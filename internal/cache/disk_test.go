@@ -20,7 +20,7 @@ func TestDiskStorageExpiry(t *testing.T) {
 	disk, err := cache.NewDisk(ctx, cache.DiskConfig{Root: dir})
 	assert.NoError(t, err)
 
-	assert.Equal(t, int64(0), disk.Size(), "initial size should be 0")
+	assert.Equal(t, int64(0), disk.Size())
 
 	w1, err := disk.Create(ctx, "/first", time.Second*3)
 	assert.NoError(t, err)
@@ -35,7 +35,7 @@ func TestDiskStorageExpiry(t *testing.T) {
 	assert.NoError(t, w2.Close())
 
 	expectedSize := int64(len("first file data") + len("second file data"))
-	assert.Equal(t, expectedSize, disk.Size(), "size should match written data")
+	assert.Equal(t, expectedSize, disk.Size())
 
 	time.Sleep(time.Second * 2)
 
@@ -45,6 +45,8 @@ func TestDiskStorageExpiry(t *testing.T) {
 
 	_, err = disk.Open(ctx, "/second")
 	assert.IsError(t, err, os.ErrNotExist)
+
+	assert.Equal(t, int64(len("first file data")), disk.Size())
 }
 
 func TestDiskAsyncEviction(t *testing.T) {
