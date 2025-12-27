@@ -66,10 +66,18 @@ func NewDisk(ctx context.Context, config DiskConfig) (*Disk, error) {
 		return nil, errors.Errorf("failed to create cache root: %w", err)
 	}
 
-	// Check if the filesystem supports xattr's, and simultaneously configure the limit.
-	if err := xattr.Set(config.Root, "limit-mb", fmt.Appendf(nil, "%x", config.LimitMB)); err != nil {
+	// Check if the filesystem supports xattr's by creating a temporary test file.
+	f, err := os.CreateTemp(config.Root, ".xattr-test-*")
+	if err != nil {
+		return nil, errors.Errorf("failed to create xattr test file: %w", err)
+	}
+	testFile := f.Name()
+	f.Close()
+	if err := xattr.Set(testFile, "limit-mb", fmt.Appendf(nil, "%x", config.LimitMB)); err != nil {
+		os.Remove(testFile)
 		return nil, errors.Errorf("fatal: xattrs are not supported on %s: %w", config.Root, err)
 	}
+	os.Remove(testFile)
 
 	// Open an os.Root to "chroot" access.
 	root, err := os.OpenRoot(config.Root)
