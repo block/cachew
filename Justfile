@@ -8,6 +8,7 @@ test:
 # Lint code
 lint:
     golangci-lint run
+    actionlint
 
 # Format code
 fmt:

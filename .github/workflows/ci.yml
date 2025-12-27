@@ -25,8 +25,7 @@ jobs:
       - name: Setup xattr-supported filesystem
         run: |
           mkdir -p /tmp/xattr-fs
-          sudo mount -t tmpfs -o size=1G,user_xattr tmpfs /tmp/xattr-fs
-          sudo chmod 1777 /tmp/xattr-fs
+          sudo mount -t tmpfs -o size=1G tmpfs /tmp/xattr-fs
       - name: Run tests
         run: just test
         env:
