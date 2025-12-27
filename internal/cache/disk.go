@@ -19,6 +19,8 @@ import (
 	"github.com/block/sfptc/internal/logging"
 )
 
+const expiresAtXAttr = "user.expires-at"
+
 func init() {
 	Register("disk", NewDisk)
 }
@@ -72,10 +74,8 @@ func NewDisk(ctx context.Context, config DiskConfig) (*Disk, error) {
 		return nil, errors.Errorf("failed to create xattr test file: %w", err)
 	}
 	testFile := f.Name()
-	if err := xattr.FSet(f, "limit-mb", fmt.Appendf(nil, "%x", config.LimitMB)); err != nil {
-		_ = f.Close()
-		_ = os.Remove(testFile)
-		return nil, errors.Errorf("fatal: xattrs are not supported on %s: %w", config.Root, err)
+	if err := xattr.FSet(f, "user.limit-mb", fmt.Appendf(nil, "%x", config.LimitMB)); err != nil {
+		return nil, errors.Join(errors.Errorf("fatal: xattrs are not supported on %s: %w", config.Root, err), f.Close(), os.Remove(testFile))
 	}
 	_ = f.Close()
 	_ = os.Remove(testFile)
@@ -166,7 +166,7 @@ func (d *Disk) Delete(_ context.Context, path string) error {
 	// Check if file is expired
 	expired := false
 	fullPath := filepath.Join(d.config.Root, path)
-	expiresAtBytes, err := xattr.Get(fullPath, "expires-at")
+	expiresAtBytes, err := xattr.Get(fullPath, expiresAtXAttr)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return fs.ErrNotExist
@@ -206,7 +206,7 @@ func (d *Disk) Open(ctx context.Context, path string) (io.ReadCloser, error) {
 		return nil, errors.Errorf("failed to open file: %w", err)
 	}
 
-	expiresAtBytes, err := xattr.FGet(f, "expires-at")
+	expiresAtBytes, err := xattr.FGet(f, expiresAtXAttr)
 	if err != nil {
 		return nil, errors.Join(errors.Errorf("failed to get expiration time: %w", err), f.Close())
 	}
@@ -229,7 +229,7 @@ func (d *Disk) Open(ctx context.Context, path string) (io.ReadCloser, error) {
 		return nil, errors.Join(errors.Errorf("failed to marshal new expiration time: %w", err), f.Close())
 	}
 
-	if err := xattr.FSet(f, "expires-at", newExpiresAtBytes); err != nil {
+	if err := xattr.FSet(f, expiresAtXAttr, newExpiresAtBytes); err != nil {
 		return nil, errors.Join(errors.Errorf("failed to update expiration time: %w", err), f.Close())
 	}
 
@@ -288,7 +288,7 @@ func (d *Disk) evict() error {
 			return err
 		}
 
-		expiresAtBytes, err := xattr.Get(path, "expires-at")
+		expiresAtBytes, err := xattr.Get(path, expiresAtXAttr)
 		if err != nil {
 			return nil //nolint:nilerr
 		}
@@ -377,7 +377,7 @@ func (w *diskWriter) Close() error {
 		return errors.Join(errors.Errorf("failed to marshal expiration time: %w", err), f.Close())
 	}
 
-	if err := xattr.FSet(f, "expires-at", expiresAtBytes); err != nil {
+	if err := xattr.FSet(f, expiresAtXAttr, expiresAtBytes); err != nil {
 		return errors.Join(errors.Errorf("failed to set expiration time: %w", err), f.Close())
 	}
 

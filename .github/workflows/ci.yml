@@ -22,14 +22,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: cashapp/activate-hermit@v1
-      - name: Setup xattr-supported filesystem
-        run: |
-          mkdir -p /tmp/xattr-fs
-          sudo mount -t tmpfs -o size=1G tmpfs /tmp/xattr-fs
       - name: Run tests
         run: just test
-        env:
-          TMPDIR: /tmp/xattr-fs
   lint:
     name: Lint
     runs-on: ubuntu-latest
