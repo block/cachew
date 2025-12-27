@@ -72,11 +72,12 @@ func NewDisk(ctx context.Context, config DiskConfig) (*Disk, error) {
 		return nil, errors.Errorf("failed to create xattr test file: %w", err)
 	}
 	testFile := f.Name()
-	f.Close()
-	if err := xattr.Set(testFile, "limit-mb", fmt.Appendf(nil, "%x", config.LimitMB)); err != nil {
+	if err := xattr.FSet(f, "limit-mb", fmt.Appendf(nil, "%x", config.LimitMB)); err != nil {
+		f.Close()
 		os.Remove(testFile)
 		return nil, errors.Errorf("fatal: xattrs are not supported on %s: %w", config.Root, err)
 	}
+	f.Close()
 	os.Remove(testFile)
 
 	// Open an os.Root to "chroot" access.
