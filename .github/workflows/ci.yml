@@ -25,9 +25,9 @@ jobs:
       - name: Setup xattr-supported filesystem
         run: |
           dd if=/dev/zero of=/tmp/xattr.img bs=1M count=1024
-          mkfs.ext4 /tmp/xattr.img
+          mkfs.ext4 -O user_xattr /tmp/xattr.img
           mkdir -p /tmp/xattr-fs
-          sudo mount -o loop,user_xattr /tmp/xattr.img /tmp/xattr-fs
+          sudo mount -o loop /tmp/xattr.img /tmp/xattr-fs
           sudo chmod 1777 /tmp/xattr-fs
       - name: Run tests
         run: just test
