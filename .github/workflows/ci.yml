@@ -24,16 +24,9 @@ jobs:
       - uses: cashapp/activate-hermit@v1
       - name: Setup xattr-supported filesystem
         run: |
-          dd if=/dev/zero of=/tmp/xattr.img bs=1M count=1024
-          mkfs.ext4 -q /tmp/xattr.img
           mkdir -p /tmp/xattr-fs
-          sudo mount -o loop /tmp/xattr.img /tmp/xattr-fs
+          sudo mount -t tmpfs -o size=1G,user_xattr tmpfs /tmp/xattr-fs
           sudo chmod 1777 /tmp/xattr-fs
-          # Verify xattr support
-          echo "test" > /tmp/xattr-fs/test-file
-          setfattr -n user.test -v "test-value" /tmp/xattr-fs/test-file
-          getfattr -n user.test /tmp/xattr-fs/test-file
-          rm /tmp/xattr-fs/test-file
       - name: Run tests
         run: just test
         env:
