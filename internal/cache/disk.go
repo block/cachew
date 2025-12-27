@@ -363,26 +363,17 @@ func (w *diskWriter) Write(p []byte) (int, error) {
 }
 
 func (w *diskWriter) Close() error {
-	if err := w.file.Close(); err != nil {
-		return errors.Errorf("failed to close temp file: %w", err)
-	}
-
-	f, err := w.disk.root.Open(w.tempPath)
-	if err != nil {
-		return errors.Errorf("failed to open temp file for setting xattr: %w", err)
-	}
-
 	expiresAtBytes, err := w.expiresAt.MarshalBinary()
 	if err != nil {
-		return errors.Join(errors.Errorf("failed to marshal expiration time: %w", err), f.Close())
+		return errors.Join(errors.Errorf("failed to marshal expiration time: %w", err), w.file.Close())
 	}
 
-	if err := xattr.FSet(f, expiresAtXAttr, expiresAtBytes); err != nil {
-		return errors.Join(errors.Errorf("failed to set expiration time: %w", err), f.Close())
+	if err := xattr.FSet(w.file, expiresAtXAttr, expiresAtBytes); err != nil {
+		return errors.Join(errors.Errorf("failed to set expiration time: %w", err), w.file.Close())
 	}
 
-	if err := f.Close(); err != nil {
-		return errors.Errorf("failed to close temp file after setting xattr: %w", err)
+	if err := w.file.Close(); err != nil {
+		return errors.Errorf("failed to close file: %w", err)
 	}
 
 	if err := w.disk.root.Rename(w.tempPath, w.path); err != nil {
