@@ -13,5 +13,5 @@ lint:
 # Format code
 fmt:
     just --unstable --fmt
-    golangci-lint fmt
+    git ls-files | grep '\.go$' | xargs gosimports -local github.com/block -w
     go mod tidy

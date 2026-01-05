@@ -35,7 +35,6 @@ type DiskConfig struct {
 type Disk struct {
 	logger      *slog.Logger
 	config      DiskConfig
-	root        *os.Root
 	size        atomic.Int64
 	runEviction chan struct{}
 	stop        context.CancelFunc
@@ -80,12 +79,6 @@ func NewDisk(ctx context.Context, config DiskConfig) (*Disk, error) {
 	_ = f.Close()
 	_ = os.Remove(testFile)
 
-	// Open an os.Root to "chroot" access.
-	root, err := os.OpenRoot(config.Root)
-	if err != nil {
-		return nil, errors.Errorf("failed to open cache root: %w", err)
-	}
-
 	// Determine the initial size.
 	var size int64
 	err = filepath.Walk(config.Root, func(_ string, info fs.FileInfo, err error) error {
@@ -109,7 +102,6 @@ func NewDisk(ctx context.Context, config DiskConfig) (*Disk, error) {
 	disk := &Disk{
 		logger:      logger,
 		config:      config,
-		root:        root,
 		runEviction: make(chan struct{}),
 		stop:        stop,
 	}
@@ -122,29 +114,28 @@ func NewDisk(ctx context.Context, config DiskConfig) (*Disk, error) {
 
 func (d *Disk) Close() error {
 	d.stop()
-	return d.root.Close()
+	return nil
 }
 
 func (d *Disk) Size() int64 {
 	return d.size.Load()
 }
 
-func (d *Disk) Create(_ context.Context, path string, ttl time.Duration) (io.WriteCloser, error) {
+func (d *Disk) Create(_ context.Context, key Key, ttl time.Duration) (io.WriteCloser, error) {
 	if ttl > d.config.MaxTTL || ttl == 0 {
 		ttl = d.config.MaxTTL
 	}
 
-	path = d.normalizePath(path)
+	path := d.keyToPath(key)
+	fullPath := filepath.Join(d.config.Root, path)
 
-	dir := filepath.Dir(path)
-	if dir != "" && dir != "." {
-		if err := d.root.MkdirAll(dir, 0755); err != nil {
-			return nil, errors.Errorf("failed to create directory %s: %w", dir, err)
-		}
+	dir := filepath.Dir(fullPath)
+	if err := os.MkdirAll(dir, 0750); err != nil {
+		return nil, errors.Errorf("failed to create directory %s: %w", dir, err)
 	}
 
-	tempPath := path + ".tmp"
-	f, err := d.root.OpenFile(tempPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	tempPath := fullPath + ".tmp"
+	f, err := os.OpenFile(tempPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
 	if err != nil {
 		return nil, errors.Errorf("failed to create temp file: %w", err)
 	}
@@ -154,18 +145,18 @@ func (d *Disk) Create(_ context.Context, path string, ttl time.Duration) (io.Wri
 	return &diskWriter{
 		disk:      d,
 		file:      f,
-		path:      path,
+		path:      fullPath,
 		tempPath:  tempPath,
 		expiresAt: expiresAt,
 	}, nil
 }
 
-func (d *Disk) Delete(_ context.Context, path string) error {
-	path = d.normalizePath(path)
+func (d *Disk) Delete(_ context.Context, key Key) error {
+	path := d.keyToPath(key)
+	fullPath := filepath.Join(d.config.Root, path)
 
 	// Check if file is expired
 	expired := false
-	fullPath := filepath.Join(d.config.Root, path)
 	expiresAtBytes, err := xattr.Get(fullPath, expiresAtXAttr)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -181,12 +172,12 @@ func (d *Disk) Delete(_ context.Context, path string) error {
 		}
 	}
 
-	info, err := d.root.Stat(path)
+	info, err := os.Stat(fullPath)
 	if err != nil {
 		return errors.Errorf("failed to stat file: %w", err)
 	}
 
-	if err := d.root.Remove(path); err != nil {
+	if err := os.Remove(fullPath); err != nil {
 		return errors.Errorf("failed to remove file: %w", err)
 	}
 
@@ -198,10 +189,11 @@ func (d *Disk) Delete(_ context.Context, path string) error {
 	return nil
 }
 
-func (d *Disk) Open(ctx context.Context, path string) (io.ReadCloser, error) {
-	path = d.normalizePath(path)
+func (d *Disk) Open(ctx context.Context, key Key) (io.ReadCloser, error) {
+	path := d.keyToPath(key)
+	fullPath := filepath.Join(d.config.Root, path)
 
-	f, err := d.root.Open(path)
+	f, err := os.Open(fullPath)
 	if err != nil {
 		return nil, errors.Errorf("failed to open file: %w", err)
 	}
@@ -218,7 +210,7 @@ func (d *Disk) Open(ctx context.Context, path string) (io.ReadCloser, error) {
 
 	now := time.Now()
 	if now.After(expiresAt) {
-		return nil, errors.Join(fs.ErrNotExist, f.Close(), d.Delete(ctx, path))
+		return nil, errors.Join(fs.ErrNotExist, f.Close(), d.Delete(ctx, key))
 	}
 
 	// Reset expiration time to implement LRU
@@ -236,12 +228,10 @@ func (d *Disk) Open(ctx context.Context, path string) (io.ReadCloser, error) {
 	return f, nil
 }
 
-func (d *Disk) normalizePath(path string) string {
-	path = filepath.Clean(path)
-	if filepath.IsAbs(path) {
-		path = path[1:]
-	}
-	return path
+func (d *Disk) keyToPath(key Key) string {
+	hexKey := key.String()
+	// Use first two hex digits as directory, full hex as filename
+	return filepath.Join(hexKey[:2], hexKey)
 }
 
 func (d *Disk) evictionLoop(ctx context.Context) {
@@ -316,9 +306,11 @@ func (d *Disk) evict() error {
 
 	for _, f := range files {
 		if now.After(f.expiresAt) {
-			if err := d.Delete(context.Background(), f.path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			fullPath := filepath.Join(d.config.Root, f.path)
+			if err := os.Remove(fullPath); err != nil && !errors.Is(err, fs.ErrNotExist) {
 				return errors.Errorf("failed to delete expired file %s: %w", f.path, err)
 			}
+			d.size.Add(-f.size)
 		} else {
 			remainingFiles = append(remainingFiles, f)
 		}
@@ -339,9 +331,11 @@ func (d *Disk) evict() error {
 			break
 		}
 
-		if err := d.Delete(context.Background(), f.path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		fullPath := filepath.Join(d.config.Root, f.path)
+		if err := os.Remove(fullPath); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return errors.Errorf("failed to delete file during size eviction %s: %w", f.path, err)
 		}
+		d.size.Add(-f.size)
 	}
 
 	return nil
@@ -376,7 +370,7 @@ func (w *diskWriter) Close() error {
 		return errors.Errorf("failed to close file: %w", err)
 	}
 
-	if err := w.disk.root.Rename(w.tempPath, w.path); err != nil {
+	if err := os.Rename(w.tempPath, w.path); err != nil {
 		return errors.Errorf("failed to rename temp file: %w", err)
 	}
 

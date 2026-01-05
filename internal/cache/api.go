@@ -3,6 +3,8 @@ package cache
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"io"
 	"time"
 
@@ -26,16 +28,28 @@ func Register[Config any, C Cache](id string, factory Factory[Config, C]) {
 	}
 }
 
-// A Cache knows how to retrieve, create and delete files from a cache.
+// Key represents a unique identifier for a cached object.
+type Key [32]byte
+
+func NewKey(url string) Key { return Key(sha256.Sum256([]byte(url))) }
+
+func (k Key) String() string { return hex.EncodeToString(k[:]) }
+
+// A Cache knows how to retrieve, create and delete objects from a cache.
 type Cache interface {
 	// Open an existing file in the cache.
-	Open(ctx context.Context, path string) (io.ReadCloser, error)
+	//
+	// Expired files SHOULD not be returned.
+	// Must return os.ErrNotExist if the file does not exist.
+	Open(ctx context.Context, key Key) (io.ReadCloser, error)
 	// Create a new file in the cache.
 	//
-	// The file must be atomically created once closed.
-	Create(ctx context.Context, path string, ttl time.Duration) (io.WriteCloser, error)
+	// The file MUST not be available for read until completely written and closed.
+	Create(ctx context.Context, key Key, ttl time.Duration) (io.WriteCloser, error)
 	// Delete a file from the cache.
-	Delete(ctx context.Context, path string) error
+	//
+	// MUST be atomic.
+	Delete(ctx context.Context, key Key) error
 	// Close the Cache.
 	Close() error
 }
