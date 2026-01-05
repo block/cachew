@@ -432,6 +432,10 @@ linters:
       # Default: false
       os-temp-dir: true
 
+    wrapcheck:
+      ignore-package-globs:
+        - "github.com/alecthomas/errors"
+
   exclusions:
     # Predefined exclusion rules.
     # Default: []

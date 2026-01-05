@@ -1,9 +1,12 @@
+set positional-arguments := true
+set shell := ["bash", "-c"]
+
 _help:
     @just -l
 
 # Run tests
 test:
-    go test ./...
+    @gotestsum --hide-summary output,skipped --format-hide-empty-pkg ${CI:+--format github-actions}
 
 # Lint code
 lint:
@@ -13,5 +16,5 @@ lint:
 # Format code
 fmt:
     just --unstable --fmt
-    git ls-files | grep '\.go$' | xargs gosimports -local github.com/block -w
+    golangci-lint fmt
     go mod tidy
