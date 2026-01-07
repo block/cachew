@@ -2,7 +2,6 @@ package cache
 
 import (
 	"context"
-	"fmt"
 	"io"
 	"io/fs"
 	"log/slog"
@@ -14,12 +13,9 @@ import (
 
 	"github.com/alecthomas/errors"
 	"github.com/alecthomas/kong"
-	"github.com/pkg/xattr"
 
 	"github.com/block/sfptc/internal/logging"
 )
-
-const expiresAtXAttr = "user.expires-at"
 
 func init() {
 	Register("disk", NewDisk)
@@ -35,6 +31,7 @@ type DiskConfig struct {
 type Disk struct {
 	logger      *slog.Logger
 	config      DiskConfig
+	ttl         *ttlStorage
 	size        atomic.Int64
 	runEviction chan struct{}
 	stop        context.CancelFunc
@@ -47,7 +44,7 @@ var _ Cache = (*Disk)(nil)
 // config.Root MUST be set.
 //
 // This [Cache] implementation stores cache entries under a directory. If total usage exceeds the limit, entries are
-// evicted based on their last access time. TTLs are stored in extended file attributes (xattr). If an entry exceeds its
+// evicted based on their last access time. TTLs are stored in a bbolt database. If an entry exceeds its
 // TTL or the default, it is evicted. The implementation is safe for concurrent use within a single Go process.
 func NewDisk(ctx context.Context, config DiskConfig) (*Disk, error) {
 	// Validate config
@@ -67,17 +64,11 @@ func NewDisk(ctx context.Context, config DiskConfig) (*Disk, error) {
 		return nil, errors.Errorf("failed to create cache root: %w", err)
 	}
 
-	// Check if the filesystem supports xattr's by creating a temporary test file.
-	f, err := os.CreateTemp(config.Root, ".xattr-test-*")
+	// Open TTL storage
+	ttl, err := newTTLStorage(filepath.Join(config.Root, "metadata.db"))
 	if err != nil {
-		return nil, errors.Errorf("failed to create xattr test file: %w", err)
+		return nil, errors.Errorf("failed to create TTL storage: %w", err)
 	}
-	testFile := f.Name()
-	if err := xattr.FSet(f, "user.limit-mb", fmt.Appendf(nil, "%x", config.LimitMB)); err != nil {
-		return nil, errors.Join(errors.Errorf("fatal: xattrs are not supported on %s: %w", config.Root, err), f.Close(), os.Remove(testFile))
-	}
-	_ = f.Close()
-	_ = os.Remove(testFile)
 
 	// Determine the initial size.
 	var size int64
@@ -86,6 +77,10 @@ func NewDisk(ctx context.Context, config DiskConfig) (*Disk, error) {
 			return err
 		}
 		if info.IsDir() {
+			return nil
+		}
+		// Skip metadata.db file
+		if info.Name() == "metadata.db" {
 			return nil
 		}
 		size += info.Size()
@@ -102,6 +97,7 @@ func NewDisk(ctx context.Context, config DiskConfig) (*Disk, error) {
 	disk := &Disk{
 		logger:      logger,
 		config:      config,
+		ttl:         ttl,
 		runEviction: make(chan struct{}),
 		stop:        stop,
 	}
@@ -116,6 +112,9 @@ func (d *Disk) String() string { return "disk:" + d.config.Root }
 
 func (d *Disk) Close() error {
 	d.stop()
+	if d.ttl != nil {
+		return d.ttl.close()
+	}
 	return nil
 }
 
@@ -147,6 +146,7 @@ func (d *Disk) Create(_ context.Context, key Key, ttl time.Duration) (io.WriteCl
 	return &diskWriter{
 		disk:      d,
 		file:      f,
+		key:       key,
 		path:      fullPath,
 		tempPath:  tempPath,
 		expiresAt: expiresAt,
@@ -159,19 +159,9 @@ func (d *Disk) Delete(_ context.Context, key Key) error {
 
 	// Check if file is expired
 	expired := false
-	expiresAtBytes, err := xattr.Get(fullPath, expiresAtXAttr)
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return fs.ErrNotExist
-		}
-		// Continue with deletion even if we can't read xattr
-	} else {
-		var expiresAt time.Time
-		if err := expiresAt.UnmarshalBinary(expiresAtBytes); err == nil {
-			if time.Now().After(expiresAt) {
-				expired = true
-			}
-		}
+	expiresAt, err := d.ttl.get(key)
+	if err == nil && time.Now().After(expiresAt) {
+		expired = true
 	}
 
 	info, err := os.Stat(fullPath)
@@ -181,6 +171,11 @@ func (d *Disk) Delete(_ context.Context, key Key) error {
 
 	if err := os.Remove(fullPath); err != nil {
 		return errors.Errorf("failed to remove file: %w", err)
+	}
+
+	// Remove TTL metadata
+	if err := d.ttl.delete(key); err != nil {
+		return errors.Errorf("failed to delete TTL metadata: %w", err)
 	}
 
 	d.size.Add(-info.Size())
@@ -200,14 +195,9 @@ func (d *Disk) Open(ctx context.Context, key Key) (io.ReadCloser, error) {
 		return nil, errors.Errorf("failed to open file: %w", err)
 	}
 
-	expiresAtBytes, err := xattr.FGet(f, expiresAtXAttr)
+	expiresAt, err := d.ttl.get(key)
 	if err != nil {
 		return nil, errors.Join(errors.Errorf("failed to get expiration time: %w", err), f.Close())
-	}
-
-	var expiresAt time.Time
-	if err := expiresAt.UnmarshalBinary(expiresAtBytes); err != nil {
-		return nil, errors.Join(errors.Errorf("failed to unmarshal expiration time: %w", err), f.Close())
 	}
 
 	now := time.Now()
@@ -218,12 +208,8 @@ func (d *Disk) Open(ctx context.Context, key Key) (io.ReadCloser, error) {
 	// Reset expiration time to implement LRU
 	ttl := min(expiresAt.Sub(now), d.config.MaxTTL)
 	newExpiresAt := now.Add(ttl)
-	newExpiresAtBytes, err := newExpiresAt.MarshalBinary()
-	if err != nil {
-		return nil, errors.Join(errors.Errorf("failed to marshal new expiration time: %w", err), f.Close())
-	}
 
-	if err := xattr.FSet(f, expiresAtXAttr, newExpiresAtBytes); err != nil {
+	if err := d.ttl.set(key, newExpiresAt); err != nil {
 		return nil, errors.Join(errors.Errorf("failed to update expiration time: %w", err), f.Close())
 	}
 
@@ -258,64 +244,52 @@ func (d *Disk) evictionLoop(ctx context.Context) {
 
 func (d *Disk) evict() error {
 	type fileInfo struct {
+		key        Key
 		path       string
 		size       int64
 		expiresAt  time.Time
 		accessedAt time.Time
 	}
 
-	var files []fileInfo
+	var remainingFiles []fileInfo
+	var expiredKeys []Key
 	now := time.Now()
 
-	err := filepath.Walk(d.config.Root, func(path string, info fs.FileInfo, err error) error {
+	err := d.ttl.walk(func(key Key, expiresAt time.Time) error {
+		path := d.keyToPath(key)
+		fullPath := filepath.Join(d.config.Root, path)
+
+		info, err := os.Stat(fullPath)
 		if err != nil {
-			return errors.WithStack(err)
-		}
-		if info.IsDir() {
+			if errors.Is(err, fs.ErrNotExist) {
+				expiredKeys = append(expiredKeys, key)
+			}
 			return nil
 		}
 
-		relPath, err := filepath.Rel(d.config.Root, path)
-		if err != nil {
-			return errors.WithStack(err)
+		if now.After(expiresAt) {
+			if err := os.Remove(fullPath); err != nil && !errors.Is(err, fs.ErrNotExist) {
+				return errors.Errorf("failed to delete expired file %s: %w", path, err)
+			}
+			expiredKeys = append(expiredKeys, key)
+			d.size.Add(-info.Size())
+		} else {
+			remainingFiles = append(remainingFiles, fileInfo{
+				key:        key,
+				path:       path,
+				size:       info.Size(),
+				expiresAt:  expiresAt,
+				accessedAt: info.ModTime(),
+			})
 		}
-
-		expiresAtBytes, err := xattr.Get(path, expiresAtXAttr)
-		if err != nil {
-			return nil //nolint:nilerr
-		}
-
-		var expiresAt time.Time
-		if err := expiresAt.UnmarshalBinary(expiresAtBytes); err != nil {
-			return nil //nolint:nilerr
-		}
-
-		files = append(files, fileInfo{
-			path:       relPath,
-			size:       info.Size(),
-			expiresAt:  expiresAt,
-			accessedAt: info.ModTime(),
-		})
-
 		return nil
 	})
-
 	if err != nil {
-		return errors.Errorf("failed to walk cache directory: %w", err)
+		return errors.Errorf("failed to walk TTL entries: %w", err)
 	}
 
-	var remainingFiles []fileInfo
-
-	for _, f := range files {
-		if now.After(f.expiresAt) {
-			fullPath := filepath.Join(d.config.Root, f.path)
-			if err := os.Remove(fullPath); err != nil && !errors.Is(err, fs.ErrNotExist) {
-				return errors.Errorf("failed to delete expired file %s: %w", f.path, err)
-			}
-			d.size.Add(-f.size)
-		} else {
-			remainingFiles = append(remainingFiles, f)
-		}
+	if err := d.ttl.deleteAll(expiredKeys); err != nil {
+		return errors.Errorf("failed to delete TTL metadata: %w", err)
 	}
 
 	limitBytes := int64(d.config.LimitMB) * 1024 * 1024
@@ -328,6 +302,7 @@ func (d *Disk) evict() error {
 		return remainingFiles[i].accessedAt.Before(remainingFiles[j].accessedAt)
 	})
 
+	var sizeEvictedKeys []Key
 	for _, f := range remainingFiles {
 		if d.size.Load() <= limitBytes {
 			break
@@ -337,7 +312,12 @@ func (d *Disk) evict() error {
 		if err := os.Remove(fullPath); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return errors.Errorf("failed to delete file during size eviction %s: %w", f.path, err)
 		}
+		sizeEvictedKeys = append(sizeEvictedKeys, f.key)
 		d.size.Add(-f.size)
+	}
+
+	if err := d.ttl.deleteAll(sizeEvictedKeys); err != nil {
+		return errors.Errorf("failed to delete TTL metadata: %w", err)
 	}
 
 	return nil
@@ -346,6 +326,7 @@ func (d *Disk) evict() error {
 type diskWriter struct {
 	disk      *Disk
 	file      *os.File
+	key       Key
 	path      string
 	tempPath  string
 	expiresAt time.Time
@@ -359,21 +340,16 @@ func (w *diskWriter) Write(p []byte) (int, error) {
 }
 
 func (w *diskWriter) Close() error {
-	expiresAtBytes, err := w.expiresAt.MarshalBinary()
-	if err != nil {
-		return errors.Join(errors.Errorf("failed to marshal expiration time: %w", err), w.file.Close())
-	}
-
-	if err := xattr.FSet(w.file, expiresAtXAttr, expiresAtBytes); err != nil {
-		return errors.Join(errors.Errorf("failed to set expiration time: %w", err), w.file.Close())
-	}
-
 	if err := w.file.Close(); err != nil {
 		return errors.Errorf("failed to close file: %w", err)
 	}
 
 	if err := os.Rename(w.tempPath, w.path); err != nil {
 		return errors.Errorf("failed to rename temp file: %w", err)
+	}
+
+	if err := w.disk.ttl.set(w.key, w.expiresAt); err != nil {
+		return errors.Join(errors.Errorf("failed to set expiration time: %w", err), os.Remove(w.path))
 	}
 
 	w.disk.size.Add(w.size)
