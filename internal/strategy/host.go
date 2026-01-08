@@ -7,9 +7,7 @@ import (
 	"log/slog"
 	"maps"
 	"net/http"
-	"net/textproto"
 	"net/url"
-	"os"
 
 	"github.com/alecthomas/errors"
 
@@ -70,31 +68,19 @@ func (d *Host) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	targetURL.RawQuery = r.URL.RawQuery
 	fullURL := targetURL.String()
 
-	key := cache.NewKey(fullURL)
-
-	cr, headers, err := d.cache.Open(r.Context(), key)
-	if err == nil {
-		defer cr.Close()
-		maps.Copy(w.Header(), headers)
-		if _, err := io.Copy(w, cr); err != nil {
-			d.logger.Error("Failed to copy cached response", slog.String("error", err.Error()), slog.String("url", fullURL))
-		}
-		return
-	}
-
-	if !errors.Is(err, os.ErrNotExist) {
-		d.logger.Error("Failed to open cache", slog.String("error", err.Error()), slog.String("url", fullURL))
-	}
-
 	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, fullURL, nil)
 	if err != nil {
 		d.httpError(w, http.StatusInternalServerError, err, "Failed to create request", slog.String("url", fullURL))
 		return
 	}
 
-	resp, err := d.client.Do(req)
+	resp, err := cache.Fetch(d.client, req, d.cache)
 	if err != nil {
-		d.httpError(w, http.StatusBadGateway, err, "Failed to fetch from target", slog.String("url", fullURL))
+		if httpErr, ok := errors.AsType[cache.HTTPError](err); ok {
+			d.httpError(w, httpErr.StatusCode(), httpErr, httpErr.Error(), slog.String("url", fullURL))
+		} else {
+			d.httpError(w, http.StatusInternalServerError, err, "Failed to fetch", slog.String("url", fullURL))
+		}
 		return
 	}
 	defer resp.Body.Close()
@@ -107,18 +93,9 @@ func (d *Host) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	responseHeaders := textproto.MIMEHeader(maps.Clone(resp.Header))
-	cw, err := d.cache.Create(r.Context(), key, responseHeaders, 0)
-	if err != nil {
-		d.httpError(w, http.StatusInternalServerError, err, "Failed to create cache entry", slog.String("url", fullURL))
-		return
-	}
-
-	mw := io.MultiWriter(w, cw)
-	_, copyErr := io.Copy(mw, resp.Body)
-	closeErr := cw.Close()
-	if err := errors.Join(copyErr, closeErr); err != nil {
-		d.logger.Error("Failed to write to cache", slog.String("error", err.Error()), slog.String("url", fullURL))
+	maps.Copy(w.Header(), resp.Header)
+	if _, err := io.Copy(w, resp.Body); err != nil {
+		d.logger.Error("Failed to copy response", slog.String("error", err.Error()), slog.String("url", fullURL))
 	}
 }
 

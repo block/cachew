@@ -1,4 +1,4 @@
-package remote_test
+package cache_test
 
 import (
 	"log/slog"
@@ -10,7 +10,6 @@ import (
 
 	"github.com/block/sfptc/internal/cache"
 	"github.com/block/sfptc/internal/cache/cachetest"
-	"github.com/block/sfptc/internal/cache/remote"
 	"github.com/block/sfptc/internal/logging"
 	"github.com/block/sfptc/internal/strategy"
 )
@@ -30,7 +29,7 @@ func TestRemoteClient(t *testing.T) {
 		ts := httptest.NewServer(server)
 		t.Cleanup(ts.Close)
 
-		client := remote.NewClient(ts.URL)
+		client := cache.NewRemote(ts.URL)
 		return client
 	})
 }
