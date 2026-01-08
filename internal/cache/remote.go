@@ -1,4 +1,4 @@
-package remote
+package cache
 
 import (
 	"context"
@@ -11,30 +11,28 @@ import (
 	"time"
 
 	"github.com/alecthomas/errors"
-
-	"github.com/block/sfptc/internal/cache"
 )
 
-// Client implements cache.Cache as a client for the remote cache server.
-type Client struct {
+// Remote implements Cache as a client for the remote cache server.
+type Remote struct {
 	baseURL string
 	client  *http.Client
 }
 
-var _ cache.Cache = (*Client)(nil)
+var _ Cache = (*Remote)(nil)
 
-// NewClient creates a new remote cache client.
-func NewClient(baseURL string) *Client {
-	return &Client{
+// NewRemote creates a new remote cache client.
+func NewRemote(baseURL string) *Remote {
+	return &Remote{
 		baseURL: baseURL,
 		client:  &http.Client{},
 	}
 }
 
-func (c *Client) String() string { return "remote:" + c.baseURL }
+func (c *Remote) String() string { return "remote:" + c.baseURL }
 
-// Open retrieves an object from the remote cache.
-func (c *Client) Open(ctx context.Context, key cache.Key) (io.ReadCloser, textproto.MIMEHeader, error) {
+// Open retrieves an object from the remote.
+func (c *Remote) Open(ctx context.Context, key Key) (io.ReadCloser, textproto.MIMEHeader, error) {
 	url := fmt.Sprintf("%s/%s", c.baseURL, key.String())
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -55,13 +53,13 @@ func (c *Client) Open(ctx context.Context, key cache.Key) (io.ReadCloser, textpr
 	}
 
 	// Filter out HTTP transport headers
-	headers := cache.FilterTransportHeaders(textproto.MIMEHeader(resp.Header))
+	headers := FilterTransportHeaders(textproto.MIMEHeader(resp.Header))
 
 	return resp.Body, headers, nil
 }
 
-// Create stores a new object in the remote cache.
-func (c *Client) Create(ctx context.Context, key cache.Key, headers textproto.MIMEHeader, ttl time.Duration) (io.WriteCloser, error) {
+// Create stores a new object in the remote.
+func (c *Remote) Create(ctx context.Context, key Key, headers textproto.MIMEHeader, ttl time.Duration) (io.WriteCloser, error) {
 	pr, pw := io.Pipe()
 
 	url := fmt.Sprintf("%s/%s", c.baseURL, key.String())
@@ -100,8 +98,8 @@ func (c *Client) Create(ctx context.Context, key cache.Key, headers textproto.MI
 	return wc, nil
 }
 
-// Delete removes an object from the remote cache.
-func (c *Client) Delete(ctx context.Context, key cache.Key) error {
+// Delete removes an object from the remote.
+func (c *Remote) Delete(ctx context.Context, key Key) error {
 	url := fmt.Sprintf("%s/%s", c.baseURL, key.String())
 	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, url, nil)
 	if err != nil {
@@ -126,7 +124,7 @@ func (c *Client) Delete(ctx context.Context, key cache.Key) error {
 }
 
 // Close closes the client and releases resources.
-func (c *Client) Close() error {
+func (c *Remote) Close() error {
 	c.client.CloseIdleConnections()
 	return nil
 }
