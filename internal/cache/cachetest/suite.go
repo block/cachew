@@ -1,6 +1,7 @@
 package cachetest
 
 import (
+	"context"
 	"io"
 	"net/textproto"
 	"os"
@@ -45,6 +46,10 @@ func Suite(t *testing.T, newCache func(t *testing.T) cache.Cache) {
 
 	t.Run("Headers", func(t *testing.T) {
 		testHeaders(t, newCache(t))
+	})
+
+	t.Run("ContextCancellation", func(t *testing.T) {
+		testContextCancellation(t, newCache(t))
 	})
 }
 
@@ -232,4 +237,33 @@ func testHeaders(t *testing.T, c cache.Cache) {
 
 	// Verify headers
 	assert.Equal(t, headers, returnedHeaders)
+}
+
+func testContextCancellation(t *testing.T, c cache.Cache) {
+	defer c.Close()
+	ctx := t.Context()
+
+	// Create a cancellable context
+	cancelledCtx, cancel := context.WithCancel(ctx)
+
+	// Create an object with the cancellable context
+	key := cache.NewKey("test-cancelled")
+	writer, err := c.Create(cancelledCtx, key, textproto.MIMEHeader{}, time.Hour)
+	assert.NoError(t, err)
+
+	// Write some data
+	_, err = writer.Write([]byte("test data"))
+	assert.NoError(t, err)
+
+	// Cancel the context before closing
+	cancel()
+
+	// Close should fail due to cancelled context
+	err = writer.Close()
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "cancel")
+
+	// Object should not be in cache
+	_, _, err = c.Open(ctx, key)
+	assert.IsError(t, err, os.ErrNotExist)
 }

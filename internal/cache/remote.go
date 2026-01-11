@@ -77,6 +77,7 @@ func (c *Remote) Create(ctx context.Context, key Key, headers textproto.MIMEHead
 	wc := &writeCloser{
 		pw:   pw,
 		done: make(chan error, 1),
+		ctx:  ctx,
 	}
 
 	go func() {
@@ -133,6 +134,7 @@ func (c *Remote) Close() error {
 type writeCloser struct {
 	pw   *io.PipeWriter
 	done chan error
+	ctx  context.Context
 }
 
 func (wc *writeCloser) Write(p []byte) (int, error) {
@@ -141,6 +143,9 @@ func (wc *writeCloser) Write(p []byte) (int, error) {
 }
 
 func (wc *writeCloser) Close() error {
+	if err := wc.ctx.Err(); err != nil {
+		return errors.Join(errors.Wrap(err, "create operation cancelled"), wc.pw.CloseWithError(err))
+	}
 	if err := wc.pw.Close(); err != nil {
 		return errors.Wrap(err, "failed to close pipe writer")
 	}

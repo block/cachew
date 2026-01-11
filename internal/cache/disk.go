@@ -123,7 +123,7 @@ func (d *Disk) Size() int64 {
 	return d.size.Load()
 }
 
-func (d *Disk) Create(_ context.Context, key Key, headers textproto.MIMEHeader, ttl time.Duration) (io.WriteCloser, error) {
+func (d *Disk) Create(ctx context.Context, key Key, headers textproto.MIMEHeader, ttl time.Duration) (io.WriteCloser, error) {
 	if ttl > d.config.MaxTTL || ttl == 0 {
 		ttl = d.config.MaxTTL
 	}
@@ -152,6 +152,7 @@ func (d *Disk) Create(_ context.Context, key Key, headers textproto.MIMEHeader, 
 		tempPath:  tempPath,
 		expiresAt: expiresAt,
 		headers:   headers,
+		ctx:       ctx,
 	}, nil
 }
 
@@ -334,6 +335,7 @@ type diskWriter struct {
 	expiresAt time.Time
 	headers   textproto.MIMEHeader
 	size      int64
+	ctx       context.Context
 }
 
 func (w *diskWriter) Write(p []byte) (int, error) {
@@ -345,6 +347,12 @@ func (w *diskWriter) Write(p []byte) (int, error) {
 func (w *diskWriter) Close() error {
 	if err := w.file.Close(); err != nil {
 		return errors.Errorf("failed to close file: %w", err)
+	}
+
+	// Check if context was cancelled
+	if err := w.ctx.Err(); err != nil {
+		// Clean up temp file and abort
+		return errors.Join(errors.Wrap(err, "create operation cancelled"), os.Remove(w.tempPath))
 	}
 
 	if err := os.Rename(w.tempPath, w.path); err != nil {

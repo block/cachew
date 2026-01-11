@@ -100,6 +100,8 @@ type Cache interface {
 	// If "ttl" is zero, a maximum TTL MUST be used by the implementation.
 	//
 	// The file MUST not be available for read until completely written and closed.
+	//
+	// If the context is cancelled the object MUST not be made available in the cache.
 	Create(ctx context.Context, key Key, headers textproto.MIMEHeader, ttl time.Duration) (io.WriteCloser, error)
 	// Delete a file from the cache.
 	//

@@ -60,7 +60,7 @@ func (m *Memory) Open(_ context.Context, key Key) (io.ReadCloser, textproto.MIME
 	return io.NopCloser(bytes.NewReader(entry.data)), entry.headers, nil
 }
 
-func (m *Memory) Create(_ context.Context, key Key, headers textproto.MIMEHeader, ttl time.Duration) (io.WriteCloser, error) {
+func (m *Memory) Create(ctx context.Context, key Key, headers textproto.MIMEHeader, ttl time.Duration) (io.WriteCloser, error) {
 	if ttl == 0 {
 		ttl = m.config.MaxTTL
 	}
@@ -71,6 +71,7 @@ func (m *Memory) Create(_ context.Context, key Key, headers textproto.MIMEHeader
 		buf:       &bytes.Buffer{},
 		expiresAt: time.Now().Add(ttl),
 		headers:   headers,
+		ctx:       ctx,
 	}
 
 	return writer, nil
@@ -104,6 +105,7 @@ type memoryWriter struct {
 	expiresAt time.Time
 	headers   textproto.MIMEHeader
 	closed    bool
+	ctx       context.Context
 }
 
 func (w *memoryWriter) Write(p []byte) (int, error) {
@@ -118,6 +120,11 @@ func (w *memoryWriter) Close() error {
 		return nil
 	}
 	w.closed = true
+
+	// Check if context was cancelled
+	if err := w.ctx.Err(); err != nil {
+		return errors.Wrap(err, "create operation cancelled")
+	}
 
 	w.cache.mu.Lock()
 	defer w.cache.mu.Unlock()
