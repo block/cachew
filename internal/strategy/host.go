@@ -3,17 +3,13 @@ package strategy
 import (
 	"context"
 	"fmt"
-	"io"
 	"log/slog"
-	"maps"
 	"net/http"
 	"net/url"
 
-	"github.com/alecthomas/errors"
-
 	"github.com/block/sfptc/internal/cache"
-	"github.com/block/sfptc/internal/httputil"
 	"github.com/block/sfptc/internal/logging"
+	"github.com/block/sfptc/internal/strategy/handler"
 )
 
 func init() {
@@ -57,18 +53,24 @@ func NewHost(ctx context.Context, config HostConfig, cache cache.Cache, mux Mux)
 		logger: logging.FromContext(ctx),
 		prefix: prefix,
 	}
-	mux.HandleFunc("GET "+prefix+"/", h.serveHTTP)
+
+	hdlr := handler.New(h.client, cache).
+		CacheKey(func(r *http.Request) string {
+			return h.buildTargetURL(r).String()
+		}).
+		Transform(func(r *http.Request) (*http.Request, error) {
+			targetURL := h.buildTargetURL(r)
+			return http.NewRequestWithContext(r.Context(), http.MethodGet, targetURL.String(), nil)
+		})
+
+	mux.Handle("GET "+prefix+"/", hdlr)
 	return h, nil
 }
 
 func (d *Host) String() string { return "host:" + d.target.Host + d.target.Path }
 
-func (d *Host) serveHTTP(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
+// buildTargetURL constructs the target URL from the incoming request.
+func (d *Host) buildTargetURL(r *http.Request) *url.URL {
 	// Strip the prefix from the request path
 	path := r.URL.Path
 	if len(path) >= len(d.prefix) {
@@ -80,40 +82,10 @@ func (d *Host) serveHTTP(w http.ResponseWriter, r *http.Request) {
 
 	targetURL, err := url.Parse(d.target.String())
 	if err != nil {
-		httputil.ErrorResponse(w, r, http.StatusInternalServerError, "Failed to parse target URL", "error", err.Error(), "upstream", d.target.String())
-		return
+		d.logger.Error("Failed to parse target URL", "error", err.Error(), "target", d.target.String())
+		return &url.URL{}
 	}
 	targetURL.Path = path
 	targetURL.RawQuery = r.URL.RawQuery
-	fullURL := targetURL.String()
-
-	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, fullURL, nil)
-	if err != nil {
-		httputil.ErrorResponse(w, r, http.StatusInternalServerError, "Failed to create request", "error", err.Error(), "upstream", fullURL)
-		return
-	}
-
-	resp, err := cache.Fetch(d.client, req, d.cache)
-	if err != nil {
-		if httpErr, ok := errors.AsType[httputil.HTTPError](err); ok {
-			httputil.ErrorResponse(w, r, httpErr.StatusCode(), httpErr.Error(), "error", httpErr.Error(), "upstream", fullURL)
-		} else {
-			httputil.ErrorResponse(w, r, http.StatusInternalServerError, "Failed to fetch", "error", err.Error(), "upstream", fullURL)
-		}
-		return
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		w.WriteHeader(resp.StatusCode)
-		if _, err := io.Copy(w, resp.Body); err != nil {
-			d.logger.Error("Failed to copy error response", "error", err.Error(), "upstream", fullURL)
-		}
-		return
-	}
-
-	maps.Copy(w.Header(), resp.Header)
-	if _, err := io.Copy(w, resp.Body); err != nil {
-		d.logger.Error("Failed to copy response", "error", err.Error(), "upstream", fullURL)
-	}
+	return targetURL
 }

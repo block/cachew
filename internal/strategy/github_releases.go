@@ -4,11 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log/slog"
-	"maps"
 	"net/http"
-	"os"
 	"slices"
 
 	"github.com/alecthomas/errors"
@@ -16,6 +13,7 @@ import (
 	"github.com/block/sfptc/internal/cache"
 	"github.com/block/sfptc/internal/httputil"
 	"github.com/block/sfptc/internal/logging"
+	"github.com/block/sfptc/internal/strategy/handler"
 )
 
 func init() {
@@ -31,6 +29,7 @@ type GitHubReleasesConfig struct {
 type GitHubReleases struct {
 	config GitHubReleasesConfig
 	cache  cache.Cache
+	client *http.Client
 }
 
 // NewGitHubReleases creates a [Strategy] that fetches private (and public) release binaries from GitHub.
@@ -38,82 +37,35 @@ func NewGitHubReleases(ctx context.Context, config GitHubReleasesConfig, cache c
 	s := &GitHubReleases{
 		config: config,
 		cache:  cache,
+		client: http.DefaultClient,
 	}
 	logger := logging.FromContext(ctx)
 	if config.Token == "" {
 		logger.WarnContext(ctx, "No token configured for github-releases strategy")
 	}
 	// eg. https://github.com/alecthomas/chroma/releases/download/v2.21.1/chroma-2.21.1-darwin-amd64.tar.gz
-	mux.Handle("GET /github.com/{org}/{repo}/releases/download/{release}/{file}", http.HandlerFunc(s.fetch))
+	h := handler.New(s.client, cache).
+		CacheKey(func(r *http.Request) string {
+			org := r.PathValue("org")
+			repo := r.PathValue("repo")
+			release := r.PathValue("release")
+			file := r.PathValue("file")
+			return fmt.Sprintf("https://github.com/%s/%s/releases/download/%s/%s", org, repo, release, file)
+		}).
+		Transform(func(r *http.Request) (*http.Request, error) {
+			org := r.PathValue("org")
+			repo := r.PathValue("repo")
+			release := r.PathValue("release")
+			file := r.PathValue("file")
+			return s.downloadRelease(r.Context(), org, repo, release, file)
+		})
+	mux.Handle("GET /github.com/{org}/{repo}/releases/download/{release}/{file}", h)
 	return s, nil
 }
 
 var _ Strategy = (*GitHubReleases)(nil)
 
 func (g *GitHubReleases) String() string { return "github-releases" }
-
-func (g *GitHubReleases) fetch(w http.ResponseWriter, r *http.Request) {
-	org := r.PathValue("org")
-	repo := r.PathValue("repo")
-	release := r.PathValue("release")
-	file := r.PathValue("file")
-	ghURL := fmt.Sprintf("https://github.com/%s/%s/releases/download/%s/%s", org, repo, release, file)
-
-	logger := logging.FromContext(r.Context()).With("upstream", ghURL)
-
-	key := cache.NewKey(ghURL)
-
-	logger.Debug("Fetching GitHub release")
-
-	// Check if the key exists in the cache
-	cr, headers, err := g.cache.Open(r.Context(), key)
-	if err == nil {
-		logger.Debug("Cache hit")
-		// Cache hit - stream directly from cache
-		defer cr.Close()
-		maps.Copy(w.Header(), headers)
-		if _, err := io.Copy(w, cr); err != nil {
-			httputil.ErrorResponse(w, r, http.StatusInternalServerError, "Failed to stream from cache", "error", err.Error())
-			return
-		}
-		return
-	}
-	if !errors.Is(err, os.ErrNotExist) {
-		httputil.ErrorResponse(w, r, http.StatusInternalServerError, "Failed to open cache", "error", err.Error())
-		return
-	}
-
-	// Cache miss - fetch from GitHub and stream while caching
-	req, err := g.downloadRelease(r.Context(), org, repo, release, file)
-	if err != nil {
-		if herr, ok := errors.AsType[httputil.HTTPError](err); ok {
-			httputil.ErrorResponse(w, r, herr.StatusCode(), herr.Error(), "upstream", ghURL)
-		} else {
-			httputil.ErrorResponse(w, r, http.StatusInternalServerError, "Failed to create download request", "error", err.Error())
-		}
-		return
-	}
-
-	response, err := cache.FetchDirect(http.DefaultClient, req, g.cache, key)
-	if err != nil {
-		if herr, ok := errors.AsType[httputil.HTTPError](err); ok {
-			httputil.ErrorResponse(w, r, herr.StatusCode(), herr.Error())
-		} else {
-			httputil.ErrorResponse(w, r, http.StatusInternalServerError, err.Error())
-		}
-		return
-	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		httputil.ErrorResponse(w, r, response.StatusCode, response.Status)
-		return
-	}
-	maps.Copy(w.Header(), response.Header)
-	if _, err := io.Copy(w, response.Body); err != nil {
-		httputil.ErrorResponse(w, r, http.StatusInternalServerError, "Failed to stream response", "error", err.Error())
-		return
-	}
-}
 
 // newGitHubRequest creates a new HTTP request with GitHub API headers and authentication.
 func (g *GitHubReleases) newGitHubRequest(ctx context.Context, url, accept string) (*http.Request, error) {
@@ -160,7 +112,7 @@ func (g *GitHubReleases) downloadRelease(ctx context.Context, org, repo, release
 		return nil, httputil.Errorf(http.StatusInternalServerError, "create API request")
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := g.client.Do(req)
 	if err != nil {
 		return nil, httputil.Errorf(http.StatusBadGateway, "fetch release info failed: %w", err)
 	}

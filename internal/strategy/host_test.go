@@ -38,7 +38,7 @@ func TestHostCaching(t *testing.T) {
 	u, _ := url.Parse(backend.URL)
 	reqPath := "/" + u.Host + "/test"
 
-	req1 := httptest.NewRequest(http.MethodGet, reqPath, nil)
+	req1 := httptest.NewRequestWithContext(ctx, http.MethodGet, reqPath, nil)
 	w1 := httptest.NewRecorder()
 	mux.ServeHTTP(w1, req1)
 
@@ -46,7 +46,7 @@ func TestHostCaching(t *testing.T) {
 	assert.Equal(t, "response", w1.Body.String())
 	assert.Equal(t, 1, callCount)
 
-	req2 := httptest.NewRequest(http.MethodGet, reqPath, nil)
+	req2 := httptest.NewRequestWithContext(ctx, http.MethodGet, reqPath, nil)
 	w2 := httptest.NewRecorder()
 	mux.ServeHTTP(w2, req2)
 
@@ -75,7 +75,7 @@ func TestHostNonOKStatus(t *testing.T) {
 	u, _ := url.Parse(backend.URL)
 	reqPath := "/" + u.Host + "/missing"
 
-	req := httptest.NewRequest(http.MethodGet, reqPath, nil)
+	req := httptest.NewRequestWithContext(ctx, http.MethodGet, reqPath, nil)
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, req)
 

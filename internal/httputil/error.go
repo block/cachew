@@ -17,14 +17,24 @@ func ErrorResponse(w http.ResponseWriter, r *http.Request, status int, msg strin
 	http.Error(w, msg, status)
 }
 
+// HTTPResponder is an error that knows how to write itself as an HTTP response.
+type HTTPResponder interface {
+	error
+	WriteHTTP(http.ResponseWriter, *http.Request)
+}
+
 type HTTPError struct {
 	status int
 	err    error
 }
 
-func (h HTTPError) Error() string   { return fmt.Sprintf("%d: %s", h.status, h.err) }
-func (h HTTPError) Unwrap() error   { return h.err }
-func (h HTTPError) StatusCode() int { return h.status }
+func (h HTTPError) Error() string { return fmt.Sprintf("%d: %s", h.status, h.err) }
+func (h HTTPError) Unwrap() error { return h.err }
+
+// WriteHTTP writes this error as an HTTP response.
+func (h HTTPError) WriteHTTP(w http.ResponseWriter, r *http.Request) {
+	ErrorResponse(w, r, h.status, h.err.Error())
+}
 
 func Errorf(status int, format string, args ...any) error {
 	return HTTPError{

@@ -87,7 +87,7 @@ func Load(ctx context.Context, r io.Reader, mux *http.ServeMux, vars map[string]
 }
 
 func expandVars(ast *hcl.AST, vars map[string]string) {
-	_ = hcl.Visit(ast, func(node hcl.Node, next func() error) error {
+	_ = hcl.Visit(ast, func(node hcl.Node, next func() error) error { //nolint:errcheck
 		attr, ok := node.(*hcl.Attribute)
 		if ok {
 			switch attr := attr.Value.(type) {
