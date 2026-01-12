@@ -66,11 +66,11 @@ func Load(ctx context.Context, r io.Reader, mux *http.ServeMux, vars map[string]
 			return errors.Errorf("%s: attributes are not allowed", node.Pos)
 		}
 	}
-	if len(caches) != 1 {
-		return errors.Errorf("%s: expected exactly one cache backend, got %d", ast.Pos, len(caches))
+	if len(caches) == 0 {
+		return errors.Errorf("%s: expected at least one cache backend", ast.Pos)
 	}
 
-	cache := caches[0]
+	cache := cache.MaybeNewTiered(ctx, caches)
 
 	logger.DebugContext(ctx, "Cache backend", "cache", cache)
 

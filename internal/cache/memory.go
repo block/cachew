@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/alecthomas/errors"
+
+	"github.com/block/sfptc/internal/logging"
 )
 
 func init() {
@@ -35,7 +37,8 @@ type Memory struct {
 	currentSize int64
 }
 
-func NewMemory(_ context.Context, config MemoryConfig) (*Memory, error) {
+func NewMemory(ctx context.Context, config MemoryConfig) (*Memory, error) {
+	logging.FromContext(ctx).InfoContext(ctx, "Constructing in-memory Cache", "limit-mb", config.LimitMB, "max-ttl", config.MaxTTL)
 	return &Memory{
 		config:  config,
 		entries: make(map[Key]*memoryEntry),

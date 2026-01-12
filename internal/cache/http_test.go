@@ -3,6 +3,7 @@ package cache_test
 import (
 	"context"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -11,10 +12,11 @@ import (
 	"github.com/alecthomas/assert/v2"
 
 	"github.com/block/sfptc/internal/cache"
+	"github.com/block/sfptc/internal/logging"
 )
 
 func TestCachedFetch(t *testing.T) {
-	ctx := context.Background()
+	_, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelError})
 	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: time.Hour})
 	assert.NoError(t, err)
 	defer memCache.Close()
@@ -58,7 +60,7 @@ func TestCachedFetch(t *testing.T) {
 }
 
 func TestCachedFetchNonOKStatus(t *testing.T) {
-	ctx := context.Background()
+	_, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelError})
 	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: time.Hour})
 	assert.NoError(t, err)
 	defer memCache.Close()

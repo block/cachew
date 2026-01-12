@@ -12,6 +12,8 @@ github-releases {
   private-orgs = ["alecthomas"]
 }
 
+memory {}
+
 disk {
   root = "./cache"
 }

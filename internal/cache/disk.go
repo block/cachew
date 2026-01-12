@@ -48,6 +48,7 @@ var _ Cache = (*Disk)(nil)
 // evicted based on their last access time. TTLs are stored in a bbolt database. If an entry exceeds its
 // TTL or the default, it is evicted. The implementation is safe for concurrent use within a single Go process.
 func NewDisk(ctx context.Context, config DiskConfig) (*Disk, error) {
+	logging.FromContext(ctx).InfoContext(ctx, "Constructing disk cache", "limit-mb", config.LimitMB, "evict-interval", config.EvictInterval, "root", config.Root, "max-ttl", config.MaxTTL)
 	// Validate config
 	if config.Root == "" {
 		return nil, errors.New("root directory is required")
