@@ -169,7 +169,7 @@ func TestS3Cache(t *testing.T) {
 			Endpoint: minioEndpoint,
 			Bucket:   minioBucket,
 			Region:   "",
-			UseSSL:   &useSSL, // MinIO container serves HTTP, not HTTPS
+			UseSSL:   useSSL, // MinIO container serves HTTP, not HTTPS
 			MaxTTL:   100 * time.Millisecond,
 		})
 		assert.NoError(t, err)

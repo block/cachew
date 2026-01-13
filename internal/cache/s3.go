@@ -25,12 +25,12 @@ func init() {
 }
 
 type S3Config struct {
-	Endpoint      string        `hcl:"endpoint" help:"S3 endpoint URL (e.g., s3.amazonaws.com or localhost:9000)."`
 	Bucket        string        `hcl:"bucket" help:"S3 bucket name."`
-	Region        string        `hcl:"region,optional" help:"S3 region (defaults to us-west-2)."`
-	UseSSL        *bool         `hcl:"use-ssl,optional" help:"Use SSL for S3 connections (defaults to true)."`
-	SkipSSLVerify bool          `hcl:"skip-ssl-verify,optional" help:"Skip SSL certificate verification (defaults to false)."`
-	MaxTTL        time.Duration `hcl:"max-ttl,optional" help:"Maximum time-to-live for entries in the S3 cache (defaults to 1 hour)."`
+	Endpoint      string        `hcl:"endpoint,optional" help:"S3 endpoint URL (e.g., s3.amazonaws.com or localhost:9000)." default:"s3.amazonaws.com"`
+	Region        string        `hcl:"region,optional" help:"S3 region (defaults to us-west-2)." default:"us-west-2"`
+	UseSSL        bool          `hcl:"use-ssl,optional" help:"Use SSL for S3 connections (defaults to true)." default:"true"`
+	SkipSSLVerify bool          `hcl:"skip-ssl-verify,optional" help:"Skip SSL certificate verification (defaults to false)." default:"false"`
+	MaxTTL        time.Duration `hcl:"max-ttl,optional" help:"Maximum time-to-live for entries in the S3 cache (defaults to 1 hour)." default:"1h"`
 }
 
 type S3 struct {
@@ -54,36 +54,15 @@ var _ Cache = (*S3)(nil)
 // Metadata (headers and expiration time) are stored as object user metadata. The implementation
 // uses the lightweight minio-go SDK to reduce overhead compared to the AWS SDK.
 func NewS3(ctx context.Context, config S3Config) (*S3, error) {
-	// Validate config
-	if config.Endpoint == "" {
-		return nil, errors.New("endpoint is required")
-	}
-	if config.Bucket == "" {
-		return nil, errors.New("bucket is required")
-	}
-
-	// Apply defaults only for zero values
-	if config.Region == "" {
-		config.Region = "us-west-2"
-	}
-	if config.MaxTTL == 0 {
-		config.MaxTTL = time.Hour
-	}
-	// UseSSL defaults to true if not explicitly set
-	useSSL := true
-	if config.UseSSL != nil {
-		useSSL = *config.UseSSL
-	}
-
 	logging.FromContext(ctx).InfoContext(ctx, "Constructing S3 cache",
 		"endpoint", config.Endpoint,
 		"bucket", config.Bucket,
 		"region", config.Region,
-		"use-ssl", useSSL,
+		"use-ssl", config.UseSSL,
 		"max-ttl", config.MaxTTL)
 
 	// Create default transport for credential chain
-	defaultTransport, err := minio.DefaultTransport(useSSL)
+	defaultTransport, err := minio.DefaultTransport(config.UseSSL)
 	if err != nil {
 		return nil, errors.Errorf("failed to create default transport: %w", err)
 	}
@@ -120,7 +99,7 @@ func NewS3(ctx context.Context, config S3Config) (*S3, error) {
 	// Create minio client options
 	options := &minio.Options{
 		Creds:  creds,
-		Secure: useSSL,
+		Secure: config.UseSSL,
 		Region: config.Region,
 	}
 
