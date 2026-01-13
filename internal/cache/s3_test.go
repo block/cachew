@@ -160,15 +160,17 @@ func TestS3Cache(t *testing.T) {
 			}
 		}
 
+		// Set credentials via environment variables for the AWS credential chain
+		t.Setenv("AWS_ACCESS_KEY_ID", minioUsername)
+		t.Setenv("AWS_SECRET_ACCESS_KEY", minioPassword)
+
 		useSSL := false
 		c, err := cache.NewS3(ctx, cache.S3Config{
-			Endpoint:        minioEndpoint,
-			AccessKeyID:     minioUsername,
-			SecretAccessKey: minioPassword,
-			Bucket:          minioBucket,
-			Region:          "",
-			UseSSL:          &useSSL, // MinIO container serves HTTP, not HTTPS
-			MaxTTL:          100 * time.Millisecond,
+			Endpoint: minioEndpoint,
+			Bucket:   minioBucket,
+			Region:   "",
+			UseSSL:   &useSSL, // MinIO container serves HTTP, not HTTPS
+			MaxTTL:   100 * time.Millisecond,
 		})
 		assert.NoError(t, err)
 		return c

@@ -25,14 +25,12 @@ func init() {
 }
 
 type S3Config struct {
-	Endpoint        string        `hcl:"endpoint" help:"S3 endpoint URL (e.g., s3.amazonaws.com or localhost:9000)."`
-	AccessKeyID     string        `hcl:"access-key-id,optional" help:"S3 access key ID (optional, uses AWS credential chain if not provided)."`
-	SecretAccessKey string        `hcl:"secret-access-key,optional" help:"S3 secret access key (optional, uses AWS credential chain if not provided)."`
-	Bucket          string        `hcl:"bucket" help:"S3 bucket name."`
-	Region          string        `hcl:"region,optional" help:"S3 region (defaults to us-west-2)."`
-	UseSSL          *bool         `hcl:"use-ssl,optional" help:"Use SSL for S3 connections (defaults to true)."`
-	SkipSSLVerify   bool          `hcl:"skip-ssl-verify,optional" help:"Skip SSL certificate verification (defaults to false)."`
-	MaxTTL          time.Duration `hcl:"max-ttl,optional" help:"Maximum time-to-live for entries in the S3 cache (defaults to 1 hour)."`
+	Endpoint      string        `hcl:"endpoint" help:"S3 endpoint URL (e.g., s3.amazonaws.com or localhost:9000)."`
+	Bucket        string        `hcl:"bucket" help:"S3 bucket name."`
+	Region        string        `hcl:"region,optional" help:"S3 region (defaults to us-west-2)."`
+	UseSSL        *bool         `hcl:"use-ssl,optional" help:"Use SSL for S3 connections (defaults to true)."`
+	SkipSSLVerify bool          `hcl:"skip-ssl-verify,optional" help:"Skip SSL certificate verification (defaults to false)."`
+	MaxTTL        time.Duration `hcl:"max-ttl,optional" help:"Maximum time-to-live for entries in the S3 cache (defaults to 1 hour)."`
 }
 
 type S3 struct {
@@ -43,20 +41,11 @@ type S3 struct {
 
 var _ Cache = (*S3)(nil)
 
-// credentialMode returns a string indicating which credential mode is being used.
-func credentialMode(config S3Config) string {
-	if config.AccessKeyID != "" && config.SecretAccessKey != "" {
-		return "static"
-	}
-	return "aws-chain"
-}
-
 // NewS3 creates a new S3-based cache instance using the minio SDK.
 //
 // config.Endpoint and config.Bucket MUST be set.
 //
-// If config.AccessKeyID and config.SecretAccessKey are provided, static credentials will be used.
-// Otherwise, the standard AWS credential chain will be used, which includes:
+// The standard AWS credential chain is used for authentication, which includes:
 //  1. Environment variables (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN)
 //  2. AWS credentials file (~/.aws/credentials)
 //  3. IAM role from EC2 instance metadata or ECS container credentials
@@ -91,19 +80,17 @@ func NewS3(ctx context.Context, config S3Config) (*S3, error) {
 		"bucket", config.Bucket,
 		"region", config.Region,
 		"use-ssl", useSSL,
-		"max-ttl", config.MaxTTL,
-		"credentials-mode", credentialMode(config))
+		"max-ttl", config.MaxTTL)
 
-	// Determine credential provider and optional custom transport
-	var creds *credentials.Credentials
+	// Create default transport for credential chain
+	defaultTransport, err := minio.DefaultTransport(useSSL)
+	if err != nil {
+		return nil, errors.Errorf("failed to create default transport: %w", err)
+	}
+
+	// Apply SSL verification settings if needed
 	var transport http.RoundTripper
-
-	// Only create custom transport if we need to skip SSL verification
 	if config.SkipSSLVerify {
-		defaultTransport, err := minio.DefaultTransport(useSSL)
-		if err != nil {
-			return nil, errors.Errorf("failed to create default transport: %w", err)
-		}
 		// Clone the default transport and disable SSL verification
 		customTransport := defaultTransport.Clone()
 		if customTransport.TLSClientConfig == nil {
@@ -115,40 +102,20 @@ func NewS3(ctx context.Context, config S3Config) (*S3, error) {
 		}
 		customTransport.TLSClientConfig.InsecureSkipVerify = true
 		transport = customTransport
+		defaultTransport = customTransport
 	}
 
-	switch {
-	case config.AccessKeyID != "" && config.SecretAccessKey != "":
-		// Use static credentials if both are provided
-		creds = credentials.NewStaticV4(config.AccessKeyID, config.SecretAccessKey, "")
-	case config.AccessKeyID != "" || config.SecretAccessKey != "":
-		// Error if only one is provided
-		return nil, errors.New("both access-key-id and secret-access-key must be provided together, or neither for credential chain")
-	default:
-		// Use AWS credential chain if neither is provided
-		defaultTransport, err := minio.DefaultTransport(useSSL)
-		if err != nil {
-			return nil, errors.Errorf("failed to create default transport: %w", err)
-		}
-		if transport != nil {
-			// Use custom transport if already set (for SkipSSLVerify)
-			var ok bool
-			defaultTransport, ok = transport.(*http.Transport)
-			if !ok {
-				return nil, errors.New("transport is not an *http.Transport")
-			}
-		}
-		creds = credentials.NewChainCredentials(
-			[]credentials.Provider{
-				&credentials.EnvAWS{},             // Check AWS environment variables
-				&credentials.FileAWSCredentials{}, // Check ~/.aws/credentials
-				&credentials.IAM{
-					Client: &http.Client{
-						Transport: defaultTransport,
-					},
-				}, // Check EC2 instance metadata or ECS container credentials
-			})
-	}
+	// Use AWS credential chain
+	creds := credentials.NewChainCredentials(
+		[]credentials.Provider{
+			&credentials.EnvAWS{},             // Check AWS environment variables
+			&credentials.FileAWSCredentials{}, // Check ~/.aws/credentials
+			&credentials.IAM{
+				Client: &http.Client{
+					Transport: defaultTransport,
+				},
+			}, // Check EC2 instance metadata or ECS container credentials
+		})
 
 	// Create minio client options
 	options := &minio.Options{
