@@ -1,7 +1,6 @@
 package cache
 
 import (
-	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/json"
@@ -188,14 +187,22 @@ func (s *S3) Create(ctx context.Context, key Key, headers textproto.MIMEHeader, 
 
 	expiresAt := time.Now().Add(ttl)
 
-	return &s3Writer{
+	pr, pw := io.Pipe()
+
+	writer := &s3Writer{
 		s3:        s,
 		key:       key,
-		buf:       &bytes.Buffer{},
+		pipe:      pw,
 		expiresAt: expiresAt,
 		headers:   headers,
 		ctx:       ctx,
-	}, nil
+		errCh:     make(chan error, 1),
+	}
+
+	// Start upload in background goroutine
+	go writer.upload(pr)
+
+	return writer, nil
 }
 
 func (s *S3) Delete(ctx context.Context, key Key) error {
@@ -222,21 +229,34 @@ func (s *S3) Delete(ctx context.Context, key Key) error {
 type s3Writer struct {
 	s3        *S3
 	key       Key
-	buf       *bytes.Buffer
+	pipe      *io.PipeWriter
 	expiresAt time.Time
 	headers   textproto.MIMEHeader
 	ctx       context.Context
+	errCh     chan error
 }
 
 func (w *s3Writer) Write(p []byte) (int, error) {
-	return errors.WithStack2(w.buf.Write(p))
+	return errors.WithStack2(w.pipe.Write(p))
 }
 
 func (w *s3Writer) Close() error {
-	// Check if context was cancelled
-	if err := w.ctx.Err(); err != nil {
-		return errors.Wrap(err, "create operation cancelled")
+	// Close the pipe writer to signal EOF to the reader
+	if err := w.pipe.Close(); err != nil {
+		return errors.Wrap(err, "failed to close pipe")
 	}
+
+	// Wait for upload to complete and get any error
+	err := <-w.errCh
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (w *s3Writer) upload(pr *io.PipeReader) {
+	defer pr.Close()
 
 	objectName := w.key.String()
 
@@ -246,7 +266,8 @@ func (w *s3Writer) Close() error {
 	// Store expiration time
 	expiresAtBytes, err := w.expiresAt.MarshalText()
 	if err != nil {
-		return errors.Errorf("failed to marshal expiration time: %w", err)
+		w.errCh <- errors.Errorf("failed to marshal expiration time: %w", err)
+		return
 	}
 	userMetadata["Expires-At"] = string(expiresAtBytes)
 
@@ -254,25 +275,27 @@ func (w *s3Writer) Close() error {
 	if len(w.headers) > 0 {
 		headersJSON, err := json.Marshal(w.headers)
 		if err != nil {
-			return errors.Errorf("failed to marshal headers: %w", err)
+			w.errCh <- errors.Errorf("failed to marshal headers: %w", err)
+			return
 		}
 		userMetadata["Headers"] = string(headersJSON)
 	}
 
-	// Upload object
+	// Upload object with streaming (size -1 means unknown size, will use chunked encoding)
 	_, err = w.s3.client.PutObject(
 		w.ctx,
 		w.s3.config.Bucket,
 		objectName,
-		w.buf,
-		int64(w.buf.Len()),
+		pr,
+		-1,
 		minio.PutObjectOptions{
 			UserMetadata: userMetadata,
 		},
 	)
 	if err != nil {
-		return errors.Errorf("failed to put object: %w", err)
+		w.errCh <- errors.Errorf("failed to put object: %w", err)
+		return
 	}
 
-	return nil
+	w.errCh <- nil
 }
