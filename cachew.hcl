@@ -1,8 +1,10 @@
 # strategy git {}
 # strategy docker {}
 # strategy hermit {}
-# strategy artifactory {
-#   mitm = ["artifactory.square.com"]
+
+# Artifactory caching proxy strategy
+# artifactory "example.jfrog.io" {
+#   target = "https://example.jfrog.io"
 # }
 
 host "https://w3.org" {}
