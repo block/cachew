@@ -16,12 +16,12 @@ import (
 )
 
 type mockArtifactoryServer struct {
-	server           *httptest.Server
-	requestCount     int
-	lastRequestPath  string
-	lastHeaders      http.Header
-	responseContent  string
-	responseStatus   int
+	server          *httptest.Server
+	requestCount    int
+	lastRequestPath string
+	lastHeaders     http.Header
+	responseContent string
+	responseStatus  int
 }
 
 func newMockArtifactoryServer() *mockArtifactoryServer {
@@ -48,7 +48,7 @@ func (m *mockArtifactoryServer) close() {
 	m.server.Close()
 }
 
-func setupArtifactoryTest(t *testing.T, config strategy.ArtifactoryConfig) (*mockArtifactoryServer, *http.ServeMux, cache.Cache, context.Context) {
+func setupArtifactoryTest(t *testing.T, config strategy.ArtifactoryConfig) (*mockArtifactoryServer, *http.ServeMux, context.Context) {
 	t.Helper()
 
 	mock := newMockArtifactoryServer()
@@ -66,11 +66,11 @@ func setupArtifactoryTest(t *testing.T, config strategy.ArtifactoryConfig) (*moc
 	_, err = strategy.NewArtifactory(ctx, config, memCache, mux)
 	assert.NoError(t, err)
 
-	return mock, mux, memCache, ctx
+	return mock, mux, ctx
 }
 
 func TestArtifactoryBasicRequest(t *testing.T) {
-	mock, mux, _, ctx := setupArtifactoryTest(t, strategy.ArtifactoryConfig{})
+	mock, mux, ctx := setupArtifactoryTest(t, strategy.ArtifactoryConfig{})
 
 	req := httptest.NewRequest(http.MethodGet, "/"+mock.server.Listener.Addr().String()+"/libs-release/com/example/app/1.0/app-1.0.jar", nil)
 	req = req.WithContext(ctx)
@@ -84,7 +84,7 @@ func TestArtifactoryBasicRequest(t *testing.T) {
 }
 
 func TestArtifactoryCaching(t *testing.T) {
-	mock, mux, _, ctx := setupArtifactoryTest(t, strategy.ArtifactoryConfig{})
+	mock, mux, ctx := setupArtifactoryTest(t, strategy.ArtifactoryConfig{})
 
 	path := "/" + mock.server.Listener.Addr().String() + "/libs-release/com/example/app/1.0/app-1.0.jar"
 
@@ -110,7 +110,7 @@ func TestArtifactoryCaching(t *testing.T) {
 }
 
 func TestArtifactoryQueryParamsIncludedInKey(t *testing.T) {
-	mock, mux, _, ctx := setupArtifactoryTest(t, strategy.ArtifactoryConfig{})
+	mock, mux, ctx := setupArtifactoryTest(t, strategy.ArtifactoryConfig{})
 
 	basePath := "/" + mock.server.Listener.Addr().String() + "/libs-release/com/example/app/1.0/app-1.0.jar"
 
@@ -133,9 +133,8 @@ func TestArtifactoryQueryParamsIncludedInKey(t *testing.T) {
 	assert.Equal(t, 2, mock.requestCount, "different query params should result in different cache keys")
 }
 
-
 func TestArtifactoryXJFrogDownloadRedirectHeader(t *testing.T) {
-	mock, mux, _, ctx := setupArtifactoryTest(t, strategy.ArtifactoryConfig{})
+	mock, mux, ctx := setupArtifactoryTest(t, strategy.ArtifactoryConfig{})
 
 	path := "/" + mock.server.Listener.Addr().String() + "/libs-release/com/example/app/1.0/app-1.0.jar"
 
@@ -146,11 +145,11 @@ func TestArtifactoryXJFrogDownloadRedirectHeader(t *testing.T) {
 
 	assert.Equal(t, http.StatusOK, w.Code)
 	// Verify X-JFrog-Download-Redirect-To header was set to None
-	assert.Equal(t, "None", mock.lastHeaders.Get("X-JFrog-Download-Redirect-To"))
+	assert.Equal(t, "None", mock.lastHeaders.Get("X-Jfrog-Download-Redirect-To"))
 }
 
 func TestArtifactoryAuthHeaders(t *testing.T) {
-	mock, mux, _, ctx := setupArtifactoryTest(t, strategy.ArtifactoryConfig{})
+	mock, mux, ctx := setupArtifactoryTest(t, strategy.ArtifactoryConfig{})
 
 	// Test Authorization header
 	path1 := "/" + mock.server.Listener.Addr().String() + "/libs-release/com/example/app/1.0/app-1.0.jar"
@@ -166,13 +165,13 @@ func TestArtifactoryAuthHeaders(t *testing.T) {
 	// Test X-JFrog-Art-Api header with different path to avoid cache
 	path2 := "/" + mock.server.Listener.Addr().String() + "/libs-release/com/example/app/2.0/app-2.0.jar"
 	req2 := httptest.NewRequest(http.MethodGet, path2, nil)
-	req2.Header.Set("X-JFrog-Art-Api", "api-key-456")
+	req2.Header.Set("X-Jfrog-Art-Api", "api-key-456")
 	req2 = req2.WithContext(ctx)
 	w2 := httptest.NewRecorder()
 	mux.ServeHTTP(w2, req2)
 
 	assert.Equal(t, http.StatusOK, w2.Code)
-	assert.Equal(t, "api-key-456", mock.lastHeaders.Get("X-JFrog-Art-Api"))
+	assert.Equal(t, "api-key-456", mock.lastHeaders.Get("X-Jfrog-Art-Api"))
 
 	// Test Cookie header with different path to avoid cache
 	path3 := "/" + mock.server.Listener.Addr().String() + "/libs-release/com/example/app/3.0/app-3.0.jar"
@@ -187,7 +186,7 @@ func TestArtifactoryAuthHeaders(t *testing.T) {
 }
 
 func TestArtifactoryNonOKResponse(t *testing.T) {
-	mock, mux, _, ctx := setupArtifactoryTest(t, strategy.ArtifactoryConfig{})
+	mock, mux, ctx := setupArtifactoryTest(t, strategy.ArtifactoryConfig{})
 
 	// Configure mock to return 404
 	mock.responseStatus = http.StatusNotFound
@@ -233,7 +232,7 @@ func TestArtifactoryInvalidTargetURL(t *testing.T) {
 }
 
 func TestArtifactoryHostBasedRouting(t *testing.T) {
-	mock, mux, _, ctx := setupArtifactoryTest(t, strategy.ArtifactoryConfig{
+	mock, mux, ctx := setupArtifactoryTest(t, strategy.ArtifactoryConfig{
 		Hosts: []string{"maven.block-artifacts.com", "npm.block-artifacts.com"},
 	})
 
@@ -251,7 +250,7 @@ func TestArtifactoryHostBasedRouting(t *testing.T) {
 }
 
 func TestArtifactoryMultipleHostsSameUpstream(t *testing.T) {
-	mock, mux, _, ctx := setupArtifactoryTest(t, strategy.ArtifactoryConfig{
+	mock, mux, ctx := setupArtifactoryTest(t, strategy.ArtifactoryConfig{
 		Hosts: []string{"maven.block-artifacts.com", "npm.block-artifacts.com"},
 	})
 
@@ -277,7 +276,7 @@ func TestArtifactoryMultipleHostsSameUpstream(t *testing.T) {
 }
 
 func TestArtifactoryBothRoutingModesSimultaneously(t *testing.T) {
-	mock, mux, _, ctx := setupArtifactoryTest(t, strategy.ArtifactoryConfig{
+	mock, mux, ctx := setupArtifactoryTest(t, strategy.ArtifactoryConfig{
 		Hosts: []string{"maven.block-artifacts.com"},
 	})
 
@@ -315,7 +314,7 @@ func TestArtifactoryBothRoutingModesSimultaneously(t *testing.T) {
 }
 
 func TestArtifactoryHostBasedWithPort(t *testing.T) {
-	mock, mux, _, ctx := setupArtifactoryTest(t, strategy.ArtifactoryConfig{
+	mock, mux, ctx := setupArtifactoryTest(t, strategy.ArtifactoryConfig{
 		Hosts: []string{"maven.block-artifacts.com"},
 	})
 
@@ -332,7 +331,7 @@ func TestArtifactoryHostBasedWithPort(t *testing.T) {
 }
 
 func TestArtifactoryPathBasedOnlyWhenNoHostsConfigured(t *testing.T) {
-	mock, mux, _, ctx := setupArtifactoryTest(t, strategy.ArtifactoryConfig{
+	mock, mux, ctx := setupArtifactoryTest(t, strategy.ArtifactoryConfig{
 		Hosts: []string{}, // Empty hosts - should only use path-based routing
 	})
 
@@ -347,5 +346,3 @@ func TestArtifactoryPathBasedOnlyWhenNoHostsConfigured(t *testing.T) {
 	assert.Equal(t, []byte("artifact-content"), w.Body.Bytes())
 	assert.Equal(t, 1, mock.requestCount)
 }
-
-

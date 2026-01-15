@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
@@ -42,7 +43,7 @@ type ArtifactoryConfig struct {
 // - Sets X-JFrog-Download-Redirect-To header to prevent redirects
 // - 7-day default TTL for cached artifacts
 // - Passes through authentication headers
-// - Supports both host-based and path-based routing simultaneously
+// - Supports both host-based and path-based routing simultaneously.
 type Artifactory struct {
 	target       *url.URL
 	cache        cache.Cache
@@ -74,7 +75,7 @@ func NewArtifactory(ctx context.Context, config ArtifactoryConfig, cache cache.C
 		Transform(func(r *http.Request) (*http.Request, error) {
 			return a.transformRequest(r)
 		}).
-		TTL(func(r *http.Request) time.Duration {
+		TTL(func(_ *http.Request) time.Duration {
 			return 7 * 24 * time.Hour // 7 days
 		})
 
@@ -130,7 +131,7 @@ func (a *Artifactory) transformRequest(r *http.Request) (*http.Request, error) {
 
 	// Set X-JFrog-Download-Redirect-To to None to prevent Artifactory from redirecting
 	// This ensures the proxy can cache the actual artifact content
-	req.Header.Set("X-JFrog-Download-Redirect-To", "None")
+	req.Header.Set("X-Jfrog-Download-Redirect-To", "None")
 
 	return req, nil
 }
@@ -195,13 +196,7 @@ func (a *Artifactory) isHostBasedRequest(r *http.Request) bool {
 	}
 
 	// Check if request host matches any configured host
-	for _, configuredHost := range a.allowedHosts {
-		if configuredHost == requestHost {
-			return true
-		}
-	}
-
-	return false
+	return slices.Contains(a.allowedHosts, requestHost)
 }
 
 // copyAuthHeaders copies authentication-related headers from the source to destination request.
