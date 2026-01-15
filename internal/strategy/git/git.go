@@ -5,6 +5,7 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"net/http/httputil"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -54,6 +55,7 @@ type Strategy struct {
 	clones     map[string]*clone
 	clonesMu   sync.RWMutex
 	httpClient *http.Client
+	proxy      *httputil.ReverseProxy
 }
 
 // New creates a new Git caching strategy.
@@ -77,6 +79,20 @@ func New(ctx context.Context, config Config, cache cache.Cache, mux strategy.Mux
 		cache:      cache,
 		clones:     make(map[string]*clone),
 		httpClient: http.DefaultClient,
+	}
+
+	s.proxy = &httputil.ReverseProxy{
+		Director: func(req *http.Request) {
+			req.URL.Scheme = "https"
+			req.URL.Host = req.PathValue("host")
+			req.URL.Path = "/" + req.PathValue("path")
+			req.Host = req.URL.Host
+		},
+		Transport: s.httpClient.Transport,
+		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
+			logging.FromContext(r.Context()).ErrorContext(r.Context(), "Upstream request failed", slog.String("error", err.Error()))
+			w.WriteHeader(http.StatusBadGateway)
+		},
 	}
 
 	mux.Handle("GET /git/{host}/{path...}", http.HandlerFunc(s.handleRequest))

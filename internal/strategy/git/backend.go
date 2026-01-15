@@ -69,7 +69,13 @@ func (s *Strategy) executeClone(ctx context.Context, c *clone) error {
 	}
 
 	// #nosec G204 - c.upstreamURL and c.path are controlled by us
-	cmd := exec.CommandContext(ctx, "git", "clone", "--bare", "--mirror", c.upstreamURL, c.path)
+	// Configure git for large repositories to avoid network buffer issues
+	cmd := exec.CommandContext(ctx, "git", "clone",
+		"--bare", "--mirror",
+		"-c", "http.postBuffer=524288000", // 500MB buffer
+		"-c", "http.lowSpeedLimit=1000", // 1KB/s minimum speed
+		"-c", "http.lowSpeedTime=600", // 10 minute timeout at low speed
+		c.upstreamURL, c.path)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		logger.ErrorContext(ctx, "git clone failed",
@@ -87,7 +93,12 @@ func (s *Strategy) executeFetch(ctx context.Context, c *clone) error {
 	logger := logging.FromContext(ctx)
 
 	// #nosec G204 - c.path is controlled by us
-	cmd := exec.CommandContext(ctx, "git", "-C", c.path, "fetch", "--all")
+	// Configure git for large repositories to avoid network buffer issues
+	cmd := exec.CommandContext(ctx, "git", "-C", c.path,
+		"-c", "http.postBuffer=524288000", // 500MB buffer
+		"-c", "http.lowSpeedLimit=1000", // 1KB/s minimum speed
+		"-c", "http.lowSpeedTime=600", // 10 minute timeout at low speed
+		"fetch", "--all")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		logger.ErrorContext(ctx, "git fetch failed",
