@@ -1,3 +1,5 @@
 /dist/
 /cache/
+/state/
+
 block-test.hcl

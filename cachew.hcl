@@ -7,6 +7,11 @@
 #   target = "https://example.jfrog.io"
 # }
 
+
+git {
+  mirror-root = "./state/git-mirrors"
+}
+
 host "https://w3.org" {}
 
 github-releases {
@@ -17,5 +22,5 @@ github-releases {
 memory {}
 
 disk {
-  root = "./cache"
+  root = "./state/cache"
 }

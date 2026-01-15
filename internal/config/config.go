@@ -14,6 +14,7 @@ import (
 	"github.com/block/cachew/internal/cache"
 	"github.com/block/cachew/internal/logging"
 	"github.com/block/cachew/internal/strategy"
+	_ "github.com/block/cachew/internal/strategy/git" // Register git strategy
 )
 
 type loggingMux struct {
