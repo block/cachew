@@ -31,8 +31,8 @@ type S3Config struct {
 	UseSSL            bool          `hcl:"use-ssl,optional" help:"Use SSL for S3 connections (defaults to true)." default:"true"`
 	SkipSSLVerify     bool          `hcl:"skip-ssl-verify,optional" help:"Skip SSL certificate verification (defaults to false)." default:"false"`
 	MaxTTL            time.Duration `hcl:"max-ttl,optional" help:"Maximum time-to-live for entries in the S3 cache (defaults to 1 hour)." default:"1h"`
-	UploadConcurrency int           `hcl:"upload-concurrency,optional" help:"Number of concurrent workers for multi-part uploads (0 = use all CPU cores, defaults to 1)." default:"1"`
-	UploadPartSizeMB  int           `hcl:"upload-part-size-mb,optional" help:"Size of each part for multi-part uploads in megabytes (defaults to 16MB, minimum 5MB)." default:"16"`
+	UploadConcurrency uint          `hcl:"upload-concurrency,optional" help:"Number of concurrent workers for multi-part uploads (0 = use all CPU cores, defaults to 1)." default:"1"`
+	UploadPartSizeMB  uint          `hcl:"upload-part-size-mb,optional" help:"Size of each part for multi-part uploads in megabytes (defaults to 16MB, minimum 5MB)." default:"16"`
 }
 
 type S3 struct {
@@ -58,11 +58,10 @@ var _ Cache = (*S3)(nil)
 func NewS3(ctx context.Context, config S3Config) (*S3, error) {
 	// Set defaults and validate configuration
 	if config.UploadConcurrency == 0 {
-		config.UploadConcurrency = runtime.NumCPU()
+		// #nosec G115 -- n is guaranteed >= 1. I was unable to satisfy all linters.
+		config.UploadConcurrency = uint(max(runtime.NumCPU(), 1))
 	}
-	if config.UploadPartSizeMB == 0 {
-		config.UploadPartSizeMB = 16 // 16MB default
-	}
+
 	if config.UploadPartSizeMB < 5 {
 		return nil, errors.New("upload-part-size-mb must be at least 5MB (S3 minimum part size)")
 	}
@@ -301,7 +300,7 @@ func (w *s3Writer) upload(pr *io.PipeReader) {
 	// Enable concurrent streaming for multi-part uploads if configured
 	if w.s3.config.UploadConcurrency > 1 {
 		opts.ConcurrentStreamParts = true
-		opts.NumThreads = uint(w.s3.config.UploadConcurrency)
+		opts.NumThreads = w.s3.config.UploadConcurrency
 		opts.PartSize = uint64(w.s3.config.UploadPartSizeMB) * 1024 * 1024 // Convert MB to bytes
 	}
 
