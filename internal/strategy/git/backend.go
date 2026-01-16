@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -64,7 +65,7 @@ func (s *Strategy) serveFromBackend(w http.ResponseWriter, r *http.Request, c *c
 	handler.ServeHTTP(w, r2)
 }
 
-// executeClone performs a git clone --bare --mirror operation.
+// executeClone performs a git clone --bare operation.
 func (s *Strategy) executeClone(ctx context.Context, c *clone) error {
 	logger := logging.FromContext(ctx)
 
@@ -74,12 +75,19 @@ func (s *Strategy) executeClone(ctx context.Context, c *clone) error {
 
 	// #nosec G204 - c.upstreamURL and c.path are controlled by us
 	// Configure git for large repositories to avoid network buffer issues
-	cmd := exec.CommandContext(ctx, "git", "clone",
-		"--bare", "--mirror",
+	args := []string{"clone", "--bare"}
+	if s.config.CloneDepth > 0 {
+		args = append(args, "--depth", strconv.Itoa(s.config.CloneDepth))
+	}
+	args = append(args,
 		"-c", "http.postBuffer=524288000", // 500MB buffer
 		"-c", "http.lowSpeedLimit=1000", // 1KB/s minimum speed
 		"-c", "http.lowSpeedTime=600", // 10 minute timeout at low speed
 		c.upstreamURL, c.path)
+	cmd, err := gitCommand(ctx, c.upstreamURL, args...)
+	if err != nil {
+		return errors.Wrap(err, "create git command")
+	}
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		logger.ErrorContext(ctx, "git clone failed",
@@ -121,12 +129,18 @@ func (s *Strategy) executeFetch(ctx context.Context, c *clone) error {
 
 	// #nosec G204 - c.path is controlled by us
 	// Configure git for large repositories to avoid network buffer issues
-	// Use 'remote update' for mirror clones to properly handle ref updates and pruning
-	cmd := exec.CommandContext(ctx, "git", "-C", c.path,
+	// Use 'remote update' to properly handle ref updates and pruning
+	cmd, err := gitCommand(ctx, c.upstreamURL, "-C", c.path,
 		"-c", "http.postBuffer=524288000", // 500MB buffer
 		"-c", "http.lowSpeedLimit=1000", // 1KB/s minimum speed
 		"-c", "http.lowSpeedTime=600", // 10 minute timeout at low speed
 		"remote", "update", "--prune")
+	if err != nil {
+		logger.ErrorContext(ctx, "Failed to create git command",
+			slog.String("upstream", c.upstreamURL),
+			slog.String("error", err.Error()))
+		return errors.Wrap(err, "create git command")
+	}
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		logger.ErrorContext(ctx, "git remote update failed",
@@ -212,7 +226,10 @@ func (s *Strategy) ensureRefsUpToDate(ctx context.Context, c *clone) error {
 func (s *Strategy) getLocalRefs(ctx context.Context, c *clone) (map[string]string, error) {
 	// #nosec G204 - c.path is controlled by us
 	// Use --head to include HEAD symbolic ref
-	cmd := exec.CommandContext(ctx, "git", "-C", c.path, "show-ref", "--head")
+	cmd, err := gitCommand(ctx, "", "-C", c.path, "show-ref", "--head")
+	if err != nil {
+		return nil, errors.Wrap(err, "create git command")
+	}
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return nil, errors.Wrap(err, "git show-ref")
@@ -224,7 +241,10 @@ func (s *Strategy) getLocalRefs(ctx context.Context, c *clone) (map[string]strin
 // getUpstreamRefs returns a map of ref names to SHAs for the upstream repository.
 func (s *Strategy) getUpstreamRefs(ctx context.Context, c *clone) (map[string]string, error) {
 	// #nosec G204 - c.upstreamURL is controlled by us
-	cmd := exec.CommandContext(ctx, "git", "ls-remote", c.upstreamURL)
+	cmd, err := gitCommand(ctx, c.upstreamURL, "ls-remote", c.upstreamURL)
+	if err != nil {
+		return nil, errors.Wrap(err, "create git command")
+	}
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return nil, errors.Wrap(err, "git ls-remote")

@@ -38,9 +38,9 @@ func main() {
 	server := &http.Server{
 		Addr:              cli.Bind,
 		Handler:           httputil.LoggingMiddleware(mux),
-		ReadTimeout:       30 * time.Second,
-		WriteTimeout:      30 * time.Second,
-		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Minute,
+		WriteTimeout:      30 * time.Minute,
+		ReadHeaderTimeout: 30 * time.Second,
 		BaseContext: func(net.Listener) context.Context {
 			return ctx
 		},
