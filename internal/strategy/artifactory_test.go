@@ -233,12 +233,12 @@ func TestArtifactoryInvalidTargetURL(t *testing.T) {
 
 func TestArtifactoryHostBasedRouting(t *testing.T) {
 	mock, mux, ctx := setupArtifactoryTest(t, strategy.ArtifactoryConfig{
-		Hosts: []string{"maven.block-artifacts.com", "npm.block-artifacts.com"},
+		Hosts: []string{"maven.example.jfrog.io", "npm.example.jfrog.io"},
 	})
 
 	// Request using host-based routing
 	req := httptest.NewRequest(http.MethodGet, "/libs-release/com/example/app/1.0/app-1.0.jar", nil)
-	req.Host = "maven.block-artifacts.com"
+	req.Host = "maven.example.jfrog.io"
 	req = req.WithContext(ctx)
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, req)
@@ -251,12 +251,12 @@ func TestArtifactoryHostBasedRouting(t *testing.T) {
 
 func TestArtifactoryMultipleHostsSameUpstream(t *testing.T) {
 	mock, mux, ctx := setupArtifactoryTest(t, strategy.ArtifactoryConfig{
-		Hosts: []string{"maven.block-artifacts.com", "npm.block-artifacts.com"},
+		Hosts: []string{"maven.example.jfrog.io", "npm.example.jfrog.io"},
 	})
 
 	// First request via maven host
 	req1 := httptest.NewRequest(http.MethodGet, "/libs-release/com/example/app/1.0/app-1.0.jar", nil)
-	req1.Host = "maven.block-artifacts.com"
+	req1.Host = "maven.example.jfrog.io"
 	req1 = req1.WithContext(ctx)
 	w1 := httptest.NewRecorder()
 	mux.ServeHTTP(w1, req1)
@@ -266,7 +266,7 @@ func TestArtifactoryMultipleHostsSameUpstream(t *testing.T) {
 
 	// Second request via npm host for the same artifact - should hit cache
 	req2 := httptest.NewRequest(http.MethodGet, "/libs-release/com/example/app/1.0/app-1.0.jar", nil)
-	req2.Host = "npm.block-artifacts.com"
+	req2.Host = "npm.example.jfrog.io"
 	req2 = req2.WithContext(ctx)
 	w2 := httptest.NewRecorder()
 	mux.ServeHTTP(w2, req2)
@@ -277,12 +277,12 @@ func TestArtifactoryMultipleHostsSameUpstream(t *testing.T) {
 
 func TestArtifactoryBothRoutingModesSimultaneously(t *testing.T) {
 	mock, mux, ctx := setupArtifactoryTest(t, strategy.ArtifactoryConfig{
-		Hosts: []string{"maven.block-artifacts.com"},
+		Hosts: []string{"maven.example.jfrog.io"},
 	})
 
 	// First request using host-based routing
 	req1 := httptest.NewRequest(http.MethodGet, "/libs-release/com/example/app/1.0/app-1.0.jar", nil)
-	req1.Host = "maven.block-artifacts.com"
+	req1.Host = "maven.example.jfrog.io"
 	req1 = req1.WithContext(ctx)
 	w1 := httptest.NewRecorder()
 	mux.ServeHTTP(w1, req1)
@@ -304,7 +304,7 @@ func TestArtifactoryBothRoutingModesSimultaneously(t *testing.T) {
 
 	// Third request using host-based routing again - still should be from cache
 	req3 := httptest.NewRequest(http.MethodGet, "/libs-release/com/example/app/1.0/app-1.0.jar", nil)
-	req3.Host = "maven.block-artifacts.com"
+	req3.Host = "maven.example.jfrog.io"
 	req3 = req3.WithContext(ctx)
 	w3 := httptest.NewRecorder()
 	mux.ServeHTTP(w3, req3)
@@ -315,12 +315,12 @@ func TestArtifactoryBothRoutingModesSimultaneously(t *testing.T) {
 
 func TestArtifactoryHostBasedWithPort(t *testing.T) {
 	mock, mux, ctx := setupArtifactoryTest(t, strategy.ArtifactoryConfig{
-		Hosts: []string{"maven.block-artifacts.com"},
+		Hosts: []string{"maven.example.jfrog.io"},
 	})
 
 	// Request with host including port - should match configured host (port is ignored)
 	req := httptest.NewRequest(http.MethodGet, "/libs-release/com/example/app/1.0/app-1.0.jar", nil)
-	req.Host = "maven.block-artifacts.com:8080"
+	req.Host = "maven.example.jfrog.io:8080"
 	req = req.WithContext(ctx)
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, req)

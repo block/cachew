@@ -141,17 +141,17 @@ func (a *Artifactory) buildTargetURL(r *http.Request) *url.URL {
 
 	if isHostBased {
 		// Host-based: use full request path as-is
-		// Request: GET http://maven.block-artifacts.com/libs-release/foo.jar
-		// Proxy to: GET https://global.block-artifacts.com/libs-release/foo.jar
+		// Request: GET http://maven.example.jfrog.io/libs-release/foo.jar
+		// Proxy to: GET https://global.example.jfrog.io/libs-release/foo.jar
 		path = r.URL.Path
 		if path == "" {
 			path = "/"
 		}
 	} else {
 		// Path-based: strip prefix from request path
-		// Request: GET http://cachew.local/global.block-artifacts.com/libs-release/foo.jar
-		// Strip "/global.block-artifacts.com" -> "/libs-release/foo.jar"
-		// Proxy to: GET https://global.block-artifacts.com/libs-release/foo.jar
+		// Request: GET http://cachew.local/global.example.jfrog.io/libs-release/foo.jar
+		// Strip "/global.example.jfrog.io" -> "/libs-release/foo.jar"
+		// Proxy to: GET https://global.example.jfrog.io/libs-release/foo.jar
 		path = r.URL.Path
 		if len(path) >= len(a.prefix) {
 			path = path[len(a.prefix):]
