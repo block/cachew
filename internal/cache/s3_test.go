@@ -145,11 +145,12 @@ func TestS3Cache(t *testing.T) {
 		t.Setenv("AWS_SECRET_ACCESS_KEY", rustfsPassword)
 
 		c, err := cache.NewS3(ctx, cache.S3Config{
-			Endpoint: rustfsAddr,
-			Bucket:   rustfsBucket,
-			Region:   "",
-			UseSSL:   false,
-			MaxTTL:   100 * time.Millisecond,
+			Endpoint:         rustfsAddr,
+			Bucket:           rustfsBucket,
+			Region:           "",
+			UseSSL:           false,
+			MaxTTL:           100 * time.Millisecond,
+			UploadPartSizeMB: 16,
 		})
 		assert.NoError(t, err)
 		return c

@@ -3,6 +3,7 @@ package git
 
 import (
 	"context"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httputil"
@@ -26,12 +27,14 @@ func init() {
 
 // Config for the Git strategy.
 type Config struct {
-	MirrorRoot       string        `hcl:"mirror-root" help:"Directory to store git mirrors." required:""`
+	MirrorRoot       string        `hcl:"mirror-root" help:"Directory to store git clones." required:""`
 	FetchInterval    time.Duration `hcl:"fetch-interval,optional" help:"How often to fetch from upstream in minutes." default:"15m"`
 	RefCheckInterval time.Duration `hcl:"ref-check-interval,optional" help:"How long to cache ref checks." default:"10s"`
+	BundleInterval   time.Duration `hcl:"bundle-interval,optional" help:"How often to generate bundles. 0 disables bundling." default:"0"`
+	CloneDepth       int           `hcl:"clone-depth,optional" help:"Depth for shallow clones. 0 means full clone." default:"0"`
 }
 
-// cloneState represents the current state of a bare clone.
+// cloneState represents the current state of a clone.
 type cloneState int
 
 const (
@@ -40,7 +43,7 @@ const (
 	stateReady                     // Clone is ready to serve
 )
 
-// clone represents a bare clone of an upstream repository.
+// clone represents a checked out clone of an upstream repository.
 type clone struct {
 	mu            sync.RWMutex
 	state         cloneState
@@ -60,6 +63,7 @@ type Strategy struct {
 	clonesMu   sync.RWMutex
 	httpClient *http.Client
 	proxy      *httputil.ReverseProxy
+	ctx        context.Context // Strategy lifecycle context
 }
 
 // New creates a new Git caching strategy.
@@ -87,6 +91,13 @@ func New(ctx context.Context, config Config, cache cache.Cache, mux strategy.Mux
 		cache:      cache,
 		clones:     make(map[string]*clone),
 		httpClient: http.DefaultClient,
+		ctx:        ctx,
+	}
+
+	// Scan for existing clones on disk and start bundle loops for them
+	if err := s.discoverExistingClones(ctx); err != nil {
+		logger.WarnContext(ctx, "Failed to discover existing clones",
+			slog.String("error", err.Error()))
 	}
 
 	s.proxy = &httputil.ReverseProxy{
@@ -109,7 +120,8 @@ func New(ctx context.Context, config Config, cache cache.Cache, mux strategy.Mux
 	logger.InfoContext(ctx, "Git strategy initialized",
 		"mirror_root", config.MirrorRoot,
 		"fetch_interval", config.FetchInterval,
-		"ref_check_interval", config.RefCheckInterval)
+		"ref_check_interval", config.RefCheckInterval,
+		"bundle_interval", config.BundleInterval)
 
 	return s, nil
 }
@@ -130,6 +142,12 @@ func (s *Strategy) handleRequest(w http.ResponseWriter, r *http.Request) {
 		slog.String("method", r.Method),
 		slog.String("host", host),
 		slog.String("path", pathValue))
+
+	// Check if this is a bundle request
+	if strings.HasSuffix(pathValue, "/bundle") {
+		s.handleBundleRequest(w, r, host, pathValue)
+		return
+	}
 
 	// Determine the service type from query param or path
 	service := r.URL.Query().Get("service")
@@ -193,6 +211,58 @@ func ExtractRepoPath(pathValue string) string {
 	return repoPath
 }
 
+// handleBundleRequest serves a git bundle from the cache.
+func (s *Strategy) handleBundleRequest(w http.ResponseWriter, r *http.Request, host, pathValue string) {
+	ctx := r.Context()
+	logger := logging.FromContext(ctx)
+
+	logger.DebugContext(ctx, "Bundle request",
+		slog.String("host", host),
+		slog.String("path", pathValue))
+
+	// Remove /bundle suffix to get repo path
+	pathValue = strings.TrimSuffix(pathValue, "/bundle")
+
+	// Extract repo path and construct upstream URL
+	repoPath := ExtractRepoPath(pathValue)
+	upstreamURL := "https://" + host + "/" + repoPath
+
+	// Generate cache key
+	cacheKey := cache.NewKey(upstreamURL + ".bundle")
+
+	// Open bundle from cache
+	reader, headers, err := s.cache.Open(ctx, cacheKey)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			logger.DebugContext(ctx, "Bundle not found in cache",
+				slog.String("upstream", upstreamURL))
+			http.NotFound(w, r)
+			return
+		}
+		logger.ErrorContext(ctx, "Failed to open bundle from cache",
+			slog.String("upstream", upstreamURL),
+			slog.String("error", err.Error()))
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+	defer reader.Close()
+
+	// Set headers
+	for key, values := range headers {
+		for _, value := range values {
+			w.Header().Add(key, value)
+		}
+	}
+
+	// Stream bundle to client
+	_, err = io.Copy(w, reader)
+	if err != nil {
+		logger.ErrorContext(ctx, "Failed to stream bundle",
+			slog.String("upstream", upstreamURL),
+			slog.String("error", err.Error()))
+	}
+}
+
 // getOrCreateClone returns an existing clone or creates a new one in empty state.
 func (s *Strategy) getOrCreateClone(ctx context.Context, upstreamURL string) *clone {
 	s.clonesMu.RLock()
@@ -222,10 +292,17 @@ func (s *Strategy) getOrCreateClone(ctx context.Context, upstreamURL string) *cl
 	}
 
 	// Check if clone already exists on disk (from previous run)
-	if _, err := os.Stat(clonePath); err == nil {
+	// Verify it has a .git directory to ensure it's a valid clone
+	gitDir := filepath.Join(clonePath, ".git")
+	if _, err := os.Stat(gitDir); err == nil {
 		c.state = stateReady
 		logging.FromContext(ctx).DebugContext(ctx, "Found existing clone on disk",
 			slog.String("path", clonePath))
+
+		// Start bundle generation loop for existing clone
+		if s.config.BundleInterval > 0 {
+			go s.cloneBundleLoop(s.ctx, c)
+		}
 	}
 
 	// Initialize semaphore as available
@@ -240,12 +317,98 @@ func (s *Strategy) clonePathForURL(upstreamURL string) string {
 	parsed, err := url.Parse(upstreamURL)
 	if err != nil {
 		// Fallback to simple hash if URL parsing fails
-		return filepath.Join(s.config.MirrorRoot, "unknown.git")
+		return filepath.Join(s.config.MirrorRoot, "unknown")
 	}
 
-	// Create path: {mirror_root}/{host}/{path}.git
+	// Create path: {mirror_root}/{host}/{path}
 	repoPath := strings.TrimSuffix(parsed.Path, ".git")
-	return filepath.Join(s.config.MirrorRoot, parsed.Host, repoPath+".git")
+	return filepath.Join(s.config.MirrorRoot, parsed.Host, repoPath)
+}
+
+// discoverExistingClones scans the mirror root for existing clones and starts bundle loops.
+func (s *Strategy) discoverExistingClones(ctx context.Context) error {
+	logger := logging.FromContext(ctx)
+
+	// Walk the mirror root directory
+	err := filepath.Walk(s.config.MirrorRoot, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+
+		// Skip non-directories
+		if !info.IsDir() {
+			return nil
+		}
+
+		// Check if this directory is a git repository by looking for .git directory or HEAD file
+		gitDir := filepath.Join(path, ".git")
+		headPath := filepath.Join(path, ".git", "HEAD")
+		if _, statErr := os.Stat(gitDir); statErr != nil {
+			// Skip if .git doesn't exist (not a git repo)
+			if errors.Is(statErr, os.ErrNotExist) {
+				return nil
+			}
+			// Return other errors
+			return errors.Wrap(statErr, "stat .git directory")
+		}
+		if _, statErr := os.Stat(headPath); statErr != nil {
+			// Skip if HEAD doesn't exist (not a valid git repo)
+			if errors.Is(statErr, os.ErrNotExist) {
+				return nil
+			}
+			// Return other errors
+			return errors.Wrap(statErr, "stat HEAD file")
+		}
+
+		// Extract upstream URL from path
+		relPath, err := filepath.Rel(s.config.MirrorRoot, path)
+		if err != nil {
+			logger.WarnContext(ctx, "Failed to get relative path",
+				slog.String("path", path),
+				slog.String("error", err.Error()))
+			return nil
+		}
+
+		// Convert path to upstream URL: {host}/{path}.git -> https://{host}/{path}
+		parts := strings.Split(filepath.ToSlash(relPath), "/")
+		if len(parts) < 2 {
+			return nil
+		}
+
+		host := parts[0]
+		repoPath := strings.Join(parts[1:], "/")
+		upstreamURL := "https://" + host + "/" + repoPath
+
+		// Create clone entry
+		c := &clone{
+			state:       stateReady,
+			path:        path,
+			upstreamURL: upstreamURL,
+			fetchSem:    make(chan struct{}, 1),
+		}
+		c.fetchSem <- struct{}{}
+
+		s.clonesMu.Lock()
+		s.clones[upstreamURL] = c
+		s.clonesMu.Unlock()
+
+		logger.DebugContext(ctx, "Discovered existing clone",
+			slog.String("path", path),
+			slog.String("upstream", upstreamURL))
+
+		// Start bundle generation loop
+		if s.config.BundleInterval > 0 {
+			go s.cloneBundleLoop(s.ctx, c)
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		return errors.Wrap(err, "walk mirror root")
+	}
+
+	return nil
 }
 
 // startClone initiates a git clone operation.
@@ -282,6 +445,11 @@ func (s *Strategy) startClone(ctx context.Context, c *clone) {
 	logger.InfoContext(ctx, "Clone completed",
 		slog.String("upstream", c.upstreamURL),
 		slog.String("path", c.path))
+
+	// Start bundle generation loop for new clone
+	if s.config.BundleInterval > 0 {
+		go s.cloneBundleLoop(context.WithoutCancel(ctx), c)
+	}
 }
 
 // maybeBackgroundFetch triggers a background fetch if enough time has passed.

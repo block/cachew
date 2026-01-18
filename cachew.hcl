@@ -10,6 +10,7 @@
 
 git {
   mirror-root = "./state/git-mirrors"
+  clone-depth = 1000
 }
 
 host "https://w3.org" {}

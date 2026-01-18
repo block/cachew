@@ -99,11 +99,17 @@ func TestIntegrationGitCloneViaProxy(t *testing.T) {
 	_, err = os.Stat(readmePath2)
 	assert.NoError(t, err)
 
-	// Verify the bare clone was created
-	bareClonePath := filepath.Join(clonesDir, "github.com", "octocat", "Hello-World.git")
-	info, err := os.Stat(bareClonePath)
+	// Verify the clone was created
+	clonePath := filepath.Join(clonesDir, "github.com", "octocat", "Hello-World")
+	info, err := os.Stat(clonePath)
 	assert.NoError(t, err)
 	assert.True(t, info.IsDir())
+
+	// Verify it has a .git directory (regular clone)
+	gitDir := filepath.Join(clonePath, ".git")
+	gitInfo, err := os.Stat(gitDir)
+	assert.NoError(t, err)
+	assert.True(t, gitInfo.IsDir())
 }
 
 // TestIntegrationGitFetchViaProxy tests fetching updates through the proxy.

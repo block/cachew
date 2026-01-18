@@ -132,8 +132,15 @@ func TestNewWithExistingCloneOnDisk(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	// Create a fake clone directory on disk before initializing strategy
-	clonePath := filepath.Join(tmpDir, "github.com", "org", "repo.git")
-	err := os.MkdirAll(clonePath, 0o750)
+	// For regular clones, we need a .git subdirectory with HEAD file
+	clonePath := filepath.Join(tmpDir, "github.com", "org", "repo")
+	gitDir := filepath.Join(clonePath, ".git")
+	err := os.MkdirAll(gitDir, 0o750)
+	assert.NoError(t, err)
+
+	// Create HEAD file to make it look like a valid git repo
+	headPath := filepath.Join(gitDir, "HEAD")
+	err = os.WriteFile(headPath, []byte("ref: refs/heads/main\n"), 0o640)
 	assert.NoError(t, err)
 
 	mux := newTestMux()
