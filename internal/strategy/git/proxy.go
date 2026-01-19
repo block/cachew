@@ -7,7 +7,6 @@ import (
 	"github.com/block/cachew/internal/logging"
 )
 
-// forwardToUpstream forwards a request to the upstream Git server.
 func (s *Strategy) forwardToUpstream(w http.ResponseWriter, r *http.Request, host, pathValue string) {
 	logger := logging.FromContext(r.Context())
 
