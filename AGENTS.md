@@ -15,3 +15,7 @@ cache and restore data. Strategies are not limited to using the Cache though; fo
 keep a local bare checkout of upstream Git repositories and serve packs from the repo directly.
 
 The codebase uses Hermit to manage toolchains. It is written in Go, and uses Just for running common tasks.
+
+Only add comments for relatively large blocks of code, 20+ lines or more, and ONLY if it is not obvious what the code is
+doing. ALWAYS add Go-style documentation comments for public variables/types/functions. If you do add comments, the
+comments should explain WHY something is happening, not WHAT is happening.
