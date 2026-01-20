@@ -11,6 +11,7 @@ import (
 
 	"github.com/block/cachew/internal/cache"
 	"github.com/block/cachew/internal/httputil"
+	"github.com/block/cachew/internal/jobscheduler"
 	"github.com/block/cachew/internal/logging"
 	"github.com/block/cachew/internal/strategy/handler"
 )
@@ -27,9 +28,9 @@ func init() {
 //	  proxy = "https://proxy.golang.org"
 //	}
 type GoModConfig struct {
-	Proxy        string `hcl:"proxy,optional" help:"Upstream Go module proxy URL (defaults to proxy.golang.org)" default:"https://proxy.golang.org"`
-	MutableTTL   string `hcl:"mutable-ttl,optional" help:"TTL for mutable Go module proxy endpoints (list, latest). Defaults to 5m." default:"5m"`
-	ImmutableTTL string `hcl:"immutable-ttl,optional" help:"TTL for immutable Go module proxy endpoints (versioned info, mod, zip). Defaults to 168h (7 days)." default:"168h"`
+	Proxy        string        `hcl:"proxy,optional" help:"Upstream Go module proxy URL (defaults to proxy.golang.org)" default:"https://proxy.golang.org"`
+	MutableTTL   time.Duration `hcl:"mutable-ttl,optional" help:"TTL for mutable Go module proxy endpoints (list, latest). Defaults to 5m." default:"5m"`
+	ImmutableTTL time.Duration `hcl:"immutable-ttl,optional" help:"TTL for immutable Go module proxy endpoints (versioned info, mod, zip). Defaults to 168h (7 days)." default:"168h"`
 }
 
 // The GoMod strategy implements a caching proxy for the Go module proxy protocol.
@@ -54,7 +55,7 @@ type GoMod struct {
 var _ Strategy = (*GoMod)(nil)
 
 // NewGoMod creates a new Go module proxy strategy.
-func NewGoMod(ctx context.Context, config GoModConfig, cache cache.Cache, mux Mux) (*GoMod, error) {
+func NewGoMod(ctx context.Context, scheduler jobscheduler.Scheduler, config GoModConfig, cache cache.Cache, mux Mux) (*GoMod, error) {
 	parsedURL, err := url.Parse(config.Proxy)
 	if err != nil {
 		return nil, fmt.Errorf("invalid proxy URL: %w", err)
@@ -101,8 +102,8 @@ func (g *GoMod) isGoModulePath(path string) bool {
 	// - /@v/{version}.mod
 	// - /@v/{version}.zip
 	// - /@latest
-	return strings.Contains(path, "/@v/list") ||
-		strings.Contains(path, "/@latest") ||
+	return strings.HasSuffix(path, "/@v/list") ||
+		strings.HasSuffix(path, "/@latest") ||
 		(strings.Contains(path, "/@v/") &&
 			(strings.HasSuffix(path, ".info") ||
 				strings.HasSuffix(path, ".mod") ||
@@ -142,12 +143,6 @@ func (g *GoMod) transformRequest(r *http.Request) (*http.Request, error) {
 		return nil, httputil.Errorf(http.StatusInternalServerError, "create upstream request: %w", err)
 	}
 
-	// Go module proxies don't typically require authentication for public modules,
-	// but we'll pass through any authorization headers just in case
-	if auth := r.Header.Get("Authorization"); auth != "" {
-		req.Header.Set("Authorization", auth)
-	}
-
 	return req, nil
 }
 
@@ -159,22 +154,10 @@ func (g *GoMod) calculateTTL(r *http.Request) time.Duration {
 	path := r.URL.Path
 
 	// Short TTL for mutable endpoints
-	if strings.Contains(path, "/@v/list") || strings.Contains(path, "/@latest") {
-		mutableTTL, err := time.ParseDuration(g.config.MutableTTL)
-		if err != nil {
-			mutableTTL = 5 * time.Minute
-			g.logger.WarnContext(r.Context(), "Invalid mutable TTL duration, defaulting to 5 minutes",
-				slog.String("provided", g.config.MutableTTL))
-		}
-		return mutableTTL
+	if strings.HasSuffix(path, "/@v/list") || strings.HasSuffix(path, "/@latest") {
+		return g.config.MutableTTL
 	}
 
 	// Long TTL for immutable versioned content (.info, .mod, .zip)
-	immutableTTL, err := time.ParseDuration(g.config.ImmutableTTL)
-	if err != nil {
-		immutableTTL = 7 * 24 * time.Hour
-		g.logger.WarnContext(r.Context(), "Invalid immutable TTL duration, defaulting to 7 days",
-			slog.String("provided", g.config.ImmutableTTL))
-	}
-	return immutableTTL
+	return g.config.ImmutableTTL
 }

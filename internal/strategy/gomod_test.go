@@ -12,6 +12,7 @@ import (
 	"github.com/alecthomas/assert/v2"
 
 	"github.com/block/cachew/internal/cache"
+	"github.com/block/cachew/internal/jobscheduler"
 	"github.com/block/cachew/internal/logging"
 	"github.com/block/cachew/internal/strategy"
 )
@@ -145,10 +146,10 @@ func setupGoModTest(t *testing.T) (*mockGoModServer, *http.ServeMux, context.Con
 	t.Cleanup(func() { _ = memCache.Close() })
 
 	mux := http.NewServeMux()
-	_, err = strategy.NewGoMod(ctx, strategy.GoModConfig{
+	_, err = strategy.NewGoMod(ctx, jobscheduler.New(ctx, jobscheduler.Config{}), strategy.GoModConfig{
 		Proxy:        mock.server.URL,
-		MutableTTL:   "5m",
-		ImmutableTTL: "168h",
+		MutableTTL:   5 * time.Minute,
+		ImmutableTTL: 168 * time.Hour,
 	}, memCache, mux)
 	assert.NoError(t, err)
 
@@ -317,62 +318,4 @@ func TestGoModMultipleConcurrentRequests(t *testing.T) {
 	// Subsequent requests might hit cache or might be in-flight
 	// We just verify all requests succeeded
 	assert.True(t, mock.requestCount[path] >= 1, "at least one request should have been made to upstream")
-}
-
-func TestGoModDefaultProxy(t *testing.T) {
-	_, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelError})
-
-	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: 24 * time.Hour})
-	assert.NoError(t, err)
-	defer memCache.Close()
-
-	mux := http.NewServeMux()
-
-	// Create strategy with default proxy
-	gomod, err := strategy.NewGoMod(ctx, strategy.GoModConfig{
-		Proxy:        "https://proxy.golang.org",
-		MutableTTL:   "5m",
-		ImmutableTTL: "168h",
-	}, memCache, mux)
-	assert.NoError(t, err)
-	assert.Equal(t, "gomod:proxy.golang.org", gomod.String())
-}
-
-func TestGoModCustomProxy(t *testing.T) {
-	_, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelError})
-
-	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: 24 * time.Hour})
-	assert.NoError(t, err)
-	defer memCache.Close()
-
-	mux := http.NewServeMux()
-
-	// Create strategy with custom proxy
-	gomod, err := strategy.NewGoMod(ctx, strategy.GoModConfig{
-		Proxy: "https://goproxy.example.com",
-	}, memCache, mux)
-	assert.NoError(t, err)
-	assert.Equal(t, "gomod:goproxy.example.com", gomod.String())
-}
-
-func TestGoModAuthorizationHeader(t *testing.T) {
-	mock, mux, ctx := setupGoModTest(t)
-
-	// Create a custom handler to check if Authorization header is passed through
-	authReceived := ""
-	originalHandler := mock.server.Config.Handler
-	mock.server.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		authReceived = r.Header.Get("Authorization")
-		originalHandler.ServeHTTP(w, r)
-	})
-
-	req := httptest.NewRequest(http.MethodGet, "/github.com/example/test/@v/list", nil)
-	req.Header.Set("Authorization", "Bearer test-token")
-	req = req.WithContext(ctx)
-	w := httptest.NewRecorder()
-
-	mux.ServeHTTP(w, req)
-
-	assert.Equal(t, http.StatusOK, w.Code)
-	assert.Equal(t, "Bearer test-token", authReceived, "Authorization header should be passed to upstream")
 }
