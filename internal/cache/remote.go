@@ -58,6 +58,34 @@ func (c *Remote) Open(ctx context.Context, key Key) (io.ReadCloser, textproto.MI
 	return resp.Body, headers, nil
 }
 
+// Stat retrieves headers for an object from the remote.
+func (c *Remote) Stat(ctx context.Context, key Key) (textproto.MIMEHeader, error) {
+	url := fmt.Sprintf("%s/%s", c.baseURL, key.String())
+	req, err := http.NewRequestWithContext(ctx, http.MethodHead, url, nil)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to create request")
+	}
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to execute request")
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, os.ErrNotExist
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, errors.Errorf("unexpected status code: %d", resp.StatusCode)
+	}
+
+	// Filter out HTTP transport headers
+	headers := FilterTransportHeaders(textproto.MIMEHeader(resp.Header))
+
+	return headers, nil
+}
+
 // Create stores a new object in the remote.
 func (c *Remote) Create(ctx context.Context, key Key, headers textproto.MIMEHeader, ttl time.Duration) (io.WriteCloser, error) {
 	pr, pw := io.Pipe()

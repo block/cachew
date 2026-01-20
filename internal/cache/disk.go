@@ -190,6 +190,26 @@ func (d *Disk) Delete(_ context.Context, key Key) error {
 	return nil
 }
 
+func (d *Disk) Stat(ctx context.Context, key Key) (textproto.MIMEHeader, error) {
+	path := d.keyToPath(key)
+	fullPath := filepath.Join(d.config.Root, path)
+
+	if _, err := os.Stat(fullPath); err != nil {
+		return nil, errors.Errorf("failed to stat file: %w", err)
+	}
+
+	expiresAt, headers, err := d.ttl.get(key)
+	if err != nil {
+		return nil, errors.Errorf("failed to get metadata: %w", err)
+	}
+
+	if time.Now().After(expiresAt) {
+		return nil, errors.Join(fs.ErrNotExist, d.Delete(ctx, key))
+	}
+
+	return headers, nil
+}
+
 func (d *Disk) Open(ctx context.Context, key Key) (io.ReadCloser, textproto.MIMEHeader, error) {
 	path := d.keyToPath(key)
 	fullPath := filepath.Join(d.config.Root, path)
