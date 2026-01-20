@@ -88,20 +88,21 @@ func (m *mockGoModServer) handleRequest(w http.ResponseWriter, r *http.Request) 
 	}
 
 	// If still not found, try pattern matching for any version
-	if !found {
-		if strings.Contains(path, "/@v/") && strings.HasSuffix(path, ".info") {
+	if !found && strings.Contains(path, "/@v/") {
+		switch {
+		case strings.HasSuffix(path, ".info"):
 			resp = mockResponse{
 				status:  http.StatusOK,
 				content: `{"Version":"v1.0.0","Time":"2023-01-01T00:00:00Z"}`,
 			}
 			found = true
-		} else if strings.Contains(path, "/@v/") && strings.HasSuffix(path, ".mod") {
+		case strings.HasSuffix(path, ".mod"):
 			resp = mockResponse{
 				status:  http.StatusOK,
 				content: "module github.com/example/test\n\ngo 1.21\n",
 			}
 			found = true
-		} else if strings.Contains(path, "/@v/") && strings.HasSuffix(path, ".zip") {
+		case strings.HasSuffix(path, ".zip"):
 			resp = mockResponse{
 				status:  http.StatusOK,
 				content: "PK\x03\x04...",
@@ -131,20 +132,11 @@ func (m *mockGoModServer) setResponse(path string, status int, content string) {
 	}
 }
 
-func setupGoModTest(t *testing.T, config strategy.GoModConfig) (*mockGoModServer, *http.ServeMux, context.Context) {
+func setupGoModTest(t *testing.T) (*mockGoModServer, *http.ServeMux, context.Context) {
 	t.Helper()
 
 	mock := newMockGoModServer()
 	t.Cleanup(mock.close)
-
-	// Point config to mock server and set defaults if not provided
-	config.Proxy = mock.server.URL
-	if config.MutableTTL == "" {
-		config.MutableTTL = "5m"
-	}
-	if config.ImmutableTTL == "" {
-		config.ImmutableTTL = "168h"
-	}
 
 	_, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelError})
 
@@ -153,14 +145,18 @@ func setupGoModTest(t *testing.T, config strategy.GoModConfig) (*mockGoModServer
 	t.Cleanup(func() { _ = memCache.Close() })
 
 	mux := http.NewServeMux()
-	_, err = strategy.NewGoMod(ctx, config, memCache, mux)
+	_, err = strategy.NewGoMod(ctx, strategy.GoModConfig{
+		Proxy:        mock.server.URL,
+		MutableTTL:   "5m",
+		ImmutableTTL: "168h",
+	}, memCache, mux)
 	assert.NoError(t, err)
 
 	return mock, mux, ctx
 }
 
 func TestGoModList(t *testing.T) {
-	mock, mux, ctx := setupGoModTest(t, strategy.GoModConfig{})
+	mock, mux, ctx := setupGoModTest(t)
 
 	req := httptest.NewRequest(http.MethodGet, "/github.com/example/test/@v/list", nil)
 	req = req.WithContext(ctx)
@@ -174,7 +170,7 @@ func TestGoModList(t *testing.T) {
 }
 
 func TestGoModInfo(t *testing.T) {
-	mock, mux, ctx := setupGoModTest(t, strategy.GoModConfig{})
+	mock, mux, ctx := setupGoModTest(t)
 
 	req := httptest.NewRequest(http.MethodGet, "/github.com/example/test/@v/v1.0.0.info", nil)
 	req = req.WithContext(ctx)
@@ -188,7 +184,7 @@ func TestGoModInfo(t *testing.T) {
 }
 
 func TestGoModMod(t *testing.T) {
-	mock, mux, ctx := setupGoModTest(t, strategy.GoModConfig{})
+	mock, mux, ctx := setupGoModTest(t)
 
 	req := httptest.NewRequest(http.MethodGet, "/github.com/example/test/@v/v1.0.0.mod", nil)
 	req = req.WithContext(ctx)
@@ -202,7 +198,7 @@ func TestGoModMod(t *testing.T) {
 }
 
 func TestGoModZip(t *testing.T) {
-	mock, mux, ctx := setupGoModTest(t, strategy.GoModConfig{})
+	mock, mux, ctx := setupGoModTest(t)
 
 	req := httptest.NewRequest(http.MethodGet, "/github.com/example/test/@v/v1.0.0.zip", nil)
 	req = req.WithContext(ctx)
@@ -216,7 +212,7 @@ func TestGoModZip(t *testing.T) {
 }
 
 func TestGoModLatest(t *testing.T) {
-	mock, mux, ctx := setupGoModTest(t, strategy.GoModConfig{})
+	mock, mux, ctx := setupGoModTest(t)
 
 	req := httptest.NewRequest(http.MethodGet, "/github.com/example/test/@latest", nil)
 	req = req.WithContext(ctx)
@@ -230,7 +226,7 @@ func TestGoModLatest(t *testing.T) {
 }
 
 func TestGoModCaching(t *testing.T) {
-	mock, mux, ctx := setupGoModTest(t, strategy.GoModConfig{})
+	mock, mux, ctx := setupGoModTest(t)
 
 	path := "/github.com/example/test/@v/v1.0.0.info"
 
@@ -255,7 +251,7 @@ func TestGoModCaching(t *testing.T) {
 }
 
 func TestGoModComplexModulePath(t *testing.T) {
-	mock, mux, ctx := setupGoModTest(t, strategy.GoModConfig{})
+	mock, mux, ctx := setupGoModTest(t)
 
 	// Test module path with multiple slashes
 	req := httptest.NewRequest(http.MethodGet, "/golang.org/x/tools/@v/v0.1.0.info", nil)
@@ -269,7 +265,7 @@ func TestGoModComplexModulePath(t *testing.T) {
 }
 
 func TestGoModNonOKResponse(t *testing.T) {
-	mock, mux, ctx := setupGoModTest(t, strategy.GoModConfig{})
+	mock, mux, ctx := setupGoModTest(t)
 
 	// Set up 404 response
 	notFoundPath := "/github.com/example/nonexistent/@v/v99.0.0.info"
@@ -295,13 +291,13 @@ func TestGoModNonOKResponse(t *testing.T) {
 }
 
 func TestGoModMultipleConcurrentRequests(t *testing.T) {
-	mock, mux, ctx := setupGoModTest(t, strategy.GoModConfig{})
+	mock, mux, ctx := setupGoModTest(t)
 
 	path := "/github.com/example/test/@v/v1.0.0.zip"
 
 	// Make multiple concurrent requests
 	results := make(chan *httptest.ResponseRecorder, 3)
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		go func() {
 			req := httptest.NewRequest(http.MethodGet, path, nil)
 			req = req.WithContext(ctx)
@@ -312,7 +308,7 @@ func TestGoModMultipleConcurrentRequests(t *testing.T) {
 	}
 
 	// Collect results
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		w := <-results
 		assert.Equal(t, http.StatusOK, w.Code)
 	}
@@ -360,7 +356,7 @@ func TestGoModCustomProxy(t *testing.T) {
 }
 
 func TestGoModAuthorizationHeader(t *testing.T) {
-	mock, mux, ctx := setupGoModTest(t, strategy.GoModConfig{})
+	mock, mux, ctx := setupGoModTest(t)
 
 	// Create a custom handler to check if Authorization header is passed through
 	authReceived := ""
