@@ -90,6 +90,11 @@ func FilterTransportHeaders(headers textproto.MIMEHeader) textproto.MIMEHeader {
 type Cache interface {
 	// String describes the Cache implementation.
 	String() string
+	// Stat returns the headers of an existing object in the cache.
+	//
+	// Expired files SHOULD not be returned.
+	// Must return os.ErrNotExist if the file does not exist.
+	Stat(ctx context.Context, key Key) (textproto.MIMEHeader, error)
 	// Open an existing file in the cache.
 	//
 	// Expired files SHOULD not be returned.

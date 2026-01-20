@@ -5,59 +5,12 @@ import (
 	"io"
 	"log/slog"
 	"net/textproto"
-	"os"
 	"strings"
 	"time"
-
-	"github.com/alecthomas/errors"
 
 	"github.com/block/cachew/internal/cache"
 	"github.com/block/cachew/internal/logging"
 )
-
-func (s *Strategy) cloneBundleLoop(ctx context.Context, c *clone) {
-	logger := logging.FromContext(ctx)
-
-	s.generateAndUploadBundleIfMissing(ctx, c)
-
-	ticker := time.NewTicker(s.config.BundleInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			logger.DebugContext(ctx, "Bundle generator shutting down",
-				slog.String("upstream", c.upstreamURL))
-			return
-
-		case <-ticker.C:
-			s.generateAndUploadBundle(ctx, c)
-		}
-	}
-}
-
-func (s *Strategy) generateAndUploadBundleIfMissing(ctx context.Context, c *clone) {
-	logger := logging.FromContext(ctx)
-
-	cacheKey := cache.NewKey(c.upstreamURL + ".bundle")
-
-	reader, _, err := s.cache.Open(ctx, cacheKey)
-	if err == nil {
-		_ = reader.Close()
-		logger.DebugContext(ctx, "Bundle already exists in cache, skipping generation",
-			slog.String("upstream", c.upstreamURL))
-		return
-	}
-
-	if !errors.Is(err, os.ErrNotExist) {
-		logger.ErrorContext(ctx, "Failed to check for existing bundle",
-			slog.String("upstream", c.upstreamURL),
-			slog.String("error", err.Error()))
-		return
-	}
-
-	s.generateAndUploadBundle(ctx, c)
-}
 
 func (s *Strategy) generateAndUploadBundle(ctx context.Context, c *clone) {
 	logger := logging.FromContext(ctx)

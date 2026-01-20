@@ -32,7 +32,7 @@ type DiskConfig struct {
 type Disk struct {
 	logger      *slog.Logger
 	config      DiskConfig
-	ttl         *ttlStorage
+	db          *diskMetaDB
 	size        atomic.Int64
 	runEviction chan struct{}
 	stop        context.CancelFunc
@@ -67,7 +67,7 @@ func NewDisk(ctx context.Context, config DiskConfig) (*Disk, error) {
 	}
 
 	// Open TTL storage
-	ttl, err := newTTLStorage(filepath.Join(config.Root, "metadata.db"))
+	db, err := newDiskMetaDB(filepath.Join(config.Root, "metadata.db"))
 	if err != nil {
 		return nil, errors.Errorf("failed to create TTL storage: %w", err)
 	}
@@ -99,7 +99,7 @@ func NewDisk(ctx context.Context, config DiskConfig) (*Disk, error) {
 	disk := &Disk{
 		logger:      logger,
 		config:      config,
-		ttl:         ttl,
+		db:          db,
 		runEviction: make(chan struct{}),
 		stop:        stop,
 	}
@@ -114,8 +114,8 @@ func (d *Disk) String() string { return "disk:" + d.config.Root }
 
 func (d *Disk) Close() error {
 	d.stop()
-	if d.ttl != nil {
-		return d.ttl.close()
+	if d.db != nil {
+		return d.db.close()
 	}
 	return nil
 }
@@ -163,7 +163,7 @@ func (d *Disk) Delete(_ context.Context, key Key) error {
 
 	// Check if file is expired
 	expired := false
-	expiresAt, _, err := d.ttl.get(key)
+	expiresAt, err := d.db.getTTL(key)
 	if err == nil && time.Now().After(expiresAt) {
 		expired = true
 	}
@@ -178,7 +178,7 @@ func (d *Disk) Delete(_ context.Context, key Key) error {
 	}
 
 	// Remove TTL metadata
-	if err := d.ttl.delete(key); err != nil {
+	if err := d.db.delete(key); err != nil {
 		return errors.Errorf("failed to delete TTL metadata: %w", err)
 	}
 
@@ -190,6 +190,31 @@ func (d *Disk) Delete(_ context.Context, key Key) error {
 	return nil
 }
 
+func (d *Disk) Stat(ctx context.Context, key Key) (textproto.MIMEHeader, error) {
+	path := d.keyToPath(key)
+	fullPath := filepath.Join(d.config.Root, path)
+
+	if _, err := os.Stat(fullPath); err != nil {
+		return nil, errors.Errorf("failed to stat file: %w", err)
+	}
+
+	expiresAt, err := d.db.getTTL(key)
+	if err != nil {
+		return nil, errors.Errorf("failed to get TTL: %w", err)
+	}
+
+	if time.Now().After(expiresAt) {
+		return nil, errors.Join(fs.ErrNotExist, d.Delete(ctx, key))
+	}
+
+	headers, err := d.db.getHeaders(key)
+	if err != nil {
+		return nil, errors.Errorf("failed to get headers: %w", err)
+	}
+
+	return headers, nil
+}
+
 func (d *Disk) Open(ctx context.Context, key Key) (io.ReadCloser, textproto.MIMEHeader, error) {
 	path := d.keyToPath(key)
 	fullPath := filepath.Join(d.config.Root, path)
@@ -199,9 +224,9 @@ func (d *Disk) Open(ctx context.Context, key Key) (io.ReadCloser, textproto.MIME
 		return nil, nil, errors.Errorf("failed to open file: %w", err)
 	}
 
-	expiresAt, headers, err := d.ttl.get(key)
+	expiresAt, err := d.db.getTTL(key)
 	if err != nil {
-		return nil, nil, errors.Join(errors.Errorf("failed to get metadata: %w", err), f.Close())
+		return nil, nil, errors.Join(errors.Errorf("failed to get TTL: %w", err), f.Close())
 	}
 
 	now := time.Now()
@@ -209,11 +234,16 @@ func (d *Disk) Open(ctx context.Context, key Key) (io.ReadCloser, textproto.MIME
 		return nil, nil, errors.Join(fs.ErrNotExist, f.Close(), d.Delete(ctx, key))
 	}
 
+	headers, err := d.db.getHeaders(key)
+	if err != nil {
+		return nil, nil, errors.Join(errors.Errorf("failed to get headers: %w", err), f.Close())
+	}
+
 	// Reset expiration time to implement LRU
 	ttl := min(expiresAt.Sub(now), d.config.MaxTTL)
 	newExpiresAt := now.Add(ttl)
 
-	if err := d.ttl.set(key, newExpiresAt, headers); err != nil {
+	if err := d.db.setTTL(key, newExpiresAt); err != nil {
 		return nil, nil, errors.Join(errors.Errorf("failed to update expiration time: %w", err), f.Close())
 	}
 
@@ -259,7 +289,7 @@ func (d *Disk) evict() error {
 	var expiredKeys []Key
 	now := time.Now()
 
-	err := d.ttl.walk(func(key Key, expiresAt time.Time) error {
+	err := d.db.walk(func(key Key, expiresAt time.Time) error {
 		path := d.keyToPath(key)
 		fullPath := filepath.Join(d.config.Root, path)
 
@@ -292,7 +322,7 @@ func (d *Disk) evict() error {
 		return errors.Errorf("failed to walk TTL entries: %w", err)
 	}
 
-	if err := d.ttl.deleteAll(expiredKeys); err != nil {
+	if err := d.db.deleteAll(expiredKeys); err != nil {
 		return errors.Errorf("failed to delete TTL metadata: %w", err)
 	}
 
@@ -320,7 +350,7 @@ func (d *Disk) evict() error {
 		d.size.Add(-f.size)
 	}
 
-	if err := d.ttl.deleteAll(sizeEvictedKeys); err != nil {
+	if err := d.db.deleteAll(sizeEvictedKeys); err != nil {
 		return errors.Errorf("failed to delete TTL metadata: %w", err)
 	}
 
@@ -360,7 +390,7 @@ func (w *diskWriter) Close() error {
 		return errors.Errorf("failed to rename temp file: %w", err)
 	}
 
-	if err := w.disk.ttl.set(w.key, w.expiresAt, w.headers); err != nil {
+	if err := w.disk.db.set(w.key, w.expiresAt, w.headers); err != nil {
 		return errors.Join(errors.Errorf("failed to set metadata: %w", err), os.Remove(w.path))
 	}
 

@@ -11,6 +11,7 @@
 git {
   mirror-root = "./state/git-mirrors"
   clone-depth = 1000
+  bundle-interval = "24h"
 }
 
 host "https://w3.org" {}
@@ -20,8 +21,8 @@ github-releases {
   private-orgs = ["alecthomas"]
 }
 
-memory {}
-
 disk {
   root = "./state/cache"
+  limit-mb = 250000
+  max-ttl = "8h"
 }

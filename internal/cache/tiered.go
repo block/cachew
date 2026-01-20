@@ -88,6 +88,24 @@ func (t Tiered) Delete(ctx context.Context, key Key) error {
 	return errors.Join(errs...)
 }
 
+// Stat returns headers from the first cache that succeeds.
+//
+// If all caches fail, all errors are returned.
+func (t Tiered) Stat(ctx context.Context, key Key) (textproto.MIMEHeader, error) {
+	errs := make([]error, len(t.caches))
+	for i, c := range t.caches {
+		headers, err := c.Stat(ctx, key)
+		errs[i] = err
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		} else if err != nil {
+			return nil, errors.WithStack(err)
+		}
+		return headers, nil
+	}
+	return nil, errors.Join(errs...)
+}
+
 // Open returns a reader from the first cache that succeeds.
 //
 // If all caches fail, all errors are returned.

@@ -10,6 +10,7 @@ import (
 
 	"github.com/alecthomas/assert/v2"
 
+	"github.com/block/cachew/internal/jobscheduler"
 	"github.com/block/cachew/internal/logging"
 	"github.com/block/cachew/internal/strategy/git"
 )
@@ -64,7 +65,7 @@ func TestNew(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			mux := newTestMux()
-			s, err := git.New(ctx, tt.config, nil, mux)
+			s, err := git.New(ctx, jobscheduler.New(ctx, jobscheduler.Config{}), tt.config, nil, mux)
 			if tt.wantError != "" {
 				assert.Error(t, err)
 				assert.Contains(t, err.Error(), tt.wantError)
@@ -144,7 +145,7 @@ func TestNewWithExistingCloneOnDisk(t *testing.T) {
 	assert.NoError(t, err)
 
 	mux := newTestMux()
-	s, err := git.New(ctx, git.Config{
+	s, err := git.New(ctx, jobscheduler.New(ctx, jobscheduler.Config{}), git.Config{
 		MirrorRoot:    tmpDir,
 		FetchInterval: 15,
 	}, nil, mux)
@@ -167,7 +168,7 @@ func TestIntegrationWithMockUpstream(t *testing.T) {
 
 	// Create strategy - it will register handlers
 	mux := newTestMux()
-	_, err := git.New(ctx, git.Config{
+	_, err := git.New(ctx, jobscheduler.New(ctx, jobscheduler.Config{}), git.Config{
 		MirrorRoot:    tmpDir,
 		FetchInterval: 15,
 	}, nil, mux)

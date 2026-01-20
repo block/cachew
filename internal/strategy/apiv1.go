@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/block/cachew/internal/cache"
+	"github.com/block/cachew/internal/jobscheduler"
 	"github.com/block/cachew/internal/logging"
 )
 
@@ -27,18 +28,40 @@ type APIV1 struct {
 	logger *slog.Logger
 }
 
-func NewAPIV1(ctx context.Context, _ struct{}, cache cache.Cache, mux Mux) (*APIV1, error) {
+func NewAPIV1(ctx context.Context, _ jobscheduler.Scheduler, _ struct{}, cache cache.Cache, mux Mux) (*APIV1, error) {
 	s := &APIV1{
 		logger: logging.FromContext(ctx),
 		cache:  cache,
 	}
 	mux.Handle("GET /api/v1/object/{key}", http.HandlerFunc(s.getObject))
+	mux.Handle("HEAD /api/v1/object/{key}", http.HandlerFunc(s.statObject))
 	mux.Handle("POST /api/v1/object/{key}", http.HandlerFunc(s.putObject))
 	mux.Handle("DELETE /api/v1/object/{key}", http.HandlerFunc(s.deleteObject))
 	return s, nil
 }
 
 func (d *APIV1) String() string { return "default" }
+
+func (d *APIV1) statObject(w http.ResponseWriter, r *http.Request) {
+	key, err := cache.ParseKey(r.PathValue("key"))
+	if err != nil {
+		d.httpError(w, http.StatusBadRequest, err, "Invalid key")
+		return
+	}
+
+	headers, err := d.cache.Stat(r.Context(), key)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			d.httpError(w, http.StatusNotFound, err, "Cache object not found", slog.String("key", key.String()))
+			return
+		}
+		d.httpError(w, http.StatusInternalServerError, err, "Failed to open cache object", slog.String("key", key.String()))
+		return
+	}
+
+	maps.Copy(w.Header(), headers)
+	w.WriteHeader(http.StatusOK)
+}
 
 func (d *APIV1) getObject(w http.ResponseWriter, r *http.Request) {
 	key, err := cache.ParseKey(r.PathValue("key"))

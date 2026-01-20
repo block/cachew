@@ -14,6 +14,7 @@ import (
 	"github.com/alecthomas/assert/v2"
 
 	"github.com/block/cachew/internal/cache"
+	"github.com/block/cachew/internal/jobscheduler"
 	"github.com/block/cachew/internal/logging"
 	"github.com/block/cachew/internal/strategy"
 )
@@ -126,7 +127,7 @@ func setupTest(t *testing.T, config strategy.GitHubReleasesConfig) (*mockGitHubS
 	t.Cleanup(func() { memCache.Close() })
 
 	mux := http.NewServeMux()
-	_, err = strategy.NewGitHubReleases(ctx, config, memCache, mux)
+	_, err = strategy.NewGitHubReleases(ctx, jobscheduler.New(ctx, jobscheduler.Config{}), config, memCache, mux)
 	assert.NoError(t, err)
 
 	return mock, mux, ctx
@@ -241,7 +242,7 @@ func TestGitHubReleasesNoToken(t *testing.T) {
 	defer memCache.Close()
 
 	mux := http.NewServeMux()
-	gh, err := strategy.NewGitHubReleases(ctx, strategy.GitHubReleasesConfig{}, memCache, mux)
+	gh, err := strategy.NewGitHubReleases(ctx, jobscheduler.New(ctx, jobscheduler.Config{}), strategy.GitHubReleasesConfig{}, memCache, mux)
 	assert.NoError(t, err)
 	assert.Equal(t, "github-releases", gh.String())
 }
@@ -253,7 +254,7 @@ func TestGitHubReleasesString(t *testing.T) {
 	defer memCache.Close()
 
 	mux := http.NewServeMux()
-	gh, err := strategy.NewGitHubReleases(ctx, strategy.GitHubReleasesConfig{
+	gh, err := strategy.NewGitHubReleases(ctx, jobscheduler.New(ctx, jobscheduler.Config{}), strategy.GitHubReleasesConfig{
 		Token: "test-token",
 	}, memCache, mux)
 	assert.NoError(t, err)

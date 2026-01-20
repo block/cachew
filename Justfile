@@ -10,11 +10,15 @@ test:
 
 # Lint code
 lint:
-    golangci-lint run
-    actionlint
+    #!/bin/bash
+    golangci-lint run &
+    actionlint &
+    wait
 
 # Format code
 fmt:
-    just --unstable --fmt
-    golangci-lint fmt
-    go mod tidy
+    #!/bin/bash
+    just --unstable --fmt &
+    golangci-lint fmt &
+    go mod tidy &
+    wait

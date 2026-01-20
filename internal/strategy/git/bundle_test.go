@@ -10,6 +10,7 @@ import (
 	"github.com/alecthomas/assert/v2"
 
 	"github.com/block/cachew/internal/cache"
+	"github.com/block/cachew/internal/jobscheduler"
 	"github.com/block/cachew/internal/logging"
 	"github.com/block/cachew/internal/strategy/git"
 )
@@ -22,7 +23,7 @@ func TestBundleHTTPEndpoint(t *testing.T) {
 	assert.NoError(t, err)
 	mux := newTestMux()
 
-	_, err = git.New(ctx, git.Config{
+	_, err = git.New(ctx, jobscheduler.New(ctx, jobscheduler.Config{}), git.Config{
 		MirrorRoot:     tmpDir,
 		BundleInterval: 24 * time.Hour,
 	}, memCache, mux)
@@ -98,7 +99,7 @@ func TestBundleInterval(t *testing.T) {
 			assert.NoError(t, err)
 			mux := newTestMux()
 
-			s, err := git.New(ctx, git.Config{
+			s, err := git.New(ctx, jobscheduler.New(ctx, jobscheduler.Config{}), git.Config{
 				MirrorRoot:     tmpDir,
 				BundleInterval: tt.bundleInterval,
 			}, memCache, mux)
