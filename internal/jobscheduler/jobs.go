@@ -26,28 +26,47 @@ type queueJob struct {
 func (j *queueJob) String() string                { return fmt.Sprintf("job-%s-%s", j.queue, j.id) }
 func (j *queueJob) Run(ctx context.Context) error { return errors.WithStack(j.run(ctx)) }
 
+// Scheduler runs background jobs concurrently across multiple serialised queues.
+//
+// That is, each queue can have at most one job running at a time, but multiple queues can run concurrently.
+//
+// Its primary role is to rate limit concurrent background tasks so that we don't DoS the host when, for example,
+// generating git snapshots, GCing git repos, etc.
 type Scheduler interface {
+	// WithQueuePrefix creates a new Scheduler that prefixes all queue names with the given prefix.
+	//
+	// This is useful to avoid collisions across strategies.
+	WithQueuePrefix(prefix string) Scheduler
+	// Submit a job to the queue.
+	//
+	// Jobs run concurrently across queues, but never within a queue.
 	Submit(queue, id string, run func(ctx context.Context) error)
+	// SubmitPeriodicJob submits a job to the queue that runs immediately, and then periodically after the interval.
+	//
+	// Jobs run concurrently across queues, but never within a queue.
 	SubmitPeriodicJob(queue, id string, interval time.Duration, run func(ctx context.Context) error)
 }
 
-type PrefixedScheduler struct {
+type prefixedScheduler struct {
 	prefix    string
 	scheduler Scheduler
 }
 
-func (ps *PrefixedScheduler) Submit(queue, id string, run func(ctx context.Context) error) {
-	ps.scheduler.Submit(ps.prefix+queue, id, run)
+func (p *prefixedScheduler) Submit(queue, id string, run func(ctx context.Context) error) {
+	p.scheduler.Submit(p.prefix+queue, id, run)
 }
 
-func (ps *PrefixedScheduler) SubmitPeriodicJob(queue, id string, interval time.Duration, run func(ctx context.Context) error) {
-	ps.scheduler.SubmitPeriodicJob(ps.prefix+queue, id, interval, run)
+func (p *prefixedScheduler) SubmitPeriodicJob(queue, id string, interval time.Duration, run func(ctx context.Context) error) {
+	p.scheduler.SubmitPeriodicJob(p.prefix+queue, id, interval, run)
 }
 
-// RootScheduler runs jobs from multiple queues.
-//
-// Its primary role is to rate limit concurrent background tasks so that we don't DoS the host when, for example,
-// generating git snapshots, GCing git repos, etc.
+func (p *prefixedScheduler) WithQueuePrefix(prefix string) Scheduler {
+	return &prefixedScheduler{
+		prefix:    p.prefix + "-" + prefix,
+		scheduler: p.scheduler,
+	}
+}
+
 type RootScheduler struct {
 	workAvailable chan bool
 	lock          sync.Mutex
@@ -75,19 +94,13 @@ func New(ctx context.Context, config Config) Scheduler {
 	return q
 }
 
-// WithQueuePrefix creates a new Scheduler that prefixes all queue names with the given prefix.
-//
-// This is useful to avoid collisions across strategies.
 func (q *RootScheduler) WithQueuePrefix(prefix string) Scheduler {
-	return &PrefixedScheduler{
-		prefix:    prefix,
+	return &prefixedScheduler{
+		prefix:    prefix + "-",
 		scheduler: q,
 	}
 }
 
-// Submit a job to the queue.
-//
-// Jobs run concurrently across queues, but never within a queue.
 func (q *RootScheduler) Submit(queue, id string, run func(ctx context.Context) error) {
 	q.lock.Lock()
 	defer q.lock.Unlock()
@@ -95,9 +108,6 @@ func (q *RootScheduler) Submit(queue, id string, run func(ctx context.Context) e
 	q.workAvailable <- true
 }
 
-// SubmitPeriodicJob submits a job to the queue that runs immediately, and then periodically after the interval.
-//
-// Jobs run concurrently across queues, but never within a queue.
 func (q *RootScheduler) SubmitPeriodicJob(queue, description string, interval time.Duration, run func(ctx context.Context) error) {
 	q.Submit(queue, description, func(ctx context.Context) error {
 		err := run(ctx)

@@ -8,6 +8,7 @@ import (
 	"net/url"
 
 	"github.com/block/cachew/internal/cache"
+	"github.com/block/cachew/internal/jobscheduler"
 	"github.com/block/cachew/internal/logging"
 	"github.com/block/cachew/internal/strategy/handler"
 )
@@ -40,7 +41,7 @@ type Host struct {
 
 var _ Strategy = (*Host)(nil)
 
-func NewHost(ctx context.Context, config HostConfig, cache cache.Cache, mux Mux) (*Host, error) {
+func NewHost(ctx context.Context, _ jobscheduler.Scheduler, config HostConfig, cache cache.Cache, mux Mux) (*Host, error) {
 	u, err := url.Parse(config.Target)
 	if err != nil {
 		return nil, fmt.Errorf("invalid target URL: %w", err)

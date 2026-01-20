@@ -12,6 +12,7 @@ import (
 	"github.com/alecthomas/hcl/v2"
 
 	"github.com/block/cachew/internal/cache"
+	"github.com/block/cachew/internal/jobscheduler"
 	"github.com/block/cachew/internal/logging"
 	"github.com/block/cachew/internal/strategy"
 	_ "github.com/block/cachew/internal/strategy/git" // Register git strategy
@@ -35,7 +36,7 @@ func (l *loggingMux) HandleFunc(pattern string, handler func(http.ResponseWriter
 var _ strategy.Mux = (*loggingMux)(nil)
 
 // Load HCL configuration and uses that to construct the cache backend, and proxy strategies.
-func Load(ctx context.Context, r io.Reader, mux *http.ServeMux, vars map[string]string) error {
+func Load(ctx context.Context, r io.Reader, scheduler jobscheduler.Scheduler, mux *http.ServeMux, vars map[string]string) error {
 	logger := logging.FromContext(ctx)
 	ast, err := hcl.Parse(r)
 	if err != nil {
@@ -79,7 +80,7 @@ func Load(ctx context.Context, r io.Reader, mux *http.ServeMux, vars map[string]
 	for _, block := range strategyCandidates {
 		logger := logger.With("strategy", block.Name)
 		mlog := &loggingMux{logger: logger, mux: mux}
-		_, err := strategy.Create(ctx, block.Name, block, cache, mlog)
+		_, err := strategy.Create(ctx, scheduler.WithQueuePrefix(block.Name), block.Name, block, cache, mlog)
 		if err != nil {
 			return errors.Errorf("%s: %w", block.Pos, err)
 		}

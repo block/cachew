@@ -17,6 +17,7 @@ import (
 	"github.com/alecthomas/errors"
 
 	"github.com/block/cachew/internal/cache"
+	"github.com/block/cachew/internal/jobscheduler"
 	"github.com/block/cachew/internal/logging"
 	"github.com/block/cachew/internal/strategy"
 )
@@ -62,7 +63,7 @@ type Strategy struct {
 	ctx        context.Context
 }
 
-func New(ctx context.Context, config Config, cache cache.Cache, mux strategy.Mux) (*Strategy, error) {
+func New(ctx context.Context, _ jobscheduler.Scheduler, config Config, cache cache.Cache, mux strategy.Mux) (*Strategy, error) {
 	logger := logging.FromContext(ctx)
 
 	if config.MirrorRoot == "" {

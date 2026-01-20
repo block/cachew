@@ -16,6 +16,7 @@ import (
 
 	"github.com/alecthomas/assert/v2"
 
+	"github.com/block/cachew/internal/jobscheduler"
 	"github.com/block/cachew/internal/logging"
 	"github.com/block/cachew/internal/strategy/git"
 )
@@ -53,7 +54,7 @@ func TestIntegrationGitCloneViaProxy(t *testing.T) {
 
 	// Create the git strategy
 	mux := http.NewServeMux()
-	strategy, err := git.New(ctx, git.Config{
+	strategy, err := git.New(ctx, jobscheduler.New(ctx, jobscheduler.Config{}), git.Config{
 		MirrorRoot:    clonesDir,
 		FetchInterval: 15,
 	}, nil, mux)
@@ -131,7 +132,7 @@ func TestIntegrationGitFetchViaProxy(t *testing.T) {
 	assert.NoError(t, err)
 
 	mux := http.NewServeMux()
-	_, err = git.New(ctx, git.Config{
+	_, err = git.New(ctx, jobscheduler.New(ctx, jobscheduler.Config{}), git.Config{
 		MirrorRoot:    clonesDir,
 		FetchInterval: 15,
 	}, nil, mux)
@@ -210,7 +211,7 @@ func TestIntegrationPushForwardsToUpstream(t *testing.T) {
 	defer upstreamServer.Close()
 
 	mux := http.NewServeMux()
-	_, err = git.New(ctx, git.Config{
+	_, err = git.New(ctx, jobscheduler.New(ctx, jobscheduler.Config{}), git.Config{
 		MirrorRoot:    clonesDir,
 		FetchInterval: 15,
 	}, nil, mux)
