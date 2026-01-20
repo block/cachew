@@ -47,6 +47,22 @@ func NewMemory(ctx context.Context, config MemoryConfig) (*Memory, error) {
 
 func (m *Memory) String() string { return fmt.Sprintf("memory:%dMB", m.config.LimitMB) }
 
+func (m *Memory) Stat(_ context.Context, key Key) (textproto.MIMEHeader, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	entry, exists := m.entries[key]
+	if !exists {
+		return nil, os.ErrNotExist
+	}
+
+	if time.Now().After(entry.expiresAt) {
+		return nil, os.ErrNotExist
+	}
+
+	return entry.headers, nil
+}
+
 func (m *Memory) Open(_ context.Context, key Key) (io.ReadCloser, textproto.MIMEHeader, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()

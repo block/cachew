@@ -157,7 +157,7 @@ func (s *S3) keyToPath(key Key) string {
 	return hexKey[:2] + "/" + hexKey
 }
 
-func (s *S3) Open(ctx context.Context, key Key) (io.ReadCloser, textproto.MIMEHeader, error) {
+func (s *S3) Stat(ctx context.Context, key Key) (textproto.MIMEHeader, error) {
 	objectName := s.keyToPath(key)
 
 	// Get object info to check metadata
@@ -165,9 +165,9 @@ func (s *S3) Open(ctx context.Context, key Key) (io.ReadCloser, textproto.MIMEHe
 	if err != nil {
 		errResponse := minio.ToErrorResponse(err)
 		if errResponse.Code == "NoSuchKey" {
-			return nil, nil, os.ErrNotExist
+			return nil, os.ErrNotExist
 		}
-		return nil, nil, errors.Errorf("failed to stat object: %w", err)
+		return nil, errors.Errorf("failed to stat object: %w", err)
 	}
 
 	// Check if object has expired
@@ -178,7 +178,7 @@ func (s *S3) Open(ctx context.Context, key Key) (io.ReadCloser, textproto.MIMEHe
 		if err := expiresAt.UnmarshalText([]byte(expiresAtStr)); err == nil {
 			if time.Now().After(expiresAt) {
 				// Object expired, delete it and return not found
-				return nil, nil, errors.Join(os.ErrNotExist, s.Delete(ctx, key))
+				return nil, errors.Join(os.ErrNotExist, s.Delete(ctx, key))
 			}
 		}
 	}
@@ -188,9 +188,20 @@ func (s *S3) Open(ctx context.Context, key Key) (io.ReadCloser, textproto.MIMEHe
 	headers := make(textproto.MIMEHeader)
 	if headersJSON := objInfo.UserMetadata["Headers"]; headersJSON != "" {
 		if err := json.Unmarshal([]byte(headersJSON), &headers); err != nil {
-			return nil, nil, errors.Errorf("failed to unmarshal headers: %w", err)
+			return nil, errors.Errorf("failed to unmarshal headers: %w", err)
 		}
 	}
+
+	return headers, nil
+}
+
+func (s *S3) Open(ctx context.Context, key Key) (io.ReadCloser, textproto.MIMEHeader, error) {
+	headers, err := s.Stat(ctx, key)
+	if err != nil {
+		return nil, nil, errors.WithStack(err)
+	}
+
+	objectName := s.keyToPath(key)
 
 	// Get object
 	obj, err := s.client.GetObject(ctx, s.config.Bucket, objectName, minio.GetObjectOptions{})
