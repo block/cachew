@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/alecthomas/chroma/v2/quick"
 	"github.com/alecthomas/hcl/v2"
 	"github.com/alecthomas/kong"
 
@@ -43,7 +44,13 @@ func main() {
 		})
 		text, err := hcl.MarshalAST(schema)
 		kctx.FatalIfErrorf(err)
-		fmt.Printf("%s\n", text)
+
+		if fileInfo, err := os.Stdout.Stat(); err == nil && (fileInfo.Mode()&os.ModeCharDevice) != 0 {
+			err = quick.Highlight(os.Stdout, string(text), "terraform", "terminal256", "monokai")
+			kctx.FatalIfErrorf(err)
+		} else {
+			fmt.Printf("%s\n", text)
+		}
 		return
 	}
 
