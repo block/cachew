@@ -87,7 +87,7 @@ func Load(ctx context.Context, r io.Reader, scheduler jobscheduler.Scheduler, mu
 	for _, block := range strategyCandidates {
 		logger := logger.With("strategy", block.Name)
 		mlog := &loggingMux{logger: logger, mux: mux}
-		_, err := strategy.Create(ctx, scheduler.WithQueuePrefix(block.Name), block.Name, block, cache, mlog)
+		_, err := strategy.Create(ctx, block.Name, block, scheduler.WithQueuePrefix(block.Name), cache, mlog)
 		if err != nil {
 			return errors.Errorf("%s: %w", block.Pos, err)
 		}

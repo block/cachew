@@ -46,7 +46,7 @@ func main() {
 		kctx.FatalIfErrorf(err)
 
 		if fileInfo, err := os.Stdout.Stat(); err == nil && (fileInfo.Mode()&os.ModeCharDevice) != 0 {
-			err = quick.Highlight(os.Stdout, string(text), "terraform", "terminal256", "monokai")
+			err = quick.Highlight(os.Stdout, string(text), "terraform", "terminal256", "solarized")
 			kctx.FatalIfErrorf(err)
 		} else {
 			fmt.Printf("%s\n", text)
