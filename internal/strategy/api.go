@@ -20,18 +20,18 @@ type Mux interface {
 	HandleFunc(pattern string, handler func(http.ResponseWriter, *http.Request))
 }
 
-var registry = map[string]func(ctx context.Context, scheduler jobscheduler.Scheduler, config *hcl.Block, cache cache.Cache, mux Mux) (Strategy, error){}
+var registry = map[string]func(ctx context.Context, config *hcl.Block, scheduler jobscheduler.Scheduler, cache cache.Cache, mux Mux) (Strategy, error){}
 
-type Factory[Config any, S Strategy] func(ctx context.Context, scheduler jobscheduler.Scheduler, config Config, cache cache.Cache, mux Mux) (S, error)
+type Factory[Config any, S Strategy] func(ctx context.Context, config Config, scheduler jobscheduler.Scheduler, cache cache.Cache, mux Mux) (S, error)
 
 // Register a new proxy strategy.
 func Register[Config any, S Strategy](id string, factory Factory[Config, S]) {
-	registry[id] = func(ctx context.Context, scheduler jobscheduler.Scheduler, config *hcl.Block, cache cache.Cache, mux Mux) (Strategy, error) {
+	registry[id] = func(ctx context.Context, config *hcl.Block, scheduler jobscheduler.Scheduler, cache cache.Cache, mux Mux) (Strategy, error) {
 		var cfg Config
 		if err := hcl.UnmarshalBlock(config, &cfg, hcl.AllowExtra(false)); err != nil {
 			return nil, errors.WithStack(err)
 		}
-		return factory(ctx, scheduler, cfg, cache, mux)
+		return factory(ctx, cfg, scheduler, cache, mux)
 	}
 }
 
@@ -47,7 +47,7 @@ func Create(
 	mux Mux,
 ) (Strategy, error) {
 	if factory, ok := registry[name]; ok {
-		return errors.WithStack2(factory(ctx, scheduler.WithQueuePrefix(name), config, cache, mux))
+		return errors.WithStack2(factory(ctx, config, scheduler.WithQueuePrefix(name), cache, mux))
 	}
 	return nil, errors.Errorf("%s: %w", name, ErrNotFound)
 }

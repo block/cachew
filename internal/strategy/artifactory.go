@@ -53,7 +53,7 @@ type Artifactory struct {
 
 var _ Strategy = (*Artifactory)(nil)
 
-func NewArtifactory(ctx context.Context, _ jobscheduler.Scheduler, config ArtifactoryConfig, cache cache.Cache, mux Mux) (*Artifactory, error) {
+func NewArtifactory(ctx context.Context, config ArtifactoryConfig, _ jobscheduler.Scheduler, cache cache.Cache, mux Mux) (*Artifactory, error) {
 	u, err := url.Parse(config.Target)
 	if err != nil {
 		return nil, fmt.Errorf("invalid target URL: %w", err)

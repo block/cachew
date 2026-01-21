@@ -23,10 +23,10 @@ func TestBundleHTTPEndpoint(t *testing.T) {
 	assert.NoError(t, err)
 	mux := newTestMux()
 
-	_, err = git.New(ctx, jobscheduler.New(ctx, jobscheduler.Config{}), git.Config{
+	_, err = git.New(ctx, git.Config{
 		MirrorRoot:     tmpDir,
 		BundleInterval: 24 * time.Hour,
-	}, memCache, mux)
+	}, jobscheduler.New(ctx, jobscheduler.Config{}), memCache, mux)
 	assert.NoError(t, err)
 
 	// Create a fake bundle in the cache
@@ -99,10 +99,10 @@ func TestBundleInterval(t *testing.T) {
 			assert.NoError(t, err)
 			mux := newTestMux()
 
-			s, err := git.New(ctx, jobscheduler.New(ctx, jobscheduler.Config{}), git.Config{
+			s, err := git.New(ctx, git.Config{
 				MirrorRoot:     tmpDir,
 				BundleInterval: tt.bundleInterval,
-			}, memCache, mux)
+			}, jobscheduler.New(ctx, jobscheduler.Config{}), memCache, mux)
 			assert.NoError(t, err)
 			assert.NotZero(t, s)
 

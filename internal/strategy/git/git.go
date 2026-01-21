@@ -64,7 +64,7 @@ type Strategy struct {
 	scheduler  jobscheduler.Scheduler
 }
 
-func New(ctx context.Context, scheduler jobscheduler.Scheduler, config Config, cache cache.Cache, mux strategy.Mux) (*Strategy, error) {
+func New(ctx context.Context, config Config, scheduler jobscheduler.Scheduler, cache cache.Cache, mux strategy.Mux) (*Strategy, error) {
 	logger := logging.FromContext(ctx)
 
 	if config.MirrorRoot == "" {

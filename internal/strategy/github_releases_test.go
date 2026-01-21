@@ -127,7 +127,7 @@ func setupTest(t *testing.T, config strategy.GitHubReleasesConfig) (*mockGitHubS
 	t.Cleanup(func() { memCache.Close() })
 
 	mux := http.NewServeMux()
-	_, err = strategy.NewGitHubReleases(ctx, jobscheduler.New(ctx, jobscheduler.Config{}), config, memCache, mux)
+	_, err = strategy.NewGitHubReleases(ctx, config, jobscheduler.New(ctx, jobscheduler.Config{}), memCache, mux)
 	assert.NoError(t, err)
 
 	return mock, mux, ctx
@@ -242,7 +242,7 @@ func TestGitHubReleasesNoToken(t *testing.T) {
 	defer memCache.Close()
 
 	mux := http.NewServeMux()
-	gh, err := strategy.NewGitHubReleases(ctx, jobscheduler.New(ctx, jobscheduler.Config{}), strategy.GitHubReleasesConfig{}, memCache, mux)
+	gh, err := strategy.NewGitHubReleases(ctx, strategy.GitHubReleasesConfig{}, jobscheduler.New(ctx, jobscheduler.Config{}), memCache, mux)
 	assert.NoError(t, err)
 	assert.Equal(t, "github-releases", gh.String())
 }
@@ -254,9 +254,9 @@ func TestGitHubReleasesString(t *testing.T) {
 	defer memCache.Close()
 
 	mux := http.NewServeMux()
-	gh, err := strategy.NewGitHubReleases(ctx, jobscheduler.New(ctx, jobscheduler.Config{}), strategy.GitHubReleasesConfig{
+	gh, err := strategy.NewGitHubReleases(ctx, strategy.GitHubReleasesConfig{
 		Token: "test-token",
-	}, memCache, mux)
+	}, jobscheduler.New(ctx, jobscheduler.Config{}), memCache, mux)
 	assert.NoError(t, err)
 
 	assert.Equal(t, "github-releases", gh.String())

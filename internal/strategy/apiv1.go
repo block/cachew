@@ -28,7 +28,7 @@ type APIV1 struct {
 	logger *slog.Logger
 }
 
-func NewAPIV1(ctx context.Context, _ jobscheduler.Scheduler, _ struct{}, cache cache.Cache, mux Mux) (*APIV1, error) {
+func NewAPIV1(ctx context.Context, _ struct{}, _ jobscheduler.Scheduler, cache cache.Cache, mux Mux) (*APIV1, error) {
 	s := &APIV1{
 		logger: logging.FromContext(ctx),
 		cache:  cache,

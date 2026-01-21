@@ -87,26 +87,28 @@ func FilterTransportHeaders(headers textproto.MIMEHeader) textproto.MIMEHeader {
 }
 
 // A Cache knows how to retrieve, create and delete objects from a cache.
+//
+// Objects in the cache are not guaranteed to persist and implementations may delete them at any time.
 type Cache interface {
 	// String describes the Cache implementation.
 	String() string
 	// Stat returns the headers of an existing object in the cache.
 	//
-	// Expired files SHOULD not be returned.
+	// Expired files MUST not be returned.
 	// Must return os.ErrNotExist if the file does not exist.
 	Stat(ctx context.Context, key Key) (textproto.MIMEHeader, error)
 	// Open an existing file in the cache.
 	//
-	// Expired files SHOULD not be returned.
+	// Expired files MUST NOT be returned.
 	// Must return os.ErrNotExist if the file does not exist.
 	Open(ctx context.Context, key Key) (io.ReadCloser, textproto.MIMEHeader, error)
 	// Create a new file in the cache.
 	//
 	// If "ttl" is zero, a maximum TTL MUST be used by the implementation.
 	//
-	// The file MUST not be available for read until completely written and closed.
+	// The file MUST NOT be available for read until completely written and closed.
 	//
-	// If the context is cancelled the object MUST not be made available in the cache.
+	// If the context is cancelled the object MUST NOT be made available in the cache.
 	Create(ctx context.Context, key Key, headers textproto.MIMEHeader, ttl time.Duration) (io.WriteCloser, error)
 	// Delete a file from the cache.
 	//
