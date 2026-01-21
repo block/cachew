@@ -64,9 +64,9 @@ func Schema() *hcl.AST {
 // Will return "ErrNotFound" if the strategy is not found.
 func Create(
 	ctx context.Context,
-	scheduler jobscheduler.Scheduler,
 	name string,
 	config *hcl.Block,
+	scheduler jobscheduler.Scheduler,
 	cache cache.Cache,
 	mux Mux,
 ) (Strategy, error) {
