@@ -14,7 +14,7 @@ import (
 )
 
 func init() {
-	Register("host", NewHost)
+	Register("host", "A generic host-based proxying strategy.", NewHost)
 }
 
 // HostConfig represents the configuration for the Host strategy.
@@ -41,7 +41,7 @@ type Host struct {
 
 var _ Strategy = (*Host)(nil)
 
-func NewHost(ctx context.Context, _ jobscheduler.Scheduler, config HostConfig, cache cache.Cache, mux Mux) (*Host, error) {
+func NewHost(ctx context.Context, config HostConfig, _ jobscheduler.Scheduler, cache cache.Cache, mux Mux) (*Host, error) {
 	u, err := url.Parse(config.Target)
 	if err != nil {
 		return nil, fmt.Errorf("invalid target URL: %w", err)

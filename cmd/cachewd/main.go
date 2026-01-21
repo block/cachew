@@ -2,13 +2,17 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
+	"github.com/alecthomas/chroma/v2/quick"
+	"github.com/alecthomas/hcl/v2"
 	"github.com/alecthomas/kong"
 
 	"github.com/block/cachew/internal/config"
@@ -18,6 +22,8 @@ import (
 )
 
 var cli struct {
+	Schema bool `help:"Print the configuration file schema." xor:"command"`
+
 	Config          *os.File            `hcl:"-" help:"Configuration file path." placeholder:"PATH" required:"" default:"cachew.hcl"`
 	Bind            string              `hcl:"bind" default:"127.0.0.1:8080" help:"Bind address for the server."`
 	SchedulerConfig jobscheduler.Config `embed:"" prefix:"scheduler-"`
@@ -29,6 +35,24 @@ func main() {
 
 	ctx := context.Background()
 	logger, ctx := logging.Configure(ctx, cli.LoggingConfig)
+
+	switch {
+	case cli.Schema:
+		schema := config.Schema()
+		slices.SortStableFunc(schema.Entries, func(a, b hcl.Entry) int {
+			return strings.Compare(a.EntryKey(), b.EntryKey())
+		})
+		text, err := hcl.MarshalAST(schema)
+		kctx.FatalIfErrorf(err)
+
+		if fileInfo, err := os.Stdout.Stat(); err == nil && (fileInfo.Mode()&os.ModeCharDevice) != 0 {
+			err = quick.Highlight(os.Stdout, string(text), "terraform", "terminal256", "monokai")
+			kctx.FatalIfErrorf(err)
+		} else {
+			fmt.Printf("%s\n", text)
+		}
+		return
+	}
 
 	mux := http.NewServeMux()
 

@@ -18,7 +18,7 @@ import (
 )
 
 func init() {
-	Register("github-releases", NewGitHubReleases)
+	Register("github-releases", "Caches public and authenticated GitHub releases.", NewGitHubReleases)
 }
 
 type GitHubReleasesConfig struct {
@@ -34,7 +34,7 @@ type GitHubReleases struct {
 }
 
 // NewGitHubReleases creates a [Strategy] that fetches private (and public) release binaries from GitHub.
-func NewGitHubReleases(ctx context.Context, _ jobscheduler.Scheduler, config GitHubReleasesConfig, cache cache.Cache, mux Mux) (*GitHubReleases, error) {
+func NewGitHubReleases(ctx context.Context, config GitHubReleasesConfig, _ jobscheduler.Scheduler, cache cache.Cache, mux Mux) (*GitHubReleases, error) {
 	s := &GitHubReleases{
 		config: config,
 		cache:  cache,

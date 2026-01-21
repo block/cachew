@@ -19,7 +19,11 @@ import (
 )
 
 func init() {
-	Register("disk", NewDisk)
+	Register(
+		"disk",
+		"Caches objects on local disk, with a maximum size limit and LRU eviction",
+		NewDisk,
+	)
 }
 
 type DiskConfig struct {

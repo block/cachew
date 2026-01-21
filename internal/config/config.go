@@ -35,6 +35,13 @@ func (l *loggingMux) HandleFunc(pattern string, handler func(http.ResponseWriter
 
 var _ strategy.Mux = (*loggingMux)(nil)
 
+// Schema returns the configuration file schema.
+func Schema() *hcl.AST {
+	return &hcl.AST{
+		Entries: append(strategy.Schema().Entries, cache.Schema().Entries...),
+	}
+}
+
 // Load HCL configuration and uses that to construct the cache backend, and proxy strategies.
 func Load(ctx context.Context, r io.Reader, scheduler jobscheduler.Scheduler, mux *http.ServeMux, vars map[string]string) error {
 	logger := logging.FromContext(ctx)

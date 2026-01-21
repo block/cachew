@@ -27,7 +27,7 @@ func TestRemoteClient(t *testing.T) {
 		t.Cleanup(func() { memCache.Close() })
 
 		mux := http.NewServeMux()
-		_, err = strategy.NewAPIV1(ctx, jobscheduler.New(ctx, jobscheduler.Config{}), struct{}{}, memCache, mux)
+		_, err = strategy.NewAPIV1(ctx, struct{}{}, jobscheduler.New(ctx, jobscheduler.Config{}), memCache, mux)
 		assert.NoError(t, err)
 		ts := httptest.NewServer(mux)
 		t.Cleanup(ts.Close)

@@ -16,7 +16,11 @@ import (
 )
 
 func init() {
-	Register("memory", NewMemory)
+	Register(
+		"memory",
+		"Caches objects in memory, with a maximum size limit and LRU eviction",
+		NewMemory,
+	)
 }
 
 type MemoryConfig struct {

@@ -11,6 +11,7 @@ require (
 )
 
 require (
+	github.com/dlclark/regexp2 v1.11.5 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/go-ini/ini v1.67.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
@@ -36,6 +37,7 @@ require (
 
 require (
 	github.com/alecthomas/assert/v2 v2.11.0
+	github.com/alecthomas/chroma/v2 v2.23.0
 	github.com/alecthomas/errors v0.9.1
 	github.com/alecthomas/participle/v2 v2.1.4 // indirect
 	github.com/alecthomas/repr v0.5.2 // indirect

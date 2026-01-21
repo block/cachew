@@ -21,7 +21,11 @@ import (
 )
 
 func init() {
-	Register("s3", NewS3)
+	Register(
+		"s3",
+		"Caches objects in S3",
+		NewS3,
+	)
 }
 
 type S3Config struct {
