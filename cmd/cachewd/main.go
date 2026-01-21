@@ -36,7 +36,8 @@ func main() {
 	ctx := context.Background()
 	logger, ctx := logging.Configure(ctx, cli.LoggingConfig)
 
-	switch {
+	// Commands
+	switch { //nolint:gocritic
 	case cli.Schema:
 		schema := config.Schema()
 		slices.SortStableFunc(schema.Entries, func(a, b hcl.Entry) int {
@@ -49,7 +50,7 @@ func main() {
 			err = quick.Highlight(os.Stdout, string(text), "terraform", "terminal256", "solarized")
 			kctx.FatalIfErrorf(err)
 		} else {
-			fmt.Printf("%s\n", text)
+			fmt.Printf("%s\n", text) //nolint:forbidigo
 		}
 		return
 	}

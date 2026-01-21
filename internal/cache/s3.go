@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net/http"
 	"net/textproto"
 	"os"
@@ -196,16 +197,50 @@ func (s *S3) Stat(ctx context.Context, key Key) (textproto.MIMEHeader, error) {
 		}
 	}
 
+	// Add Last-Modified header from S3 object metadata if not already present
+	if headers.Get("Last-Modified") == "" && !objInfo.LastModified.IsZero() {
+		headers.Set("Last-Modified", objInfo.LastModified.UTC().Format(http.TimeFormat))
+	}
+
 	return headers, nil
 }
 
 func (s *S3) Open(ctx context.Context, key Key) (io.ReadCloser, textproto.MIMEHeader, error) {
-	headers, err := s.Stat(ctx, key)
+	objectName := s.keyToPath(key)
+
+	// Get object info to retrieve metadata and check expiration
+	objInfo, err := s.client.StatObject(ctx, s.config.Bucket, objectName, minio.StatObjectOptions{})
 	if err != nil {
-		return nil, nil, errors.WithStack(err)
+		errResponse := minio.ToErrorResponse(err)
+		if errResponse.Code == "NoSuchKey" {
+			return nil, nil, os.ErrNotExist
+		}
+		return nil, nil, errors.Errorf("failed to stat object: %w", err)
 	}
 
-	objectName := s.keyToPath(key)
+	// Check if object has expired
+	expiresAtStr := objInfo.UserMetadata["Expires-At"]
+	if expiresAtStr != "" {
+		var expiresAt time.Time
+		if err := expiresAt.UnmarshalText([]byte(expiresAtStr)); err == nil {
+			if time.Now().After(expiresAt) {
+				return nil, nil, errors.Join(os.ErrNotExist, s.Delete(ctx, key))
+			}
+		}
+	}
+
+	// Retrieve headers from metadata
+	headers := make(textproto.MIMEHeader)
+	if headersJSON := objInfo.UserMetadata["Headers"]; headersJSON != "" {
+		if err := json.Unmarshal([]byte(headersJSON), &headers); err != nil {
+			return nil, nil, errors.Errorf("failed to unmarshal headers: %w", err)
+		}
+	}
+
+	// Add Last-Modified header from S3 object metadata if not already present
+	if headers.Get("Last-Modified") == "" && !objInfo.LastModified.IsZero() {
+		headers.Set("Last-Modified", objInfo.LastModified.UTC().Format(http.TimeFormat))
+	}
 
 	// Get object
 	obj, err := s.client.GetObject(ctx, s.config.Bucket, objectName, minio.GetObjectOptions{})
@@ -221,6 +256,10 @@ func (s *S3) Create(ctx context.Context, key Key, headers textproto.MIMEHeader, 
 		ttl = s.config.MaxTTL
 	}
 
+	// Clone headers to avoid concurrent access issues
+	clonedHeaders := make(textproto.MIMEHeader)
+	maps.Copy(clonedHeaders, headers)
+
 	expiresAt := time.Now().Add(ttl)
 
 	pr, pw := io.Pipe()
@@ -230,7 +269,7 @@ func (s *S3) Create(ctx context.Context, key Key, headers textproto.MIMEHeader, 
 		key:       key,
 		pipe:      pw,
 		expiresAt: expiresAt,
-		headers:   headers,
+		headers:   clonedHeaders,
 		ctx:       ctx,
 		errCh:     make(chan error, 1),
 	}

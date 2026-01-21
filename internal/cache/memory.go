@@ -5,6 +5,8 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"maps"
+	"net/http"
 	"net/textproto"
 	"os"
 	"sync"
@@ -88,12 +90,20 @@ func (m *Memory) Create(ctx context.Context, key Key, headers textproto.MIMEHead
 		ttl = m.config.MaxTTL
 	}
 
+	now := time.Now()
+	// Clone headers to avoid concurrent map writes
+	clonedHeaders := make(textproto.MIMEHeader)
+	maps.Copy(clonedHeaders, headers)
+	if clonedHeaders.Get("Last-Modified") == "" {
+		clonedHeaders.Set("Last-Modified", now.UTC().Format(http.TimeFormat))
+	}
+
 	writer := &memoryWriter{
 		cache:     m,
 		key:       key,
 		buf:       &bytes.Buffer{},
-		expiresAt: time.Now().Add(ttl),
-		headers:   headers,
+		expiresAt: now.Add(ttl),
+		headers:   clonedHeaders,
 		ctx:       ctx,
 	}
 

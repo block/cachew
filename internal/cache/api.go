@@ -33,7 +33,7 @@ func Register[Config any, C Cache](id, description string, factory Factory[Confi
 	if err != nil {
 		panic(err)
 	}
-	block := schema.Entries[0].(*hcl.Block)
+	block := schema.Entries[0].(*hcl.Block) //nolint:errcheck // This seems spurious
 	block.Comments = hcl.CommentList{description}
 	registry[id] = registryEntry{
 		schema: block,
@@ -124,6 +124,7 @@ type Cache interface {
 	// Open an existing file in the cache.
 	//
 	// Expired files MUST NOT be returned.
+	// The returned headers MUST include a Last-Modified header.
 	// Must return os.ErrNotExist if the file does not exist.
 	Open(ctx context.Context, key Key) (io.ReadCloser, textproto.MIMEHeader, error)
 	// Create a new file in the cache.

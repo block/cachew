@@ -5,6 +5,8 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
+	"maps"
+	"net/http"
 	"net/textproto"
 	"os"
 	"path/filepath"
@@ -133,6 +135,14 @@ func (d *Disk) Create(ctx context.Context, key Key, headers textproto.MIMEHeader
 		ttl = d.config.MaxTTL
 	}
 
+	now := time.Now()
+	// Clone headers to avoid concurrent map writes
+	clonedHeaders := make(textproto.MIMEHeader)
+	maps.Copy(clonedHeaders, headers)
+	if clonedHeaders.Get("Last-Modified") == "" {
+		clonedHeaders.Set("Last-Modified", now.UTC().Format(http.TimeFormat))
+	}
+
 	path := d.keyToPath(key)
 	fullPath := filepath.Join(d.config.Root, path)
 
@@ -147,7 +157,7 @@ func (d *Disk) Create(ctx context.Context, key Key, headers textproto.MIMEHeader
 		return nil, errors.Errorf("failed to create temp file: %w", err)
 	}
 
-	expiresAt := time.Now().Add(ttl)
+	expiresAt := now.Add(ttl)
 
 	return &diskWriter{
 		disk:      d,
@@ -156,7 +166,7 @@ func (d *Disk) Create(ctx context.Context, key Key, headers textproto.MIMEHeader
 		path:      fullPath,
 		tempPath:  tempPath,
 		expiresAt: expiresAt,
-		headers:   headers,
+		headers:   clonedHeaders,
 		ctx:       ctx,
 	}, nil
 }

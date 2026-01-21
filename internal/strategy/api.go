@@ -36,7 +36,7 @@ func Register[Config any, S Strategy](id, description string, factory Factory[Co
 	if err != nil {
 		panic(err)
 	}
-	block := schema.Entries[0].(*hcl.Block)
+	block := schema.Entries[0].(*hcl.Block) //nolint:errcheck // This seems spurious
 	block.Comments = hcl.CommentList{description}
 	registry[id] = registryEntry{
 		schema: block,

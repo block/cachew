@@ -55,7 +55,7 @@ type GoMod struct {
 var _ Strategy = (*GoMod)(nil)
 
 // NewGoMod creates a new Go module proxy strategy.
-func NewGoMod(ctx context.Context, config GoModConfig, scheduler jobscheduler.Scheduler, cache cache.Cache, mux Mux) (*GoMod, error) {
+func NewGoMod(ctx context.Context, config GoModConfig, _ jobscheduler.Scheduler, cache cache.Cache, mux Mux) (*GoMod, error) {
 	parsedURL, err := url.Parse(config.Proxy)
 	if err != nil {
 		return nil, fmt.Errorf("invalid proxy URL: %w", err)
