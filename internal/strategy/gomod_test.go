@@ -146,11 +146,11 @@ func setupGoModTest(t *testing.T) (*mockGoModServer, *http.ServeMux, context.Con
 	t.Cleanup(func() { _ = memCache.Close() })
 
 	mux := http.NewServeMux()
-	_, err = strategy.NewGoMod(ctx, jobscheduler.New(ctx, jobscheduler.Config{}), strategy.GoModConfig{
+	_, err = strategy.NewGoMod(ctx, strategy.GoModConfig{
 		Proxy:        mock.server.URL,
 		MutableTTL:   5 * time.Minute,
 		ImmutableTTL: 168 * time.Hour,
-	}, memCache, mux)
+	}, jobscheduler.New(ctx, jobscheduler.Config{}), memCache, mux)
 	assert.NoError(t, err)
 
 	return mock, mux, ctx

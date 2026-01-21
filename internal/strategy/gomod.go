@@ -17,7 +17,7 @@ import (
 )
 
 func init() {
-	Register("gomod", NewGoMod)
+	Register("gomod", "Caches Go module proxy requests.", NewGoMod)
 }
 
 // GoModConfig represents the configuration for the Go module proxy strategy.
@@ -55,7 +55,7 @@ type GoMod struct {
 var _ Strategy = (*GoMod)(nil)
 
 // NewGoMod creates a new Go module proxy strategy.
-func NewGoMod(ctx context.Context, scheduler jobscheduler.Scheduler, config GoModConfig, cache cache.Cache, mux Mux) (*GoMod, error) {
+func NewGoMod(ctx context.Context, config GoModConfig, scheduler jobscheduler.Scheduler, cache cache.Cache, mux Mux) (*GoMod, error) {
 	parsedURL, err := url.Parse(config.Proxy)
 	if err != nil {
 		return nil, fmt.Errorf("invalid proxy URL: %w", err)
