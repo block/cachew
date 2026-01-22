@@ -46,6 +46,7 @@ func NewGoMod(ctx context.Context, config GoModConfig, _ jobscheduler.Scheduler,
 	}
 
 	g.goproxy = &goproxy.Goproxy{
+		Logger: g.logger,
 		Fetcher: &goproxy.GoFetcher{
 			Env: []string{
 				"GOPROXY=" + config.Proxy,
