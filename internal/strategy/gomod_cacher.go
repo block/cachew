@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"strings"
 
 	"github.com/block/cachew/internal/cache"
 )
@@ -25,6 +26,10 @@ func (g *goproxyCacher) Get(ctx context.Context, name string) (io.ReadCloser, er
 }
 
 func (g *goproxyCacher) Put(ctx context.Context, name string, content io.ReadSeeker) error {
+	if strings.HasSuffix(name, "/@v/list") || strings.HasSuffix(name, "/@latest") {
+		return nil
+	}
+
 	key := cache.NewKey(name)
 
 	wc, err := g.cache.Create(ctx, key, nil, 0)

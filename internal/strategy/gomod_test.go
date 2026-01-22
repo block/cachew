@@ -348,3 +348,51 @@ func TestGoModMultipleConcurrentRequests(t *testing.T) {
 
 	assert.True(t, mock.getRequestCount(upstreamPath) >= 1, "at least one request should have been made to upstream")
 }
+
+func TestGoModListNotCached(t *testing.T) {
+	mock, mux, ctx := setupGoModTest(t)
+
+	path := "/gomod/github.com/example/test/@v/list"
+	upstreamPath := "/github.com/example/test/@v/list"
+
+	req1 := httptest.NewRequest(http.MethodGet, path, nil)
+	req1 = req1.WithContext(ctx)
+	w1 := httptest.NewRecorder()
+	mux.ServeHTTP(w1, req1)
+
+	assert.Equal(t, http.StatusOK, w1.Code)
+	assert.Equal(t, 1, mock.getRequestCount(upstreamPath))
+
+	req2 := httptest.NewRequest(http.MethodGet, path, nil)
+	req2 = req2.WithContext(ctx)
+	w2 := httptest.NewRecorder()
+	mux.ServeHTTP(w2, req2)
+
+	assert.Equal(t, http.StatusOK, w2.Code)
+	assert.Equal(t, w1.Body.String(), w2.Body.String())
+	assert.Equal(t, 2, mock.getRequestCount(upstreamPath), "/@v/list endpoint should not be cached")
+}
+
+func TestGoModLatestNotCached(t *testing.T) {
+	mock, mux, ctx := setupGoModTest(t)
+
+	path := "/gomod/github.com/example/test/@latest"
+	upstreamPath := "/github.com/example/test/@latest"
+
+	req1 := httptest.NewRequest(http.MethodGet, path, nil)
+	req1 = req1.WithContext(ctx)
+	w1 := httptest.NewRecorder()
+	mux.ServeHTTP(w1, req1)
+
+	assert.Equal(t, http.StatusOK, w1.Code)
+	assert.Equal(t, 1, mock.getRequestCount(upstreamPath))
+
+	req2 := httptest.NewRequest(http.MethodGet, path, nil)
+	req2 = req2.WithContext(ctx)
+	w2 := httptest.NewRecorder()
+	mux.ServeHTTP(w2, req2)
+
+	assert.Equal(t, http.StatusOK, w2.Code)
+	assert.Equal(t, w1.Body.String(), w2.Body.String())
+	assert.Equal(t, 2, mock.getRequestCount(upstreamPath), "/@latest endpoint should not be cached")
+}
