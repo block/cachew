@@ -51,6 +51,7 @@ func NewGoMod(ctx context.Context, config GoModConfig, _ jobscheduler.Scheduler,
 
 	// Create the goproxy instance with our custom cacher adapter
 	g.goproxy = &goproxy.Goproxy{
+		Logger: g.logger,
 		Fetcher: &goproxy.GoFetcher{
 			// Configure to use the specified upstream proxy
 			Env: []string{
