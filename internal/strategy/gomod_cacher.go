@@ -2,7 +2,6 @@ package strategy
 
 import (
 	"context"
-	"crypto/sha256"
 	"fmt"
 	"io"
 	"io/fs"
