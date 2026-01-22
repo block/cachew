@@ -14,7 +14,6 @@ type goproxyCacher struct {
 }
 
 func (g *goproxyCacher) Get(ctx context.Context, name string) (io.ReadCloser, error) {
-
 	key := cache.NewKey(name)
 
 	rc, _, err := g.cache.Open(ctx, key)
