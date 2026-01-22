@@ -40,7 +40,6 @@ func newMockGoModServer() *mockGoModServer {
 	}
 
 	// Set up default responses for common endpoints
-	// Note: goproxy fetches .zip files first to validate, then fetches .info and .mod
 	m.responses["/@v/list"] = mockResponse{
 		status:  http.StatusOK,
 		content: "v1.0.0\nv1.0.1\nv1.1.0",
@@ -49,7 +48,6 @@ func newMockGoModServer() *mockGoModServer {
 		status:  http.StatusOK,
 		content: `{"Version":"v1.1.0","Time":"2023-06-01T00:00:00Z"}`,
 	}
-	// Other responses will be dynamically generated based on the path
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", m.handleRequest)
@@ -58,15 +56,12 @@ func newMockGoModServer() *mockGoModServer {
 	return m
 }
 
-// createModuleZip creates a valid Go module zip file with the correct structure
 func createModuleZip(modulePath, version string) string {
 	var buf bytes.Buffer
 	w := zip.NewWriter(&buf)
 
-	// The zip file must have paths prefixed with modulePath@version/
 	prefix := modulePath + "@" + version + "/"
 
-	// Add a go.mod file to make it a valid Go module zip
 	f, err := w.Create(prefix + "go.mod")
 	if err != nil {
 		panic(err)
@@ -76,7 +71,6 @@ func createModuleZip(modulePath, version string) string {
 		panic(err)
 	}
 
-	// Add a dummy source file
 	f2, err := w.Create(prefix + "main.go")
 	if err != nil {
 		panic(err)
@@ -101,16 +95,13 @@ func (m *mockGoModServer) handleRequest(w http.ResponseWriter, r *http.Request) 
 	m.requestCount[path]++
 	m.mu.Unlock()
 
-	// Find matching response
 	var resp mockResponse
 	found := false
 
-	// Try exact match first
 	if r, ok := m.responses[path]; ok {
 		resp = r
 		found = true
 	} else {
-		// Try suffix match for module paths
 		for suffix, r := range m.responses {
 			if len(path) >= len(suffix) && path[len(path)-len(suffix):] == suffix {
 				resp = r
@@ -120,10 +111,7 @@ func (m *mockGoModServer) handleRequest(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 
-	// If still not found, try pattern matching for any version
 	if !found && strings.Contains(path, "/@v/") {
-		// Extract module path and version from the request
-		// e.g., /github.com/example/test/@v/v1.0.0.info
 		parts := strings.Split(path, "/@v/")
 		if len(parts) == 2 {
 			modulePath := strings.TrimPrefix(parts[0], "/")
@@ -212,7 +200,6 @@ func TestGoModList(t *testing.T) {
 	mux.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusOK, w.Code)
-	// goproxy may add a trailing newline or format the output
 	body := strings.TrimSpace(w.Body.String())
 	assert.True(t, strings.Contains(body, "v1.0.0"), "response should contain v1.0.0")
 	assert.True(t, strings.Contains(body, "v1.0.1"), "response should contain v1.0.1")
@@ -258,7 +245,6 @@ func TestGoModZip(t *testing.T) {
 	mux.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusOK, w.Code)
-	// Verify we get a valid zip file (starts with PK signature)
 	assert.True(t, strings.HasPrefix(w.Body.String(), "PK"), "response should be a valid zip file")
 	assert.True(t, mock.getRequestCount("/github.com/example/test/@v/v1.0.0.zip") >= 1, "should have fetched zip")
 }
@@ -283,7 +269,6 @@ func TestGoModCaching(t *testing.T) {
 	path := "/gomod/github.com/example/test/@v/v1.0.0.info"
 	upstreamPath := "/github.com/example/test/@v/v1.0.0.info"
 
-	// First request
 	req1 := httptest.NewRequest(http.MethodGet, path, nil)
 	req1 = req1.WithContext(ctx)
 	w1 := httptest.NewRecorder()
@@ -292,7 +277,6 @@ func TestGoModCaching(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w1.Code)
 	assert.Equal(t, 1, mock.getRequestCount(upstreamPath))
 
-	// Second request should hit cache
 	req2 := httptest.NewRequest(http.MethodGet, path, nil)
 	req2 = req2.WithContext(ctx)
 	w2 := httptest.NewRecorder()
@@ -306,7 +290,6 @@ func TestGoModCaching(t *testing.T) {
 func TestGoModComplexModulePath(t *testing.T) {
 	mock, mux, ctx := setupGoModTest(t)
 
-	// Test module path with multiple slashes
 	req := httptest.NewRequest(http.MethodGet, "/gomod/golang.org/x/tools/@v/v0.1.0.info", nil)
 	req = req.WithContext(ctx)
 	w := httptest.NewRecorder()
@@ -320,12 +303,10 @@ func TestGoModComplexModulePath(t *testing.T) {
 func TestGoModNonOKResponse(t *testing.T) {
 	mock, mux, ctx := setupGoModTest(t)
 
-	// Set up 404 response
 	upstreamPath := "/github.com/example/nonexistent/@v/v99.0.0.info"
 	notFoundPath := "/gomod" + upstreamPath
 	mock.setResponse(upstreamPath, http.StatusNotFound, "not found")
 
-	// First request should return 404
 	req1 := httptest.NewRequest(http.MethodGet, notFoundPath, nil)
 	req1 = req1.WithContext(ctx)
 	w1 := httptest.NewRecorder()
@@ -334,7 +315,6 @@ func TestGoModNonOKResponse(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, w1.Code)
 	assert.Equal(t, 1, mock.getRequestCount(upstreamPath))
 
-	// Second request should also hit upstream (404s are not cached)
 	req2 := httptest.NewRequest(http.MethodGet, notFoundPath, nil)
 	req2 = req2.WithContext(ctx)
 	w2 := httptest.NewRecorder()
@@ -350,7 +330,6 @@ func TestGoModMultipleConcurrentRequests(t *testing.T) {
 	path := "/gomod/github.com/example/test/@v/v1.0.0.zip"
 	upstreamPath := "/github.com/example/test/@v/v1.0.0.zip"
 
-	// Make multiple concurrent requests
 	results := make(chan *httptest.ResponseRecorder, 3)
 	for range 3 {
 		go func() {
@@ -362,14 +341,10 @@ func TestGoModMultipleConcurrentRequests(t *testing.T) {
 		}()
 	}
 
-	// Collect results
 	for range 3 {
 		w := <-results
 		assert.Equal(t, http.StatusOK, w.Code)
 	}
 
-	// First request should have created the cache entry
-	// Subsequent requests might hit cache or might be in-flight
-	// We just verify all requests succeeded
 	assert.True(t, mock.getRequestCount(upstreamPath) >= 1, "at least one request should have been made to upstream")
 }
