@@ -45,19 +45,15 @@ func NewGoMod(ctx context.Context, config GoModConfig, _ jobscheduler.Scheduler,
 		proxy:  parsedURL,
 	}
 
-	// Create the goproxy instance with our custom cacher adapter
 	g.goproxy = &goproxy.Goproxy{
 		Fetcher: &goproxy.GoFetcher{
-			// Configure to use the specified upstream proxy
 			Env: []string{
 				"GOPROXY=" + config.Proxy,
 				"GOSUMDB=off", // Disable checksum database validation in fetcher, to prevent unneccessary double validation
 			},
 		},
 		Cacher: &goproxyCacher{
-			cache:        cache,
-			mutableTTL:   config.MutableTTL,
-			immutableTTL: config.ImmutableTTL,
+			cache: cache,
 		},
 		ProxiedSumDBs: []string{
 			"sum.golang.org https://sum.golang.org",
@@ -65,12 +61,8 @@ func NewGoMod(ctx context.Context, config GoModConfig, _ jobscheduler.Scheduler,
 	}
 
 	g.logger.InfoContext(ctx, "Initialized Go module proxy strategy",
-		slog.String("proxy", g.proxy.String()),
-		slog.Duration("mutable_ttl", config.MutableTTL),
-		slog.Duration("immutable_ttl", config.ImmutableTTL))
+		slog.String("proxy", g.proxy.String()))
 
-	// Register a namespaced handler for Go module proxy patterns
-	// Strip the /gomod prefix and delegate to goproxy
 	mux.Handle("GET /gomod/{path...}", http.StripPrefix("/gomod", g.goproxy))
 
 	return g, nil
