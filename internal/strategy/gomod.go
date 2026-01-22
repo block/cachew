@@ -53,7 +53,6 @@ func NewGoMod(ctx context.Context, config GoModConfig, _ jobscheduler.Scheduler,
 				"GOPROXY=" + config.Proxy,
 				"GOSUMDB=off", // Disable checksum database validation in fetcher, to prevent unneccessary double validation
 			},
-			MaxDirectFetches: 0, // Disable direct fetches entirely
 		},
 		Cacher: &goproxyCacher{
 			cache:        cache,
