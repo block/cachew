@@ -8,7 +8,6 @@ import (
 	"io/fs"
 	"net/textproto"
 	"strings"
-	"time"
 
 	"github.com/block/cachew/internal/cache"
 )
@@ -17,9 +16,7 @@ import (
 // It handles the translation between goproxy's file-based caching model and cachew's
 // HTTP-response-based caching model.
 type goproxyCacher struct {
-	cache        cache.Cache
-	mutableTTL   time.Duration
-	immutableTTL time.Duration
+	cache cache.Cache
 }
 
 // Get retrieves cached content by name from cachew's cache.
@@ -40,15 +37,10 @@ func (g *goproxyCacher) Get(ctx context.Context, name string) (io.ReadCloser, er
 	return rc, nil
 }
 
-// Put stores content in cachew's cache with the appropriate TTL.
-// The TTL is determined by inspecting the cache name to identify whether
-// it represents mutable or immutable content.
+// Put stores content in cachew's cache.
 func (g *goproxyCacher) Put(ctx context.Context, name string, content io.ReadSeeker) error {
 	// Hash the name to create a cache key
 	key := cache.Key(sha256.Sum256([]byte(name)))
-
-	// Determine TTL based on the endpoint type
-	ttl := g.calculateTTL(name)
 
 	// Determine Content-Type from the file extension
 	contentType := g.getContentType(name)
@@ -57,8 +49,8 @@ func (g *goproxyCacher) Put(ctx context.Context, name string, content io.ReadSee
 	headers := make(textproto.MIMEHeader)
 	headers.Set("Content-Type", contentType)
 
-	// Create the cache entry
-	wc, err := g.cache.Create(ctx, key, headers, ttl)
+	// Create the cache entry with zero TTL (cache handles TTL via its own config)
+	wc, err := g.cache.Create(ctx, key, headers, 0)
 	if err != nil {
 		return fmt.Errorf("create cache entry: %w", err)
 	}
@@ -80,20 +72,6 @@ func (g *goproxyCacher) Put(ctx context.Context, name string, content io.ReadSee
 	}
 
 	return nil
-}
-
-// calculateTTL determines the appropriate cache TTL based on the endpoint type.
-//
-// Mutable endpoints (list, latest) get short TTL.
-// Immutable versioned content (info, mod, zip) gets long TTL.
-func (g *goproxyCacher) calculateTTL(name string) time.Duration {
-	// Short TTL for mutable endpoints
-	if strings.HasSuffix(name, "/@v/list") || strings.HasSuffix(name, "/@latest") {
-		return g.mutableTTL
-	}
-
-	// Long TTL for immutable versioned content (.info, .mod, .zip)
-	return g.immutableTTL
 }
 
 // getContentType returns the appropriate Content-Type header based on the file extension.

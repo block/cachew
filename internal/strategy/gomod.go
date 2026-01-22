@@ -6,7 +6,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
-	"time"
 
 	"github.com/goproxy/goproxy"
 
@@ -20,9 +19,7 @@ func init() {
 }
 
 type GoModConfig struct {
-	Proxy        string        `hcl:"proxy,optional" help:"Upstream Go module proxy URL (defaults to proxy.golang.org)" default:"https://proxy.golang.org"`
-	MutableTTL   time.Duration `hcl:"mutable-ttl,optional" help:"TTL for mutable Go module proxy endpoints (list, latest). Defaults to 5m." default:"5m"`
-	ImmutableTTL time.Duration `hcl:"immutable-ttl,optional" help:"TTL for immutable Go module proxy endpoints (versioned info, mod, zip). Defaults to 168h (7 days)." default:"168h"`
+	Proxy string `hcl:"proxy,optional" help:"Upstream Go module proxy URL (defaults to proxy.golang.org)" default:"https://proxy.golang.org"`
 }
 
 type GoMod struct {
@@ -35,7 +32,6 @@ type GoMod struct {
 
 var _ Strategy = (*GoMod)(nil)
 
-// NewGoMod creates a new Go module proxy strategy.
 func NewGoMod(ctx context.Context, config GoModConfig, _ jobscheduler.Scheduler, cache cache.Cache, mux Mux) (*GoMod, error) {
 	parsedURL, err := url.Parse(config.Proxy)
 	if err != nil {
@@ -49,19 +45,15 @@ func NewGoMod(ctx context.Context, config GoModConfig, _ jobscheduler.Scheduler,
 		proxy:  parsedURL,
 	}
 
-	// Create the goproxy instance with our custom cacher adapter
 	g.goproxy = &goproxy.Goproxy{
 		Fetcher: &goproxy.GoFetcher{
-			// Configure to use the specified upstream proxy
 			Env: []string{
 				"GOPROXY=" + config.Proxy,
 				"GOSUMDB=off", // Disable checksum database validation in fetcher, to prevent unneccessary double validation
 			},
 		},
 		Cacher: &goproxyCacher{
-			cache:        cache,
-			mutableTTL:   config.MutableTTL,
-			immutableTTL: config.ImmutableTTL,
+			cache: cache,
 		},
 		ProxiedSumDBs: []string{
 			"sum.golang.org https://sum.golang.org",
@@ -69,12 +61,8 @@ func NewGoMod(ctx context.Context, config GoModConfig, _ jobscheduler.Scheduler,
 	}
 
 	g.logger.InfoContext(ctx, "Initialized Go module proxy strategy",
-		slog.String("proxy", g.proxy.String()),
-		slog.Duration("mutable_ttl", config.MutableTTL),
-		slog.Duration("immutable_ttl", config.ImmutableTTL))
+		slog.String("proxy", g.proxy.String()))
 
-	// Register a namespaced handler for Go module proxy patterns
-	// Strip the /gomod prefix and delegate to goproxy
 	mux.Handle("GET /gomod/{path...}", http.StripPrefix("/gomod", g.goproxy))
 
 	return g, nil
