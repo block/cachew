@@ -75,21 +75,21 @@ func (p *privateFetcher) Download(ctx context.Context, path, version string) (in
 		return nil, nil, nil, errors.Wrapf(err, "ensure clone for %s", path)
 	}
 
-	infoReader, err := p.generateInfo(ctx, repoPath, path, version)
+	infoReader, err := p.generateInfo(ctx, repoPath, version)
 	if err != nil {
 		return nil, nil, nil, errors.Wrap(err, "generate info")
 	}
 
 	modReader, err := p.generateMod(ctx, repoPath, path, version)
 	if err != nil {
-		infoReader.Close()
+		_ = infoReader.Close()
 		return nil, nil, nil, errors.Wrap(err, "generate mod")
 	}
 
 	zipReader, err := p.generateZip(ctx, repoPath, path, version)
 	if err != nil {
-		infoReader.Close()
-		modReader.Close()
+		_ = infoReader.Close()
+		_ = modReader.Close()
 		return nil, nil, nil, errors.Wrap(err, "generate zip")
 	}
 
@@ -135,7 +135,8 @@ func (p *privateFetcher) listVersions(ctx context.Context, repoPath string) ([]s
 	}
 
 	var versions []string
-	for _, line := range strings.Split(string(output), "\n") {
+	lines := strings.Split(string(output), "\n")
+	for _, line := range lines {
 		line = strings.TrimSpace(line)
 		if line != "" && semver.IsValid(line) {
 			versions = append(versions, line)
@@ -157,7 +158,8 @@ func (p *privateFetcher) getCommitTime(ctx context.Context, repoPath, ref string
 	}
 
 	timeStr := strings.TrimSpace(string(output))
-	return time.Parse(time.RFC3339, timeStr)
+	t, err := time.Parse(time.RFC3339, timeStr)
+	return t, errors.Wrap(err, "parse commit time")
 }
 
 func (p *privateFetcher) getDefaultBranchVersion(ctx context.Context, repoPath string) (string, time.Time, error) {
@@ -180,7 +182,7 @@ func (p *privateFetcher) getDefaultBranchVersion(ctx context.Context, repoPath s
 	return pseudoVersion, commitTime, nil
 }
 
-func (p *privateFetcher) generateInfo(ctx context.Context, repoPath, modulePath, version string) (io.ReadSeekCloser, error) {
+func (p *privateFetcher) generateInfo(ctx context.Context, repoPath, version string) (io.ReadSeekCloser, error) {
 	commitTime, err := p.getCommitTime(ctx, repoPath, version)
 	if err != nil {
 		return nil, err
@@ -191,6 +193,7 @@ func (p *privateFetcher) generateInfo(ctx context.Context, repoPath, modulePath,
 }
 
 func (p *privateFetcher) generateMod(ctx context.Context, repoPath, modulePath, version string) (io.ReadSeekCloser, error) {
+	// #nosec G204 - version and repoPath are controlled by this package, not user input
 	cmd := exec.CommandContext(ctx, "git", "-C", repoPath, "show", fmt.Sprintf("%s:go.mod", version))
 	output, err := cmd.CombinedOutput()
 
@@ -204,6 +207,7 @@ func (p *privateFetcher) generateMod(ctx context.Context, repoPath, modulePath, 
 
 func (p *privateFetcher) generateZip(ctx context.Context, repoPath, modulePath, version string) (io.ReadSeekCloser, error) {
 	prefix := fmt.Sprintf("%s@%s/", modulePath, version)
+	// #nosec G204 - version and repoPath are controlled by this package, not user input
 	cmd := exec.CommandContext(ctx, "git", "-C", repoPath, "archive",
 		"--format=zip",
 		fmt.Sprintf("--prefix=%s", prefix),

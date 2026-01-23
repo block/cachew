@@ -148,7 +148,7 @@ func (s *Strategy) EnsureClone(ctx context.Context, gitURL string) (string, erro
 
 			select {
 			case <-ctx.Done():
-				return "", ctx.Err()
+				return "", errors.Wrap(ctx.Err(), "context cancelled waiting for clone state")
 			default:
 			}
 		}
@@ -179,7 +179,7 @@ func (s *Strategy) EnsureClone(ctx context.Context, gitURL string) (string, erro
 					}
 				}
 			case <-ctx.Done():
-				return "", ctx.Err()
+				return "", errors.Wrap(ctx.Err(), "context cancelled during fetch")
 			}
 		}
 	}

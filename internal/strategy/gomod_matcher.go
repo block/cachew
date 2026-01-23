@@ -5,17 +5,21 @@ import (
 	"strings"
 )
 
-type modulePathMatcher struct {
+// ModulePathMatcher matches module paths against patterns.
+type ModulePathMatcher struct {
 	patterns []string
 }
 
-func newModulePathMatcher(patterns []string) *modulePathMatcher {
-	return &modulePathMatcher{patterns: patterns}
+// NewModulePathMatcher creates a new matcher with the given patterns.
+func NewModulePathMatcher(patterns []string) *ModulePathMatcher {
+	return &ModulePathMatcher{patterns: patterns}
 }
 
-func (m *modulePathMatcher) isPrivate(modulePath string) bool {
+// IsPrivate checks if a module path matches any private pattern.
+func (m *ModulePathMatcher) IsPrivate(modulePath string) bool {
 	for _, pattern := range m.patterns {
-		if matched, _ := path.Match(pattern, modulePath); matched {
+		matched, err := path.Match(pattern, modulePath)
+		if err == nil && matched {
 			return true
 		}
 
