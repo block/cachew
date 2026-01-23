@@ -3,7 +3,7 @@ package strategy_test
 import (
 	"testing"
 
-	. "github.com/block/cachew/internal/strategy"
+	"github.com/block/cachew/internal/strategy"
 )
 
 func TestModulePathMatcher(t *testing.T) {
@@ -113,7 +113,7 @@ func TestModulePathMatcher(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			matcher := NewModulePathMatcher(tt.patterns)
+			matcher := strategy.NewModulePathMatcher(tt.patterns)
 			got := matcher.IsPrivate(tt.modulePath)
 			if got != tt.want {
 				t.Errorf("IsPrivate() = %v, want %v", got, tt.want)

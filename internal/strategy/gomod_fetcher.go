@@ -5,6 +5,7 @@ import (
 	"io"
 	"time"
 
+	"github.com/alecthomas/errors"
 	"github.com/goproxy/goproxy"
 )
 
@@ -28,21 +29,27 @@ func newCompositeFetcher(
 
 func (c *compositeFetcher) Query(ctx context.Context, path, query string) (version string, t time.Time, err error) {
 	if c.matcher.IsPrivate(path) {
-		return c.privateFetcher.Query(ctx, path, query)
+		v, tm, err := c.privateFetcher.Query(ctx, path, query)
+		return v, tm, errors.Wrap(err, "private fetcher query")
 	}
-	return c.publicFetcher.Query(ctx, path, query)
+	v, tm, err := c.publicFetcher.Query(ctx, path, query)
+	return v, tm, errors.Wrap(err, "public fetcher query")
 }
 
 func (c *compositeFetcher) List(ctx context.Context, path string) (versions []string, err error) {
 	if c.matcher.IsPrivate(path) {
-		return c.privateFetcher.List(ctx, path)
+		v, err := c.privateFetcher.List(ctx, path)
+		return v, errors.Wrap(err, "private fetcher list")
 	}
-	return c.publicFetcher.List(ctx, path)
+	v, err := c.publicFetcher.List(ctx, path)
+	return v, errors.Wrap(err, "public fetcher list")
 }
 
 func (c *compositeFetcher) Download(ctx context.Context, path, version string) (info, mod, zip io.ReadSeekCloser, err error) {
 	if c.matcher.IsPrivate(path) {
-		return c.privateFetcher.Download(ctx, path, version)
+		i, m, z, err := c.privateFetcher.Download(ctx, path, version)
+		return i, m, z, errors.Wrap(err, "private fetcher download")
 	}
-	return c.publicFetcher.Download(ctx, path, version)
+	i, m, z, err := c.publicFetcher.Download(ctx, path, version)
+	return i, m, z, errors.Wrap(err, "public fetcher download")
 }

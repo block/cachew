@@ -80,11 +80,7 @@ func (p *privateFetcher) Download(ctx context.Context, path, version string) (in
 		return nil, nil, nil, errors.Wrap(err, "generate info")
 	}
 
-	modReader, err := p.generateMod(ctx, repoPath, path, version)
-	if err != nil {
-		_ = infoReader.Close()
-		return nil, nil, nil, errors.Wrap(err, "generate mod")
-	}
+	modReader := p.generateMod(ctx, repoPath, path, version)
 
 	zipReader, err := p.generateZip(ctx, repoPath, path, version)
 	if err != nil {
@@ -135,8 +131,7 @@ func (p *privateFetcher) listVersions(ctx context.Context, repoPath string) ([]s
 	}
 
 	var versions []string
-	lines := strings.Split(string(output), "\n")
-	for _, line := range lines {
+	for line := range strings.Lines(string(output)) {
 		line = strings.TrimSpace(line)
 		if line != "" && semver.IsValid(line) {
 			versions = append(versions, line)
@@ -192,17 +187,17 @@ func (p *privateFetcher) generateInfo(ctx context.Context, repoPath, version str
 	return newReadSeekCloser(bytes.NewReader([]byte(info))), nil
 }
 
-func (p *privateFetcher) generateMod(ctx context.Context, repoPath, modulePath, version string) (io.ReadSeekCloser, error) {
+func (p *privateFetcher) generateMod(ctx context.Context, repoPath, modulePath, version string) io.ReadSeekCloser {
 	// #nosec G204 - version and repoPath are controlled by this package, not user input
 	cmd := exec.CommandContext(ctx, "git", "-C", repoPath, "show", fmt.Sprintf("%s:go.mod", version))
 	output, err := cmd.CombinedOutput()
 
 	if err != nil {
 		minimal := fmt.Sprintf("module %s\n\ngo 1.21\n", modulePath)
-		return newReadSeekCloser(bytes.NewReader([]byte(minimal))), nil
+		return newReadSeekCloser(bytes.NewReader([]byte(minimal)))
 	}
 
-	return newReadSeekCloser(bytes.NewReader(output)), nil
+	return newReadSeekCloser(bytes.NewReader(output))
 }
 
 func (p *privateFetcher) generateZip(ctx context.Context, repoPath, modulePath, version string) (io.ReadSeekCloser, error) {
