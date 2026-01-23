@@ -26,3 +26,7 @@ disk {
   limit-mb = 250000
   max-ttl = "8h"
 }
+
+gomod {
+  proxy = "https://proxy.golang.org"
+}
