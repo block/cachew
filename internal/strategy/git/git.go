@@ -159,27 +159,14 @@ func (s *Strategy) EnsureClone(ctx context.Context, gitURL string) (string, erro
 		c.mu.RUnlock()
 
 		if time.Since(lastFetch) > s.config.FetchInterval {
-			select {
-			case c.fetchSem <- struct{}{}:
-				defer func() { <-c.fetchSem }()
-
-				c.mu.RLock()
-				lastFetch = c.lastFetch
-				c.mu.RUnlock()
-
-				if time.Since(lastFetch) > s.config.FetchInterval {
-					if err := s.executeFetch(ctx, c); err != nil {
-						logging.FromContext(ctx).WarnContext(ctx, "Failed to fetch updates",
-							slog.String("upstream", gitURL),
-							slog.String("error", err.Error()))
-					} else {
-						c.mu.Lock()
-						c.lastFetch = time.Now()
-						c.mu.Unlock()
-					}
-				}
-			case <-ctx.Done():
-				return "", errors.Wrap(ctx.Err(), "context cancelled during fetch")
+			if err := s.executeFetch(ctx, c); err != nil {
+				logging.FromContext(ctx).WarnContext(ctx, "Failed to fetch updates",
+					slog.String("upstream", gitURL),
+					slog.String("error", err.Error()))
+			} else {
+				c.mu.Lock()
+				c.lastFetch = time.Now()
+				c.mu.Unlock()
 			}
 		}
 	}
