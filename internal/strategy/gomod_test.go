@@ -26,6 +26,7 @@ type mockGoModServer struct {
 	mu           sync.Mutex     // Protects requestCount
 	lastPath     string
 	responses    map[string]mockResponse
+	t            *testing.T
 }
 
 type mockResponse struct {
@@ -33,10 +34,11 @@ type mockResponse struct {
 	content string
 }
 
-func newMockGoModServer() *mockGoModServer {
+func newMockGoModServer(t *testing.T) *mockGoModServer {
 	m := &mockGoModServer{
 		requestCount: make(map[string]int),
 		responses:    make(map[string]mockResponse),
+		t:            t,
 	}
 
 	// Set up default responses for common endpoints
@@ -56,33 +58,25 @@ func newMockGoModServer() *mockGoModServer {
 	return m
 }
 
-func createModuleZip(modulePath, version string) string {
+func createModuleZip(t *testing.T, modulePath, version string) string {
+	t.Helper()
 	var buf bytes.Buffer
 	w := zip.NewWriter(&buf)
 
 	prefix := modulePath + "@" + version + "/"
 
 	f, err := w.Create(prefix + "go.mod")
-	if err != nil {
-		panic(err)
-	}
+	assert.NoError(t, err)
 	_, err = f.Write([]byte("module " + modulePath + "\n\ngo 1.21\n"))
-	if err != nil {
-		panic(err)
-	}
+	assert.NoError(t, err)
 
 	f2, err := w.Create(prefix + "main.go")
-	if err != nil {
-		panic(err)
-	}
+	assert.NoError(t, err)
 	_, err = f2.Write([]byte("package main\n\nfunc main() {}\n"))
-	if err != nil {
-		panic(err)
-	}
+	assert.NoError(t, err)
 
-	if err := w.Close(); err != nil {
-		panic(err)
-	}
+	err = w.Close()
+	assert.NoError(t, err)
 
 	return buf.String()
 }
@@ -135,7 +129,7 @@ func (m *mockGoModServer) handleRequest(w http.ResponseWriter, r *http.Request) 
 				version := strings.TrimSuffix(versionPart, ".zip")
 				resp = mockResponse{
 					status:  http.StatusOK,
-					content: createModuleZip(modulePath, version),
+					content: createModuleZip(m.t, modulePath, version),
 				}
 				found = true
 			}
@@ -172,7 +166,7 @@ func (m *mockGoModServer) getRequestCount(path string) int {
 func setupGoModTest(t *testing.T) (*mockGoModServer, *http.ServeMux, context.Context) {
 	t.Helper()
 
-	mock := newMockGoModServer()
+	mock := newMockGoModServer(t)
 	t.Cleanup(mock.close)
 
 	_, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelError})
