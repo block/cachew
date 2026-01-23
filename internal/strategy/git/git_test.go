@@ -10,6 +10,7 @@ import (
 
 	"github.com/alecthomas/assert/v2"
 
+	"github.com/block/cachew/internal/gitclone"
 	"github.com/block/cachew/internal/jobscheduler"
 	"github.com/block/cachew/internal/logging"
 	"github.com/block/cachew/internal/strategy/git"
@@ -227,7 +228,7 @@ abc123def456 refs/heads/main`,
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := git.ParseGitRefs([]byte(tt.output))
+			result := gitclone.ParseGitRefs([]byte(tt.output))
 			assert.Equal(t, tt.expected, result)
 		})
 	}

@@ -1,4 +1,4 @@
-package git //nolint:testpackage // Internal functions need to be tested
+package gitclone //nolint:testpackage // Internal functions need to be tested
 
 import (
 	"context"
@@ -13,9 +13,7 @@ func TestGetInsteadOfDisableArgsForURL(t *testing.T) {
 	tests := []struct {
 		name      string
 		targetURL string
-		// We can't easily test the actual git config reading in a unit test,
-		// but we can test the logic would work correctly
-		skipTest bool
+		skipTest  bool
 	}{
 		{
 			name:      "EmptyURL",
@@ -47,12 +45,10 @@ func TestGetInsteadOfDisableArgsForURL(t *testing.T) {
 func TestGitCommand(t *testing.T) {
 	ctx := context.Background()
 
-	// Test that gitCommand creates a valid command
 	cmd, err := gitCommand(ctx, "https://github.com/user/repo", "version")
 	assert.NoError(t, err)
 
 	assert.NotZero(t, cmd)
-	// Should have at least "git" and "version" in args
 	assert.True(t, len(cmd.Args) >= 2)
 	// First arg should be git binary path
 	assert.Equal(t, "git", cmd.Args[0])
@@ -63,7 +59,6 @@ func TestGitCommand(t *testing.T) {
 func TestGitCommandWithEmptyURL(t *testing.T) {
 	ctx := context.Background()
 
-	// Test with empty URL (for commands that don't need URL filtering)
 	cmd, err := gitCommand(ctx, "", "version")
 	assert.NoError(t, err)
 
