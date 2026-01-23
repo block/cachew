@@ -14,17 +14,19 @@ import (
 
 	"github.com/alecthomas/errors"
 	"golang.org/x/mod/semver"
+
+	"github.com/block/cachew/internal/gitclone"
 )
 
 type privateFetcher struct {
-	gomod       *GoMod
-	gitStrategy GitStrategy
+	gomod        *GoMod
+	cloneManager *gitclone.Manager
 }
 
-func newPrivateFetcher(gomod *GoMod, gitStrategy GitStrategy) *privateFetcher {
+func newPrivateFetcher(gomod *GoMod, cloneManager *gitclone.Manager) *privateFetcher {
 	return &privateFetcher{
-		gomod:       gomod,
-		gitStrategy: gitStrategy,
+		gomod:        gomod,
+		cloneManager: cloneManager,
 	}
 }
 
@@ -34,7 +36,12 @@ func (p *privateFetcher) Query(ctx context.Context, path, query string) (version
 
 	gitURL := p.modulePathToGitURL(path)
 
-	repoPath, err := p.gitStrategy.EnsureClone(ctx, gitURL)
+	repo, err := p.cloneManager.GetOrCreate(ctx, gitURL)
+	if err != nil {
+		return "", time.Time{}, errors.Wrapf(err, "get or create clone for %s", path)
+	}
+
+	repoPath, err := p.ensureCloneReady(ctx, repo)
 	if err != nil {
 		return "", time.Time{}, errors.Wrapf(err, "ensure clone for %s", path)
 	}
@@ -52,7 +59,12 @@ func (p *privateFetcher) List(ctx context.Context, path string) (versions []stri
 	logger.DebugContext(ctx, "Private fetcher: List")
 
 	gitURL := p.modulePathToGitURL(path)
-	repoPath, err := p.gitStrategy.EnsureClone(ctx, gitURL)
+	repo, err := p.cloneManager.GetOrCreate(ctx, gitURL)
+	if err != nil {
+		return nil, errors.Wrapf(err, "get or create clone for %s", path)
+	}
+
+	repoPath, err := p.ensureCloneReady(ctx, repo)
 	if err != nil {
 		return nil, errors.Wrapf(err, "ensure clone for %s", path)
 	}
@@ -70,7 +82,12 @@ func (p *privateFetcher) Download(ctx context.Context, path, version string) (in
 	logger.DebugContext(ctx, "Private fetcher: Download")
 
 	gitURL := p.modulePathToGitURL(path)
-	repoPath, err := p.gitStrategy.EnsureClone(ctx, gitURL)
+	repo, err := p.cloneManager.GetOrCreate(ctx, gitURL)
+	if err != nil {
+		return nil, nil, nil, errors.Wrapf(err, "get or create clone for %s", path)
+	}
+
+	repoPath, err := p.ensureCloneReady(ctx, repo)
 	if err != nil {
 		return nil, nil, nil, errors.Wrapf(err, "ensure clone for %s", path)
 	}
@@ -94,6 +111,66 @@ func (p *privateFetcher) Download(ctx context.Context, path, version string) (in
 
 func (p *privateFetcher) modulePathToGitURL(modulePath string) string {
 	return "https://" + modulePath
+}
+
+// ensureCloneReady ensures the repository is cloned and ready to use.
+// It handles the cloning state machine and waits for the clone to complete if necessary.
+func (p *privateFetcher) ensureCloneReady(ctx context.Context, repo *gitclone.Repository) (string, error) {
+	state := repo.State()
+
+	switch state {
+	case gitclone.StateEmpty:
+		// Need to clone
+		gitcloneConfig := gitclone.Config{
+			RootDir:          p.gomod.config.MirrorRoot,
+			FetchInterval:    p.gomod.config.FetchInterval,
+			RefCheckInterval: p.gomod.config.RefCheckInterval,
+			CloneDepth:       p.gomod.config.CloneDepth,
+			GitConfig:        gitclone.DefaultGitTuningConfig(),
+		}
+		if err := repo.Clone(ctx, gitcloneConfig); err != nil {
+			return "", errors.Wrap(err, "clone repository")
+		}
+
+	case gitclone.StateCloning:
+		// Wait for clone to complete
+		for {
+			time.Sleep(100 * time.Millisecond)
+			currentState := repo.State()
+
+			if currentState == gitclone.StateReady {
+				break
+			}
+			if currentState == gitclone.StateEmpty {
+				return "", errors.New("clone failed")
+			}
+
+			select {
+			case <-ctx.Done():
+				return "", errors.Wrap(ctx.Err(), "context cancelled waiting for clone")
+			default:
+			}
+		}
+
+	case gitclone.StateReady:
+		// Maybe fetch if needed
+		if repo.NeedsFetch(p.gomod.config.FetchInterval) {
+			gitcloneConfig := gitclone.Config{
+				RootDir:          p.gomod.config.MirrorRoot,
+				FetchInterval:    p.gomod.config.FetchInterval,
+				RefCheckInterval: p.gomod.config.RefCheckInterval,
+				CloneDepth:       p.gomod.config.CloneDepth,
+				GitConfig:        gitclone.DefaultGitTuningConfig(),
+			}
+			if err := repo.Fetch(ctx, gitcloneConfig); err != nil {
+				p.gomod.logger.WarnContext(ctx, "Failed to fetch updates",
+					slog.String("upstream", repo.UpstreamURL()),
+					slog.String("error", err.Error()))
+			}
+		}
+	}
+
+	return repo.Path(), nil
 }
 
 // resolveVersionQuery resolves a version query (like "latest" or "v1.2.3") to a specific version.

@@ -105,78 +105,12 @@ func New(ctx context.Context, config Config, scheduler jobscheduler.Scheduler, c
 		"ref_check_interval", config.RefCheckInterval,
 		"bundle_interval", config.BundleInterval)
 
-	strategy.RegisterStrategy("git", s)
-
 	return s, nil
 }
 
 var _ strategy.Strategy = (*Strategy)(nil)
 
 func (s *Strategy) String() string { return "git" }
-
-func (s *Strategy) EnsureClone(ctx context.Context, gitURL string) (string, error) {
-	c := s.getOrCreateClone(ctx, gitURL)
-
-	c.mu.RLock()
-	state := c.state
-	c.mu.RUnlock()
-
-	switch state {
-	case stateEmpty:
-		s.startClone(ctx, c)
-		c.mu.RLock()
-		finalState := c.state
-		c.mu.RUnlock()
-
-		if finalState != stateReady {
-			return "", errors.New("clone failed")
-		}
-
-	case stateCloning:
-		for {
-			time.Sleep(100 * time.Millisecond)
-			c.mu.RLock()
-			currentState := c.state
-			c.mu.RUnlock()
-
-			if currentState == stateReady {
-				break
-			}
-			if currentState == stateEmpty {
-				return "", errors.New("clone failed")
-			}
-
-			select {
-			case <-ctx.Done():
-				return "", errors.Wrap(ctx.Err(), "context cancelled waiting for clone state")
-			default:
-			}
-		}
-
-	case stateReady:
-		c.mu.RLock()
-		lastFetch := c.lastFetch
-		c.mu.RUnlock()
-
-		if time.Since(lastFetch) > s.config.FetchInterval {
-			if err := s.executeFetch(ctx, c); err != nil {
-				logging.FromContext(ctx).WarnContext(ctx, "Failed to fetch updates",
-					slog.String("upstream", gitURL),
-					slog.String("error", err.Error()))
-			} else {
-				c.mu.Lock()
-				c.lastFetch = time.Now()
-				c.mu.Unlock()
-			}
-		}
-	}
-
-	return c.path, nil
-}
-
-func (s *Strategy) GetClonePath(gitURL string) string {
-	return s.clonePathForURL(gitURL)
-}
 
 func (s *Strategy) handleRequest(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()

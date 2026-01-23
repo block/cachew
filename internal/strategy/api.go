@@ -4,7 +4,6 @@ package strategy
 import (
 	"context"
 	"net/http"
-	"sync"
 
 	"github.com/alecthomas/errors"
 	"github.com/alecthomas/hcl/v2"
@@ -79,27 +78,4 @@ func Create(
 
 type Strategy interface {
 	String() string
-}
-
-type GitStrategy interface {
-	Strategy
-	EnsureClone(ctx context.Context, gitURL string) (string, error)
-	GetClonePath(gitURL string) string
-}
-
-var (
-	strategyRegistry   = make(map[string]Strategy)
-	strategyRegistryMu sync.RWMutex
-)
-
-func RegisterStrategy(name string, strategy Strategy) {
-	strategyRegistryMu.Lock()
-	defer strategyRegistryMu.Unlock()
-	strategyRegistry[name] = strategy
-}
-
-func GetStrategy(name string) Strategy {
-	strategyRegistryMu.RLock()
-	defer strategyRegistryMu.RUnlock()
-	return strategyRegistry[name]
 }
