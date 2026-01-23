@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"maps"
 	"net/http"
-	"net/textproto"
 	"os"
 	"path/filepath"
 	"sort"
@@ -130,14 +129,14 @@ func (d *Disk) Size() int64 {
 	return d.size.Load()
 }
 
-func (d *Disk) Create(ctx context.Context, key Key, headers textproto.MIMEHeader, ttl time.Duration) (io.WriteCloser, error) {
+func (d *Disk) Create(ctx context.Context, key Key, headers http.Header, ttl time.Duration) (io.WriteCloser, error) {
 	if ttl > d.config.MaxTTL || ttl == 0 {
 		ttl = d.config.MaxTTL
 	}
 
 	now := time.Now()
 	// Clone headers to avoid concurrent map writes
-	clonedHeaders := make(textproto.MIMEHeader)
+	clonedHeaders := make(http.Header)
 	maps.Copy(clonedHeaders, headers)
 	if clonedHeaders.Get("Last-Modified") == "" {
 		clonedHeaders.Set("Last-Modified", now.UTC().Format(http.TimeFormat))
@@ -204,7 +203,7 @@ func (d *Disk) Delete(_ context.Context, key Key) error {
 	return nil
 }
 
-func (d *Disk) Stat(ctx context.Context, key Key) (textproto.MIMEHeader, error) {
+func (d *Disk) Stat(ctx context.Context, key Key) (http.Header, error) {
 	path := d.keyToPath(key)
 	fullPath := filepath.Join(d.config.Root, path)
 
@@ -229,7 +228,7 @@ func (d *Disk) Stat(ctx context.Context, key Key) (textproto.MIMEHeader, error) 
 	return headers, nil
 }
 
-func (d *Disk) Open(ctx context.Context, key Key) (io.ReadCloser, textproto.MIMEHeader, error) {
+func (d *Disk) Open(ctx context.Context, key Key) (io.ReadCloser, http.Header, error) {
 	path := d.keyToPath(key)
 	fullPath := filepath.Join(d.config.Root, path)
 
@@ -378,7 +377,7 @@ type diskWriter struct {
 	path      string
 	tempPath  string
 	expiresAt time.Time
-	headers   textproto.MIMEHeader
+	headers   http.Header
 	size      int64
 	ctx       context.Context
 }

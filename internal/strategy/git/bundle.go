@@ -4,7 +4,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
-	"net/textproto"
+	"net/http"
 	"strings"
 	"time"
 
@@ -20,7 +20,7 @@ func (s *Strategy) generateAndUploadBundle(ctx context.Context, c *clone) {
 
 	cacheKey := cache.NewKey(c.upstreamURL + ".bundle")
 
-	headers := textproto.MIMEHeader{
+	headers := http.Header{
 		"Content-Type": []string{"application/x-git-bundle"},
 	}
 	ttl := 7 * 24 * time.Hour

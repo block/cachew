@@ -2,7 +2,7 @@ package cache
 
 import (
 	"encoding/json"
-	"net/textproto"
+	"net/http"
 	"time"
 
 	"github.com/alecthomas/errors"
@@ -55,7 +55,7 @@ func (s *diskMetaDB) setTTL(key Key, expiresAt time.Time) error {
 	}))
 }
 
-func (s *diskMetaDB) set(key Key, expiresAt time.Time, headers textproto.MIMEHeader) error {
+func (s *diskMetaDB) set(key Key, expiresAt time.Time, headers http.Header) error {
 	ttlBytes, err := expiresAt.MarshalBinary()
 	if err != nil {
 		return errors.Errorf("failed to marshal TTL: %w", err)
@@ -90,8 +90,8 @@ func (s *diskMetaDB) getTTL(key Key) (time.Time, error) {
 	return expiresAt, errors.WithStack(err)
 }
 
-func (s *diskMetaDB) getHeaders(key Key) (textproto.MIMEHeader, error) {
-	var headers textproto.MIMEHeader
+func (s *diskMetaDB) getHeaders(key Key) (http.Header, error) {
+	var headers http.Header
 	err := s.db.View(func(tx *bbolt.Tx) error {
 		bucket := tx.Bucket(headersBucketName)
 		headersBytes := bucket.Get(key[:])

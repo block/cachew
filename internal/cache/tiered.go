@@ -3,7 +3,7 @@ package cache
 import (
 	"context"
 	"io"
-	"net/textproto"
+	"net/http"
 	"os"
 	"strings"
 	"sync"
@@ -50,7 +50,7 @@ func (t Tiered) Close() error {
 }
 
 // Create a new object. All underlying caches will be written to in sequence.
-func (t Tiered) Create(ctx context.Context, key Key, headers textproto.MIMEHeader, ttl time.Duration) (io.WriteCloser, error) {
+func (t Tiered) Create(ctx context.Context, key Key, headers http.Header, ttl time.Duration) (io.WriteCloser, error) {
 	// The first error will cancel all outstanding writes.
 	ctx, cancel := context.WithCancelCause(ctx)
 
@@ -91,7 +91,7 @@ func (t Tiered) Delete(ctx context.Context, key Key) error {
 // Stat returns headers from the first cache that succeeds.
 //
 // If all caches fail, all errors are returned.
-func (t Tiered) Stat(ctx context.Context, key Key) (textproto.MIMEHeader, error) {
+func (t Tiered) Stat(ctx context.Context, key Key) (http.Header, error) {
 	errs := make([]error, len(t.caches))
 	for i, c := range t.caches {
 		headers, err := c.Stat(ctx, key)
@@ -109,7 +109,7 @@ func (t Tiered) Stat(ctx context.Context, key Key) (textproto.MIMEHeader, error)
 // Open returns a reader from the first cache that succeeds.
 //
 // If all caches fail, all errors are returned.
-func (t Tiered) Open(ctx context.Context, key Key) (io.ReadCloser, textproto.MIMEHeader, error) {
+func (t Tiered) Open(ctx context.Context, key Key) (io.ReadCloser, http.Header, error) {
 	errs := make([]error, len(t.caches))
 	for i, c := range t.caches {
 		r, headers, err := c.Open(ctx, key)

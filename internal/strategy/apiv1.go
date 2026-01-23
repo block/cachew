@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"maps"
 	"net/http"
-	"net/textproto"
 	"os"
 	"time"
 
@@ -109,7 +108,7 @@ func (d *APIV1) putObject(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Extract and filter headers from request
-	headers := cache.FilterTransportHeaders(textproto.MIMEHeader(r.Header))
+	headers := cache.FilterTransportHeaders(r.Header)
 
 	cw, err := d.cache.Create(r.Context(), key, headers, ttl)
 	if err != nil {
