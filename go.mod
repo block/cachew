@@ -40,7 +40,7 @@ require (
 
 require (
 	github.com/alecthomas/assert/v2 v2.11.0
-	github.com/alecthomas/chroma/v2 v2.23.0
+	github.com/alecthomas/chroma/v2 v2.23.1
 	github.com/alecthomas/errors v0.9.1
 	github.com/alecthomas/participle/v2 v2.1.4 // indirect
 	github.com/alecthomas/repr v0.5.2 // indirect
