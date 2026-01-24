@@ -80,14 +80,16 @@ func NewKey(url string) Key { return Key(sha256.Sum256([]byte(url))) }
 func (k *Key) String() string { return hex.EncodeToString(k[:]) }
 
 func (k *Key) UnmarshalText(text []byte) error {
-	bytes, err := hex.DecodeString(string(text))
-	if err != nil {
-		return errors.WithStack(err)
+	// Try to decode as SHA256 hex encoded string
+	if len(text) == 64 {
+		bytes, err := hex.DecodeString(string(text))
+		if err == nil && len(bytes) == len(*k) {
+			copy(k[:], bytes)
+			return nil
+		}
 	}
-	if len(bytes) != len(*k) {
-		return errors.New("invalid key length")
-	}
-	copy(k[:], bytes)
+	// If not valid hex, treat as string and SHA256 it
+	*k = NewKey(string(text))
 	return nil
 }
 

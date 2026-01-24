@@ -54,10 +54,10 @@ func TestIntegrationGitCloneViaProxy(t *testing.T) {
 
 	// Create the git strategy
 	mux := http.NewServeMux()
-	strategy, err := git.New(ctx, jobscheduler.New(ctx, jobscheduler.Config{}), git.Config{
+	strategy, err := git.New(ctx, git.Config{
 		MirrorRoot:    clonesDir,
 		FetchInterval: 15,
-	}, nil, mux)
+	}, jobscheduler.New(ctx, jobscheduler.Config{}), nil, mux)
 	assert.NoError(t, err)
 	assert.NotZero(t, strategy)
 
@@ -67,7 +67,7 @@ func TestIntegrationGitCloneViaProxy(t *testing.T) {
 
 	// Clone a small public repository through the proxy
 	// Using a small test repo to keep the test fast
-	repoURL := fmt.Sprintf("%s/github.com/octocat/Hello-World", server.URL)
+	repoURL := fmt.Sprintf("%s/git/github.com/octocat/Hello-World", server.URL)
 
 	// First clone - should forward to upstream and start background clone
 	cmd := exec.Command("git", "clone", repoURL, filepath.Join(workDir, "repo1"))
@@ -132,16 +132,16 @@ func TestIntegrationGitFetchViaProxy(t *testing.T) {
 	assert.NoError(t, err)
 
 	mux := http.NewServeMux()
-	_, err = git.New(ctx, jobscheduler.New(ctx, jobscheduler.Config{}), git.Config{
+	_, err = git.New(ctx, git.Config{
 		MirrorRoot:    clonesDir,
 		FetchInterval: 15,
-	}, nil, mux)
+	}, jobscheduler.New(ctx, jobscheduler.Config{}), nil, mux)
 	assert.NoError(t, err)
 
 	server := testServerWithLogging(ctx, mux)
 	defer server.Close()
 
-	repoURL := fmt.Sprintf("%s/github.com/octocat/Hello-World", server.URL)
+	repoURL := fmt.Sprintf("%s/git/github.com/octocat/Hello-World", server.URL)
 
 	// Clone first
 	cmd := exec.Command("git", "clone", repoURL, filepath.Join(workDir, "repo"))
@@ -211,10 +211,10 @@ func TestIntegrationPushForwardsToUpstream(t *testing.T) {
 	defer upstreamServer.Close()
 
 	mux := http.NewServeMux()
-	_, err = git.New(ctx, jobscheduler.New(ctx, jobscheduler.Config{}), git.Config{
+	_, err = git.New(ctx, git.Config{
 		MirrorRoot:    clonesDir,
 		FetchInterval: 15,
-	}, nil, mux)
+	}, jobscheduler.New(ctx, jobscheduler.Config{}), nil, mux)
 	assert.NoError(t, err)
 
 	server := testServerWithLogging(ctx, mux)
@@ -255,7 +255,7 @@ func TestIntegrationPushForwardsToUpstream(t *testing.T) {
 
 	// Try to push through the proxy - this will fail but should forward to upstream
 	// We're just verifying the forwarding logic, not actual push success
-	proxyURL := fmt.Sprintf("%s/localhost/test/repo", server.URL)
+	proxyURL := fmt.Sprintf("%s/git/localhost/test/repo", server.URL)
 	cmd = exec.Command("git", "-C", repoPath, "push", proxyURL, "HEAD:main")
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
 	_, _ = cmd.CombinedOutput()
