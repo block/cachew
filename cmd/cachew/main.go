@@ -23,6 +23,8 @@ type CLI struct {
 
 	URL      string `help:"Remote cache server URL." default:"http://127.0.0.1:8080"`
 	Platform bool   `help:"Prefix keys with platform ($${os}-$${arch}-)."`
+	Daily    bool   `help:"Prefix keys with date ($${YYYY}-$${MM}-$${DD}-). Mutually exclusive with --hourly." xor:"timeprefix"`
+	Hourly   bool   `help:"Prefix keys with date and hour ($${YYYY}-$${MM}-$${DD}-$${HH}-). Mutually exclusive with --daily." xor:"timeprefix"`
 
 	Get    GetCmd    `cmd:"" help:"Download object from cache." group:"Operations:"`
 	Stat   StatCmd   `cmd:"" help:"Show metadata for cached object." group:"Operations:"`
@@ -194,9 +196,25 @@ func (pk *PlatformKey) String() string {
 }
 
 func (pk *PlatformKey) AfterApply(cli *CLI) error {
-	if !cli.Platform {
-		return nil
+	prefixed := pk.raw
+
+	// Apply platform prefix if enabled
+	if cli.Platform {
+		prefixed = fmt.Sprintf("%s-%s-%s", runtime.GOOS, runtime.GOARCH, prefixed)
 	}
-	prefixed := fmt.Sprintf("%s-%s-%s", runtime.GOOS, runtime.GOARCH, pk.raw)
+
+	// Apply time-based prefix if enabled (goes first in final order)
+	now := time.Now()
+	if cli.Hourly {
+		prefixed = now.Format("2006-01-02-15-") + prefixed
+	} else if cli.Daily {
+		prefixed = now.Format("2006-01-02-") + prefixed
+	}
+
+	// Only print debug if we actually modified the key
+	if prefixed != pk.raw {
+		fmt.Fprintf(os.Stderr, "[DEBUG] Key transform: %s -> %s\n", pk.raw, prefixed) //nolint:forbidigo
+	}
+
 	return errors.WithStack(pk.key.UnmarshalText([]byte(prefixed)))
 }
