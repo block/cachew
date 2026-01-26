@@ -7,16 +7,14 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httputil"
-	"net/url"
 	"os"
-	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/alecthomas/errors"
 
 	"github.com/block/cachew/internal/cache"
+	"github.com/block/cachew/internal/gitclone"
 	"github.com/block/cachew/internal/jobscheduler"
 	"github.com/block/cachew/internal/logging"
 	"github.com/block/cachew/internal/strategy"
@@ -34,34 +32,14 @@ type Config struct {
 	CloneDepth       int           `hcl:"clone-depth,optional" help:"Depth for shallow clones. 0 means full clone." default:"0"`
 }
 
-type cloneState int
-
-const (
-	stateEmpty cloneState = iota
-	stateCloning
-	stateReady
-)
-
-type clone struct {
-	mu            sync.RWMutex
-	state         cloneState
-	path          string
-	upstreamURL   string
-	lastFetch     time.Time
-	lastRefCheck  time.Time
-	refCheckValid bool
-	fetchSem      chan struct{}
-}
-
 type Strategy struct {
-	config     Config
-	cache      cache.Cache
-	clones     map[string]*clone
-	clonesMu   sync.RWMutex
-	httpClient *http.Client
-	proxy      *httputil.ReverseProxy
-	ctx        context.Context
-	scheduler  jobscheduler.Scheduler
+	config       Config
+	cache        cache.Cache
+	cloneManager *gitclone.Manager
+	httpClient   *http.Client
+	proxy        *httputil.ReverseProxy
+	ctx          context.Context
+	scheduler    jobscheduler.Scheduler
 }
 
 func New(ctx context.Context, config Config, scheduler jobscheduler.Scheduler, cache cache.Cache, mux strategy.Mux) (*Strategy, error) {
@@ -79,20 +57,27 @@ func New(ctx context.Context, config Config, scheduler jobscheduler.Scheduler, c
 		config.RefCheckInterval = 10 * time.Second
 	}
 
-	if err := os.MkdirAll(config.MirrorRoot, 0o750); err != nil {
-		return nil, errors.Wrap(err, "create mirror root directory")
+	cloneManager, err := gitclone.NewManager(ctx, gitclone.Config{
+		RootDir:          config.MirrorRoot,
+		FetchInterval:    config.FetchInterval,
+		RefCheckInterval: config.RefCheckInterval,
+		CloneDepth:       config.CloneDepth,
+		GitConfig:        gitclone.DefaultGitTuningConfig(),
+	})
+	if err != nil {
+		return nil, errors.Wrap(err, "create clone manager")
 	}
 
 	s := &Strategy{
-		config:     config,
-		cache:      cache,
-		clones:     make(map[string]*clone),
-		httpClient: http.DefaultClient,
-		ctx:        ctx,
-		scheduler:  scheduler.WithQueuePrefix("git"),
+		config:       config,
+		cache:        cache,
+		cloneManager: cloneManager,
+		httpClient:   http.DefaultClient,
+		ctx:          ctx,
+		scheduler:    scheduler.WithQueuePrefix("git"),
 	}
 
-	if err := s.discoverExistingClones(ctx); err != nil {
+	if err := s.cloneManager.DiscoverExisting(ctx); err != nil {
 		logger.WarnContext(ctx, "Failed to discover existing clones",
 			slog.String("error", err.Error()))
 	}
@@ -156,33 +141,36 @@ func (s *Strategy) handleRequest(w http.ResponseWriter, r *http.Request) {
 	repoPath := ExtractRepoPath(pathValue)
 	upstreamURL := "https://" + host + "/" + repoPath
 
-	c := s.getOrCreateClone(ctx, upstreamURL)
+	repo, err := s.cloneManager.GetOrCreate(ctx, upstreamURL)
+	if err != nil {
+		logger.ErrorContext(ctx, "Failed to get or create clone",
+			slog.String("error", err.Error()))
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
 
-	c.mu.RLock()
-	state := c.state
-	c.mu.RUnlock()
-
+	state := repo.State()
 	isInfoRefs := strings.HasSuffix(pathValue, "/info/refs")
 
 	switch state {
-	case stateReady:
+	case gitclone.StateReady:
 		if isInfoRefs {
-			if err := s.ensureRefsUpToDate(ctx, c); err != nil {
+			if err := s.ensureRefsUpToDate(ctx, repo); err != nil {
 				logger.WarnContext(ctx, "Failed to ensure refs up to date",
 					slog.String("error", err.Error()))
 			}
 		}
-		s.maybeBackgroundFetch(c)
-		s.serveFromBackend(w, r, c)
+		s.maybeBackgroundFetch(repo)
+		s.serveFromBackend(w, r, repo)
 
-	case stateCloning:
+	case gitclone.StateCloning:
 		logger.DebugContext(ctx, "Clone in progress, forwarding to upstream")
 		s.forwardToUpstream(w, r, host, pathValue)
 
-	case stateEmpty:
+	case gitclone.StateEmpty:
 		logger.DebugContext(ctx, "Starting background clone, forwarding to upstream")
-		s.scheduler.Submit(c.upstreamURL, "clone", func(ctx context.Context) error {
-			s.startClone(ctx, c)
+		s.scheduler.Submit(repo.UpstreamURL(), "clone", func(ctx context.Context) error {
+			s.startClone(ctx, repo)
 			return nil
 		})
 		s.forwardToUpstream(w, r, host, pathValue)
@@ -241,211 +229,79 @@ func (s *Strategy) handleBundleRequest(w http.ResponseWriter, r *http.Request, h
 	}
 }
 
-func (s *Strategy) getOrCreateClone(ctx context.Context, upstreamURL string) *clone {
-	s.clonesMu.RLock()
-	c, exists := s.clones[upstreamURL]
-	s.clonesMu.RUnlock()
-
-	if exists {
-		return c
-	}
-
-	s.clonesMu.Lock()
-	defer s.clonesMu.Unlock()
-
-	if c, exists = s.clones[upstreamURL]; exists {
-		return c
-	}
-
-	clonePath := s.clonePathForURL(upstreamURL)
-
-	c = &clone{
-		state:       stateEmpty,
-		path:        clonePath,
-		upstreamURL: upstreamURL,
-		fetchSem:    make(chan struct{}, 1),
-	}
-
-	gitDir := filepath.Join(clonePath, ".git")
-	if _, err := os.Stat(gitDir); err == nil {
-		c.state = stateReady
-		logging.FromContext(ctx).DebugContext(ctx, "Found existing clone on disk",
-			slog.String("path", clonePath))
-
-		if s.config.BundleInterval > 0 {
-			s.scheduleBundleJobs(c)
-		}
-	}
-
-	c.fetchSem <- struct{}{}
-
-	s.clones[upstreamURL] = c
-	return c
-}
-
-func (s *Strategy) clonePathForURL(upstreamURL string) string {
-	parsed, err := url.Parse(upstreamURL)
-	if err != nil {
-		return filepath.Join(s.config.MirrorRoot, "unknown")
-	}
-
-	repoPath := strings.TrimSuffix(parsed.Path, ".git")
-	return filepath.Join(s.config.MirrorRoot, parsed.Host, repoPath)
-}
-
-func (s *Strategy) discoverExistingClones(ctx context.Context) error {
+func (s *Strategy) startClone(ctx context.Context, repo *gitclone.Repository) {
 	logger := logging.FromContext(ctx)
-
-	err := filepath.Walk(s.config.MirrorRoot, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-
-		if !info.IsDir() {
-			return nil
-		}
-
-		gitDir := filepath.Join(path, ".git")
-		headPath := filepath.Join(path, ".git", "HEAD")
-		if _, statErr := os.Stat(gitDir); statErr != nil {
-			if errors.Is(statErr, os.ErrNotExist) {
-				return nil
-			}
-			return errors.Wrap(statErr, "stat .git directory")
-		}
-		if _, statErr := os.Stat(headPath); statErr != nil {
-			if errors.Is(statErr, os.ErrNotExist) {
-				return nil
-			}
-			return errors.Wrap(statErr, "stat HEAD file")
-		}
-
-		relPath, err := filepath.Rel(s.config.MirrorRoot, path)
-		if err != nil {
-			logger.WarnContext(ctx, "Failed to get relative path",
-				slog.String("path", path),
-				slog.String("error", err.Error()))
-			return nil
-		}
-
-		parts := strings.Split(filepath.ToSlash(relPath), "/")
-		if len(parts) < 2 {
-			return nil
-		}
-
-		host := parts[0]
-		repoPath := strings.Join(parts[1:], "/")
-		upstreamURL := "https://" + host + "/" + repoPath
-
-		c := &clone{
-			state:       stateReady,
-			path:        path,
-			upstreamURL: upstreamURL,
-			fetchSem:    make(chan struct{}, 1),
-		}
-		c.fetchSem <- struct{}{}
-
-		s.clonesMu.Lock()
-		s.clones[upstreamURL] = c
-		s.clonesMu.Unlock()
-
-		logger.DebugContext(ctx, "Discovered existing clone",
-			slog.String("path", path),
-			slog.String("upstream", upstreamURL))
-
-		if s.config.BundleInterval > 0 {
-			s.scheduleBundleJobs(c)
-		}
-
-		return nil
-	})
-
-	if err != nil {
-		return errors.Wrap(err, "walk mirror root")
-	}
-
-	return nil
-}
-
-func (s *Strategy) startClone(ctx context.Context, c *clone) {
-	logger := logging.FromContext(ctx)
-
-	c.mu.Lock()
-	if c.state != stateEmpty {
-		c.mu.Unlock()
-		return
-	}
-	c.state = stateCloning
-	c.mu.Unlock()
 
 	logger.InfoContext(ctx, "Starting clone",
-		slog.String("upstream", c.upstreamURL),
-		slog.String("path", c.path))
+		slog.String("upstream", repo.UpstreamURL()),
+		slog.String("path", repo.Path()))
 
-	err := s.executeClone(ctx, c)
+	gitcloneConfig := gitclone.Config{
+		RootDir:          s.config.MirrorRoot,
+		FetchInterval:    s.config.FetchInterval,
+		RefCheckInterval: s.config.RefCheckInterval,
+		CloneDepth:       s.config.CloneDepth,
+		GitConfig:        gitclone.DefaultGitTuningConfig(),
+	}
 
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	err := repo.Clone(ctx, gitcloneConfig)
 
 	if err != nil {
 		logger.ErrorContext(ctx, "Clone failed",
-			slog.String("upstream", c.upstreamURL),
+			slog.String("upstream", repo.UpstreamURL()),
 			slog.String("error", err.Error()))
-		c.state = stateEmpty
 		return
 	}
 
-	c.state = stateReady
-	c.lastFetch = time.Now()
 	logger.InfoContext(ctx, "Clone completed",
-		slog.String("upstream", c.upstreamURL),
-		slog.String("path", c.path))
+		slog.String("upstream", repo.UpstreamURL()),
+		slog.String("path", repo.Path()))
 
 	if s.config.BundleInterval > 0 {
-		s.scheduleBundleJobs(c)
+		s.scheduleBundleJobs(repo)
 	}
 }
 
-func (s *Strategy) maybeBackgroundFetch(c *clone) {
-	c.mu.RLock()
-	lastFetch := c.lastFetch
-	c.mu.RUnlock()
-
-	if time.Since(lastFetch) < s.config.FetchInterval {
+func (s *Strategy) maybeBackgroundFetch(repo *gitclone.Repository) {
+	if !repo.NeedsFetch(s.config.FetchInterval) {
 		return
 	}
 
-	s.scheduler.Submit(c.upstreamURL, "fetch", func(ctx context.Context) error {
-		s.backgroundFetch(ctx, c)
+	s.scheduler.Submit(repo.UpstreamURL(), "fetch", func(ctx context.Context) error {
+		s.backgroundFetch(ctx, repo)
 		return nil
 	})
 }
 
-func (s *Strategy) backgroundFetch(ctx context.Context, c *clone) {
+func (s *Strategy) backgroundFetch(ctx context.Context, repo *gitclone.Repository) {
 	logger := logging.FromContext(ctx)
 
-	c.mu.Lock()
-	if time.Since(c.lastFetch) < s.config.FetchInterval {
-		c.mu.Unlock()
+	if !repo.NeedsFetch(s.config.FetchInterval) {
 		return
 	}
-	c.lastFetch = time.Now()
-	c.mu.Unlock()
 
 	logger.DebugContext(ctx, "Fetching updates",
-		slog.String("upstream", c.upstreamURL),
-		slog.String("path", c.path))
+		slog.String("upstream", repo.UpstreamURL()),
+		slog.String("path", repo.Path()))
 
-	if err := s.executeFetch(ctx, c); err != nil {
+	gitcloneConfig := gitclone.Config{
+		RootDir:          s.config.MirrorRoot,
+		FetchInterval:    s.config.FetchInterval,
+		RefCheckInterval: s.config.RefCheckInterval,
+		CloneDepth:       s.config.CloneDepth,
+		GitConfig:        gitclone.DefaultGitTuningConfig(),
+	}
+
+	if err := repo.Fetch(ctx, gitcloneConfig); err != nil {
 		logger.ErrorContext(ctx, "Fetch failed",
-			slog.String("upstream", c.upstreamURL),
+			slog.String("upstream", repo.UpstreamURL()),
 			slog.String("error", err.Error()))
 	}
 }
 
-func (s *Strategy) scheduleBundleJobs(c *clone) {
-	s.scheduler.SubmitPeriodicJob(c.upstreamURL, "bundle-periodic", s.config.BundleInterval, func(ctx context.Context) error {
-		s.generateAndUploadBundle(ctx, c)
+func (s *Strategy) scheduleBundleJobs(repo *gitclone.Repository) {
+	s.scheduler.SubmitPeriodicJob(repo.UpstreamURL(), "bundle-periodic", s.config.BundleInterval, func(ctx context.Context) error {
+		s.generateAndUploadBundle(ctx, repo)
 		return nil
 	})
 }

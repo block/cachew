@@ -1,4 +1,6 @@
-package git
+// Package gitclone provides reusable git clone management with lifecycle control,
+// concurrency management, and large repository optimizations.
+package gitclone
 
 import (
 	"bufio"
@@ -9,8 +11,6 @@ import (
 	"github.com/alecthomas/errors"
 )
 
-// gitCommand creates a git command with insteadOf URL rewriting disabled for the given URL
-// to prevent infinite loops where git config rules rewrite URLs to point back through the proxy.
 func gitCommand(ctx context.Context, url string, args ...string) (*exec.Cmd, error) {
 	configArgs, err := getInsteadOfDisableArgsForURL(ctx, url)
 	if err != nil {
@@ -27,7 +27,6 @@ func gitCommand(ctx context.Context, url string, args ...string) (*exec.Cmd, err
 	return cmd, nil
 }
 
-// getInsteadOfDisableArgsForURL returns arguments to disable insteadOf rules that would affect the given URL.
 func getInsteadOfDisableArgsForURL(ctx context.Context, targetURL string) ([]string, error) {
 	if targetURL == "" {
 		return nil, nil
@@ -36,7 +35,6 @@ func getInsteadOfDisableArgsForURL(ctx context.Context, targetURL string) ([]str
 	cmd := exec.CommandContext(ctx, "git", "config", "--get-regexp", "^url\\..*\\.(insteadof|pushinsteadof)$")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		// Exit code 1 when no insteadOf rules exist is expected, not an error
 		return []string{}, nil //nolint:nilerr
 	}
 
@@ -59,4 +57,19 @@ func getInsteadOfDisableArgsForURL(ctx context.Context, targetURL string) ([]str
 	}
 
 	return args, nil
+}
+
+func ParseGitRefs(output []byte) map[string]string {
+	refs := make(map[string]string)
+	scanner := bufio.NewScanner(strings.NewReader(string(output)))
+	for scanner.Scan() {
+		line := scanner.Text()
+		parts := strings.Fields(line)
+		if len(parts) >= 2 {
+			sha := parts[0]
+			ref := parts[1]
+			refs[ref] = sha
+		}
+	}
+	return refs
 }
