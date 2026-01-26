@@ -6,7 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"io"
-	"net/textproto"
+	"net/http"
 	"time"
 
 	"github.com/alecthomas/errors"
@@ -80,14 +80,16 @@ func NewKey(url string) Key { return Key(sha256.Sum256([]byte(url))) }
 func (k *Key) String() string { return hex.EncodeToString(k[:]) }
 
 func (k *Key) UnmarshalText(text []byte) error {
-	bytes, err := hex.DecodeString(string(text))
-	if err != nil {
-		return errors.WithStack(err)
+	// Try to decode as SHA256 hex encoded string
+	if len(text) == 64 {
+		bytes, err := hex.DecodeString(string(text))
+		if err == nil && len(bytes) == len(*k) {
+			copy(k[:], bytes)
+			return nil
+		}
 	}
-	if len(bytes) != len(*k) {
-		return errors.New("invalid key length")
-	}
-	copy(k[:], bytes)
+	// If not valid hex, treat as string and SHA256 it
+	*k = NewKey(string(text))
 	return nil
 }
 
@@ -97,8 +99,8 @@ func (k *Key) MarshalText() ([]byte, error) {
 
 // FilterTransportHeaders returns a copy of the given headers with standard HTTP transport headers removed.
 // These headers are typically added by HTTP clients/servers and should not be cached.
-func FilterTransportHeaders(headers textproto.MIMEHeader) textproto.MIMEHeader {
-	filtered := make(textproto.MIMEHeader)
+func FilterTransportHeaders(headers http.Header) http.Header {
+	filtered := make(http.Header)
 	for key, values := range headers {
 		// Skip standard HTTP headers added by transport layer or that shouldn't be cached
 		if key == "Content-Length" || key == "Date" || key == "Accept-Encoding" ||
@@ -120,13 +122,13 @@ type Cache interface {
 	//
 	// Expired files MUST not be returned.
 	// Must return os.ErrNotExist if the file does not exist.
-	Stat(ctx context.Context, key Key) (textproto.MIMEHeader, error)
+	Stat(ctx context.Context, key Key) (http.Header, error)
 	// Open an existing file in the cache.
 	//
 	// Expired files MUST NOT be returned.
 	// The returned headers MUST include a Last-Modified header.
 	// Must return os.ErrNotExist if the file does not exist.
-	Open(ctx context.Context, key Key) (io.ReadCloser, textproto.MIMEHeader, error)
+	Open(ctx context.Context, key Key) (io.ReadCloser, http.Header, error)
 	// Create a new file in the cache.
 	//
 	// If "ttl" is zero, a maximum TTL MUST be used by the implementation.
@@ -134,7 +136,7 @@ type Cache interface {
 	// The file MUST NOT be available for read until completely written and closed.
 	//
 	// If the context is cancelled the object MUST NOT be made available in the cache.
-	Create(ctx context.Context, key Key, headers textproto.MIMEHeader, ttl time.Duration) (io.WriteCloser, error)
+	Create(ctx context.Context, key Key, headers http.Header, ttl time.Duration) (io.WriteCloser, error)
 	// Delete a file from the cache.
 	//
 	// MUST be atomic.

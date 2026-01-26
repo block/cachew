@@ -4,7 +4,6 @@ import (
 	"context"
 	"io"
 	"net/http"
-	"net/textproto"
 	"os"
 	"testing"
 	"time"
@@ -215,7 +214,7 @@ func testHeaders(t *testing.T, c cache.Cache) {
 	key := cache.NewKey("test-key-with-headers")
 
 	// Create headers to store
-	headers := textproto.MIMEHeader{
+	headers := http.Header{
 		"Content-Type":   []string{"application/json"},
 		"Cache-Control":  []string{"max-age=3600"},
 		"X-Custom-Field": []string{"custom-value"},
@@ -258,7 +257,7 @@ func testContextCancellation(t *testing.T, c cache.Cache) {
 
 	// Create an object with the cancellable context
 	key := cache.NewKey("test-cancelled")
-	writer, err := c.Create(cancelledCtx, key, textproto.MIMEHeader{}, time.Hour)
+	writer, err := c.Create(cancelledCtx, key, http.Header{}, time.Hour)
 	assert.NoError(t, err)
 
 	// Write some data
@@ -310,7 +309,7 @@ func testLastModified(t *testing.T, c cache.Cache) {
 	// Test with explicit Last-Modified header
 	key2 := cache.NewKey("test-last-modified-explicit")
 	explicitTime := time.Date(2023, 1, 15, 12, 30, 0, 0, time.UTC)
-	explicitHeaders := textproto.MIMEHeader{
+	explicitHeaders := http.Header{
 		"Last-Modified": []string{explicitTime.Format(http.TimeFormat)},
 	}
 

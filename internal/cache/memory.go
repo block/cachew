@@ -7,7 +7,6 @@ import (
 	"io"
 	"maps"
 	"net/http"
-	"net/textproto"
 	"os"
 	"sync"
 	"time"
@@ -33,7 +32,7 @@ type MemoryConfig struct {
 type memoryEntry struct {
 	data      []byte
 	expiresAt time.Time
-	headers   textproto.MIMEHeader
+	headers   http.Header
 }
 
 type Memory struct {
@@ -53,7 +52,7 @@ func NewMemory(ctx context.Context, config MemoryConfig) (*Memory, error) {
 
 func (m *Memory) String() string { return fmt.Sprintf("memory:%dMB", m.config.LimitMB) }
 
-func (m *Memory) Stat(_ context.Context, key Key) (textproto.MIMEHeader, error) {
+func (m *Memory) Stat(_ context.Context, key Key) (http.Header, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -69,7 +68,7 @@ func (m *Memory) Stat(_ context.Context, key Key) (textproto.MIMEHeader, error) 
 	return entry.headers, nil
 }
 
-func (m *Memory) Open(_ context.Context, key Key) (io.ReadCloser, textproto.MIMEHeader, error) {
+func (m *Memory) Open(_ context.Context, key Key) (io.ReadCloser, http.Header, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -85,14 +84,14 @@ func (m *Memory) Open(_ context.Context, key Key) (io.ReadCloser, textproto.MIME
 	return io.NopCloser(bytes.NewReader(entry.data)), entry.headers, nil
 }
 
-func (m *Memory) Create(ctx context.Context, key Key, headers textproto.MIMEHeader, ttl time.Duration) (io.WriteCloser, error) {
+func (m *Memory) Create(ctx context.Context, key Key, headers http.Header, ttl time.Duration) (io.WriteCloser, error) {
 	if ttl == 0 {
 		ttl = m.config.MaxTTL
 	}
 
 	now := time.Now()
 	// Clone headers to avoid concurrent map writes
-	clonedHeaders := make(textproto.MIMEHeader)
+	clonedHeaders := make(http.Header)
 	maps.Copy(clonedHeaders, headers)
 	if clonedHeaders.Get("Last-Modified") == "" {
 		clonedHeaders.Set("Last-Modified", now.UTC().Format(http.TimeFormat))
@@ -136,7 +135,7 @@ type memoryWriter struct {
 	key       Key
 	buf       *bytes.Buffer
 	expiresAt time.Time
-	headers   textproto.MIMEHeader
+	headers   http.Header
 	closed    bool
 	ctx       context.Context
 }

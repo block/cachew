@@ -4,7 +4,6 @@ import (
 	"io"
 	"maps"
 	"net/http"
-	"net/textproto"
 	"os"
 
 	"github.com/alecthomas/errors"
@@ -27,7 +26,7 @@ func Fetch(client *http.Client, r *http.Request, c Cache) (*http.Response, error
 			Proto:         "HTTP/1.1",
 			ProtoMajor:    1,
 			ProtoMinor:    1,
-			Header:        http.Header(headers),
+			Header:        headers,
 			Body:          cr,
 			ContentLength: -1,
 			Request:       r,
@@ -53,7 +52,7 @@ func FetchDirect(client *http.Client, r *http.Request, c Cache, key Key) (*http.
 		return resp, nil
 	}
 
-	responseHeaders := textproto.MIMEHeader(maps.Clone(resp.Header))
+	responseHeaders := maps.Clone(resp.Header)
 	cw, err := c.Create(r.Context(), key, responseHeaders, 0)
 	if err != nil {
 		_ = resp.Body.Close()

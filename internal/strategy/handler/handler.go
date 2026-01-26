@@ -5,7 +5,6 @@ import (
 	"log/slog"
 	"maps"
 	"net/http"
-	"net/textproto"
 	"os"
 	"time"
 
@@ -169,7 +168,7 @@ func (h *Handler) streamNonOKResponse(w http.ResponseWriter, resp *http.Response
 
 func (h *Handler) streamAndCache(w http.ResponseWriter, r *http.Request, key cache.Key, resp *http.Response, logger *slog.Logger) {
 	ttl := h.ttlFunc(r)
-	responseHeaders := textproto.MIMEHeader(maps.Clone(resp.Header))
+	responseHeaders := maps.Clone(resp.Header)
 	cw, err := h.cache.Create(r.Context(), key, responseHeaders, ttl)
 	if err != nil {
 		h.errorHandler(httputil.Errorf(http.StatusInternalServerError, "failed to create cache entry: %w", err), w, r)

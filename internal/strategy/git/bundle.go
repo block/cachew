@@ -21,7 +21,7 @@ func (s *Strategy) generateAndUploadBundle(ctx context.Context, repo *gitclone.R
 
 	cacheKey := cache.NewKey(repo.UpstreamURL() + ".bundle")
 
-	headers := textproto.MIMEHeader{
+	headers := http.Header{
 		"Content-Type": []string{"application/x-git-bundle"},
 	}
 	ttl := 7 * 24 * time.Hour

@@ -9,7 +9,6 @@ import (
 	"log/slog"
 	"maps"
 	"net/http"
-	"net/textproto"
 	"os"
 	"runtime"
 	"time"
@@ -162,7 +161,7 @@ func (s *S3) keyToPath(key Key) string {
 	return hexKey[:2] + "/" + hexKey
 }
 
-func (s *S3) Stat(ctx context.Context, key Key) (textproto.MIMEHeader, error) {
+func (s *S3) Stat(ctx context.Context, key Key) (http.Header, error) {
 	objectName := s.keyToPath(key)
 
 	// Get object info to check metadata
@@ -190,7 +189,7 @@ func (s *S3) Stat(ctx context.Context, key Key) (textproto.MIMEHeader, error) {
 
 	// Retrieve headers from metadata
 	// Note: UserMetadata keys are returned WITHOUT the "X-Amz-Meta-" prefix by minio-go
-	headers := make(textproto.MIMEHeader)
+	headers := make(http.Header)
 	if headersJSON := objInfo.UserMetadata["Headers"]; headersJSON != "" {
 		if err := json.Unmarshal([]byte(headersJSON), &headers); err != nil {
 			return nil, errors.Errorf("failed to unmarshal headers: %w", err)
@@ -205,7 +204,7 @@ func (s *S3) Stat(ctx context.Context, key Key) (textproto.MIMEHeader, error) {
 	return headers, nil
 }
 
-func (s *S3) Open(ctx context.Context, key Key) (io.ReadCloser, textproto.MIMEHeader, error) {
+func (s *S3) Open(ctx context.Context, key Key) (io.ReadCloser, http.Header, error) {
 	objectName := s.keyToPath(key)
 
 	// Get object info to retrieve metadata and check expiration
@@ -230,7 +229,7 @@ func (s *S3) Open(ctx context.Context, key Key) (io.ReadCloser, textproto.MIMEHe
 	}
 
 	// Retrieve headers from metadata
-	headers := make(textproto.MIMEHeader)
+	headers := make(http.Header)
 	if headersJSON := objInfo.UserMetadata["Headers"]; headersJSON != "" {
 		if err := json.Unmarshal([]byte(headersJSON), &headers); err != nil {
 			return nil, nil, errors.Errorf("failed to unmarshal headers: %w", err)
@@ -251,13 +250,13 @@ func (s *S3) Open(ctx context.Context, key Key) (io.ReadCloser, textproto.MIMEHe
 	return obj, headers, nil
 }
 
-func (s *S3) Create(ctx context.Context, key Key, headers textproto.MIMEHeader, ttl time.Duration) (io.WriteCloser, error) {
+func (s *S3) Create(ctx context.Context, key Key, headers http.Header, ttl time.Duration) (io.WriteCloser, error) {
 	if ttl > s.config.MaxTTL || ttl == 0 {
 		ttl = s.config.MaxTTL
 	}
 
 	// Clone headers to avoid concurrent access issues
-	clonedHeaders := make(textproto.MIMEHeader)
+	clonedHeaders := make(http.Header)
 	maps.Copy(clonedHeaders, headers)
 
 	expiresAt := time.Now().Add(ttl)
@@ -296,7 +295,7 @@ type s3Writer struct {
 	key       Key
 	pipe      *io.PipeWriter
 	expiresAt time.Time
-	headers   textproto.MIMEHeader
+	headers   http.Header
 	ctx       context.Context
 	errCh     chan error
 }

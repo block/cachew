@@ -6,7 +6,6 @@ import (
 	"io"
 	"maps"
 	"net/http"
-	"net/textproto"
 	"os"
 	"time"
 
@@ -32,7 +31,7 @@ func NewRemote(baseURL string) *Remote {
 func (c *Remote) String() string { return "remote:" + c.baseURL }
 
 // Open retrieves an object from the remote.
-func (c *Remote) Open(ctx context.Context, key Key) (io.ReadCloser, textproto.MIMEHeader, error) {
+func (c *Remote) Open(ctx context.Context, key Key) (io.ReadCloser, http.Header, error) {
 	url := fmt.Sprintf("%s/%s", c.baseURL, key.String())
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -53,13 +52,13 @@ func (c *Remote) Open(ctx context.Context, key Key) (io.ReadCloser, textproto.MI
 	}
 
 	// Filter out HTTP transport headers
-	headers := FilterTransportHeaders(textproto.MIMEHeader(resp.Header))
+	headers := FilterTransportHeaders(resp.Header)
 
 	return resp.Body, headers, nil
 }
 
 // Stat retrieves headers for an object from the remote.
-func (c *Remote) Stat(ctx context.Context, key Key) (textproto.MIMEHeader, error) {
+func (c *Remote) Stat(ctx context.Context, key Key) (http.Header, error) {
 	url := fmt.Sprintf("%s/%s", c.baseURL, key.String())
 	req, err := http.NewRequestWithContext(ctx, http.MethodHead, url, nil)
 	if err != nil {
@@ -81,13 +80,13 @@ func (c *Remote) Stat(ctx context.Context, key Key) (textproto.MIMEHeader, error
 	}
 
 	// Filter out HTTP transport headers
-	headers := FilterTransportHeaders(textproto.MIMEHeader(resp.Header))
+	headers := FilterTransportHeaders(resp.Header)
 
 	return headers, nil
 }
 
 // Create stores a new object in the remote.
-func (c *Remote) Create(ctx context.Context, key Key, headers textproto.MIMEHeader, ttl time.Duration) (io.WriteCloser, error) {
+func (c *Remote) Create(ctx context.Context, key Key, headers http.Header, ttl time.Duration) (io.WriteCloser, error) {
 	pr, pw := io.Pipe()
 
 	url := fmt.Sprintf("%s/%s", c.baseURL, key.String())
