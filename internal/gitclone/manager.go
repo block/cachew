@@ -161,13 +161,15 @@ func (m *Manager) DiscoverExisting(_ context.Context) error {
 			return errors.Wrap(err, "get relative path")
 		}
 
-		parts := strings.Split(filepath.ToSlash(relPath), "/")
-		if len(parts) < 2 {
+		urlPath := filepath.ToSlash(relPath)
+
+		idx := strings.Index(urlPath, "/")
+		if idx == -1 {
 			return nil
 		}
 
-		host := parts[0]
-		repoPath := strings.Join(parts[1:], "/")
+		host := urlPath[:idx]
+		repoPath := urlPath[idx+1:]
 		upstreamURL := "https://" + host + "/" + repoPath
 
 		repo := &Repository{
