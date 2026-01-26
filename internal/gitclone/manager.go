@@ -2,6 +2,7 @@ package gitclone
 
 import (
 	"context"
+	"io/fs"
 	"net/url"
 	"os"
 	"os/exec"
@@ -184,7 +185,7 @@ func (m *Manager) DiscoverExisting(_ context.Context) error {
 		m.clones[upstreamURL] = repo
 		m.clonesMu.Unlock()
 
-		return nil
+		return fs.SkipDir
 	})
 
 	if err != nil {
