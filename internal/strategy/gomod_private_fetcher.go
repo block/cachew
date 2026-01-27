@@ -41,12 +41,11 @@ func (p *privateFetcher) Query(ctx context.Context, path, query string) (version
 		return "", time.Time{}, errors.Wrapf(err, "get or create clone for %s", path)
 	}
 
-	repoPath, err := p.ensureCloneReady(ctx, repo)
-	if err != nil {
+	if err := p.ensureCloneReady(ctx, repo); err != nil {
 		return "", time.Time{}, errors.Wrapf(err, "ensure clone for %s", path)
 	}
 
-	resolvedVersion, commitTime, err := p.resolveVersionQuery(ctx, repoPath, query)
+	resolvedVersion, commitTime, err := p.resolveVersionQuery(ctx, repo, query)
 	if err != nil {
 		return "", time.Time{}, errors.Wrapf(err, "resolve version query %s", query)
 	}
@@ -64,12 +63,11 @@ func (p *privateFetcher) List(ctx context.Context, path string) (versions []stri
 		return nil, errors.Wrapf(err, "get or create clone for %s", path)
 	}
 
-	repoPath, err := p.ensureCloneReady(ctx, repo)
-	if err != nil {
+	if err := p.ensureCloneReady(ctx, repo); err != nil {
 		return nil, errors.Wrapf(err, "ensure clone for %s", path)
 	}
 
-	versions, err = p.listVersions(ctx, repoPath)
+	versions, err = p.listVersions(ctx, repo)
 	if err != nil {
 		return nil, errors.Wrap(err, "list versions")
 	}
@@ -87,19 +85,18 @@ func (p *privateFetcher) Download(ctx context.Context, path, version string) (in
 		return nil, nil, nil, errors.Wrapf(err, "get or create clone for %s", path)
 	}
 
-	repoPath, err := p.ensureCloneReady(ctx, repo)
-	if err != nil {
+	if err := p.ensureCloneReady(ctx, repo); err != nil {
 		return nil, nil, nil, errors.Wrapf(err, "ensure clone for %s", path)
 	}
 
-	infoReader, err := p.generateInfo(ctx, repoPath, version)
+	infoReader, err := p.generateInfo(ctx, repo, version)
 	if err != nil {
 		return nil, nil, nil, errors.Wrap(err, "generate info")
 	}
 
-	modReader := p.generateMod(ctx, repoPath, path, version)
+	modReader := p.generateMod(ctx, repo, path, version)
 
-	zipReader, err := p.generateZip(ctx, repoPath, path, version)
+	zipReader, err := p.generateZip(ctx, repo, path, version)
 	if err != nil {
 		_ = infoReader.Close()
 		_ = modReader.Close()
@@ -115,7 +112,7 @@ func (p *privateFetcher) modulePathToGitURL(modulePath string) string {
 
 // ensureCloneReady ensures the repository is cloned and ready to use.
 // It handles the cloning state machine and waits for the clone to complete if necessary.
-func (p *privateFetcher) ensureCloneReady(ctx context.Context, repo *gitclone.Repository) (string, error) {
+func (p *privateFetcher) ensureCloneReady(ctx context.Context, repo *gitclone.Repository) error {
 	state := repo.State()
 
 	switch state {
@@ -129,7 +126,7 @@ func (p *privateFetcher) ensureCloneReady(ctx context.Context, repo *gitclone.Re
 			GitConfig:        gitclone.DefaultGitTuningConfig(),
 		}
 		if err := repo.Clone(ctx, gitcloneConfig); err != nil {
-			return "", errors.Wrap(err, "clone repository")
+			return errors.Wrap(err, "clone repository")
 		}
 
 	case gitclone.StateCloning:
@@ -142,12 +139,12 @@ func (p *privateFetcher) ensureCloneReady(ctx context.Context, repo *gitclone.Re
 				break
 			}
 			if currentState == gitclone.StateEmpty {
-				return "", errors.New("clone failed")
+				return errors.New("clone failed")
 			}
 
 			select {
 			case <-ctx.Done():
-				return "", errors.Wrap(ctx.Err(), "context cancelled waiting for clone")
+				return errors.Wrap(ctx.Err(), "context cancelled waiting for clone")
 			default:
 			}
 		}
@@ -170,19 +167,19 @@ func (p *privateFetcher) ensureCloneReady(ctx context.Context, repo *gitclone.Re
 		}
 	}
 
-	return repo.Path(), nil
+	return nil
 }
 
 // resolveVersionQuery resolves a version query (like "latest" or "v1.2.3") to a specific version.
-func (p *privateFetcher) resolveVersionQuery(ctx context.Context, repoPath, query string) (string, time.Time, error) {
+func (p *privateFetcher) resolveVersionQuery(ctx context.Context, repo *gitclone.Repository, query string) (string, time.Time, error) {
 	if query == "latest" {
-		versions, err := p.listVersions(ctx, repoPath)
+		versions, err := p.listVersions(ctx, repo)
 		if err != nil || len(versions) == 0 {
-			return p.getDefaultBranchVersion(ctx, repoPath)
+			return p.getDefaultBranchVersion(ctx, repo)
 		}
 
 		latestVersion := versions[len(versions)-1]
-		commitTime, err := p.getCommitTime(ctx, repoPath, latestVersion)
+		commitTime, err := p.getCommitTime(ctx, repo, latestVersion)
 		if err != nil {
 			return "", time.Time{}, err
 		}
@@ -190,19 +187,25 @@ func (p *privateFetcher) resolveVersionQuery(ctx context.Context, repoPath, quer
 	}
 
 	if semver.IsValid(query) {
-		commitTime, err := p.getCommitTime(ctx, repoPath, query)
+		commitTime, err := p.getCommitTime(ctx, repo, query)
 		if err != nil {
 			return "", time.Time{}, fs.ErrNotExist
 		}
 		return query, commitTime, nil
 	}
 
-	return p.getDefaultBranchVersion(ctx, repoPath)
+	return p.getDefaultBranchVersion(ctx, repo)
 }
 
-func (p *privateFetcher) listVersions(ctx context.Context, repoPath string) ([]string, error) {
-	cmd := exec.CommandContext(ctx, "git", "-C", repoPath, "tag", "-l", "v*")
-	output, err := cmd.CombinedOutput()
+func (p *privateFetcher) listVersions(ctx context.Context, repo *gitclone.Repository) ([]string, error) {
+	var output []byte
+	var err error
+
+	repo.WithReadLock(func() {
+		cmd := exec.CommandContext(ctx, "git", "-C", repo.Path(), "tag", "-l", "v*")
+		output, err = cmd.CombinedOutput()
+	})
+
 	if err != nil {
 		return nil, errors.Wrapf(err, "git tag failed: %s", string(output))
 	}
@@ -222,9 +225,15 @@ func (p *privateFetcher) listVersions(ctx context.Context, repoPath string) ([]s
 	return versions, nil
 }
 
-func (p *privateFetcher) getCommitTime(ctx context.Context, repoPath, ref string) (time.Time, error) {
-	cmd := exec.CommandContext(ctx, "git", "-C", repoPath, "log", "-1", "--format=%cI", ref)
-	output, err := cmd.CombinedOutput()
+func (p *privateFetcher) getCommitTime(ctx context.Context, repo *gitclone.Repository, ref string) (time.Time, error) {
+	var output []byte
+	var err error
+
+	repo.WithReadLock(func() {
+		cmd := exec.CommandContext(ctx, "git", "-C", repo.Path(), "log", "-1", "--format=%cI", ref)
+		output, err = cmd.CombinedOutput()
+	})
+
 	if err != nil {
 		return time.Time{}, errors.Wrapf(err, "git log failed: %s", string(output))
 	}
@@ -234,15 +243,21 @@ func (p *privateFetcher) getCommitTime(ctx context.Context, repoPath, ref string
 	return t, errors.Wrap(err, "parse commit time")
 }
 
-func (p *privateFetcher) getDefaultBranchVersion(ctx context.Context, repoPath string) (string, time.Time, error) {
-	cmd := exec.CommandContext(ctx, "git", "-C", repoPath, "rev-parse", "HEAD")
-	output, err := cmd.CombinedOutput()
+func (p *privateFetcher) getDefaultBranchVersion(ctx context.Context, repo *gitclone.Repository) (string, time.Time, error) {
+	var output []byte
+	var err error
+
+	repo.WithReadLock(func() {
+		cmd := exec.CommandContext(ctx, "git", "-C", repo.Path(), "rev-parse", "HEAD")
+		output, err = cmd.CombinedOutput()
+	})
+
 	if err != nil {
 		return "", time.Time{}, errors.Wrapf(err, "git rev-parse failed: %s", string(output))
 	}
 
 	commitHash := strings.TrimSpace(string(output))
-	commitTime, err := p.getCommitTime(ctx, repoPath, "HEAD")
+	commitTime, err := p.getCommitTime(ctx, repo, "HEAD")
 	if err != nil {
 		return "", time.Time{}, err
 	}
@@ -254,8 +269,8 @@ func (p *privateFetcher) getDefaultBranchVersion(ctx context.Context, repoPath s
 	return pseudoVersion, commitTime, nil
 }
 
-func (p *privateFetcher) generateInfo(ctx context.Context, repoPath, version string) (io.ReadSeekCloser, error) {
-	commitTime, err := p.getCommitTime(ctx, repoPath, version)
+func (p *privateFetcher) generateInfo(ctx context.Context, repo *gitclone.Repository, version string) (io.ReadSeekCloser, error) {
+	commitTime, err := p.getCommitTime(ctx, repo, version)
 	if err != nil {
 		return nil, err
 	}
@@ -264,10 +279,15 @@ func (p *privateFetcher) generateInfo(ctx context.Context, repoPath, version str
 	return newReadSeekCloser(bytes.NewReader([]byte(info))), nil
 }
 
-func (p *privateFetcher) generateMod(ctx context.Context, repoPath, modulePath, version string) io.ReadSeekCloser {
-	// #nosec G204 - version and repoPath are controlled by this package, not user input
-	cmd := exec.CommandContext(ctx, "git", "-C", repoPath, "show", fmt.Sprintf("%s:go.mod", version))
-	output, err := cmd.CombinedOutput()
+func (p *privateFetcher) generateMod(ctx context.Context, repo *gitclone.Repository, modulePath, version string) io.ReadSeekCloser {
+	var output []byte
+	var err error
+
+	repo.WithReadLock(func() {
+		// #nosec G204 - version and repo.Path() are controlled by this package, not user input
+		cmd := exec.CommandContext(ctx, "git", "-C", repo.Path(), "show", fmt.Sprintf("%s:go.mod", version))
+		output, err = cmd.CombinedOutput()
+	})
 
 	if err != nil {
 		minimal := fmt.Sprintf("module %s\n\ngo 1.21\n", modulePath)
@@ -277,15 +297,20 @@ func (p *privateFetcher) generateMod(ctx context.Context, repoPath, modulePath, 
 	return newReadSeekCloser(bytes.NewReader(output))
 }
 
-func (p *privateFetcher) generateZip(ctx context.Context, repoPath, modulePath, version string) (io.ReadSeekCloser, error) {
+func (p *privateFetcher) generateZip(ctx context.Context, repo *gitclone.Repository, modulePath, version string) (io.ReadSeekCloser, error) {
 	prefix := fmt.Sprintf("%s@%s/", modulePath, version)
-	// #nosec G204 - version and repoPath are controlled by this package, not user input
-	cmd := exec.CommandContext(ctx, "git", "-C", repoPath, "archive",
-		"--format=zip",
-		fmt.Sprintf("--prefix=%s", prefix),
-		version)
+	var output []byte
+	var err error
 
-	output, err := cmd.CombinedOutput()
+	repo.WithReadLock(func() {
+		// #nosec G204 - version and repo.Path() are controlled by this package, not user input
+		cmd := exec.CommandContext(ctx, "git", "-C", repo.Path(), "archive",
+			"--format=zip",
+			fmt.Sprintf("--prefix=%s", prefix),
+			version)
+		output, err = cmd.CombinedOutput()
+	})
+
 	if err != nil {
 		return nil, errors.Wrapf(err, "git archive failed: %s", string(output))
 	}
