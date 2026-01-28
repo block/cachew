@@ -158,7 +158,7 @@ func soakWorker(
 		case op < 90: // 30% reads
 			doRead(ctx, t, c, config, rng, result, mu, writtenHashes)
 		default: // 10% deletes
-			doDelete(ctx, t, c, config, rng, result, mu, writtenHashes)
+			doDelete(ctx, t, c, config, rng, result)
 		}
 	}
 }
@@ -194,6 +194,13 @@ func doWrite(
 	}
 
 	key := cache.NewKey(fmt.Sprintf("soak-key-%d", keyIdx))
+
+	// Record hash before writing so concurrent reads can validate against it
+	hash := sha256.Sum256(data)
+	mu.Lock()
+	writtenHashes[keyIdx] = append(writtenHashes[keyIdx], hash)
+	mu.Unlock()
+
 	writer, err := c.Create(ctx, key, nil, config.TTL)
 	if err != nil {
 		t.Errorf("failed to create cache entry: %v", err)
@@ -211,11 +218,6 @@ func doWrite(
 		t.Errorf("failed to close cache entry: %v", err)
 		return
 	}
-
-	hash := sha256.Sum256(data)
-	mu.Lock()
-	writtenHashes[keyIdx] = append(writtenHashes[keyIdx], hash)
-	mu.Unlock()
 
 	atomic.AddInt64(&result.Writes, 1)
 	atomic.AddInt64(&result.BytesWritten, int64(n))
@@ -283,17 +285,7 @@ func doDelete(
 	config *SoakConfig,
 	rng *mrand.Rand,
 	result *SoakResult,
-	mu *sync.Mutex,
-	writtenHashes map[int][][32]byte,
 ) {
-	mu.Lock()
-	numWritten := len(writtenHashes)
-	mu.Unlock()
-
-	if numWritten == 0 {
-		return
-	}
-
 	keyIdx := rng.IntN(config.NumObjects)
 	key := cache.NewKey(fmt.Sprintf("soak-key-%d", keyIdx))
 
@@ -304,10 +296,6 @@ func doDelete(
 		t.Errorf("failed to delete cache entry: %v", err)
 		return
 	}
-
-	mu.Lock()
-	delete(writtenHashes, keyIdx)
-	mu.Unlock()
 
 	atomic.AddInt64(&result.Deletes, 1)
 }
