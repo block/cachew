@@ -35,12 +35,13 @@ type DiskConfig struct {
 }
 
 type Disk struct {
-	logger      *slog.Logger
-	config      DiskConfig
-	db          *diskMetaDB
-	size        atomic.Int64
-	runEviction chan struct{}
-	stop        context.CancelFunc
+	logger       *slog.Logger
+	config       DiskConfig
+	db           *diskMetaDB
+	size         atomic.Int64
+	runEviction  chan struct{}
+	stop         context.CancelFunc
+	evictionDone chan struct{}
 }
 
 var _ Cache = (*Disk)(nil)
@@ -102,11 +103,12 @@ func NewDisk(ctx context.Context, config DiskConfig) (*Disk, error) {
 	ctx, stop := context.WithCancel(ctx)
 
 	disk := &Disk{
-		logger:      logger,
-		config:      config,
-		db:          db,
-		runEviction: make(chan struct{}),
-		stop:        stop,
+		logger:       logger,
+		config:       config,
+		db:           db,
+		runEviction:  make(chan struct{}),
+		stop:         stop,
+		evictionDone: make(chan struct{}),
 	}
 	disk.size.Store(size)
 
@@ -119,6 +121,7 @@ func (d *Disk) String() string { return "disk:" + d.config.Root }
 
 func (d *Disk) Close() error {
 	d.stop()
+	<-d.evictionDone
 	if d.db != nil {
 		return d.db.close()
 	}
@@ -162,8 +165,7 @@ func (d *Disk) Create(ctx context.Context, key Key, headers http.Header, ttl tim
 		return nil, errors.Errorf("failed to create directory %s: %w", dir, err)
 	}
 
-	tempPath := fullPath + ".tmp"
-	f, err := os.OpenFile(tempPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
+	f, err := os.CreateTemp(dir, ".tmp-*")
 	if err != nil {
 		return nil, errors.Errorf("failed to create temp file: %w", err)
 	}
@@ -175,7 +177,7 @@ func (d *Disk) Create(ctx context.Context, key Key, headers http.Header, ttl tim
 		file:      f,
 		key:       key,
 		path:      fullPath,
-		tempPath:  tempPath,
+		tempPath:  f.Name(),
 		expiresAt: expiresAt,
 		headers:   clonedHeaders,
 		ctx:       ctx,
@@ -202,7 +204,7 @@ func (d *Disk) Delete(_ context.Context, key Key) error {
 		return errors.Errorf("failed to remove file: %w", err)
 	}
 
-	// Remove TTL metadata
+	// Remove metadata
 	if err := d.db.delete(key); err != nil {
 		return errors.Errorf("failed to delete TTL metadata: %w", err)
 	}
@@ -251,7 +253,7 @@ func (d *Disk) Open(ctx context.Context, key Key) (io.ReadCloser, http.Header, e
 
 	expiresAt, err := d.db.getTTL(key)
 	if err != nil {
-		return nil, nil, errors.Join(errors.Errorf("failed to get TTL: %w", err), f.Close())
+		return nil, nil, errors.Join(err, f.Close())
 	}
 
 	now := time.Now()
@@ -282,6 +284,8 @@ func (d *Disk) keyToPath(key Key) string {
 }
 
 func (d *Disk) evictionLoop(ctx context.Context) {
+	defer close(d.evictionDone)
+
 	ticker := time.NewTicker(d.config.EvictInterval)
 	defer ticker.Stop()
 
@@ -409,6 +413,12 @@ func (w *diskWriter) Close() error {
 	if err := w.ctx.Err(); err != nil {
 		// Clean up temp file and abort
 		return errors.Join(errors.Wrap(err, "create operation cancelled"), os.Remove(w.tempPath))
+	}
+
+	// Ensure directory exists (eviction may have removed it)
+	dir := filepath.Dir(w.path)
+	if err := os.MkdirAll(dir, 0750); err != nil {
+		return errors.Errorf("failed to create directory: %w", err)
 	}
 
 	if err := os.Rename(w.tempPath, w.path); err != nil {
