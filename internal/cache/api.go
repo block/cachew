@@ -112,6 +112,16 @@ func FilterTransportHeaders(headers http.Header) http.Header {
 	return filtered
 }
 
+// Stats contains health and usage statistics for a cache.
+type Stats struct {
+	// Objects is the number of objects currently in the cache.
+	Objects int64
+	// Size is the total size of all objects in the cache in bytes.
+	Size int64
+	// Capacity is the maximum size of the cache in bytes (0 if unlimited).
+	Capacity int64
+}
+
 // A Cache knows how to retrieve, create and delete objects from a cache.
 //
 // Objects in the cache are not guaranteed to persist and implementations may delete them at any time.
@@ -141,6 +151,8 @@ type Cache interface {
 	//
 	// MUST be atomic.
 	Delete(ctx context.Context, key Key) error
+	// Stats returns health and usage statistics for the cache.
+	Stats(ctx context.Context) (Stats, error)
 	// Close the Cache.
 	Close() error
 }

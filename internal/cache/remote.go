@@ -157,6 +157,11 @@ func (c *Remote) Close() error {
 	return nil
 }
 
+// Stats returns empty stats as the remote cache doesn't expose stats via API.
+func (c *Remote) Stats(_ context.Context) (Stats, error) {
+	return Stats{}, nil
+}
+
 // writeCloser wraps a pipe writer and waits for the HTTP request to complete.
 type writeCloser struct {
 	pw   *io.PipeWriter

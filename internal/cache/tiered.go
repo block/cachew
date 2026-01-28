@@ -132,6 +132,20 @@ func (t Tiered) String() string {
 	return "tiered:" + strings.Join(names, ",")
 }
 
+func (t Tiered) Stats(ctx context.Context) (Stats, error) {
+	var combined Stats
+	for _, c := range t.caches {
+		s, err := c.Stats(ctx)
+		if err != nil {
+			return Stats{}, errors.Wrap(err, c.String())
+		}
+		combined.Objects += s.Objects
+		combined.Size += s.Size
+		combined.Capacity += s.Capacity
+	}
+	return combined, nil
+}
+
 type tieredWriter struct {
 	writers []io.WriteCloser
 	cancel  context.CancelCauseFunc

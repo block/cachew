@@ -156,6 +156,19 @@ func (s *diskMetaDB) walk(fn func(key Key, expiresAt time.Time) error) error {
 	}))
 }
 
+func (s *diskMetaDB) count() (int64, error) {
+	var count int64
+	err := s.db.View(func(tx *bbolt.Tx) error {
+		bucket := tx.Bucket(ttlBucketName)
+		if bucket == nil {
+			return nil
+		}
+		count = int64(bucket.Stats().KeyN)
+		return nil
+	})
+	return count, errors.WithStack(err)
+}
+
 func (s *diskMetaDB) close() error {
 	if err := s.db.Close(); err != nil {
 		return errors.Errorf("failed to close bbolt database: %w", err)

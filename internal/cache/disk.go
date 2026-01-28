@@ -129,6 +129,18 @@ func (d *Disk) Size() int64 {
 	return d.size.Load()
 }
 
+func (d *Disk) Stats(_ context.Context) (Stats, error) {
+	count, err := d.db.count()
+	if err != nil {
+		return Stats{}, err
+	}
+	return Stats{
+		Objects:  count,
+		Size:     d.size.Load(),
+		Capacity: int64(d.config.LimitMB) * 1024 * 1024,
+	}, nil
+}
+
 func (d *Disk) Create(ctx context.Context, key Key, headers http.Header, ttl time.Duration) (io.WriteCloser, error) {
 	if ttl > d.config.MaxTTL || ttl == 0 {
 		ttl = d.config.MaxTTL

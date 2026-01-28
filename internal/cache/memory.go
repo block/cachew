@@ -130,6 +130,17 @@ func (m *Memory) Close() error {
 	return nil
 }
 
+func (m *Memory) Stats(_ context.Context) (Stats, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	return Stats{
+		Objects:  int64(len(m.entries)),
+		Size:     m.currentSize,
+		Capacity: int64(m.config.LimitMB) * 1024 * 1024,
+	}, nil
+}
+
 type memoryWriter struct {
 	cache     *Memory
 	key       Key
