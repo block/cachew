@@ -2,6 +2,7 @@ package cache
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"maps"
@@ -23,7 +24,7 @@ var _ Cache = (*Remote)(nil)
 // NewRemote creates a new remote cache client.
 func NewRemote(baseURL string) *Remote {
 	return &Remote{
-		baseURL: baseURL + "/api/v1/object",
+		baseURL: baseURL + "/api/v1",
 		client:  &http.Client{},
 	}
 }
@@ -32,7 +33,7 @@ func (c *Remote) String() string { return "remote:" + c.baseURL }
 
 // Open retrieves an object from the remote.
 func (c *Remote) Open(ctx context.Context, key Key) (io.ReadCloser, http.Header, error) {
-	url := fmt.Sprintf("%s/%s", c.baseURL, key.String())
+	url := fmt.Sprintf("%s/object/%s", c.baseURL, key.String())
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, nil, errors.Wrap(err, "failed to create request")
@@ -59,7 +60,7 @@ func (c *Remote) Open(ctx context.Context, key Key) (io.ReadCloser, http.Header,
 
 // Stat retrieves headers for an object from the remote.
 func (c *Remote) Stat(ctx context.Context, key Key) (http.Header, error) {
-	url := fmt.Sprintf("%s/%s", c.baseURL, key.String())
+	url := fmt.Sprintf("%s/object/%s", c.baseURL, key.String())
 	req, err := http.NewRequestWithContext(ctx, http.MethodHead, url, nil)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to create request")
@@ -89,7 +90,7 @@ func (c *Remote) Stat(ctx context.Context, key Key) (http.Header, error) {
 func (c *Remote) Create(ctx context.Context, key Key, headers http.Header, ttl time.Duration) (io.WriteCloser, error) {
 	pr, pw := io.Pipe()
 
-	url := fmt.Sprintf("%s/%s", c.baseURL, key.String())
+	url := fmt.Sprintf("%s/object/%s", c.baseURL, key.String())
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, pr)
 	if err != nil {
 		return nil, errors.Join(errors.Wrap(err, "failed to create request"), pr.Close(), pw.Close())
@@ -128,7 +129,7 @@ func (c *Remote) Create(ctx context.Context, key Key, headers http.Header, ttl t
 
 // Delete removes an object from the remote.
 func (c *Remote) Delete(ctx context.Context, key Key) error {
-	url := fmt.Sprintf("%s/%s", c.baseURL, key.String())
+	url := fmt.Sprintf("%s/object/%s", c.baseURL, key.String())
 	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, url, nil)
 	if err != nil {
 		return errors.Wrap(err, "failed to create request")
@@ -157,9 +158,30 @@ func (c *Remote) Close() error {
 	return nil
 }
 
-// Stats returns empty stats as the remote cache doesn't expose stats via API.
-func (c *Remote) Stats(_ context.Context) (Stats, error) {
-	return Stats{}, nil
+// Stats retrieves cache statistics from the remote server.
+func (c *Remote) Stats(ctx context.Context) (Stats, error) {
+	url := c.baseURL + "/stats"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return Stats{}, errors.Wrap(err, "failed to create request")
+	}
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return Stats{}, errors.Wrap(err, "failed to execute request")
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return Stats{}, errors.Errorf("unexpected status code: %d", resp.StatusCode)
+	}
+
+	var stats Stats
+	if err := json.NewDecoder(resp.Body).Decode(&stats); err != nil {
+		return Stats{}, errors.Wrap(err, "failed to decode stats response")
+	}
+
+	return stats, nil
 }
 
 // writeCloser wraps a pipe writer and waits for the HTTP request to complete.

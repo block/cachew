@@ -2,6 +2,7 @@ package strategy
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -36,6 +37,7 @@ func NewAPIV1(ctx context.Context, _ struct{}, _ jobscheduler.Scheduler, cache c
 	mux.Handle("HEAD /api/v1/object/{key}", http.HandlerFunc(s.statObject))
 	mux.Handle("POST /api/v1/object/{key}", http.HandlerFunc(s.putObject))
 	mux.Handle("DELETE /api/v1/object/{key}", http.HandlerFunc(s.deleteObject))
+	mux.Handle("GET /api/v1/stats", http.HandlerFunc(s.getStats))
 	return s, nil
 }
 
@@ -142,6 +144,19 @@ func (d *APIV1) deleteObject(w http.ResponseWriter, r *http.Request) {
 		}
 		d.httpError(w, http.StatusInternalServerError, err, "Failed to delete cache object", slog.String("key", key.String()))
 		return
+	}
+}
+
+func (d *APIV1) getStats(w http.ResponseWriter, r *http.Request) {
+	stats, err := d.cache.Stats(r.Context())
+	if err != nil {
+		d.httpError(w, http.StatusInternalServerError, err, "Failed to get cache stats")
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(stats); err != nil {
+		d.logger.Error("Failed to encode stats response", slog.String("error", err.Error()))
 	}
 }
 
