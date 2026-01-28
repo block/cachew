@@ -14,12 +14,15 @@ import (
 	"github.com/alecthomas/chroma/v2/quick"
 	"github.com/alecthomas/hcl/v2"
 	"github.com/alecthomas/kong"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"go.opentelemetry.io/otel"
 
 	"github.com/block/cachew/internal/cache"
 	"github.com/block/cachew/internal/config"
 	"github.com/block/cachew/internal/httputil"
 	"github.com/block/cachew/internal/jobscheduler"
 	"github.com/block/cachew/internal/logging"
+	"github.com/block/cachew/internal/metrics"
 )
 
 var cli struct {
@@ -29,6 +32,7 @@ var cli struct {
 	Bind            string              `hcl:"bind" default:"127.0.0.1:8080" help:"Bind address for the server."`
 	SchedulerConfig jobscheduler.Config `embed:"" prefix:"scheduler-"`
 	LoggingConfig   logging.Config      `embed:"" prefix:"log-"`
+	MetricsConfig   metrics.Config      `embed:"" prefix:"metrics-"`
 }
 
 func main() {
@@ -79,11 +83,32 @@ func main() {
 	err := config.Load(ctx, cr, cli.Config, scheduler, mux, parseEnvars())
 	kctx.FatalIfErrorf(err)
 
+	metricsClient, err := metrics.New(ctx, cli.MetricsConfig)
+	kctx.FatalIfErrorf(err, "failed to create metrics client")
+	defer func() {
+		if err := metricsClient.Close(); err != nil {
+			logger.ErrorContext(ctx, "failed to close metrics client", "error", err)
+		}
+	}()
+
+	if err := metricsClient.ServeMetrics(ctx); err != nil {
+		kctx.FatalIfErrorf(err, "failed to start metrics server")
+	}
+
 	logger.InfoContext(ctx, "Starting cachewd", slog.String("bind", cli.Bind))
+
+	var handler http.Handler = mux
+
+	handler = otelhttp.NewMiddleware(cli.MetricsConfig.ServiceName,
+		otelhttp.WithMeterProvider(otel.GetMeterProvider()),
+		otelhttp.WithTracerProvider(otel.GetTracerProvider()),
+	)(handler)
+
+	handler = httputil.LoggingMiddleware(handler)
 
 	server := &http.Server{
 		Addr:              cli.Bind,
-		Handler:           httputil.LoggingMiddleware(mux),
+		Handler:           handler,
 		ReadTimeout:       30 * time.Minute,
 		WriteTimeout:      30 * time.Minute,
 		ReadHeaderTimeout: 30 * time.Second,
