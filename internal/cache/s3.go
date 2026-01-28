@@ -304,16 +304,35 @@ type s3Writer struct {
 	headers   http.Header
 	ctx       context.Context
 	errCh     chan error
+	uploadErr error
 }
 
 func (w *s3Writer) Write(p []byte) (int, error) {
-	return errors.WithStack2(w.pipe.Write(p))
+	n, err := w.pipe.Write(p)
+	if err != nil {
+		// Check if upload failed - if so, return that error instead
+		select {
+		case uploadErr := <-w.errCh:
+			if uploadErr != nil {
+				w.uploadErr = uploadErr
+				return n, uploadErr
+			}
+		default:
+		}
+		return n, errors.WithStack(err)
+	}
+	return n, nil
 }
 
 func (w *s3Writer) Close() error {
 	// Close the pipe writer to signal EOF to the reader
 	if err := w.pipe.Close(); err != nil {
 		return errors.Wrap(err, "failed to close pipe")
+	}
+
+	// If we already captured the upload error during Write, return it
+	if w.uploadErr != nil {
+		return w.uploadErr
 	}
 
 	// Wait for upload to complete and get any error
@@ -326,7 +345,11 @@ func (w *s3Writer) Close() error {
 }
 
 func (w *s3Writer) upload(pr *io.PipeReader) {
-	defer pr.Close()
+	var uploadErr error
+	defer func() {
+		// Use CloseWithError to propagate any error to the writer side
+		_ = pr.CloseWithError(uploadErr)
+	}()
 
 	objectName := w.s3.keyToPath(w.key)
 
@@ -336,7 +359,8 @@ func (w *s3Writer) upload(pr *io.PipeReader) {
 	// Store expiration time
 	expiresAtBytes, err := w.expiresAt.MarshalText()
 	if err != nil {
-		w.errCh <- errors.Errorf("failed to marshal expiration time: %w", err)
+		uploadErr = errors.Errorf("failed to marshal expiration time: %w", err)
+		w.errCh <- uploadErr
 		return
 	}
 	userMetadata["Expires-At"] = string(expiresAtBytes)
@@ -345,7 +369,8 @@ func (w *s3Writer) upload(pr *io.PipeReader) {
 	if len(w.headers) > 0 {
 		headersJSON, err := json.Marshal(w.headers)
 		if err != nil {
-			w.errCh <- errors.Errorf("failed to marshal headers: %w", err)
+			uploadErr = errors.Errorf("failed to marshal headers: %w", err)
+			w.errCh <- uploadErr
 			return
 		}
 		userMetadata["Headers"] = string(headersJSON)
@@ -373,7 +398,8 @@ func (w *s3Writer) upload(pr *io.PipeReader) {
 		opts,
 	)
 	if err != nil {
-		w.errCh <- errors.Errorf("failed to put object: %w", err)
+		uploadErr = errors.Errorf("failed to put object: %w", err)
+		w.errCh <- uploadErr
 		return
 	}
 

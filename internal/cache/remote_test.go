@@ -17,7 +17,7 @@ import (
 	"github.com/block/cachew/internal/strategy"
 )
 
-func TestRemoteClient(t *testing.T) {
+func TestRemoteCache(t *testing.T) {
 	cachetest.Suite(t, func(t *testing.T) cache.Cache {
 		ctx := t.Context()
 		_, ctx = logging.Configure(ctx, logging.Config{Level: slog.LevelError})
@@ -38,7 +38,7 @@ func TestRemoteClient(t *testing.T) {
 	})
 }
 
-func TestRemoteClientSoak(t *testing.T) {
+func TestRemoteCacheSoak(t *testing.T) {
 	if os.Getenv("SOAK_TEST") == "" {
 		t.Skip("Skipping soak test; set SOAK_TEST=1 to run")
 	}

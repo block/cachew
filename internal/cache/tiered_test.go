@@ -13,7 +13,7 @@ import (
 	"github.com/block/cachew/internal/logging"
 )
 
-func TestTiered(t *testing.T) {
+func TestTieredCache(t *testing.T) {
 	cachetest.Suite(t, func(t *testing.T) cache.Cache {
 		_, ctx := logging.Configure(t.Context(), logging.Config{})
 		memory, err := cache.NewMemory(ctx, cache.MemoryConfig{LimitMB: 1024, MaxTTL: time.Hour})
@@ -24,7 +24,7 @@ func TestTiered(t *testing.T) {
 	})
 }
 
-func TestTieredSoak(t *testing.T) {
+func TestTieredCacheSoak(t *testing.T) {
 	if os.Getenv("SOAK_TEST") == "" {
 		t.Skip("Skipping soak test; set SOAK_TEST=1 to run")
 	}
