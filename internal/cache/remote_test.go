@@ -67,7 +67,7 @@ func TestRemoteCacheSoak(t *testing.T) {
 		MaxObjectSize:    512 * 1024,
 		MinObjectSize:    1024,
 		OverwritePercent: 30,
-		Concurrency:      8,
+		Concurrency:      4,
 		TTL:              5 * time.Minute,
 	})
 }

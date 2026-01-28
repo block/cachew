@@ -206,16 +206,22 @@ func doWrite(
 		_ = writer.Close()
 		return
 	}
+	if n != len(data) {
+		t.Errorf("short write: wrote %d of %d bytes", n, len(data))
+		_ = writer.Close()
+		return
+	}
+
+	// Record hash BEFORE Close() to avoid race with concurrent reads
+	hash := sha256.Sum256(data)
+	mu.Lock()
+	writtenHashes[keyIdx] = append(writtenHashes[keyIdx], hash)
+	mu.Unlock()
 
 	if err := writer.Close(); err != nil {
 		t.Errorf("failed to close cache entry: %+v", err)
 		return
 	}
-
-	hash := sha256.Sum256(data)
-	mu.Lock()
-	writtenHashes[keyIdx] = append(writtenHashes[keyIdx], hash)
-	mu.Unlock()
 
 	atomic.AddInt64(&result.Writes, 1)
 	atomic.AddInt64(&result.BytesWritten, int64(n))

@@ -53,7 +53,7 @@ func (d *APIV1) statObject(w http.ResponseWriter, r *http.Request) {
 	headers, err := d.cache.Stat(r.Context(), key)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			d.httpError(w, http.StatusNotFound, err, "Cache object not found", slog.String("key", key.String()))
+			http.Error(w, "Cache object not found", http.StatusNotFound)
 			return
 		}
 		d.httpError(w, http.StatusInternalServerError, err, "Failed to open cache object", slog.String("key", key.String()))
@@ -74,7 +74,7 @@ func (d *APIV1) getObject(w http.ResponseWriter, r *http.Request) {
 	cr, headers, err := d.cache.Open(r.Context(), key)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			d.httpError(w, http.StatusNotFound, err, "Cache object not found", slog.String("key", key.String()))
+			http.Error(w, "Cache object not found", http.StatusNotFound)
 			return
 		}
 		d.httpError(w, http.StatusInternalServerError, err, "Failed to open cache object", slog.String("key", key.String()))
@@ -139,7 +139,7 @@ func (d *APIV1) deleteObject(w http.ResponseWriter, r *http.Request) {
 	err = d.cache.Delete(r.Context(), key)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			d.httpError(w, http.StatusNotFound, err, "Cache object not found", slog.String("key", key.String()))
+			http.Error(w, "Cache object not found", http.StatusNotFound)
 			return
 		}
 		d.httpError(w, http.StatusInternalServerError, err, "Failed to delete cache object", slog.String("key", key.String()))

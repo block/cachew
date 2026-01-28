@@ -23,9 +23,13 @@ var _ Cache = (*Remote)(nil)
 
 // NewRemote creates a new remote cache client.
 func NewRemote(baseURL string) *Remote {
+	transport := http.DefaultTransport.(*http.Transport).Clone() //nolint:errcheck
+	transport.MaxIdleConns = 100
+	transport.MaxIdleConnsPerHost = 100
+
 	return &Remote{
 		baseURL: baseURL + "/api/v1",
-		client:  &http.Client{},
+		client:  &http.Client{Transport: transport},
 	}
 }
 
@@ -45,10 +49,12 @@ func (c *Remote) Open(ctx context.Context, key Key) (io.ReadCloser, http.Header,
 	}
 
 	if resp.StatusCode == http.StatusNotFound {
+		_, _ = io.Copy(io.Discard, resp.Body) //nolint:errcheck,gosec
 		return nil, nil, errors.Join(os.ErrNotExist, resp.Body.Close())
 	}
 
 	if resp.StatusCode != http.StatusOK {
+		_, _ = io.Copy(io.Discard, resp.Body) //nolint:errcheck,gosec
 		return nil, nil, errors.Join(errors.Errorf("unexpected status code: %d", resp.StatusCode), resp.Body.Close())
 	}
 
@@ -114,7 +120,8 @@ func (c *Remote) Create(ctx context.Context, key Key, headers http.Header, ttl t
 			wc.done <- errors.Wrap(err, "failed to execute request")
 			return
 		}
-		defer resp.Body.Close()
+		_, _ = io.Copy(io.Discard, resp.Body) //nolint:errcheck,gosec
+		_ = resp.Body.Close()                 //nolint:gosec
 
 		if resp.StatusCode != http.StatusOK {
 			wc.done <- errors.Errorf("unexpected status code: %d", resp.StatusCode)
@@ -202,9 +209,12 @@ func (wc *writeCloser) Write(p []byte) (int, error) {
 
 func (wc *writeCloser) Close() error {
 	if err := wc.ctx.Err(); err != nil {
-		return errors.Join(errors.Wrap(err, "create operation cancelled"), wc.pw.CloseWithError(err))
+		_ = wc.pw.CloseWithError(err)
+		<-wc.done // Wait for goroutine to finish and release connection
+		return errors.Wrap(err, "create operation cancelled")
 	}
 	if err := wc.pw.Close(); err != nil {
+		<-wc.done // Wait for goroutine to finish and release connection
 		return errors.Wrap(err, "failed to close pipe writer")
 	}
 	err := <-wc.done
