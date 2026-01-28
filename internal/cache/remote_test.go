@@ -4,6 +4,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
 	"time"
 
@@ -16,7 +17,7 @@ import (
 	"github.com/block/cachew/internal/strategy"
 )
 
-func TestRemoteClient(t *testing.T) {
+func TestRemoteCache(t *testing.T) {
 	cachetest.Suite(t, func(t *testing.T) cache.Cache {
 		ctx := t.Context()
 		_, ctx = logging.Configure(ctx, logging.Config{Level: slog.LevelError})
@@ -34,5 +35,39 @@ func TestRemoteClient(t *testing.T) {
 
 		client := cache.NewRemote(ts.URL)
 		return client
+	})
+}
+
+func TestRemoteCacheSoak(t *testing.T) {
+	if os.Getenv("SOAK_TEST") == "" {
+		t.Skip("Skipping soak test; set SOAK_TEST=1 to run")
+	}
+
+	ctx := t.Context()
+	_, ctx = logging.Configure(ctx, logging.Config{Level: slog.LevelError})
+	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{
+		LimitMB: 50,
+		MaxTTL:  10 * time.Minute,
+	})
+	assert.NoError(t, err)
+	defer memCache.Close()
+
+	mux := http.NewServeMux()
+	_, err = strategy.NewAPIV1(ctx, struct{}{}, jobscheduler.New(ctx, jobscheduler.Config{}), memCache, mux)
+	assert.NoError(t, err)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	client := cache.NewRemote(ts.URL)
+	defer client.Close()
+
+	cachetest.Soak(t, client, cachetest.SoakConfig{
+		Duration:         time.Minute,
+		NumObjects:       500,
+		MaxObjectSize:    512 * 1024,
+		MinObjectSize:    1024,
+		OverwritePercent: 30,
+		Concurrency:      4,
+		TTL:              5 * time.Minute,
 	})
 }

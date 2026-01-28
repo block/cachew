@@ -130,6 +130,53 @@ func (m *Memory) Close() error {
 	return nil
 }
 
+func (m *Memory) Stats(_ context.Context) (Stats, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	return Stats{
+		Objects:  int64(len(m.entries)),
+		Size:     m.currentSize,
+		Capacity: int64(m.config.LimitMB) * 1024 * 1024,
+	}, nil
+}
+
+func (m *Memory) evictOldest(neededSpace int64) {
+	type entryInfo struct {
+		key       Key
+		size      int64
+		expiresAt time.Time
+	}
+
+	var entries []entryInfo
+	for k, e := range m.entries {
+		entries = append(entries, entryInfo{
+			key:       k,
+			size:      int64(len(e.data)),
+			expiresAt: e.expiresAt,
+		})
+	}
+
+	// Sort by expiry time (earliest first)
+	for i := 0; i < len(entries); i++ {
+		for j := i + 1; j < len(entries); j++ {
+			if entries[i].expiresAt.After(entries[j].expiresAt) {
+				entries[i], entries[j] = entries[j], entries[i]
+			}
+		}
+	}
+
+	freedSpace := int64(0)
+	for _, e := range entries {
+		if freedSpace >= neededSpace {
+			break
+		}
+		m.currentSize -= e.size
+		delete(m.entries, e.key)
+		freedSpace += e.size
+	}
+}
+
 type memoryWriter struct {
 	cache     *Memory
 	key       Key
@@ -179,48 +226,16 @@ func (w *memoryWriter) Close() error {
 	}
 
 	w.cache.currentSize -= oldSize
+	// Copy the buffer data to avoid holding a reference to the buffer's internal slice
+	data := make([]byte, w.buf.Len())
+	copy(data, w.buf.Bytes())
+	w.buf.Reset()
 	w.cache.entries[w.key] = &memoryEntry{
-		data:      w.buf.Bytes(),
+		data:      data,
 		expiresAt: w.expiresAt,
 		headers:   w.headers,
 	}
 	w.cache.currentSize += newSize
 
 	return nil
-}
-
-func (m *Memory) evictOldest(neededSpace int64) {
-	type entryInfo struct {
-		key       Key
-		size      int64
-		expiresAt time.Time
-	}
-
-	var entries []entryInfo
-	for k, e := range m.entries {
-		entries = append(entries, entryInfo{
-			key:       k,
-			size:      int64(len(e.data)),
-			expiresAt: e.expiresAt,
-		})
-	}
-
-	// Sort by expiry time (earliest first)
-	for i := 0; i < len(entries); i++ {
-		for j := i + 1; j < len(entries); j++ {
-			if entries[i].expiresAt.After(entries[j].expiresAt) {
-				entries[i], entries[j] = entries[j], entries[i]
-			}
-		}
-	}
-
-	freedSpace := int64(0)
-	for _, e := range entries {
-		if freedSpace >= neededSpace {
-			break
-		}
-		m.currentSize -= e.size
-		delete(m.entries, e.key)
-		freedSpace += e.size
-	}
 }

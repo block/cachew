@@ -2,6 +2,7 @@ package cache
 
 import (
 	"encoding/json"
+	"io/fs"
 	"net/http"
 	"time"
 
@@ -83,7 +84,7 @@ func (s *diskMetaDB) getTTL(key Key) (time.Time, error) {
 		bucket := tx.Bucket(ttlBucketName)
 		ttlBytes := bucket.Get(key[:])
 		if ttlBytes == nil {
-			return errors.New("key not found")
+			return fs.ErrNotExist
 		}
 		return errors.WithStack(expiresAt.UnmarshalBinary(ttlBytes))
 	})
@@ -96,7 +97,7 @@ func (s *diskMetaDB) getHeaders(key Key) (http.Header, error) {
 		bucket := tx.Bucket(headersBucketName)
 		headersBytes := bucket.Get(key[:])
 		if headersBytes == nil {
-			return errors.New("key not found")
+			return fs.ErrNotExist
 		}
 		return errors.WithStack(json.Unmarshal(headersBytes, &headers))
 	})
@@ -154,6 +155,19 @@ func (s *diskMetaDB) walk(fn func(key Key, expiresAt time.Time) error) error {
 			return fn(key, expiresAt)
 		})
 	}))
+}
+
+func (s *diskMetaDB) count() (int64, error) {
+	var count int64
+	err := s.db.View(func(tx *bbolt.Tx) error {
+		bucket := tx.Bucket(ttlBucketName)
+		if bucket == nil {
+			return nil
+		}
+		count = int64(bucket.Stats().KeyN)
+		return nil
+	})
+	return count, errors.WithStack(err)
 }
 
 func (s *diskMetaDB) close() error {

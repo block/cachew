@@ -16,6 +16,9 @@ import (
 // ErrNotFound is returned when a cache backend is not found.
 var ErrNotFound = errors.New("cache backend not found")
 
+// ErrStatsUnavailable is returned when a cache backend cannot provide statistics.
+var ErrStatsUnavailable = errors.New("stats unavailable")
+
 type registryEntry struct {
 	schema  *hcl.Block
 	factory func(ctx context.Context, config *hcl.Block) (Cache, error)
@@ -112,6 +115,16 @@ func FilterTransportHeaders(headers http.Header) http.Header {
 	return filtered
 }
 
+// Stats contains health and usage statistics for a cache.
+type Stats struct {
+	// Objects is the number of objects currently in the cache.
+	Objects int64 `json:"objects"`
+	// Size is the total size of all objects in the cache in bytes.
+	Size int64 `json:"size"`
+	// Capacity is the maximum size of the cache in bytes (0 if unlimited).
+	Capacity int64 `json:"capacity"`
+}
+
 // A Cache knows how to retrieve, create and delete objects from a cache.
 //
 // Objects in the cache are not guaranteed to persist and implementations may delete them at any time.
@@ -141,6 +154,8 @@ type Cache interface {
 	//
 	// MUST be atomic.
 	Delete(ctx context.Context, key Key) error
+	// Stats returns health and usage statistics for the cache.
+	Stats(ctx context.Context) (Stats, error)
 	// Close the Cache.
 	Close() error
 }

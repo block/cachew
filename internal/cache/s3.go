@@ -168,7 +168,7 @@ func (s *S3) Stat(ctx context.Context, key Key) (http.Header, error) {
 	objInfo, err := s.client.StatObject(ctx, s.config.Bucket, objectName, minio.StatObjectOptions{})
 	if err != nil {
 		errResponse := minio.ToErrorResponse(err)
-		if errResponse.Code == "NoSuchKey" {
+		if errResponse.Code == s3ErrNoSuchKey {
 			return nil, os.ErrNotExist
 		}
 		return nil, errors.Errorf("failed to stat object: %w", err)
@@ -211,7 +211,7 @@ func (s *S3) Open(ctx context.Context, key Key) (io.ReadCloser, http.Header, err
 	objInfo, err := s.client.StatObject(ctx, s.config.Bucket, objectName, minio.StatObjectOptions{})
 	if err != nil {
 		errResponse := minio.ToErrorResponse(err)
-		if errResponse.Code == "NoSuchKey" {
+		if errResponse.Code == s3ErrNoSuchKey {
 			return nil, nil, os.ErrNotExist
 		}
 		return nil, nil, errors.Errorf("failed to stat object: %w", err)
@@ -247,7 +247,31 @@ func (s *S3) Open(ctx context.Context, key Key) (io.ReadCloser, http.Header, err
 		return nil, nil, errors.Errorf("failed to get object: %w", err)
 	}
 
-	return obj, headers, nil
+	return &s3Reader{obj: obj}, headers, nil
+}
+
+const s3ErrNoSuchKey = "NoSuchKey"
+
+// s3Reader wraps minio.Object to convert S3 errors to standard errors.
+type s3Reader struct {
+	obj *minio.Object
+}
+
+func (r *s3Reader) Read(p []byte) (int, error) {
+	n, err := r.obj.Read(p)
+	if err == nil || errors.Is(err, io.EOF) {
+		return n, err //nolint:wrapcheck
+	}
+	// Convert NoSuchKey to os.ErrNotExist for consistency
+	errResponse := minio.ToErrorResponse(err)
+	if errResponse.Code == s3ErrNoSuchKey {
+		return n, os.ErrNotExist
+	}
+	return n, errors.WithStack(err)
+}
+
+func (r *s3Reader) Close() error {
+	return errors.WithStack(r.obj.Close())
 }
 
 func (s *S3) Create(ctx context.Context, key Key, headers http.Header, ttl time.Duration) (io.WriteCloser, error) {
@@ -290,6 +314,12 @@ func (s *S3) Delete(ctx context.Context, key Key) error {
 	return nil
 }
 
+func (s *S3) Stats(_ context.Context) (Stats, error) {
+	// S3 doesn't provide efficient count/size operations without listing the entire bucket,
+	// which would be prohibitively slow and expensive.
+	return Stats{}, ErrStatsUnavailable
+}
+
 type s3Writer struct {
 	s3        *S3
 	key       Key
@@ -298,16 +328,35 @@ type s3Writer struct {
 	headers   http.Header
 	ctx       context.Context
 	errCh     chan error
+	uploadErr error
 }
 
 func (w *s3Writer) Write(p []byte) (int, error) {
-	return errors.WithStack2(w.pipe.Write(p))
+	n, err := w.pipe.Write(p)
+	if err != nil {
+		// Check if upload failed - if so, return that error instead
+		select {
+		case uploadErr := <-w.errCh:
+			if uploadErr != nil {
+				w.uploadErr = uploadErr
+				return n, uploadErr
+			}
+		default:
+		}
+		return n, errors.WithStack(err)
+	}
+	return n, nil
 }
 
 func (w *s3Writer) Close() error {
 	// Close the pipe writer to signal EOF to the reader
 	if err := w.pipe.Close(); err != nil {
 		return errors.Wrap(err, "failed to close pipe")
+	}
+
+	// If we already captured the upload error during Write, return it
+	if w.uploadErr != nil {
+		return w.uploadErr
 	}
 
 	// Wait for upload to complete and get any error
@@ -320,7 +369,11 @@ func (w *s3Writer) Close() error {
 }
 
 func (w *s3Writer) upload(pr *io.PipeReader) {
-	defer pr.Close()
+	var uploadErr error
+	defer func() {
+		// Use CloseWithError to propagate any error to the writer side
+		_ = pr.CloseWithError(uploadErr)
+	}()
 
 	objectName := w.s3.keyToPath(w.key)
 
@@ -330,7 +383,8 @@ func (w *s3Writer) upload(pr *io.PipeReader) {
 	// Store expiration time
 	expiresAtBytes, err := w.expiresAt.MarshalText()
 	if err != nil {
-		w.errCh <- errors.Errorf("failed to marshal expiration time: %w", err)
+		uploadErr = errors.Errorf("failed to marshal expiration time: %w", err)
+		w.errCh <- uploadErr
 		return
 	}
 	userMetadata["Expires-At"] = string(expiresAtBytes)
@@ -339,7 +393,8 @@ func (w *s3Writer) upload(pr *io.PipeReader) {
 	if len(w.headers) > 0 {
 		headersJSON, err := json.Marshal(w.headers)
 		if err != nil {
-			w.errCh <- errors.Errorf("failed to marshal headers: %w", err)
+			uploadErr = errors.Errorf("failed to marshal headers: %w", err)
+			w.errCh <- uploadErr
 			return
 		}
 		userMetadata["Headers"] = string(headersJSON)
@@ -367,7 +422,8 @@ func (w *s3Writer) upload(pr *io.PipeReader) {
 		opts,
 	)
 	if err != nil {
-		w.errCh <- errors.Errorf("failed to put object: %w", err)
+		uploadErr = errors.Errorf("failed to put object: %w", err)
+		w.errCh <- uploadErr
 		return
 	}
 

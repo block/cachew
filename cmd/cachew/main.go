@@ -211,10 +211,5 @@ func (pk *PlatformKey) AfterApply(cli *CLI) error {
 		prefixed = now.Format("2006-01-02-") + prefixed
 	}
 
-	// Only print debug if we actually modified the key
-	if prefixed != pk.raw {
-		fmt.Fprintf(os.Stderr, "[DEBUG] Key transform: %s -> %s\n", pk.raw, prefixed) //nolint:forbidigo
-	}
-
 	return errors.WithStack(pk.key.UnmarshalText([]byte(prefixed)))
 }
