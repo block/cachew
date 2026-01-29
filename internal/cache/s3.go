@@ -20,8 +20,9 @@ import (
 	"github.com/block/cachew/internal/logging"
 )
 
-func init() {
+func RegisterS3(r *Registry) {
 	Register(
+		r,
 		"s3",
 		"Caches objects in S3",
 		NewS3,

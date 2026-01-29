@@ -16,8 +16,9 @@ import (
 	"github.com/block/cachew/internal/logging"
 )
 
-func init() {
+func RegisterMemory(r *Registry) {
 	Register(
+		r,
 		"memory",
 		"Caches objects in memory, with a maximum size limit and LRU eviction",
 		NewMemory,

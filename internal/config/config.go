@@ -37,14 +37,14 @@ func (l *loggingMux) HandleFunc(pattern string, handler func(http.ResponseWriter
 var _ strategy.Mux = (*loggingMux)(nil)
 
 // Schema returns the configuration file schema.
-func Schema() *hcl.AST {
+func Schema(cr *cache.Registry) *hcl.AST {
 	return &hcl.AST{
-		Entries: append(strategy.Schema().Entries, cache.Schema().Entries...),
+		Entries: append(strategy.Schema().Entries, cr.Schema().Entries...),
 	}
 }
 
 // Load HCL configuration and uses that to construct the cache backend, and proxy strategies.
-func Load(ctx context.Context, r io.Reader, scheduler jobscheduler.Scheduler, mux *http.ServeMux, vars map[string]string) error {
+func Load(ctx context.Context, cr *cache.Registry, r io.Reader, scheduler jobscheduler.Scheduler, mux *http.ServeMux, vars map[string]string) error {
 	logger := logging.FromContext(ctx)
 	ast, err := hcl.Parse(r)
 	if err != nil {
@@ -63,7 +63,7 @@ func Load(ctx context.Context, r io.Reader, scheduler jobscheduler.Scheduler, mu
 	for _, node := range ast.Entries {
 		switch node := node.(type) {
 		case *hcl.Block:
-			c, err := cache.Create(ctx, node.Name, node)
+			c, err := cr.Create(ctx, node.Name, node)
 			if errors.Is(err, cache.ErrNotFound) {
 				strategyCandidates = append(strategyCandidates, node)
 				continue

@@ -15,6 +15,7 @@ import (
 	"github.com/alecthomas/hcl/v2"
 	"github.com/alecthomas/kong"
 
+	"github.com/block/cachew/internal/cache"
 	"github.com/block/cachew/internal/config"
 	"github.com/block/cachew/internal/httputil"
 	"github.com/block/cachew/internal/jobscheduler"
@@ -36,10 +37,15 @@ func main() {
 	ctx := context.Background()
 	logger, ctx := logging.Configure(ctx, cli.LoggingConfig)
 
+	cr := cache.NewRegistry()
+	cache.RegisterMemory(cr)
+	cache.RegisterDisk(cr)
+	cache.RegisterS3(cr)
+
 	// Commands
 	switch { //nolint:gocritic
 	case cli.Schema:
-		schema := config.Schema()
+		schema := config.Schema(cr)
 		slices.SortStableFunc(schema.Entries, func(a, b hcl.Entry) int {
 			return strings.Compare(a.EntryKey(), b.EntryKey())
 		})
@@ -59,7 +65,7 @@ func main() {
 
 	scheduler := jobscheduler.New(ctx, cli.SchedulerConfig)
 
-	err := config.Load(ctx, cli.Config, scheduler, mux, parseEnvars())
+	err := config.Load(ctx, cr, cli.Config, scheduler, mux, parseEnvars())
 	kctx.FatalIfErrorf(err)
 
 	logger.InfoContext(ctx, "Starting cachewd", slog.String("bind", cli.Bind))

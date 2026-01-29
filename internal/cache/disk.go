@@ -19,8 +19,10 @@ import (
 	"github.com/block/cachew/internal/logging"
 )
 
-func init() {
+// RegisterDisk cache with the given registry.
+func RegisterDisk(r *Registry) {
 	Register(
+		r,
 		"disk",
 		"Caches objects on local disk, with a maximum size limit and LRU eviction",
 		NewDisk,

@@ -24,13 +24,21 @@ type registryEntry struct {
 	factory func(ctx context.Context, config *hcl.Block) (Cache, error)
 }
 
-var registry = map[string]registryEntry{}
+type Registry struct {
+	registry map[string]registryEntry
+}
+
+func NewRegistry() *Registry {
+	return &Registry{
+		registry: make(map[string]registryEntry),
+	}
+}
 
 // Factory is a function that creates a new cache instance from the given hcl-tagged configuration struct.
 type Factory[Config any, C Cache] func(ctx context.Context, config Config) (C, error)
 
 // Register a cache factory function.
-func Register[Config any, C Cache](id, description string, factory Factory[Config, C]) {
+func Register[Config any, C Cache](r *Registry, id, description string, factory Factory[Config, C]) {
 	var c Config
 	schema, err := hcl.BlockSchema(id, &c)
 	if err != nil {
@@ -38,7 +46,7 @@ func Register[Config any, C Cache](id, description string, factory Factory[Confi
 	}
 	block := schema.Entries[0].(*hcl.Block) //nolint:errcheck // This seems spurious
 	block.Comments = hcl.CommentList{description}
-	registry[id] = registryEntry{
+	r.registry[id] = registryEntry{
 		schema: block,
 		factory: func(ctx context.Context, config *hcl.Block) (Cache, error) {
 			var cfg Config
@@ -51,9 +59,9 @@ func Register[Config any, C Cache](id, description string, factory Factory[Confi
 }
 
 // Schema returns the schema for all registered cache backends.
-func Schema() *hcl.AST {
+func (r *Registry) Schema() *hcl.AST {
 	ast := &hcl.AST{}
-	for _, entry := range registry {
+	for _, entry := range r.registry {
 		ast.Entries = append(ast.Entries, entry.schema)
 	}
 	return ast
@@ -62,8 +70,8 @@ func Schema() *hcl.AST {
 // Create a new cache instance from the given name and configuration.
 //
 // Will return "ErrNotFound" if the cache backend is not found.
-func Create(ctx context.Context, name string, config *hcl.Block) (Cache, error) {
-	if entry, ok := registry[name]; ok {
+func (r *Registry) Create(ctx context.Context, name string, config *hcl.Block) (Cache, error) {
+	if entry, ok := r.registry[name]; ok {
 		return errors.WithStack2(entry.factory(ctx, config))
 	}
 	return nil, errors.Errorf("%s: %w", name, ErrNotFound)
