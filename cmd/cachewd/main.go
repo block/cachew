@@ -63,6 +63,17 @@ func main() {
 
 	mux := http.NewServeMux()
 
+	// Health check endpoints
+	mux.HandleFunc("GET /_liveness", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("OK")) //nolint:errcheck
+	})
+
+	mux.HandleFunc("GET /_readiness", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("OK")) //nolint:errcheck
+	})
+
 	scheduler := jobscheduler.New(ctx, cli.SchedulerConfig)
 
 	err := config.Load(ctx, cr, cli.Config, scheduler, mux, parseEnvars())
