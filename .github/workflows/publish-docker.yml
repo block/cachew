@@ -10,8 +10,8 @@ on:
       - docker
   push:
     tags:
-      - 'v*.*.*'
-      - 'v*.*.*-*' # For pre-releases like v1.2.3-beta
+      - "v*.*.*"
+      - "v*.*.*-*" # For pre-releases like v1.2.3-beta
   workflow_dispatch:
 
 permissions:
@@ -53,7 +53,7 @@ jobs:
             VERSION="$(git describe --tags --always --dirty 2>/dev/null || echo dev)"
           fi
           echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
-          
+
           GIT_COMMIT="$(git rev-parse HEAD)"
           echo "git_commit=${GIT_COMMIT}" >> "${GITHUB_OUTPUT}"
 
@@ -73,6 +73,10 @@ jobs:
             # For pre-release tags: keep the full version
             type=raw,value={{tag}},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
 
+      - uses: cashapp/activate-hermit@e49f5cb4dd64ff0b0b659d1d8df499595451155a # v1
+      - run: |
+          just build linux arm64
+          just build linux amd64
       - name: Build and push Docker image
         uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # pin@v6.18.0
         with:
