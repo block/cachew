@@ -7,7 +7,6 @@ on:
       - completed
     branches:
       - main
-      - docker
   push:
     tags:
       - "v*.*.*"
@@ -42,6 +41,12 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Log in to Docker Hub
+        env:
+          DOCKER_HUB_PULL_TOKEN: ${{ secrets.DOCKER_HUB_PULL_TOKEN }}
+        run: |
+          echo "${DOCKER_HUB_PULL_TOKEN}" | docker login --username "blockossreleases" --password-stdin
+
       - name: Extract version metadata
         id: meta
         run: |
@@ -61,7 +66,9 @@ jobs:
         id: docker_meta
         uses: docker/metadata-action@c1e51972afc2121e065aed6d45c65596fe445f3f # pin@v5.8.0
         with:
-          images: ghcr.io/${{ github.repository_owner }}/cachew
+          images: |
+            ghcr.io/${{ github.repository_owner }}/cachew
+            blockossreleases/cachew
           tags: |
             # For main branch: latest, main, and sha
             type=ref,event=branch
