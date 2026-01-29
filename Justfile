@@ -39,7 +39,8 @@ fmt:
 build GOOS=(GOOS) GOARCH=(GOARCH):
     #!/usr/bin/env bash
     mkdir -p {{ RELEASE }}
-    go build -trimpath -o {{ RELEASE }}/cachewd-{{ GOOS }}-{{ GOARCH }} \
+    CGO_ENABLED=0 GOOS={{ GOOS }} GOARCH={{ GOARCH }} \
+        go build -trimpath -o {{ RELEASE }}/cachewd-{{ GOOS }}-{{ GOARCH }} \
         -ldflags "-s -w -X main.version={{ VERSION }} -X main.gitCommit={{ GIT_COMMIT }}" \
         ./cmd/cachewd
     test "{{ GOOS }}-{{ GOARCH }}" = "$(go env GOOS)-$(go env GOARCH)" && (cd {{ RELEASE }} && ln -sf cachewd-{{ GOOS }}-{{ GOARCH }} cachewd)

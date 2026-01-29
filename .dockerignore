@@ -1,6 +1,4 @@
-# Build artifacts
-dist/
-**/dist/
+# Build artifacts (dist/ is allowed for pre-built binaries)
 
 # Git
 .git/

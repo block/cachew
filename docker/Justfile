@@ -7,9 +7,12 @@ TAG := `git rev-parse --short HEAD 2>/dev/null || echo "dev"`
 VERSION := `git describe --tags --always --dirty 2>/dev/null || echo "dev"`
 GIT_COMMIT := `git rev-parse HEAD 2>/dev/null || echo "unknown"`
 DOCKERFILE := ROOT + "/docker/Dockerfile"
+RELEASE := ROOT + "/dist"
 
 # Build Docker image for local development
 build:
+    @echo "Building Linux binary for current architecture..."
+    @just -f {{ ROOT }}/Justfile build linux
     @echo "Building Docker image..."
     @docker build -f {{ DOCKERFILE }} \
         --build-arg VERSION={{ VERSION }} \
@@ -20,6 +23,9 @@ build:
 
 # Build multi-arch Docker image (builds for amd64 + arm64, stays in cache)
 build-multi:
+    @echo "Building Linux binaries for amd64 and arm64..."
+    @just -f {{ ROOT }}/Justfile build linux amd64
+    @just -f {{ ROOT }}/Justfile build linux arm64
     @docker buildx create --use --driver docker-container --driver-opt image=moby/buildkit:v0.17.3 --name multi-arch-cachew 2>/dev/null || docker buildx use multi-arch-cachew
     @echo "Building multi-arch image..."
     @docker buildx build \
