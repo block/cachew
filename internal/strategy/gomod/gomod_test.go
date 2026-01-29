@@ -1,4 +1,4 @@
-package strategy_test
+package gomod_test
 
 import (
 	"archive/zip"
@@ -17,7 +17,7 @@ import (
 	"github.com/block/cachew/internal/cache"
 	"github.com/block/cachew/internal/jobscheduler"
 	"github.com/block/cachew/internal/logging"
-	"github.com/block/cachew/internal/strategy"
+	"github.com/block/cachew/internal/strategy/gomod"
 )
 
 type mockGoModServer struct {
@@ -58,25 +58,33 @@ func newMockGoModServer(t *testing.T) *mockGoModServer {
 	return m
 }
 
-func createModuleZip(t *testing.T, modulePath, version string) string {
-	t.Helper()
+func createModuleZip(modulePath, version string) string {
 	var buf bytes.Buffer
 	w := zip.NewWriter(&buf)
 
 	prefix := modulePath + "@" + version + "/"
 
 	f, err := w.Create(prefix + "go.mod")
-	assert.NoError(t, err)
+	if err != nil {
+		panic(err)
+	}
 	_, err = f.Write([]byte("module " + modulePath + "\n\ngo 1.21\n"))
-	assert.NoError(t, err)
+	if err != nil {
+		panic(err)
+	}
 
 	f2, err := w.Create(prefix + "main.go")
-	assert.NoError(t, err)
+	if err != nil {
+		panic(err)
+	}
 	_, err = f2.Write([]byte("package main\n\nfunc main() {}\n"))
-	assert.NoError(t, err)
+	if err != nil {
+		panic(err)
+	}
 
-	err = w.Close()
-	assert.NoError(t, err)
+	if err := w.Close(); err != nil {
+		panic(err)
+	}
 
 	return buf.String()
 }
@@ -129,7 +137,7 @@ func (m *mockGoModServer) handleRequest(w http.ResponseWriter, r *http.Request) 
 				version := strings.TrimSuffix(versionPart, ".zip")
 				resp = mockResponse{
 					status:  http.StatusOK,
-					content: createModuleZip(m.t, modulePath, version),
+					content: createModuleZip(modulePath, version),
 				}
 				found = true
 			}
@@ -176,7 +184,7 @@ func setupGoModTest(t *testing.T) (*mockGoModServer, *http.ServeMux, context.Con
 	t.Cleanup(func() { _ = memCache.Close() })
 
 	mux := http.NewServeMux()
-	_, err = strategy.NewGoMod(ctx, strategy.GoModConfig{
+	_, err = gomod.New(ctx, gomod.Config{
 		Proxy: mock.server.URL,
 	}, jobscheduler.New(ctx, jobscheduler.Config{}), memCache, mux)
 	assert.NoError(t, err)

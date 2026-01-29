@@ -1,4 +1,4 @@
-package strategy
+package gomod
 
 import (
 	"context"

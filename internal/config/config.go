@@ -15,7 +15,8 @@ import (
 	"github.com/block/cachew/internal/jobscheduler"
 	"github.com/block/cachew/internal/logging"
 	"github.com/block/cachew/internal/strategy"
-	_ "github.com/block/cachew/internal/strategy/git" // Register git strategy
+	_ "github.com/block/cachew/internal/strategy/git"   // Register git strategy
+	_ "github.com/block/cachew/internal/strategy/gomod" // Register gomod strategy
 )
 
 type loggingMux struct {
