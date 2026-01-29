@@ -2,7 +2,7 @@ set positional-arguments := true
 set shell := ["bash", "-c"]
 
 # Configuration
-ROOT := `git rev-parse --show-toplevel 2>/dev/null || echo "."` 
+ROOT := `git rev-parse --show-toplevel 2>/dev/null || echo "."`
 TAG := `git rev-parse --short HEAD 2>/dev/null || echo "dev"`
 VERSION := `git describe --tags --always --dirty 2>/dev/null || echo "dev"`
 GIT_COMMIT := `git rev-parse HEAD 2>/dev/null || echo "unknown"`

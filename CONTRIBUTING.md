@@ -19,8 +19,8 @@ just docker run debug       # Run with debug logging
 
 ```bash
 just build              # Build for current platform
-just build-linux        # Build for Linux
 just build-all          # Build all platforms
+just build GOOS=linux GOARCH=amd64 # Build for linux/amd64
 just test               # Run tests
 just lint               # Lint code
 just fmt                # Format code
