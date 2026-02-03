@@ -116,10 +116,13 @@ func (s *Hermit) handleNonGitHub(w http.ResponseWriter, r *http.Request, host, p
 }
 
 func buildOriginalURL(host, path, query string) string {
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
 	u := &url.URL{
 		Scheme:   "https",
 		Host:     host,
-		Path:     "/" + path,
+		Path:     path,
 		RawQuery: query,
 	}
 	return u.String()
