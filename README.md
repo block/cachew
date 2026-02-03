@@ -29,4 +29,10 @@ As Git itself isn't aware of the snapshots, Git-specific code in the Cachew CLI 
 
 ## Hermit
 
-Hermit
+Caches Hermit package downloads from all sources (golang.org, npm, GitHub releases, etc.).
+
+**URL pattern:** `/hermit/{host}/{path...}`
+
+Example: `GET /hermit/golang.org/dl/go1.21.0.tar.gz`
+
+GitHub releases are automatically redirected to the `github-releases` strategy.
