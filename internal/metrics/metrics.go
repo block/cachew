@@ -2,6 +2,7 @@ package metrics
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
@@ -10,6 +11,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp"
 	prometheusexporter "go.opentelemetry.io/otel/exporters/prometheus"
 	"go.opentelemetry.io/otel/metric"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
@@ -21,22 +23,33 @@ import (
 
 // Config holds metrics configuration.
 type Config struct {
-	ServiceName string `help:"Service name for metrics." default:"cachew"`
-	Port        int    `help:"Port for metrics server." default:"9102"`
+	ServiceName        string `help:"Service name for metrics." default:"cachew"`
+	Port               int    `help:"Port for Prometheus metrics server." default:"9102"`
+	EnablePrometheus   bool   `help:"Enable Prometheus exporter." default:"true"`
+	EnableOTLP         bool   `help:"Enable OTLP exporter." default:"false"`
+	OTLPEndpoint       string `help:"OTLP endpoint URL." default:"http://localhost:4318"`
+	OTLPInsecure       bool   `help:"Use insecure connection for OTLP." default:"false"`
+	OTLPExportInterval int    `help:"OTLP export interval in seconds." default:"60"`
 }
 
-// Client provides OpenTelemetry metrics with Prometheus exporter.
+// Client provides OpenTelemetry metrics with configurable exporters.
 type Client struct {
-	provider    metric.MeterProvider
-	exporter    *prometheusexporter.Exporter
-	registry    *prometheus.Registry
-	serviceName string
-	port        int
+	provider          metric.MeterProvider
+	prometheusEnabled bool
+	exporter          *prometheusexporter.Exporter
+	registry          *prometheus.Registry
+	serviceName       string
+	port              int
 }
 
-// New creates a new OpenTelemetry metrics client with Prometheus exporter.
+// New creates a new OpenTelemetry metrics client with configurable exporters.
 func New(ctx context.Context, cfg Config) (*Client, error) {
 	logger := logging.FromContext(ctx)
+
+	// Validate that at least one exporter is enabled
+	if !cfg.EnablePrometheus && !cfg.EnableOTLP {
+		return nil, errors.New("at least one exporter (Prometheus or OTLP) must be enabled")
+	}
 
 	attrs := []attribute.KeyValue{
 		semconv.ServiceName(cfg.ServiceName),
@@ -51,31 +64,70 @@ func New(ctx context.Context, cfg Config) (*Client, error) {
 		return nil, fmt.Errorf("failed to create resource: %w", err)
 	}
 
-	registry := prometheus.NewRegistry()
+	var readers []sdkmetric.Reader
+	var registry *prometheus.Registry
+	var prometheusExporter *prometheusexporter.Exporter
+	exporters := []string{}
 
-	exporter, err := prometheusexporter.New(prometheusexporter.WithRegisterer(registry))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create Prometheus exporter: %w", err)
+	// Configure Prometheus exporter if enabled
+	if cfg.EnablePrometheus {
+		registry = prometheus.NewRegistry()
+		prometheusExporter, err = prometheusexporter.New(prometheusexporter.WithRegisterer(registry))
+		if err != nil {
+			return nil, fmt.Errorf("failed to create Prometheus exporter: %w", err)
+		}
+		readers = append(readers, prometheusExporter)
+		exporters = append(exporters, "prometheus")
 	}
 
-	provider := sdkmetric.NewMeterProvider(
-		sdkmetric.WithResource(res),
-		sdkmetric.WithReader(exporter),
-	)
+	// Configure OTLP exporter if enabled
+	if cfg.EnableOTLP {
+		opts := []otlpmetrichttp.Option{
+			otlpmetrichttp.WithEndpointURL(cfg.OTLPEndpoint),
+		}
+		if cfg.OTLPInsecure {
+			opts = append(opts, otlpmetrichttp.WithInsecure())
+		}
 
+		otlpExporter, err := otlpmetrichttp.New(ctx, opts...)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create OTLP exporter: %w", err)
+		}
+
+		// Create periodic reader for OTLP
+		reader := sdkmetric.NewPeriodicReader(
+			otlpExporter,
+			sdkmetric.WithInterval(time.Duration(cfg.OTLPExportInterval)*time.Second),
+		)
+		readers = append(readers, reader)
+		exporters = append(exporters, "otlp")
+	}
+
+	// Create meter provider with all configured readers
+	providerOpts := []sdkmetric.Option{
+		sdkmetric.WithResource(res),
+	}
+	for _, reader := range readers {
+		providerOpts = append(providerOpts, sdkmetric.WithReader(reader))
+	}
+
+	provider := sdkmetric.NewMeterProvider(providerOpts...)
 	otel.SetMeterProvider(provider)
 
 	client := &Client{
-		provider:    provider,
-		exporter:    exporter,
-		registry:    registry,
-		serviceName: cfg.ServiceName,
-		port:        cfg.Port,
+		provider:          provider,
+		prometheusEnabled: cfg.EnablePrometheus,
+		exporter:          prometheusExporter,
+		registry:          registry,
+		serviceName:       cfg.ServiceName,
+		port:              cfg.Port,
 	}
 
-	logger.InfoContext(ctx, "OpenTelemetry metrics initialized with Prometheus exporter",
+	logger.InfoContext(ctx, "OpenTelemetry metrics initialized",
 		"service", cfg.ServiceName,
-		"port", cfg.Port,
+		"exporters", exporters,
+		"prometheus_port", cfg.Port,
+		"otlp_endpoint", cfg.OTLPEndpoint,
 	)
 
 	return client, nil
@@ -107,7 +159,13 @@ func (c *Client) Handler() http.Handler {
 }
 
 // ServeMetrics starts a dedicated HTTP server for Prometheus metrics scraping.
+// This is only started if Prometheus exporter is enabled.
 func (c *Client) ServeMetrics(ctx context.Context) error {
+	// Only start metrics server if Prometheus is enabled
+	if !c.prometheusEnabled {
+		return nil
+	}
+
 	logger := logging.FromContext(ctx)
 
 	mux := http.NewServeMux()
@@ -127,7 +185,7 @@ func (c *Client) ServeMetrics(ctx context.Context) error {
 	}
 
 	go func() {
-		logger.InfoContext(ctx, "Starting metrics server", "port", c.port)
+		logger.InfoContext(ctx, "Starting Prometheus metrics server", "port", c.port)
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			logger.ErrorContext(ctx, "Metrics server error", "error", err)
 		}

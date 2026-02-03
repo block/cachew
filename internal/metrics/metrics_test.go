@@ -19,8 +19,10 @@ func TestMetricsClient(t *testing.T) {
 	_ = logger
 
 	client, err := metrics.New(ctx, metrics.Config{
-		ServiceName: "cachew",
-		Port:        9102,
+		ServiceName:      "cachew",
+		Port:             9102,
+		EnablePrometheus: true,
+		EnableOTLP:       false,
 	})
 	assert.NoError(t, err)
 
@@ -41,8 +43,10 @@ func TestMetricsDedicatedServer(t *testing.T) {
 	_ = logger
 
 	client, err := metrics.New(ctx, metrics.Config{
-		ServiceName: "cachew-test",
-		Port:        9103,
+		ServiceName:      "cachew-test",
+		Port:             9103,
+		EnablePrometheus: true,
+		EnableOTLP:       false,
 	})
 	assert.NoError(t, err)
 	defer client.Close()
@@ -50,4 +54,64 @@ func TestMetricsDedicatedServer(t *testing.T) {
 	// ServeMetrics uses configured port
 	err = client.ServeMetrics(ctx)
 	assert.NoError(t, err)
+}
+
+func TestMetricsOTLPOnly(t *testing.T) {
+	ctx := context.Background()
+	logger, ctx := logging.Configure(ctx, logging.Config{})
+	_ = logger
+
+	// OTLP-only configuration
+	client, err := metrics.New(ctx, metrics.Config{
+		ServiceName:        "cachew-otlp",
+		EnablePrometheus:   false,
+		EnableOTLP:         true,
+		OTLPEndpoint:       "http://localhost:4318",
+		OTLPExportInterval: 10,
+	})
+	assert.NoError(t, err)
+	defer client.Close()
+
+	// ServeMetrics should not start server when Prometheus is disabled
+	err = client.ServeMetrics(ctx)
+	assert.NoError(t, err)
+}
+
+func TestMetricsBothExporters(t *testing.T) {
+	ctx := context.Background()
+	logger, ctx := logging.Configure(ctx, logging.Config{})
+	_ = logger
+
+	// Both exporters enabled
+	client, err := metrics.New(ctx, metrics.Config{
+		ServiceName:        "cachew-both",
+		Port:               9104,
+		EnablePrometheus:   true,
+		EnableOTLP:         true,
+		OTLPEndpoint:       "http://localhost:4318",
+		OTLPExportInterval: 10,
+	})
+	assert.NoError(t, err)
+	defer client.Close()
+
+	// Handler should return metrics
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	w := httptest.NewRecorder()
+	client.Handler().ServeHTTP(w, req)
+	assert.Equal(t, http.StatusOK, w.Code)
+}
+
+func TestMetricsNoExportersError(t *testing.T) {
+	ctx := context.Background()
+	logger, ctx := logging.Configure(ctx, logging.Config{})
+	_ = logger
+
+	// Should error when no exporters are enabled
+	_, err := metrics.New(ctx, metrics.Config{
+		ServiceName:      "cachew-none",
+		EnablePrometheus: false,
+		EnableOTLP:       false,
+	})
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "at least one exporter")
 }
