@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -271,51 +272,84 @@ func TestRepository_HasCommit_NotReady(t *testing.T) {
 	assert.Contains(t, err.Error(), "repository not ready")
 }
 
-func TestRepository_HasCommit_MissingCommit(t *testing.T) {
+func TestRepository_FetchCommit_MissingCommit(t *testing.T) {
 	tmpDir := t.TempDir()
-	repoPath := filepath.Join(tmpDir, "test-repo")
+	upstreamPath := filepath.Join(tmpDir, "upstream")
+	localPath := filepath.Join(tmpDir, "local")
 
-	// Initialize a real git repository
-	assert.NoError(t, os.MkdirAll(repoPath, 0o755))
-
-	// Run git init
-	cmd := exec.Command("git", "init", repoPath)
+	// Create upstream repository with initial commit
+	assert.NoError(t, os.MkdirAll(upstreamPath, 0o755))
+	cmd := exec.Command("git", "init", upstreamPath)
 	output, err := cmd.CombinedOutput()
-	assert.NoError(t, err, "git init failed: %s", string(output))
+	assert.NoError(t, err, "git init upstream failed: %s", string(output))
 
-	// Configure git for the test
-	cmd = exec.Command("git", "-C", repoPath, "config", "user.email", "test@example.com")
+	cmd = exec.Command("git", "-C", upstreamPath, "config", "user.email", "test@example.com")
 	output, err = cmd.CombinedOutput()
-	assert.NoError(t, err, "git config user.email failed: %s", string(output))
+	assert.NoError(t, err, "git config failed: %s", string(output))
 
-	cmd = exec.Command("git", "-C", repoPath, "config", "user.name", "Test User")
+	cmd = exec.Command("git", "-C", upstreamPath, "config", "user.name", "Test User")
 	output, err = cmd.CombinedOutput()
-	assert.NoError(t, err, "git config user.name failed: %s", string(output))
+	assert.NoError(t, err, "git config failed: %s", string(output))
 
-	// Create a commit so the repo has some history
-	testFile := filepath.Join(repoPath, "test.txt")
-	assert.NoError(t, os.WriteFile(testFile, []byte("test content"), 0o644))
-
-	cmd = exec.Command("git", "-C", repoPath, "add", "test.txt")
+	// Create initial commit
+	testFile := filepath.Join(upstreamPath, "file1.txt")
+	assert.NoError(t, os.WriteFile(testFile, []byte("content 1"), 0o644))
+	cmd = exec.Command("git", "-C", upstreamPath, "add", "file1.txt")
 	output, err = cmd.CombinedOutput()
 	assert.NoError(t, err, "git add failed: %s", string(output))
 
-	cmd = exec.Command("git", "-C", repoPath, "commit", "-m", "Initial commit")
+	cmd = exec.Command("git", "-C", upstreamPath, "commit", "-m", "Initial commit")
 	output, err = cmd.CombinedOutput()
 	assert.NoError(t, err, "git commit failed: %s", string(output))
 
-	// Create a Repository instance in StateReady
+	// Clone the repository (this represents our cache)
+	cmd = exec.Command("git", "clone", upstreamPath, localPath)
+	output, err = cmd.CombinedOutput()
+	assert.NoError(t, err, "git clone failed: %s", string(output))
+
+	// Now add a NEW commit to upstream (after the clone, so local doesn't have it)
+	testFile2 := filepath.Join(upstreamPath, "file2.txt")
+	assert.NoError(t, os.WriteFile(testFile2, []byte("content 2"), 0o644))
+	cmd = exec.Command("git", "-C", upstreamPath, "add", "file2.txt")
+	output, err = cmd.CombinedOutput()
+	assert.NoError(t, err, "git add failed: %s", string(output))
+
+	cmd = exec.Command("git", "-C", upstreamPath, "commit", "-m", "New commit")
+	output, err = cmd.CombinedOutput()
+	assert.NoError(t, err, "git commit failed: %s", string(output))
+
+	// Get the SHA of the new commit
+	cmd = exec.Command("git", "-C", upstreamPath, "rev-parse", "HEAD")
+	output, err = cmd.CombinedOutput()
+	assert.NoError(t, err, "git rev-parse failed: %s", string(output))
+	newCommitSHA := strings.TrimSpace(string(output))
+
+	// Create a Repository instance
 	repo := &Repository{
 		state:       StateReady,
-		path:        repoPath,
-		upstreamURL: "https://github.com/user/repo",
+		path:        localPath,
+		upstreamURL: upstreamPath,
 		fetchSem:    make(chan struct{}, 1),
 	}
 	repo.fetchSem <- struct{}{}
 
-	// Test with a non-existent commit SHA
-	nonExistentSHA := "0000000000000000000000000000000000000000"
-	hasCommit, err := repo.HasCommit(context.Background(), nonExistentSHA)
+	// Verify the new commit is NOT available locally yet
+	hasCommit, err := repo.HasCommit(context.Background(), newCommitSHA)
 	assert.NoError(t, err)
-	assert.False(t, hasCommit)
+	assert.False(t, hasCommit, "new commit should not be in local cache yet")
+
+	// Now fetch the missing commit directly
+	config := Config{
+		RootDir:          tmpDir,
+		FetchInterval:    15 * time.Minute,
+		RefCheckInterval: 10 * time.Second,
+		GitConfig:        DefaultGitTuningConfig(),
+	}
+	err = repo.FetchCommit(context.Background(), newCommitSHA, config)
+	assert.NoError(t, err, "FetchCommit should fetch the missing commit")
+
+	// Verify the commit is now available locally
+	hasCommit, err = repo.HasCommit(context.Background(), newCommitSHA)
+	assert.NoError(t, err)
+	assert.True(t, hasCommit, "new commit should now be available after FetchCommit")
 }
