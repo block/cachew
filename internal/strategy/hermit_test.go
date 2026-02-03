@@ -22,7 +22,6 @@ import (
 var httpTransportMutexHermit sync.Mutex
 
 func TestHermitNonGitHubCaching(t *testing.T) {
-	// Lock to prevent parallel execution since we modify http.DefaultTransport
 	httpTransportMutexHermit.Lock()
 	defer httpTransportMutexHermit.Unlock()
 
@@ -34,7 +33,6 @@ func TestHermitNonGitHubCaching(t *testing.T) {
 	}))
 	defer backend.Close()
 
-	// Override http.DefaultTransport to redirect to our mock server
 	originalTransport := http.DefaultTransport
 	defer func() { http.DefaultTransport = originalTransport }()                                   //nolint:reassign
 	http.DefaultTransport = &mockTransport{backend: backend, originalTransport: originalTransport} //nolint:reassign
@@ -48,16 +46,14 @@ func TestHermitNonGitHubCaching(t *testing.T) {
 	_, err = strategy.NewHermit(ctx, strategy.HermitConfig{}, jobscheduler.New(ctx, jobscheduler.Config{}), memCache, mux)
 	assert.NoError(t, err)
 
-	// First request - cache miss
 	req1 := httptest.NewRequestWithContext(ctx, http.MethodGet, "/hermit/golang.org/dl/go1.21.0.tar.gz", nil)
 	w1 := httptest.NewRecorder()
 	mux.ServeHTTP(w1, req1)
 
 	assert.Equal(t, http.StatusOK, w1.Code)
 	assert.Equal(t, "go-binary-content", w1.Body.String())
-	assert.Equal(t, 1, callCount, "first request should fetch from upstream")
+	assert.Equal(t, 1, callCount)
 
-	// Second request - cache hit
 	req2 := httptest.NewRequestWithContext(ctx, http.MethodGet, "/hermit/golang.org/dl/go1.21.0.tar.gz", nil)
 	w2 := httptest.NewRecorder()
 	mux.ServeHTTP(w2, req2)
@@ -67,14 +63,12 @@ func TestHermitNonGitHubCaching(t *testing.T) {
 	assert.Equal(t, 1, callCount, "second request should be served from cache")
 }
 
-// mockTransport redirects all HTTP requests to the mock backend server
 type mockTransport struct {
 	backend           *httptest.Server
 	originalTransport http.RoundTripper
 }
 
 func (m *mockTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	// Redirect all requests to our mock server
 	newReq := req.Clone(req.Context())
 	newReq.URL.Scheme = "http"
 	newReq.URL.Host = m.backend.Listener.Addr().String()
@@ -83,7 +77,6 @@ func (m *mockTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 }
 
 func TestHermitGitHubRelease(t *testing.T) {
-	// Mock GitHub server
 	githubCallCount := 0
 	githubServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		githubCallCount++
@@ -98,28 +91,21 @@ func TestHermitGitHubRelease(t *testing.T) {
 	defer memCache.Close()
 
 	mux := http.NewServeMux()
-
-	// Create hermit strategy
 	_, err = strategy.NewHermit(ctx, strategy.HermitConfig{}, jobscheduler.New(ctx, jobscheduler.Config{}), memCache, mux)
 	assert.NoError(t, err)
 
-	// Also create github-releases strategy for redirect
 	_, err = strategy.NewGitHubReleases(ctx, strategy.GitHubReleasesConfig{}, jobscheduler.New(ctx, jobscheduler.Config{}), memCache, mux)
 	assert.NoError(t, err)
 
-	// Test GitHub release URL - should redirect to github-releases strategy
 	req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/hermit/github.com/alecthomas/chroma/releases/download/v2.14.0/chroma-2.14.0-linux-amd64.tar.gz", nil)
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, req)
 
-	// Note: This will fail to fetch from real GitHub, but we're testing the redirect logic
-	// In a real test, we'd mock the GitHub server
 	assert.True(t, w.Code == http.StatusOK || w.Code == http.StatusBadGateway || w.Code == http.StatusNotFound,
 		"should attempt to fetch from GitHub (may fail without mock)")
 }
 
 func TestHermitNonOKStatus(t *testing.T) {
-	// Lock to prevent parallel execution since we modify http.DefaultTransport
 	httpTransportMutexHermit.Lock()
 	defer httpTransportMutexHermit.Unlock()
 
@@ -129,7 +115,6 @@ func TestHermitNonOKStatus(t *testing.T) {
 	}))
 	defer backend.Close()
 
-	// Override http.DefaultTransport to redirect to our mock server
 	originalTransport := http.DefaultTransport
 	defer func() { http.DefaultTransport = originalTransport }()                                   //nolint:reassign
 	http.DefaultTransport = &mockTransport{backend: backend, originalTransport: originalTransport} //nolint:reassign
@@ -150,7 +135,6 @@ func TestHermitNonOKStatus(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, w.Code)
 	assert.Equal(t, "not found", w.Body.String())
 
-	// Verify non-OK responses are not cached
 	key := cache.NewKey("https://example.com/missing.tar.gz")
 	_, _, err = memCache.Open(context.Background(), key)
 	assert.Error(t, err, "non-OK responses should not be cached")
@@ -181,20 +165,15 @@ func TestHermitDifferentSources(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Lock to prevent parallel execution since we modify http.DefaultTransport
 			httpTransportMutexHermit.Lock()
 			defer httpTransportMutexHermit.Unlock()
 
 			backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-				// Verify the upstream request is correct
-				// Note: r.Host will be the mock server host, not the original host
-				// This is expected behavior with mockTransport
 				w.WriteHeader(http.StatusOK)
 				_, _ = w.Write([]byte("content"))
 			}))
 			defer backend.Close()
 
-			// Override http.DefaultTransport to redirect to our mock server
 			originalTransport := http.DefaultTransport
 			defer func() { http.DefaultTransport = originalTransport }()                                   //nolint:reassign
 			http.DefaultTransport = &mockTransport{backend: backend, originalTransport: originalTransport} //nolint:reassign
@@ -212,7 +191,6 @@ func TestHermitDifferentSources(t *testing.T) {
 			w := httptest.NewRecorder()
 			mux.ServeHTTP(w, req)
 
-			// Should successfully fetch from mock server
 			assert.Equal(t, http.StatusOK, w.Code)
 			assert.Equal(t, "content", w.Body.String())
 		})
@@ -257,8 +235,6 @@ func TestHermitCacheKeyGeneration(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// We can't easily test the cache key directly without exposing internals,
-			// but we can verify the URL pattern is correct by checking the request
 			_, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelError})
 			memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: time.Hour})
 			assert.NoError(t, err)
@@ -271,9 +247,6 @@ func TestHermitCacheKeyGeneration(t *testing.T) {
 			req := httptest.NewRequestWithContext(ctx, http.MethodGet, tt.path, nil)
 			w := httptest.NewRecorder()
 			mux.ServeHTTP(w, req)
-
-			// The cache key should be the wantKey (we verify this indirectly through caching behavior)
-			// A more thorough test would mock the cache and verify the key
 		})
 	}
 }
