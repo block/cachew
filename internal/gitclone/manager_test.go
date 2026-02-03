@@ -2,7 +2,9 @@ package gitclone //nolint:testpackage // white-box testing required for unexport
 
 import (
 	"context"
+	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
@@ -213,4 +215,107 @@ func TestState_String(t *testing.T) {
 	assert.Equal(t, "empty", StateEmpty.String())
 	assert.Equal(t, "cloning", StateCloning.String())
 	assert.Equal(t, "ready", StateReady.String())
+}
+
+func TestCommitError_Error(t *testing.T) {
+	tests := []struct {
+		name     string
+		err      *CommitError
+		expected string
+	}{
+		{
+			name: "not found",
+			err: &CommitError{
+				SHA:      "abc123",
+				NotFound: true,
+			},
+			expected: "commit abc123 not found",
+		},
+		{
+			name: "not fetched",
+			err: &CommitError{
+				SHA:        "def456",
+				NotFetched: true,
+			},
+			expected: "commit def456 exists upstream but not fetched locally",
+		},
+		{
+			name: "with underlying error",
+			err: &CommitError{
+				SHA: "xyz789",
+				Err: errors.New("network timeout"),
+			},
+			expected: "commit xyz789: network timeout",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, tt.err.Error())
+		})
+	}
+}
+
+func TestRepository_HasCommit_NotReady(t *testing.T) {
+	repo := &Repository{
+		state:       StateEmpty,
+		path:        "/tmp/test",
+		upstreamURL: "https://github.com/user/repo",
+		fetchSem:    make(chan struct{}, 1),
+	}
+	repo.fetchSem <- struct{}{}
+
+	hasCommit, err := repo.HasCommit(context.Background(), "abc123")
+	assert.Error(t, err)
+	assert.False(t, hasCommit)
+	assert.Contains(t, err.Error(), "repository not ready")
+}
+
+func TestRepository_HasCommit_MissingCommit(t *testing.T) {
+	tmpDir := t.TempDir()
+	repoPath := filepath.Join(tmpDir, "test-repo")
+
+	// Initialize a real git repository
+	assert.NoError(t, os.MkdirAll(repoPath, 0o755))
+
+	// Run git init
+	cmd := exec.Command("git", "init", repoPath)
+	output, err := cmd.CombinedOutput()
+	assert.NoError(t, err, "git init failed: %s", string(output))
+
+	// Configure git for the test
+	cmd = exec.Command("git", "-C", repoPath, "config", "user.email", "test@example.com")
+	output, err = cmd.CombinedOutput()
+	assert.NoError(t, err, "git config user.email failed: %s", string(output))
+
+	cmd = exec.Command("git", "-C", repoPath, "config", "user.name", "Test User")
+	output, err = cmd.CombinedOutput()
+	assert.NoError(t, err, "git config user.name failed: %s", string(output))
+
+	// Create a commit so the repo has some history
+	testFile := filepath.Join(repoPath, "test.txt")
+	assert.NoError(t, os.WriteFile(testFile, []byte("test content"), 0o644))
+
+	cmd = exec.Command("git", "-C", repoPath, "add", "test.txt")
+	output, err = cmd.CombinedOutput()
+	assert.NoError(t, err, "git add failed: %s", string(output))
+
+	cmd = exec.Command("git", "-C", repoPath, "commit", "-m", "Initial commit")
+	output, err = cmd.CombinedOutput()
+	assert.NoError(t, err, "git commit failed: %s", string(output))
+
+	// Create a Repository instance in StateReady
+	repo := &Repository{
+		state:       StateReady,
+		path:        repoPath,
+		upstreamURL: "https://github.com/user/repo",
+		fetchSem:    make(chan struct{}, 1),
+	}
+	repo.fetchSem <- struct{}{}
+
+	// Test with a non-existent commit SHA
+	nonExistentSHA := "0000000000000000000000000000000000000000"
+	hasCommit, err := repo.HasCommit(context.Background(), nonExistentSHA)
+	assert.NoError(t, err)
+	assert.False(t, hasCommit)
 }

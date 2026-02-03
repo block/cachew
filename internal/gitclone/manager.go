@@ -259,6 +259,15 @@ func (r *Repository) Clone(ctx context.Context, config Config) error {
 	return nil
 }
 
+// gitConfigArgs returns the git config arguments for http tuning settings
+func gitConfigArgs(config GitTuningConfig) []string {
+	return []string{
+		"-c", "http.postBuffer=" + strconv.Itoa(config.PostBuffer),
+		"-c", "http.lowSpeedLimit=" + strconv.Itoa(config.LowSpeedLimit),
+		"-c", "http.lowSpeedTime=" + strconv.Itoa(int(config.LowSpeedTime.Seconds())),
+	}
+}
+
 func (r *Repository) executeClone(ctx context.Context, config Config) error {
 	if err := os.MkdirAll(filepath.Dir(r.path), 0o750); err != nil {
 		return errors.Wrap(err, "create clone directory")
@@ -269,11 +278,8 @@ func (r *Repository) executeClone(ctx context.Context, config Config) error {
 	if config.CloneDepth > 0 {
 		args = append(args, "--depth", strconv.Itoa(config.CloneDepth))
 	}
-	args = append(args,
-		"-c", "http.postBuffer="+strconv.Itoa(config.GitConfig.PostBuffer),
-		"-c", "http.lowSpeedLimit="+strconv.Itoa(config.GitConfig.LowSpeedLimit),
-		"-c", "http.lowSpeedTime="+strconv.Itoa(int(config.GitConfig.LowSpeedTime.Seconds())),
-		r.upstreamURL, r.path)
+	args = append(args, gitConfigArgs(config.GitConfig)...)
+	args = append(args, r.upstreamURL, r.path)
 
 	cmd, err := gitCommand(ctx, r.upstreamURL, args...)
 	if err != nil {
@@ -291,11 +297,10 @@ func (r *Repository) executeClone(ctx context.Context, config Config) error {
 		return errors.Wrapf(err, "configure fetch refspec: %s", string(output))
 	}
 
-	cmd, err = gitCommand(ctx, r.upstreamURL, "-C", r.path,
-		"-c", "http.postBuffer="+strconv.Itoa(config.GitConfig.PostBuffer),
-		"-c", "http.lowSpeedLimit="+strconv.Itoa(config.GitConfig.LowSpeedLimit),
-		"-c", "http.lowSpeedTime="+strconv.Itoa(int(config.GitConfig.LowSpeedTime.Seconds())),
-		"fetch", "--all")
+	args = []string{"-C", r.path}
+	args = append(args, gitConfigArgs(config.GitConfig)...)
+	args = append(args, "fetch", "--all")
+	cmd, err = gitCommand(ctx, r.upstreamURL, args...)
 	if err != nil {
 		return errors.Wrap(err, "create git command for fetch")
 	}
@@ -328,11 +333,10 @@ func (r *Repository) Fetch(ctx context.Context, config Config) error {
 	r.mu.Lock()
 
 	// #nosec G204 - r.path is controlled by us
-	cmd, err := gitCommand(ctx, r.upstreamURL, "-C", r.path,
-		"-c", "http.postBuffer="+strconv.Itoa(config.GitConfig.PostBuffer),
-		"-c", "http.lowSpeedLimit="+strconv.Itoa(config.GitConfig.LowSpeedLimit),
-		"-c", "http.lowSpeedTime="+strconv.Itoa(int(config.GitConfig.LowSpeedTime.Seconds())),
-		"remote", "update", "--prune")
+	args := []string{"-C", r.path}
+	args = append(args, gitConfigArgs(config.GitConfig)...)
+	args = append(args, "remote", "update", "--prune")
+	cmd, err := gitCommand(ctx, r.upstreamURL, args...)
 	if err != nil {
 		return errors.Wrap(err, "create git command")
 	}
@@ -428,4 +432,221 @@ func (r *Repository) GetUpstreamRefs(ctx context.Context) (map[string]string, er
 	}
 
 	return ParseGitRefs(output), nil
+}
+
+// CommitError represents an error related to commit resolution
+type CommitError struct {
+	SHA        string
+	NotFound   bool  // doesn't exist anywhere (locally or upstream)
+	NotFetched bool  // exists upstream but not locally
+	Err        error // underlying error
+}
+
+func (e *CommitError) Error() string {
+	if e.NotFound {
+		return "commit " + e.SHA + " not found"
+	}
+	if e.NotFetched {
+		return "commit " + e.SHA + " exists upstream but not fetched locally"
+	}
+	if e.Err != nil {
+		return "commit " + e.SHA + ": " + e.Err.Error()
+	}
+	return "commit " + e.SHA + ": unknown error"
+}
+
+func (e *CommitError) Unwrap() error {
+	return e.Err
+}
+
+// HasCommit checks if a commit exists in the local repository
+func (r *Repository) HasCommit(ctx context.Context, sha string) (bool, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	if r.state != StateReady {
+		return false, errors.New("repository not ready")
+	}
+
+	// #nosec G204 - r.path is controlled by us
+	cmd := exec.CommandContext(ctx, "git", "-C", r.path, "cat-file", "-e", sha)
+	err := cmd.Run()
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
+			return false, nil
+		}
+		return false, errors.Wrap(err, "git cat-file")
+	}
+
+	return true, nil
+}
+
+// CommitExistsUpstream checks if a commit exists in the upstream repository
+func (r *Repository) CommitExistsUpstream(ctx context.Context, sha string) (bool, error) {
+	// Use git ls-remote to check if the commit exists upstream
+	// #nosec G204 - r.upstreamURL is controlled by us
+	cmd, err := gitCommand(ctx, r.upstreamURL, "ls-remote", r.upstreamURL, sha)
+	if err != nil {
+		return false, errors.Wrap(err, "create git command")
+	}
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		// ls-remote returns non-zero for network errors, not for missing commits
+		return false, errors.Wrap(err, "git ls-remote")
+	}
+
+	// If the commit exists, ls-remote will return a line with the SHA
+	// If it doesn't exist, it returns empty output
+	return len(strings.TrimSpace(string(output))) > 0, nil
+}
+
+// FetchCommit fetches a specific commit from upstream
+func (r *Repository) FetchCommit(ctx context.Context, sha string, config Config) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.state != StateReady {
+		return errors.New("repository not ready")
+	}
+
+	// Check if this is a shallow clone
+	shallowFile := filepath.Join(r.path, ".git", "shallow")
+	isShallow := false
+	if _, err := os.Stat(shallowFile); err == nil {
+		isShallow = true
+	}
+
+	// Try fetching the specific commit
+	// #nosec G204 - r.path is controlled by us
+	args := []string{"-C", r.path}
+	args = append(args, gitConfigArgs(config.GitConfig)...)
+	args = append(args, "fetch", "origin", sha)
+
+	// For shallow clones, we need to use --depth or --deepen to fetch specific commits
+	if isShallow {
+		args = append(args, "--depth=1")
+	}
+
+	cmd, err := gitCommand(ctx, r.upstreamURL, args...)
+	if err != nil {
+		return errors.Wrap(err, "create git command")
+	}
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		// If fetching with depth fails on a shallow clone, try unshallowing
+		if isShallow && strings.Contains(string(output), "shallow") {
+			r.mu.Unlock()
+			unshallowErr := r.Unshallow(ctx, config)
+			r.mu.Lock()
+			if unshallowErr != nil {
+				return errors.Wrapf(err, "git fetch commit %s failed and unshallow also failed: %v: %s", sha, unshallowErr, string(output))
+			}
+			// Retry the fetch after unshallowing
+			args = []string{"-C", r.path}
+			args = append(args, gitConfigArgs(config.GitConfig)...)
+			args = append(args, "fetch", "origin", sha)
+			cmd, err = gitCommand(ctx, r.upstreamURL, args...)
+			if err != nil {
+				return errors.Wrap(err, "create git command for retry")
+			}
+			output, err = cmd.CombinedOutput()
+			if err != nil {
+				return errors.Wrapf(err, "git fetch commit %s after unshallow: %s", sha, string(output))
+			}
+			return nil
+		}
+		return errors.Wrapf(err, "git fetch commit %s: %s", sha, string(output))
+	}
+
+	return nil
+}
+
+// ResolveCommit ensures a commit is available locally, fetching it if necessary
+func (r *Repository) ResolveCommit(ctx context.Context, sha string, config Config) error {
+	// First check if we have it locally
+	hasCommit, err := r.HasCommit(ctx, sha)
+	if err != nil {
+		return &CommitError{SHA: sha, Err: err}
+	}
+
+	if hasCommit {
+		return nil
+	}
+
+	// Check if it exists upstream
+	existsUpstream, err := r.CommitExistsUpstream(ctx, sha)
+	if err != nil {
+		return &CommitError{SHA: sha, Err: err}
+	}
+
+	if !existsUpstream {
+		return &CommitError{SHA: sha, NotFound: true}
+	}
+
+	// Fetch the commit
+	if err := r.FetchCommit(ctx, sha, config); err != nil {
+		return &CommitError{SHA: sha, NotFetched: true, Err: err}
+	}
+
+	return nil
+}
+
+// FetchRef fetches a specific ref from upstream
+func (r *Repository) FetchRef(ctx context.Context, ref string, config Config) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.state != StateReady {
+		return errors.New("repository not ready")
+	}
+
+	// #nosec G204 - r.path is controlled by us
+	args := []string{"-C", r.path}
+	args = append(args, gitConfigArgs(config.GitConfig)...)
+	args = append(args, "fetch", "origin", ref)
+	cmd, err := gitCommand(ctx, r.upstreamURL, args...)
+	if err != nil {
+		return errors.Wrap(err, "create git command")
+	}
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return errors.Wrapf(err, "git fetch ref %s: %s", ref, string(output))
+	}
+
+	return nil
+}
+
+// Unshallow converts a shallow clone to a full clone
+func (r *Repository) Unshallow(ctx context.Context, config Config) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.state != StateReady {
+		return errors.New("repository not ready")
+	}
+
+	// Check if it's actually a shallow clone
+	shallowFile := filepath.Join(r.path, ".git", "shallow")
+	if _, err := os.Stat(shallowFile); errors.Is(err, os.ErrNotExist) {
+		return nil // Not a shallow clone
+	}
+
+	// #nosec G204 - r.path is controlled by us
+	args := []string{"-C", r.path}
+	args = append(args, gitConfigArgs(config.GitConfig)...)
+	args = append(args, "fetch", "--unshallow")
+	cmd, err := gitCommand(ctx, r.upstreamURL, args...)
+	if err != nil {
+		return errors.Wrap(err, "create git command")
+	}
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return errors.Wrapf(err, "git fetch --unshallow: %s", string(output))
+	}
+
+	return nil
 }

@@ -236,13 +236,7 @@ func (s *Strategy) startClone(ctx context.Context, repo *gitclone.Repository) {
 		slog.String("upstream", repo.UpstreamURL()),
 		slog.String("path", repo.Path()))
 
-	gitcloneConfig := gitclone.Config{
-		RootDir:          s.config.MirrorRoot,
-		FetchInterval:    s.config.FetchInterval,
-		RefCheckInterval: s.config.RefCheckInterval,
-		CloneDepth:       s.config.CloneDepth,
-		GitConfig:        gitclone.DefaultGitTuningConfig(),
-	}
+	gitcloneConfig := s.gitcloneConfig()
 
 	err := repo.Clone(ctx, gitcloneConfig)
 
@@ -284,13 +278,7 @@ func (s *Strategy) backgroundFetch(ctx context.Context, repo *gitclone.Repositor
 		slog.String("upstream", repo.UpstreamURL()),
 		slog.String("path", repo.Path()))
 
-	gitcloneConfig := gitclone.Config{
-		RootDir:          s.config.MirrorRoot,
-		FetchInterval:    s.config.FetchInterval,
-		RefCheckInterval: s.config.RefCheckInterval,
-		CloneDepth:       s.config.CloneDepth,
-		GitConfig:        gitclone.DefaultGitTuningConfig(),
-	}
+	gitcloneConfig := s.gitcloneConfig()
 
 	if err := repo.Fetch(ctx, gitcloneConfig); err != nil {
 		logger.ErrorContext(ctx, "Fetch failed",

@@ -85,15 +85,19 @@ func (s *Strategy) serveFromBackend(w http.ResponseWriter, r *http.Request, repo
 }
 
 func (s *Strategy) ensureRefsUpToDate(ctx context.Context, repo *gitclone.Repository) error {
-	gitcloneConfig := gitclone.Config{
+	config := s.gitcloneConfig()
+	if err := repo.EnsureRefsUpToDate(ctx, config); err != nil {
+		return errors.Wrap(err, "ensure refs up to date")
+	}
+	return nil
+}
+
+func (s *Strategy) gitcloneConfig() gitclone.Config {
+	return gitclone.Config{
 		RootDir:          s.config.MirrorRoot,
 		FetchInterval:    s.config.FetchInterval,
 		RefCheckInterval: s.config.RefCheckInterval,
 		CloneDepth:       s.config.CloneDepth,
 		GitConfig:        gitclone.DefaultGitTuningConfig(),
 	}
-	if err := repo.EnsureRefsUpToDate(ctx, gitcloneConfig); err != nil {
-		return errors.Wrap(err, "ensure refs up to date")
-	}
-	return nil
 }
