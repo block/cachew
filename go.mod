@@ -9,7 +9,6 @@ require (
 	github.com/lmittmann/tint v1.1.2
 	github.com/minio/minio-go/v7 v7.0.97
 	go.etcd.io/bbolt v1.4.3
-	golang.org/x/mod v0.31.0
 )
 
 require (
@@ -31,6 +30,7 @@ require (
 	github.com/stretchr/testify v1.11.1 // indirect
 	github.com/tinylib/msgp v1.3.0 // indirect
 	golang.org/x/crypto v0.44.0 // indirect
+	golang.org/x/mod v0.31.0 // indirect
 	golang.org/x/net v0.47.0 // indirect
 	golang.org/x/sys v0.38.0 // indirect
 	golang.org/x/text v0.32.0 // indirect
