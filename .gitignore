@@ -4,3 +4,7 @@
 
 block-test.hcl
 /*-source/
+
+.env
+
+.claude/

@@ -64,7 +64,7 @@ build-all:
 run: build
     @echo "→ Starting cachew at http://localhost:8080"
     @mkdir -p state
-    @{{ RELEASE }}/cachewd --config cachew.hcl
+    @{{ RELEASE }}/cachewd --config cachew-local.hcl
 
 # Clean up build artifacts
 clean:
