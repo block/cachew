@@ -8,3 +8,7 @@ block-test.hcl
 .env
 
 .claude/
+
+# Binaries
+/cachew
+/cachewd
