@@ -20,7 +20,7 @@ func init() {
 }
 
 type HermitConfig struct {
-	BaseURL string `hcl:"base-url" help:"Base URL for internal redirects to github-releases strategy (e.g., http://localhost:8080)."`
+	BaseURL string `hcl:"base-url" help:"Base URL for internal redirects to github-releases strategy" default:"${CACHEW_URL}"`
 }
 
 // Hermit caches Hermit package downloads.
@@ -38,6 +38,9 @@ var _ Strategy = (*Hermit)(nil)
 
 func NewHermit(ctx context.Context, config HermitConfig, _ jobscheduler.Scheduler, cache cache.Cache, mux Mux) (*Hermit, error) {
 	logger := logging.FromContext(ctx)
+
+	logger.DebugContext(ctx, "Hermit strategy config received",
+		slog.String("base_url_raw", config.BaseURL))
 
 	s := &Hermit{
 		config: config,
@@ -84,6 +87,10 @@ func (s *Hermit) redirectToGitHubReleases(w http.ResponseWriter, r *http.Request
 			if r.URL.RawQuery != "" {
 				internalURL += "?" + r.URL.RawQuery
 			}
+
+			s.logger.DebugContext(r.Context(), "Creating internal redirect request",
+				slog.String("base_url", s.config.BaseURL),
+				slog.String("internal_url", internalURL))
 
 			req, err := http.NewRequestWithContext(r.Context(), r.Method, internalURL, nil)
 			if err != nil {

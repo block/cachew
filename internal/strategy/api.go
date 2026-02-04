@@ -4,6 +4,8 @@ package strategy
 import (
 	"context"
 	"net/http"
+	"os"
+	"reflect"
 
 	"github.com/alecthomas/errors"
 	"github.com/alecthomas/hcl/v2"
@@ -22,7 +24,7 @@ type Mux interface {
 
 type registryEntry struct {
 	schema  *hcl.Block
-	factory func(ctx context.Context, config *hcl.Block, scheduler jobscheduler.Scheduler, cache cache.Cache, mux Mux) (Strategy, error)
+	factory func(ctx context.Context, config *hcl.Block, scheduler jobscheduler.Scheduler, cache cache.Cache, mux Mux, vars map[string]string) (Strategy, error)
 }
 
 var registry = map[string]registryEntry{}
@@ -40,11 +42,13 @@ func Register[Config any, S Strategy](id, description string, factory Factory[Co
 	block.Comments = hcl.CommentList{description}
 	registry[id] = registryEntry{
 		schema: block,
-		factory: func(ctx context.Context, config *hcl.Block, scheduler jobscheduler.Scheduler, cache cache.Cache, mux Mux) (Strategy, error) {
+		factory: func(ctx context.Context, config *hcl.Block, scheduler jobscheduler.Scheduler, cache cache.Cache, mux Mux, vars map[string]string) (Strategy, error) {
 			var cfg Config
 			if err := hcl.UnmarshalBlock(config, &cfg, hcl.AllowExtra(false)); err != nil {
 				return nil, errors.WithStack(err)
 			}
+			// Expand environment variables in string fields
+			expandStructStrings(&cfg, vars)
 			return factory(ctx, cfg, scheduler, cache, mux)
 		},
 	}
@@ -69,13 +73,36 @@ func Create(
 	scheduler jobscheduler.Scheduler,
 	cache cache.Cache,
 	mux Mux,
+	vars map[string]string,
 ) (Strategy, error) {
 	if entry, ok := registry[name]; ok {
-		return errors.WithStack2(entry.factory(ctx, config, scheduler.WithQueuePrefix(name), cache, mux))
+		return errors.WithStack2(entry.factory(ctx, config, scheduler.WithQueuePrefix(name), cache, mux, vars))
 	}
 	return nil, errors.Errorf("%s: %w", name, ErrNotFound)
 }
 
 type Strategy interface {
 	String() string
+}
+
+// expandStructStrings expands environment variables in string fields of a struct.
+func expandStructStrings(v any, vars map[string]string) {
+	rv := reflect.ValueOf(v)
+	if rv.Kind() != reflect.Ptr || rv.Elem().Kind() != reflect.Struct {
+		return
+	}
+
+	rv = rv.Elem()
+	for i := range rv.NumField() {
+		field := rv.Field(i)
+		if field.Kind() == reflect.String && field.CanSet() {
+			expanded := os.Expand(field.String(), func(key string) string {
+				if val, ok := vars[key]; ok {
+					return val
+				}
+				return os.Getenv(key)
+			})
+			field.SetString(expanded)
+		}
+	}
 }
