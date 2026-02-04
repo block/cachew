@@ -1,35 +1,32 @@
-# Cachew unified configuration with tiered caching strategy
-# Uses disk (L1) + S3 (L2) cache backends
-#
-# Required environment variable:
-# - CACHEW_S3_BUCKET: S3 bucket name (REQUIRED)
+# strategy git {}
+# strategy docker {}
+# strategy hermit {}
 
-# First tier: Disk cache (fast local access)
-# 500GB limit hardcoded - uses defaults for everything else
-disk {
-  root     = "./state/cache"
-  limit-mb = 512000  # 500GB
-}
+# Artifactory caching proxy strategy
+# artifactory "example.jfrog.io" {
+#   target = "https://example.jfrog.io"
+# }
 
-# Second tier: S3 cache (durable storage)
-# Uses defaults for all optional fields (region=us-west-2, endpoint=s3.amazonaws.com, etc.)
-s3 {
-  bucket = "${CACHEW_S3_BUCKET}"
-}
 
-# Git strategy configuration
 git {
-  mirror-root     = "./state/git-mirrors"
-  clone-depth     = 1000
+  mirror-root = "./state/git-mirrors"
+  clone-depth = 1000
   bundle-interval = "24h"
 }
 
-# GitHub releases caching
+host "https://w3.org" {}
+
 github-releases {
   token = "${GITHUB_TOKEN}"
+  private-orgs = ["alecthomas"]
 }
 
-# Go module proxy
+disk {
+  root = "./state/cache"
+  limit-mb = 250000
+  max-ttl = "8h"
+}
+
 gomod {
   proxy = "https://proxy.golang.org"
 }

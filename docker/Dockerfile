@@ -16,9 +16,6 @@ WORKDIR /app
 # Copy pre-built binary from host (built by Justfile)
 COPY dist/cachewd-linux-${TARGETARCH} /usr/local/bin/cachewd
 
-# Copy default configuration file
-COPY cachew.hcl /app/cachew.hcl
-
 # Create state directory with proper permissions
 RUN mkdir -p /app/state/cache && \
   chown -R cachew:cachew /app
