@@ -16,6 +16,10 @@ GOOS := env("GOOS", `go env GOOS`)
 _help:
     @just -l
 
+# Run cachewd with hot reload
+dev:
+    proctor
+
 # Run tests
 test:
     @gotestsum --hide-summary output,skipped --format-hide-empty-pkg ${CI:+--format github-actions} ./... -- -race -timeout 30s
