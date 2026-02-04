@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 
 	"github.com/alecthomas/errors"
@@ -20,7 +21,7 @@ func init() {
 }
 
 type HermitConfig struct {
-	BaseURL string `hcl:"base-url" help:"Base URL for internal redirects to github-releases strategy" default:"${CACHEW_URL}"`
+	GitHubBaseURL string `hcl:"github-base-url,optional" help:"Base URL for GitHub release redirects" default:"${CACHEW_URL}/github.com"`
 }
 
 // Hermit caches Hermit package downloads.
@@ -41,9 +42,6 @@ var _ Strategy = (*Hermit)(nil)
 func NewHermit(ctx context.Context, config HermitConfig, _ jobscheduler.Scheduler, c cache.Cache, mux Mux) (*Hermit, error) {
 	logger := logging.FromContext(ctx)
 
-	logger.DebugContext(ctx, "Hermit strategy config received",
-		slog.String("base_url_raw", config.BaseURL))
-
 	s := &Hermit{
 		config: config,
 		cache:  c,
@@ -55,12 +53,15 @@ func NewHermit(ctx context.Context, config HermitConfig, _ jobscheduler.Schedule
 	s.directHandler = s.createDirectHandler(c)
 	mux.Handle("GET /hermit/{host}/{path...}", s.directHandler)
 
-	if config.BaseURL != "" {
-		s.redirectHandler = s.createRedirectHandler()
+	if config.GitHubBaseURL != "" {
+		isInternalRedirect := strings.Contains(config.GitHubBaseURL, os.Getenv("CACHEW_URL"))
+		s.redirectHandler = s.createRedirectHandler(isInternalRedirect, c)
 		mux.Handle("GET /hermit/github.com/{path...}", s.redirectHandler)
-		logger.InfoContext(ctx, "Hermit strategy initialized", slog.String("base_url", config.BaseURL))
+		logger.InfoContext(ctx, "Hermit strategy initialized",
+			slog.String("github_base_url", config.GitHubBaseURL),
+			slog.Bool("internal_redirect", isInternalRedirect))
 	} else {
-		logger.WarnContext(ctx, "Hermit strategy initialized without base-url - GitHub releases will fail")
+		logger.InfoContext(ctx, "Hermit strategy initialized")
 	}
 
 	return s, nil
@@ -78,23 +79,36 @@ func (s *Hermit) createDirectHandler(c cache.Cache) http.Handler {
 		})
 }
 
-func (s *Hermit) createRedirectHandler() http.Handler {
-	return handler.New(s.client, cache.NoOpCache()).
+func (s *Hermit) createRedirectHandler(isInternalRedirect bool, c cache.Cache) http.Handler {
+	var cacheBackend cache.Cache
+	if isInternalRedirect {
+		cacheBackend = cache.NoOpCache()
+	} else {
+		cacheBackend = c
+	}
+
+	return handler.New(s.client, cacheBackend).
+		CacheKey(func(r *http.Request) string {
+			return s.buildGitHubURL(r)
+		}).
 		Transform(func(r *http.Request) (*http.Request, error) {
+			s.logger.DebugContext(r.Context(), "Redirect handler called for GitHub release")
 			return s.buildRedirectRequest(r)
 		})
 }
 
-func (s *Hermit) buildRedirectRequest(r *http.Request) (*http.Request, error) {
-	path := r.PathValue("path")
-	newPath := "/github.com/" + path
+func (s *Hermit) buildGitHubURL(r *http.Request) string {
+	return buildURL("https", "github.com", r.PathValue("path"), r.URL.RawQuery)
+}
 
-	internalURL := s.config.BaseURL + newPath
+func (s *Hermit) buildRedirectRequest(r *http.Request) (*http.Request, error) {
+	path := ensureLeadingSlash(r.PathValue("path"))
+	redirectURL := s.config.GitHubBaseURL + path
 	if r.URL.RawQuery != "" {
-		internalURL += "?" + r.URL.RawQuery
+		redirectURL += "?" + r.URL.RawQuery
 	}
 
-	req, err := http.NewRequestWithContext(r.Context(), r.Method, internalURL, nil)
+	req, err := http.NewRequestWithContext(r.Context(), r.Method, redirectURL, nil)
 	if err != nil {
 		return nil, errors.Wrap(err, "create internal redirect request")
 	}
@@ -117,18 +131,22 @@ func (s *Hermit) buildDirectRequest(r *http.Request) (*http.Request, error) {
 }
 
 func (s *Hermit) buildOriginalURL(r *http.Request) string {
-	host := r.PathValue("host")
-	path := r.PathValue("path")
+	return buildURL("https", r.PathValue("host"), r.PathValue("path"), r.URL.RawQuery)
+}
 
-	if !strings.HasPrefix(path, "/") {
-		path = "/" + path
-	}
-
+func buildURL(scheme, host, path, query string) string {
 	u := &url.URL{
-		Scheme:   "https",
+		Scheme:   scheme,
 		Host:     host,
-		Path:     path,
-		RawQuery: r.URL.RawQuery,
+		Path:     ensureLeadingSlash(path),
+		RawQuery: query,
 	}
 	return u.String()
+}
+
+func ensureLeadingSlash(path string) string {
+	if !strings.HasPrefix(path, "/") {
+		return "/" + path
+	}
+	return path
 }

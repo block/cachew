@@ -30,7 +30,7 @@ func setupHermitTest(t *testing.T) (*http.ServeMux, context.Context, cache.Cache
 	t.Cleanup(func() { memCache.Close() })
 
 	mux := http.NewServeMux()
-	_, err = strategy.NewHermit(ctx, strategy.HermitConfig{BaseURL: "http://localhost:8080"}, jobscheduler.New(ctx, jobscheduler.Config{}), memCache, mux)
+	_, err = strategy.NewHermit(ctx, strategy.HermitConfig{GitHubBaseURL: "http://localhost:8080"}, jobscheduler.New(ctx, jobscheduler.Config{}), memCache, mux)
 	assert.NoError(t, err)
 
 	return mux, ctx, memCache
