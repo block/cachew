@@ -1,7 +1,3 @@
-# strategy git {}
-# strategy docker {}
-# strategy hermit {}
-
 # Artifactory caching proxy strategy
 # artifactory "example.jfrog.io" {
 #   target = "https://example.jfrog.io"
@@ -16,7 +12,14 @@ git-clone {
     mirror-root = "./state/git-mirrors"
 }
 
+github-app {
+  app-id             = "${GITHUB_APP_ID}"
+  private-key-path   = "${GITHUB_APP_PRIVATE_KEY_PATH}"
+  installations-json = "${GITHUB_APP_INSTALLATIONS}"
+}
+
 metrics {}
+
 
 git {
   bundle-interval = "24h"

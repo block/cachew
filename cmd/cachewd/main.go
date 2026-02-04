@@ -7,7 +7,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/alecthomas/chroma/v2/quick"
@@ -19,6 +18,7 @@ import (
 	"github.com/block/cachew/internal/cache"
 	"github.com/block/cachew/internal/config"
 	"github.com/block/cachew/internal/gitclone"
+	"github.com/block/cachew/internal/githubapp"
 	"github.com/block/cachew/internal/httputil"
 	"github.com/block/cachew/internal/jobscheduler"
 	"github.com/block/cachew/internal/logging"
@@ -35,6 +35,7 @@ type GlobalConfig struct {
 	LoggingConfig   logging.Config      `hcl:"log,block"`
 	MetricsConfig   metrics.Config      `hcl:"metrics,block"`
 	GitCloneConfig  gitclone.Config     `hcl:"git-clone,block"`
+	GithubAppConfig githubapp.Config    `embed:"" hcl:"github-app,block" prefix:"github-app-"`
 }
 
 type CLI struct {
@@ -51,13 +52,16 @@ func main() {
 	ast, err := hcl.Parse(cli.Config)
 	kctx.FatalIfErrorf(err)
 
+	// Expand environment variables in HCL (e.g., ${GITHUB_APP_ID})
+	config.ExpandVars(ast, config.ParseEnvars())
+
 	globalConfigHCL, providersConfigHCL := config.Split[GlobalConfig](ast)
 
 	// Load global config.
 	var globalConfig GlobalConfig
 	globalSchema, err := hcl.Schema(&globalConfig)
 	kctx.FatalIfErrorf(err)
-	config.InjectEnvars(globalSchema, globalConfigHCL, "CACHEW", parseEnvars())
+	config.InjectEnvars(globalSchema, globalConfigHCL, "CACHEW", config.ParseEnvars())
 	err = hcl.UnmarshalAST(globalConfigHCL, &globalConfig, hcl.HydratedImplicitBlocks(true))
 	kctx.FatalIfErrorf(err)
 
@@ -66,10 +70,11 @@ func main() {
 
 	// Start initialising
 	managerProvider := gitclone.NewManagerProvider(ctx, globalConfig.GitCloneConfig)
+	tokenManagerProvider := githubapp.NewTokenManagerProvider(globalConfig.GithubAppConfig, logger)
 
 	scheduler := jobscheduler.New(ctx, globalConfig.SchedulerConfig)
 
-	cr, sr := newRegistries(globalConfig.URL, scheduler, managerProvider)
+	cr, sr := newRegistries(globalConfig.URL, scheduler, managerProvider, tokenManagerProvider)
 
 	// Commands
 	switch { //nolint:gocritic
@@ -100,7 +105,7 @@ func main() {
 	kctx.FatalIfErrorf(err)
 }
 
-func newRegistries(cachewURL string, scheduler jobscheduler.Scheduler, cloneManagerProvider gitclone.ManagerProvider) (*cache.Registry, *strategy.Registry) {
+func newRegistries(cachewURL string, scheduler jobscheduler.Scheduler, cloneManagerProvider gitclone.ManagerProvider, tokenManagerProvider githubapp.TokenManagerProvider) (*cache.Registry, *strategy.Registry) {
 	cr := cache.NewRegistry()
 	cache.RegisterMemory(cr)
 	cache.RegisterDisk(cr)
@@ -109,10 +114,10 @@ func newRegistries(cachewURL string, scheduler jobscheduler.Scheduler, cloneMana
 	sr := strategy.NewRegistry()
 	strategy.RegisterAPIV1(sr)
 	strategy.RegisterArtifactory(sr)
-	strategy.RegisterGitHubReleases(sr)
+	strategy.RegisterGitHubReleases(sr, tokenManagerProvider)
 	strategy.RegisterHermit(sr, cachewURL)
 	strategy.RegisterHost(sr)
-	git.Register(sr, scheduler, cloneManagerProvider)
+	git.Register(sr, scheduler, cloneManagerProvider, tokenManagerProvider)
 	gomod.Register(sr, cloneManagerProvider)
 
 	return cr, sr
@@ -144,7 +149,7 @@ func newMux(ctx context.Context, cr *cache.Registry, sr *strategy.Registry, prov
 		_, _ = w.Write([]byte("OK")) //nolint:errcheck
 	})
 
-	if err := config.Load(ctx, cr, sr, providersConfigHCL, mux, parseEnvars()); err != nil {
+	if err := config.Load(ctx, cr, sr, providersConfigHCL, mux, config.ParseEnvars()); err != nil {
 		return nil, fmt.Errorf("load config: %w", err)
 	}
 
@@ -175,14 +180,4 @@ func newServer(ctx context.Context, mux *http.ServeMux, bind string, metricsConf
 			return logging.ContextWithLogger(ctx, logger.With("client", c.RemoteAddr().String()))
 		},
 	}
-}
-
-func parseEnvars() map[string]string {
-	envars := map[string]string{}
-	for _, env := range os.Environ() {
-		if key, value, ok := strings.Cut(env, "="); ok {
-			envars[key] = value
-		}
-	}
-	return envars
 }

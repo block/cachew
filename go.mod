@@ -5,6 +5,7 @@ go 1.25.5
 require (
 	github.com/alecthomas/hcl/v2 v2.6.0
 	github.com/alecthomas/kong v1.13.0
+	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/goproxy/goproxy v0.25.0
 	github.com/lmittmann/tint v1.1.2
 	github.com/minio/minio-go/v7 v7.0.97

@@ -5,14 +5,24 @@ package gitclone
 import (
 	"bufio"
 	"context"
+	neturl "net/url"
 	"os/exec"
 	"strings"
 
 	"github.com/alecthomas/errors"
 )
 
-func gitCommand(ctx context.Context, url string, args ...string) (*exec.Cmd, error) {
-	configArgs, err := getInsteadOfDisableArgsForURL(ctx, url)
+func gitCommand(ctx context.Context, repoURL string, credentialProvider CredentialProvider, args ...string) (*exec.Cmd, error) {
+	modifiedURL := repoURL
+	if credentialProvider != nil && strings.Contains(repoURL, "github.com") {
+		token, err := credentialProvider.GetTokenForURL(ctx, repoURL)
+		if err == nil && token != "" {
+			modifiedURL = injectTokenIntoURL(repoURL, token)
+		}
+		// If error getting token, fall back to original URL (system credentials)
+	}
+
+	configArgs, err := getInsteadOfDisableArgsForURL(ctx, repoURL)
 	if err != nil {
 		return nil, errors.Wrap(err, "get insteadOf disable args")
 	}
@@ -23,8 +33,41 @@ func gitCommand(ctx context.Context, url string, args ...string) (*exec.Cmd, err
 	}
 	allArgs = append(allArgs, args...)
 
-	cmd := exec.CommandContext(ctx, "git", allArgs...)
-	return cmd, nil
+	// Replace URL in args if it was modified for authentication
+	if modifiedURL != repoURL {
+		for i, arg := range allArgs {
+			if arg == repoURL {
+				allArgs[i] = modifiedURL
+			}
+		}
+	}
+
+	return exec.CommandContext(ctx, "git", allArgs...), nil
+}
+
+// Converts https://github.com/org/repo to https://x-access-token:TOKEN@github.com/org/repo
+func injectTokenIntoURL(rawURL, token string) string {
+	if token == "" {
+		return rawURL
+	}
+
+	u, err := neturl.Parse(rawURL)
+	if err != nil {
+		return rawURL
+	}
+
+	// Only inject token for GitHub URLs
+	if !strings.Contains(u.Host, "github.com") {
+		return rawURL
+	}
+
+	// Upgrade http to https for security
+	if u.Scheme == "http" {
+		u.Scheme = "https"
+	}
+
+	u.User = neturl.UserPassword("x-access-token", token)
+	return u.String()
 }
 
 func getInsteadOfDisableArgsForURL(ctx context.Context, targetURL string) ([]string, error) {

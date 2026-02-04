@@ -58,23 +58,30 @@ type Config struct {
 	RefCheckInterval time.Duration `hcl:"ref-check-interval,optional" help:"How long to cache ref checks." default:"10s"`
 }
 
+// CredentialProvider provides credentials for git operations.
+type CredentialProvider interface {
+	GetTokenForURL(ctx context.Context, url string) (string, error)
+}
+
 type Repository struct {
-	mu            sync.RWMutex
-	config        Config
-	state         State
-	path          string
-	upstreamURL   string
-	lastFetch     time.Time
-	lastRefCheck  time.Time
-	refCheckValid bool
-	fetchSem      chan struct{}
+	mu                 sync.RWMutex
+	config             Config
+	state              State
+	path               string
+	upstreamURL        string
+	lastFetch          time.Time
+	lastRefCheck       time.Time
+	refCheckValid      bool
+	fetchSem           chan struct{}
+	credentialProvider CredentialProvider
 }
 
 type Manager struct {
-	config          Config
-	gitTuningConfig GitTuningConfig
-	clones          map[string]*Repository
-	clonesMu        sync.RWMutex
+	config             Config
+	gitTuningConfig    GitTuningConfig
+	clones             map[string]*Repository
+	clonesMu           sync.RWMutex
+	credentialProvider CredentialProvider
 }
 
 // ManagerProvider is a function that lazily creates a singleton Manager.
@@ -82,11 +89,11 @@ type ManagerProvider func() (*Manager, error)
 
 func NewManagerProvider(ctx context.Context, config Config) ManagerProvider {
 	return sync.OnceValues(func() (*Manager, error) {
-		return NewManager(ctx, config)
+		return NewManager(ctx, config, nil)
 	})
 }
 
-func NewManager(ctx context.Context, config Config) (*Manager, error) {
+func NewManager(ctx context.Context, config Config, credentialProvider CredentialProvider) (*Manager, error) {
 	if config.MirrorRoot == "" {
 		return nil, errors.New("mirror-root is required")
 	}
@@ -109,9 +116,10 @@ func NewManager(ctx context.Context, config Config) (*Manager, error) {
 		"ref_check_interval", config.RefCheckInterval)
 
 	return &Manager{
-		config:          config,
-		gitTuningConfig: DefaultGitTuningConfig(),
-		clones:          make(map[string]*Repository),
+		config:             config,
+		gitTuningConfig:    DefaultGitTuningConfig(),
+		clones:             make(map[string]*Repository),
+		credentialProvider: credentialProvider,
 	}, nil
 }
 
@@ -138,11 +146,12 @@ func (m *Manager) GetOrCreate(_ context.Context, upstreamURL string) (*Repositor
 	clonePath := m.clonePathForURL(upstreamURL)
 
 	repo = &Repository{
-		state:       StateEmpty,
-		config:      m.config,
-		path:        clonePath,
-		upstreamURL: upstreamURL,
-		fetchSem:    make(chan struct{}, 1),
+		state:              StateEmpty,
+		config:             m.config,
+		path:               clonePath,
+		upstreamURL:        upstreamURL,
+		fetchSem:           make(chan struct{}, 1),
+		credentialProvider: m.credentialProvider,
 	}
 
 	gitDir := filepath.Join(clonePath, ".git")
@@ -205,10 +214,12 @@ func (m *Manager) DiscoverExisting(_ context.Context) ([]*Repository, error) {
 		upstreamURL := "https://" + host + "/" + repoPath
 
 		repo := &Repository{
-			state:       StateReady,
-			path:        path,
-			upstreamURL: upstreamURL,
-			fetchSem:    make(chan struct{}, 1),
+			state:              StateReady,
+			config:             m.config,
+			path:               path,
+			upstreamURL:        upstreamURL,
+			fetchSem:           make(chan struct{}, 1),
+			credentialProvider: m.credentialProvider,
 		}
 		repo.fetchSem <- struct{}{}
 
@@ -315,7 +326,7 @@ func (r *Repository) executeClone(ctx context.Context) error {
 		r.upstreamURL, r.path,
 	}
 
-	cmd, err := gitCommand(ctx, r.upstreamURL, args...)
+	cmd, err := gitCommand(ctx, r.upstreamURL, r.credentialProvider, args...)
 	if err != nil {
 		return errors.Wrap(err, "create git command")
 	}
@@ -331,7 +342,7 @@ func (r *Repository) executeClone(ctx context.Context) error {
 		return errors.Wrapf(err, "configure fetch refspec: %s", string(output))
 	}
 
-	cmd, err = gitCommand(ctx, r.upstreamURL, "-C", r.path,
+	cmd, err = gitCommand(ctx, r.upstreamURL, r.credentialProvider, "-C", r.path,
 		"-c", "http.postBuffer="+strconv.Itoa(config.PostBuffer),
 		"-c", "http.lowSpeedLimit="+strconv.Itoa(config.LowSpeedLimit),
 		"-c", "http.lowSpeedTime="+strconv.Itoa(int(config.LowSpeedTime.Seconds())),
@@ -370,7 +381,7 @@ func (r *Repository) Fetch(ctx context.Context) error {
 	config := DefaultGitTuningConfig()
 
 	// #nosec G204 - r.path is controlled by us
-	cmd, err := gitCommand(ctx, r.upstreamURL, "-C", r.path,
+	cmd, err := gitCommand(ctx, r.upstreamURL, r.credentialProvider, "-C", r.path,
 		"-c", "http.postBuffer="+strconv.Itoa(config.PostBuffer),
 		"-c", "http.lowSpeedLimit="+strconv.Itoa(config.LowSpeedLimit),
 		"-c", "http.lowSpeedTime="+strconv.Itoa(int(config.LowSpeedTime.Seconds())),
@@ -460,7 +471,7 @@ func (r *Repository) GetLocalRefs(ctx context.Context) (map[string]string, error
 
 func (r *Repository) GetUpstreamRefs(ctx context.Context) (map[string]string, error) {
 	// #nosec G204 - r.upstreamURL is controlled by us
-	cmd, err := gitCommand(ctx, r.upstreamURL, "ls-remote", r.upstreamURL)
+	cmd, err := gitCommand(ctx, r.upstreamURL, r.credentialProvider, "ls-remote", r.upstreamURL)
 	if err != nil {
 		return nil, errors.Wrap(err, "create git command")
 	}
