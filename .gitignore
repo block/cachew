@@ -4,3 +4,11 @@
 
 block-test.hcl
 /*-source/
+
+.env
+
+.claude/
+
+# Binaries
+/cachew
+/cachewd

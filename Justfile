@@ -16,6 +16,10 @@ GOOS := env("GOOS", `go env GOOS`)
 _help:
     @just -l
 
+# Run cachewd with hot reload
+dev:
+    proctor
+
 # Run tests
 test:
     @gotestsum --hide-summary output,skipped --format-hide-empty-pkg ${CI:+--format github-actions} ./... -- -race -timeout 30s
@@ -64,7 +68,7 @@ build-all:
 run: build
     @echo "→ Starting cachew at http://localhost:8080"
     @mkdir -p state
-    @{{ RELEASE }}/cachewd --config cachew.hcl
+    @{{ RELEASE }}/cachewd --config cachew-local.hcl
 
 # Clean up build artifacts
 clean:
