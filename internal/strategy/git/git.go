@@ -20,8 +20,10 @@ import (
 	"github.com/block/cachew/internal/strategy"
 )
 
-func init() {
-	strategy.Register("git", "Caches Git repositories, including bundle and tarball snapshots.", New)
+func Register(r *strategy.Registry, scheduler jobscheduler.Scheduler) {
+	strategy.Register(r, "git", "Caches Git repositories, including bundle and tarball snapshots.", func(ctx context.Context, config Config, cache cache.Cache, mux strategy.Mux) (*Strategy, error) {
+		return New(ctx, config, scheduler, cache, mux)
+	})
 }
 
 type Config struct {

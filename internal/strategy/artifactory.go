@@ -10,13 +10,12 @@ import (
 	"strings"
 
 	"github.com/block/cachew/internal/cache"
-	"github.com/block/cachew/internal/jobscheduler"
 	"github.com/block/cachew/internal/logging"
 	"github.com/block/cachew/internal/strategy/handler"
 )
 
-func init() {
-	Register("artifactory", "Caches artifacts from an Artifactory server.", NewArtifactory)
+func RegisterArtifactory(r *Registry) {
+	Register(r, "artifactory", "Caches artifacts from an Artifactory server.", NewArtifactory)
 }
 
 // ArtifactoryConfig represents the configuration for the Artifactory strategy.
@@ -53,7 +52,7 @@ type Artifactory struct {
 
 var _ Strategy = (*Artifactory)(nil)
 
-func NewArtifactory(ctx context.Context, config ArtifactoryConfig, _ jobscheduler.Scheduler, cache cache.Cache, mux Mux) (*Artifactory, error) {
+func NewArtifactory(ctx context.Context, config ArtifactoryConfig, cache cache.Cache, mux Mux) (*Artifactory, error) {
 	u, err := url.Parse(config.Target)
 	if err != nil {
 		return nil, fmt.Errorf("invalid target URL: %w", err)

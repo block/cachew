@@ -23,6 +23,9 @@ import (
 	"github.com/block/cachew/internal/jobscheduler"
 	"github.com/block/cachew/internal/logging"
 	"github.com/block/cachew/internal/metrics"
+	"github.com/block/cachew/internal/strategy"
+	"github.com/block/cachew/internal/strategy/git"
+	"github.com/block/cachew/internal/strategy/gomod"
 )
 
 var cli struct {
@@ -30,6 +33,7 @@ var cli struct {
 
 	Config          *os.File            `hcl:"-" help:"Configuration file path." placeholder:"PATH" required:"" default:"cachew.hcl"`
 	Bind            string              `hcl:"bind" default:"127.0.0.1:8080" help:"Bind address for the server."`
+	URL             string              `hcl:"url" default:"http://127.0.0.1:8080/" help:"Base URL for cachewd."`
 	SchedulerConfig jobscheduler.Config `embed:"" prefix:"scheduler-"`
 	LoggingConfig   logging.Config      `embed:"" prefix:"log-"`
 	MetricsConfig   metrics.Config      `embed:"" prefix:"metrics-"`
@@ -41,15 +45,26 @@ func main() {
 	ctx := context.Background()
 	logger, ctx := logging.Configure(ctx, cli.LoggingConfig)
 
+	scheduler := jobscheduler.New(ctx, cli.SchedulerConfig)
+
 	cr := cache.NewRegistry()
 	cache.RegisterMemory(cr)
 	cache.RegisterDisk(cr)
 	cache.RegisterS3(cr)
 
+	sr := strategy.NewRegistry()
+	strategy.RegisterAPIV1(sr)
+	strategy.RegisterArtifactory(sr)
+	strategy.RegisterGitHubReleases(sr)
+	strategy.RegisterHermit(sr, cli.URL)
+	strategy.RegisterHost(sr)
+	git.Register(sr, scheduler)
+	gomod.Register(sr)
+
 	// Commands
 	switch { //nolint:gocritic
 	case cli.Schema:
-		schema := config.Schema(cr)
+		schema := config.Schema(cr, sr)
 		slices.SortStableFunc(schema.Entries, func(a, b hcl.Entry) int {
 			return strings.Compare(a.EntryKey(), b.EntryKey())
 		})
@@ -78,9 +93,7 @@ func main() {
 		_, _ = w.Write([]byte("OK")) //nolint:errcheck
 	})
 
-	scheduler := jobscheduler.New(ctx, cli.SchedulerConfig)
-
-	err := config.Load(ctx, cr, cli.Config, scheduler, mux, parseEnvars())
+	err := config.Load(ctx, cr, sr, cli.Config, mux, parseEnvars())
 	kctx.FatalIfErrorf(err)
 
 	metricsClient, err := metrics.New(ctx, cli.MetricsConfig)

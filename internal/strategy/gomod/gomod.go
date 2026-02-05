@@ -10,13 +10,12 @@ import (
 	"github.com/goproxy/goproxy"
 
 	"github.com/block/cachew/internal/cache"
-	"github.com/block/cachew/internal/jobscheduler"
 	"github.com/block/cachew/internal/logging"
 	"github.com/block/cachew/internal/strategy"
 )
 
-func init() {
-	strategy.Register("gomod", "Caches Go module proxy requests.", New)
+func Register(r *strategy.Registry) {
+	strategy.Register(r, "gomod", "Caches Go module proxy requests.", New)
 }
 
 type Config struct {
@@ -33,7 +32,7 @@ type Strategy struct {
 
 var _ strategy.Strategy = (*Strategy)(nil)
 
-func New(ctx context.Context, config Config, _ jobscheduler.Scheduler, cache cache.Cache, mux strategy.Mux) (*Strategy, error) {
+func New(ctx context.Context, config Config, cache cache.Cache, mux strategy.Mux) (*Strategy, error) {
 	parsedURL, err := url.Parse(config.Proxy)
 	if err != nil {
 		return nil, fmt.Errorf("invalid proxy URL: %w", err)

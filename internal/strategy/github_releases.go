@@ -12,13 +12,12 @@ import (
 
 	"github.com/block/cachew/internal/cache"
 	"github.com/block/cachew/internal/httputil"
-	"github.com/block/cachew/internal/jobscheduler"
 	"github.com/block/cachew/internal/logging"
 	"github.com/block/cachew/internal/strategy/handler"
 )
 
-func init() {
-	Register("github-releases", "Caches public and authenticated GitHub releases.", NewGitHubReleases)
+func RegisterGitHubReleases(r *Registry) {
+	Register(r, "github-releases", "Caches public and authenticated GitHub releases.", NewGitHubReleases)
 }
 
 type GitHubReleasesConfig struct {
@@ -34,7 +33,7 @@ type GitHubReleases struct {
 }
 
 // NewGitHubReleases creates a [Strategy] that fetches private (and public) release binaries from GitHub.
-func NewGitHubReleases(ctx context.Context, config GitHubReleasesConfig, _ jobscheduler.Scheduler, cache cache.Cache, mux Mux) (*GitHubReleases, error) {
+func NewGitHubReleases(ctx context.Context, config GitHubReleasesConfig, cache cache.Cache, mux Mux) (*GitHubReleases, error) {
 	s := &GitHubReleases{
 		config: config,
 		cache:  cache,

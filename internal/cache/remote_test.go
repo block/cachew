@@ -12,7 +12,6 @@ import (
 
 	"github.com/block/cachew/internal/cache"
 	"github.com/block/cachew/internal/cache/cachetest"
-	"github.com/block/cachew/internal/jobscheduler"
 	"github.com/block/cachew/internal/logging"
 	"github.com/block/cachew/internal/strategy"
 )
@@ -28,7 +27,7 @@ func TestRemoteCache(t *testing.T) {
 		t.Cleanup(func() { memCache.Close() })
 
 		mux := http.NewServeMux()
-		_, err = strategy.NewAPIV1(ctx, struct{}{}, jobscheduler.New(ctx, jobscheduler.Config{}), memCache, mux)
+		_, err = strategy.NewAPIV1(ctx, struct{}{}, memCache, mux)
 		assert.NoError(t, err)
 		ts := httptest.NewServer(mux)
 		t.Cleanup(ts.Close)
@@ -53,7 +52,7 @@ func TestRemoteCacheSoak(t *testing.T) {
 	defer memCache.Close()
 
 	mux := http.NewServeMux()
-	_, err = strategy.NewAPIV1(ctx, struct{}{}, jobscheduler.New(ctx, jobscheduler.Config{}), memCache, mux)
+	_, err = strategy.NewAPIV1(ctx, struct{}{}, memCache, mux)
 	assert.NoError(t, err)
 	ts := httptest.NewServer(mux)
 	defer ts.Close()

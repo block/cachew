@@ -11,7 +11,6 @@ import (
 	"github.com/alecthomas/assert/v2"
 
 	"github.com/block/cachew/internal/cache"
-	"github.com/block/cachew/internal/jobscheduler"
 	"github.com/block/cachew/internal/logging"
 	"github.com/block/cachew/internal/strategy"
 )
@@ -64,7 +63,7 @@ func setupArtifactoryTest(t *testing.T, config strategy.ArtifactoryConfig) (*moc
 	t.Cleanup(func() { memCache.Close() })
 
 	mux := http.NewServeMux()
-	_, err = strategy.NewArtifactory(ctx, config, jobscheduler.New(ctx, jobscheduler.Config{}), memCache, mux)
+	_, err = strategy.NewArtifactory(ctx, config, memCache, mux)
 	assert.NoError(t, err)
 
 	return mock, mux, ctx
@@ -213,7 +212,7 @@ func TestArtifactoryString(t *testing.T) {
 	mux := http.NewServeMux()
 	artifactory, err := strategy.NewArtifactory(ctx, strategy.ArtifactoryConfig{
 		Target: "https://ec2.example.jfrog.io",
-	}, jobscheduler.New(ctx, jobscheduler.Config{}), memCache, mux)
+	}, memCache, mux)
 	assert.NoError(t, err)
 
 	assert.Equal(t, "artifactory:ec2.example.jfrog.io", artifactory.String())
@@ -228,7 +227,7 @@ func TestArtifactoryInvalidTargetURL(t *testing.T) {
 	mux := http.NewServeMux()
 	_, err = strategy.NewArtifactory(ctx, strategy.ArtifactoryConfig{
 		Target: "://invalid-url",
-	}, jobscheduler.New(ctx, jobscheduler.Config{}), memCache, mux)
+	}, memCache, mux)
 	assert.Error(t, err)
 }
 

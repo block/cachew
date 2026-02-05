@@ -8,13 +8,12 @@ import (
 	"net/url"
 
 	"github.com/block/cachew/internal/cache"
-	"github.com/block/cachew/internal/jobscheduler"
 	"github.com/block/cachew/internal/logging"
 	"github.com/block/cachew/internal/strategy/handler"
 )
 
-func init() {
-	Register("host", "A generic host-based proxying strategy.", NewHost)
+func RegisterHost(r *Registry) {
+	Register(r, "host", "A generic host-based proxying strategy.", NewHost)
 }
 
 // HostConfig represents the configuration for the Host strategy.
@@ -41,7 +40,7 @@ type Host struct {
 
 var _ Strategy = (*Host)(nil)
 
-func NewHost(ctx context.Context, config HostConfig, _ jobscheduler.Scheduler, cache cache.Cache, mux Mux) (*Host, error) {
+func NewHost(ctx context.Context, config HostConfig, cache cache.Cache, mux Mux) (*Host, error) {
 	u, err := url.Parse(config.Target)
 	if err != nil {
 		return nil, fmt.Errorf("invalid target URL: %w", err)

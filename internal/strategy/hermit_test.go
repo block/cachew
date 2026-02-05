@@ -12,7 +12,6 @@ import (
 	"github.com/alecthomas/assert/v2"
 
 	"github.com/block/cachew/internal/cache"
-	"github.com/block/cachew/internal/jobscheduler"
 	"github.com/block/cachew/internal/logging"
 	"github.com/block/cachew/internal/strategy"
 )
@@ -30,7 +29,7 @@ func setupHermitTest(t *testing.T) (*http.ServeMux, context.Context, cache.Cache
 	t.Cleanup(func() { memCache.Close() })
 
 	mux := http.NewServeMux()
-	_, err = strategy.NewHermit(ctx, strategy.HermitConfig{GitHubBaseURL: "http://localhost:8080"}, jobscheduler.New(ctx, jobscheduler.Config{}), memCache, mux)
+	_, err = strategy.NewHermit(ctx, "http://github.com", strategy.HermitConfig{GitHubBaseURL: "http://localhost:8080"}, nil, memCache, mux)
 	assert.NoError(t, err)
 
 	return mux, ctx, memCache
@@ -95,7 +94,7 @@ func TestHermitGitHubRelease(t *testing.T) {
 
 	mux, ctx, memCache := setupHermitTest(t)
 
-	_, err := strategy.NewGitHubReleases(ctx, strategy.GitHubReleasesConfig{}, jobscheduler.New(ctx, jobscheduler.Config{}), memCache, mux)
+	_, err := strategy.NewGitHubReleases(ctx, strategy.GitHubReleasesConfig{}, memCache, mux)
 	assert.NoError(t, err)
 
 	req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/hermit/github.com/alecthomas/chroma/releases/download/v2.14.0/chroma-2.14.0-linux-amd64.tar.gz", nil)

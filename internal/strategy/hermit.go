@@ -5,7 +5,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
-	"os"
 	"strings"
 
 	"github.com/alecthomas/errors"
@@ -16,8 +15,10 @@ import (
 	"github.com/block/cachew/internal/strategy/handler"
 )
 
-func init() {
-	Register("hermit", "Caches Hermit package downloads.", NewHermit)
+func RegisterHermit(r *Registry, cachewURL string) {
+	Register(r, "hermit", "Caches Hermit package downloads.", func(ctx context.Context, config HermitConfig, c cache.Cache, mux Mux) (*Hermit, error) {
+		return NewHermit(ctx, cachewURL, config, nil, c, mux)
+	})
 }
 
 type HermitConfig struct {
@@ -39,7 +40,7 @@ type Hermit struct {
 
 var _ Strategy = (*Hermit)(nil)
 
-func NewHermit(ctx context.Context, config HermitConfig, _ jobscheduler.Scheduler, c cache.Cache, mux Mux) (*Hermit, error) {
+func NewHermit(ctx context.Context, cachewURL string, config HermitConfig, _ jobscheduler.Scheduler, c cache.Cache, mux Mux) (*Hermit, error) {
 	logger := logging.FromContext(ctx)
 
 	s := &Hermit{
@@ -54,7 +55,7 @@ func NewHermit(ctx context.Context, config HermitConfig, _ jobscheduler.Schedule
 	mux.Handle("GET /hermit/{host}/{path...}", s.directHandler)
 
 	if config.GitHubBaseURL != "" {
-		isInternalRedirect := strings.Contains(config.GitHubBaseURL, os.Getenv("CACHEW_URL"))
+		isInternalRedirect := strings.HasPrefix(config.GitHubBaseURL, cachewURL)
 		s.redirectHandler = s.createRedirectHandler(isInternalRedirect, c)
 		mux.Handle("GET /hermit/github.com/{path...}", s.redirectHandler)
 		logger.InfoContext(ctx, "Hermit strategy initialized",

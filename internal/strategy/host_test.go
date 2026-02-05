@@ -12,7 +12,6 @@ import (
 	"github.com/alecthomas/assert/v2"
 
 	"github.com/block/cachew/internal/cache"
-	"github.com/block/cachew/internal/jobscheduler"
 	"github.com/block/cachew/internal/logging"
 	"github.com/block/cachew/internal/strategy"
 )
@@ -32,7 +31,7 @@ func TestHostCaching(t *testing.T) {
 	defer memCache.Close()
 
 	mux := http.NewServeMux()
-	_, err = strategy.NewHost(ctx, strategy.HostConfig{Target: backend.URL}, jobscheduler.New(ctx, jobscheduler.Config{}), memCache, mux)
+	_, err = strategy.NewHost(ctx, strategy.HostConfig{Target: backend.URL}, memCache, mux)
 	assert.NoError(t, err)
 
 	// Request path must include the host prefix from the target URL
@@ -69,7 +68,7 @@ func TestHostNonOKStatus(t *testing.T) {
 	defer memCache.Close()
 
 	mux := http.NewServeMux()
-	_, err = strategy.NewHost(ctx, strategy.HostConfig{Target: backend.URL}, jobscheduler.New(ctx, jobscheduler.Config{}), memCache, mux)
+	_, err = strategy.NewHost(ctx, strategy.HostConfig{Target: backend.URL}, memCache, mux)
 	assert.NoError(t, err)
 
 	// Request path must include the host prefix from the target URL
@@ -95,7 +94,7 @@ func TestHostInvalidTargetURL(t *testing.T) {
 	defer memCache.Close()
 
 	mux := http.NewServeMux()
-	_, err = strategy.NewHost(ctx, strategy.HostConfig{Target: "://invalid"}, jobscheduler.New(ctx, jobscheduler.Config{}), memCache, mux)
+	_, err = strategy.NewHost(ctx, strategy.HostConfig{Target: "://invalid"}, memCache, mux)
 	assert.Error(t, err)
 }
 
@@ -106,7 +105,7 @@ func TestHostString(t *testing.T) {
 	defer memCache.Close()
 
 	mux := http.NewServeMux()
-	host, err := strategy.NewHost(ctx, strategy.HostConfig{Target: "https://example.com/prefix"}, jobscheduler.New(ctx, jobscheduler.Config{}), memCache, mux)
+	host, err := strategy.NewHost(ctx, strategy.HostConfig{Target: "https://example.com/prefix"}, memCache, mux)
 	assert.NoError(t, err)
 
 	assert.Equal(t, "host:example.com/prefix", host.String())

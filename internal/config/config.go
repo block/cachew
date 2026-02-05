@@ -12,7 +12,6 @@ import (
 	"github.com/alecthomas/hcl/v2"
 
 	"github.com/block/cachew/internal/cache"
-	"github.com/block/cachew/internal/jobscheduler"
 	"github.com/block/cachew/internal/logging"
 	"github.com/block/cachew/internal/strategy"
 	_ "github.com/block/cachew/internal/strategy/git"   // Register git strategy
@@ -37,14 +36,21 @@ func (l *loggingMux) HandleFunc(pattern string, handler func(http.ResponseWriter
 var _ strategy.Mux = (*loggingMux)(nil)
 
 // Schema returns the configuration file schema.
-func Schema(cr *cache.Registry) *hcl.AST {
+func Schema(cr *cache.Registry, sr *strategy.Registry) *hcl.AST {
 	return &hcl.AST{
-		Entries: append(strategy.Schema().Entries, cr.Schema().Entries...),
+		Entries: append(sr.Schema().Entries, cr.Schema().Entries...),
 	}
 }
 
 // Load HCL configuration and uses that to construct the cache backend, and proxy strategies.
-func Load(ctx context.Context, cr *cache.Registry, r io.Reader, scheduler jobscheduler.Scheduler, mux *http.ServeMux, vars map[string]string) error {
+func Load(
+	ctx context.Context,
+	cr *cache.Registry,
+	sr *strategy.Registry,
+	r io.Reader,
+	mux *http.ServeMux,
+	vars map[string]string,
+) error {
 	logger := logging.FromContext(ctx)
 	ast, err := hcl.Parse(r)
 	if err != nil {
@@ -88,7 +94,7 @@ func Load(ctx context.Context, cr *cache.Registry, r io.Reader, scheduler jobsch
 	for _, block := range strategyCandidates {
 		logger := logger.With("strategy", block.Name)
 		mlog := &loggingMux{logger: logger, mux: mux}
-		_, err := strategy.Create(ctx, block.Name, block, scheduler.WithQueuePrefix(block.Name), cache, mlog, vars)
+		_, err := sr.Create(ctx, block.Name, block, cache, mlog, vars)
 		if err != nil {
 			return errors.Errorf("%s: %w", block.Pos, err)
 		}
