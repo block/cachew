@@ -3,6 +3,7 @@ package gomod
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"io/fs"
@@ -21,6 +22,11 @@ import (
 type privateFetcher struct {
 	logger       *slog.Logger
 	cloneManager *gitclone.Manager
+}
+
+type moduleInfo struct {
+	Version string
+	Time    string
 }
 
 func newPrivateFetcher(logger *slog.Logger, cloneManager *gitclone.Manager) *privateFetcher {
@@ -228,8 +234,17 @@ func (p *privateFetcher) generateInfo(ctx context.Context, repo *gitclone.Reposi
 		return nil, err
 	}
 
-	info := fmt.Sprintf(`{"Version":"%s","Time":"%s"}`, version, commitTime.Format(time.RFC3339))
-	return newReadSeekCloser(bytes.NewReader([]byte(info))), nil
+	info := moduleInfo{
+		Version: version,
+		Time:    commitTime.Format(time.RFC3339),
+	}
+
+	data, err := json.Marshal(info)
+	if err != nil {
+		return nil, errors.Wrap(err, "marshal module info")
+	}
+
+	return newReadSeekCloser(bytes.NewReader(data)), nil
 }
 
 func (p *privateFetcher) generateMod(ctx context.Context, repo *gitclone.Repository, modulePath, version string) io.ReadSeekCloser {
