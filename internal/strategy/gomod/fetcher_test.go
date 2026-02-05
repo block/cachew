@@ -1,12 +1,10 @@
-package gomod_test
+package gomod
 
 import (
 	"testing"
-
-	"github.com/block/cachew/internal/strategy/gomod"
 )
 
-func TestModulePathMatcher(t *testing.T) {
+func TestCompositeFetcher_isPrivate(t *testing.T) {
 	tests := []struct {
 		name       string
 		patterns   []string
@@ -113,10 +111,10 @@ func TestModulePathMatcher(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			matcher := gomod.NewModulePathMatcher(tt.patterns)
-			got := matcher.IsPrivate(tt.modulePath)
+			fetcher := newCompositeFetcher(nil, nil, tt.patterns)
+			got := fetcher.isPrivate(tt.modulePath)
 			if got != tt.want {
-				t.Errorf("IsPrivate() = %v, want %v", got, tt.want)
+				t.Errorf("isPrivate() = %v, want %v", got, tt.want)
 			}
 		})
 	}

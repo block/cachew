@@ -3,6 +3,8 @@ package gomod
 import (
 	"context"
 	"io"
+	"path"
+	"strings"
 	"time"
 
 	"github.com/alecthomas/errors"
@@ -13,7 +15,7 @@ import (
 type compositeFetcher struct {
 	publicFetcher  goproxy.Fetcher
 	privateFetcher goproxy.Fetcher
-	matcher        *ModulePathMatcher
+	patterns       []string
 }
 
 func newCompositeFetcher(
@@ -24,12 +26,27 @@ func newCompositeFetcher(
 	return &compositeFetcher{
 		publicFetcher:  publicFetcher,
 		privateFetcher: privateFetcher,
-		matcher:        NewModulePathMatcher(patterns),
+		patterns:       patterns,
 	}
 }
 
+func (c *compositeFetcher) isPrivate(modulePath string) bool {
+	for _, pattern := range c.patterns {
+		matched, err := path.Match(pattern, modulePath)
+		if err == nil && matched {
+			return true
+		}
+
+		if strings.HasPrefix(modulePath, pattern+"/") || modulePath == pattern {
+			return true
+		}
+	}
+
+	return false
+}
+
 func (c *compositeFetcher) Query(ctx context.Context, path, query string) (version string, t time.Time, err error) {
-	if c.matcher.IsPrivate(path) {
+	if c.isPrivate(path) {
 		v, tm, err := c.privateFetcher.Query(ctx, path, query)
 		return v, tm, errors.Wrap(err, "private fetcher query")
 	}
@@ -38,7 +55,7 @@ func (c *compositeFetcher) Query(ctx context.Context, path, query string) (versi
 }
 
 func (c *compositeFetcher) List(ctx context.Context, path string) (versions []string, err error) {
-	if c.matcher.IsPrivate(path) {
+	if c.isPrivate(path) {
 		v, err := c.privateFetcher.List(ctx, path)
 		return v, errors.Wrap(err, "private fetcher list")
 	}
@@ -47,7 +64,7 @@ func (c *compositeFetcher) List(ctx context.Context, path string) (versions []st
 }
 
 func (c *compositeFetcher) Download(ctx context.Context, path, version string) (info, mod, zip io.ReadSeekCloser, err error) {
-	if c.matcher.IsPrivate(path) {
+	if c.isPrivate(path) {
 		i, m, z, err := c.privateFetcher.Download(ctx, path, version)
 		return i, m, z, errors.Wrap(err, "private fetcher download")
 	}
