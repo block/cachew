@@ -25,8 +25,8 @@ type privateFetcher struct {
 }
 
 type moduleInfo struct {
-	Version string
-	Time    string
+	Version string `json:"Version"`
+	Time    string `json:"Time"`
 }
 
 func newPrivateFetcher(logger *slog.Logger, cloneManager *gitclone.Manager) *privateFetcher {
