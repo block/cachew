@@ -70,7 +70,7 @@ func New(ctx context.Context, config Config, _ jobscheduler.Scheduler, cache cac
 		fetcher = NewCompositeFetcher(publicFetcher, privateFetcher, config.PrivatePaths)
 
 		s.logger.InfoContext(ctx, "Configured private module support",
-			slog.Any("private_paths", config.PrivatePaths))
+			slog.Any("private-paths", config.PrivatePaths))
 	}
 
 	s.goproxy = &goproxy.Goproxy{
