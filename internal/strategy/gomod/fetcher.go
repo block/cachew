@@ -9,6 +9,7 @@ import (
 	"github.com/goproxy/goproxy"
 )
 
+// compositeFetcher routes module requests to either public or private fetchers based on module path patterns.
 type compositeFetcher struct {
 	publicFetcher  goproxy.Fetcher
 	privateFetcher goproxy.Fetcher
