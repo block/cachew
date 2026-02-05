@@ -30,3 +30,5 @@ disk {
 gomod {
   proxy = "https://proxy.golang.org"
 }
+
+hermit { }

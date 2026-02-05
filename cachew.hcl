@@ -33,3 +33,5 @@ github-releases {
 gomod {
   proxy = "https://proxy.golang.org"
 }
+
+hermit { }
