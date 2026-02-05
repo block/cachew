@@ -15,7 +15,6 @@ import (
 	"github.com/alecthomas/assert/v2"
 
 	"github.com/block/cachew/internal/cache"
-	"github.com/block/cachew/internal/jobscheduler"
 	"github.com/block/cachew/internal/logging"
 	"github.com/block/cachew/internal/strategy/gomod"
 )
@@ -178,7 +177,7 @@ func setupGoModTest(t *testing.T) (*mockGoModServer, *http.ServeMux, context.Con
 	mux := http.NewServeMux()
 	_, err = gomod.New(ctx, gomod.Config{
 		Proxy: mock.server.URL,
-	}, jobscheduler.New(ctx, jobscheduler.Config{}), memCache, mux)
+	}, memCache, mux)
 	assert.NoError(t, err)
 
 	return mock, mux, ctx

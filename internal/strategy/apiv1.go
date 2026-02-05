@@ -12,12 +12,11 @@ import (
 	"time"
 
 	"github.com/block/cachew/internal/cache"
-	"github.com/block/cachew/internal/jobscheduler"
 	"github.com/block/cachew/internal/logging"
 )
 
-func init() {
-	Register("apiv1", "The stable API of the cache server.", NewAPIV1)
+func RegisterAPIV1(r *Registry) {
+	Register(r, "apiv1", "The stable API of the cache server.", NewAPIV1)
 }
 
 var _ Strategy = (*APIV1)(nil)
@@ -28,7 +27,7 @@ type APIV1 struct {
 	logger *slog.Logger
 }
 
-func NewAPIV1(ctx context.Context, _ struct{}, _ jobscheduler.Scheduler, cache cache.Cache, mux Mux) (*APIV1, error) {
+func NewAPIV1(ctx context.Context, _ struct{}, cache cache.Cache, mux Mux) (*APIV1, error) {
 	s := &APIV1{
 		logger: logging.FromContext(ctx),
 		cache:  cache,

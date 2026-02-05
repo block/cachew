@@ -3,7 +3,7 @@ module github.com/block/cachew
 go 1.25.5
 
 require (
-	github.com/alecthomas/hcl/v2 v2.3.1
+	github.com/alecthomas/hcl/v2 v2.4.0
 	github.com/alecthomas/kong v1.13.0
 	github.com/goproxy/goproxy v0.25.0
 	github.com/lmittmann/tint v1.1.2
