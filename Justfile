@@ -18,7 +18,7 @@ _help:
 
 # Run cachewd with hot reload
 dev:
-    proctor
+    CACHEW_URL=http://localhost:8080 proctor
 
 # Run tests
 test:
@@ -68,7 +68,7 @@ build-all:
 run: build
     @echo "→ Starting cachew at http://localhost:8080"
     @mkdir -p state
-    @{{ RELEASE }}/cachewd --config cachew-local.hcl
+    @CACHEW_URL=http://localhost:8080 {{ RELEASE }}/cachewd --config cachew-local.hcl
 
 # Clean up build artifacts
 clean:
