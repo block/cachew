@@ -66,7 +66,7 @@ func New(ctx context.Context, config Config, _ jobscheduler.Scheduler, cache cac
 		}
 
 		s.cloneManager = cloneManager
-		privateFetcher := newPrivateFetcher(s, cloneManager)
+		privateFetcher := newPrivateFetcher(s.logger, cloneManager)
 		fetcher = NewCompositeFetcher(publicFetcher, privateFetcher, config.PrivatePaths)
 
 		s.logger.InfoContext(ctx, "Configured private module support",
