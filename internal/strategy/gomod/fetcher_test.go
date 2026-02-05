@@ -1,7 +1,9 @@
-package gomod
+package gomod_test
 
 import (
 	"testing"
+
+	"github.com/block/cachew/internal/strategy/gomod"
 )
 
 func TestCompositeFetcher_isPrivate(t *testing.T) {
@@ -111,10 +113,10 @@ func TestCompositeFetcher_isPrivate(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			fetcher := newCompositeFetcher(nil, nil, tt.patterns)
-			got := fetcher.isPrivate(tt.modulePath)
+			fetcher := gomod.NewCompositeFetcher(nil, nil, tt.patterns)
+			got := fetcher.IsPrivate(tt.modulePath)
 			if got != tt.want {
-				t.Errorf("isPrivate() = %v, want %v", got, tt.want)
+				t.Errorf("IsPrivate() = %v, want %v", got, tt.want)
 			}
 		})
 	}
