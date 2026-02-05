@@ -70,10 +70,8 @@ jobs:
             ghcr.io/${{ github.repository_owner }}/cachew
             squareup/cachew
           tags: |
-            # For main branch: latest, main, and sha
-            type=ref,event=branch
+            type=raw,value={{branch}}-{{sha}}
             type=raw,value=latest,enable={{is_default_branch}}
-            type=sha,prefix=sha-
             # For tags: v1.2.3 -> 1.2.3, 1.2, 1
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
