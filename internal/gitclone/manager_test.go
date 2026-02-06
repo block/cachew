@@ -18,7 +18,6 @@ func TestNewManager(t *testing.T) {
 		RootDir:          tmpDir,
 		FetchInterval:    15 * time.Minute,
 		RefCheckInterval: 10 * time.Second,
-		CloneDepth:       0,
 		GitConfig:        DefaultGitTuningConfig(),
 	}
 

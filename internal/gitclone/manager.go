@@ -71,7 +71,6 @@ type Config struct {
 	RootDir          string
 	FetchInterval    time.Duration
 	RefCheckInterval time.Duration
-	CloneDepth       int
 	GitConfig        GitTuningConfig
 }
 
@@ -286,15 +285,13 @@ func (r *Repository) executeClone(ctx context.Context, config Config) error {
 	}
 
 	// #nosec G204 - r.upstreamURL and r.path are controlled by us
-	args := []string{"clone"}
-	if config.CloneDepth > 0 {
-		args = append(args, "--depth", strconv.Itoa(config.CloneDepth))
+	args := []string{
+		"clone",
+		"-c", "http.postBuffer=" + strconv.Itoa(config.GitConfig.PostBuffer),
+		"-c", "http.lowSpeedLimit=" + strconv.Itoa(config.GitConfig.LowSpeedLimit),
+		"-c", "http.lowSpeedTime=" + strconv.Itoa(int(config.GitConfig.LowSpeedTime.Seconds())),
+		r.upstreamURL, r.path,
 	}
-	args = append(args,
-		"-c", "http.postBuffer="+strconv.Itoa(config.GitConfig.PostBuffer),
-		"-c", "http.lowSpeedLimit="+strconv.Itoa(config.GitConfig.LowSpeedLimit),
-		"-c", "http.lowSpeedTime="+strconv.Itoa(int(config.GitConfig.LowSpeedTime.Seconds())),
-		r.upstreamURL, r.path)
 
 	cmd, err := gitCommand(ctx, r.upstreamURL, args...)
 	if err != nil {

@@ -31,7 +31,6 @@ type Config struct {
 	FetchInterval    time.Duration `hcl:"fetch-interval,optional" help:"How often to fetch from upstream in minutes." default:"15m"`
 	RefCheckInterval time.Duration `hcl:"ref-check-interval,optional" help:"How long to cache ref checks." default:"10s"`
 	BundleInterval   time.Duration `hcl:"bundle-interval,optional" help:"How often to generate bundles. 0 disables bundling." default:"0"`
-	CloneDepth       int           `hcl:"clone-depth,optional" help:"Depth for shallow clones. 0 means full clone." default:"0"`
 }
 
 type Strategy struct {
@@ -63,7 +62,6 @@ func New(ctx context.Context, config Config, scheduler jobscheduler.Scheduler, c
 		RootDir:          config.MirrorRoot,
 		FetchInterval:    config.FetchInterval,
 		RefCheckInterval: config.RefCheckInterval,
-		CloneDepth:       config.CloneDepth,
 		GitConfig:        gitclone.DefaultGitTuningConfig(),
 	})
 	if err != nil {
@@ -244,7 +242,6 @@ func (s *Strategy) startClone(ctx context.Context, repo *gitclone.Repository) {
 		RootDir:          s.config.MirrorRoot,
 		FetchInterval:    s.config.FetchInterval,
 		RefCheckInterval: s.config.RefCheckInterval,
-		CloneDepth:       s.config.CloneDepth,
 		GitConfig:        gitclone.DefaultGitTuningConfig(),
 	}
 
@@ -292,7 +289,6 @@ func (s *Strategy) backgroundFetch(ctx context.Context, repo *gitclone.Repositor
 		RootDir:          s.config.MirrorRoot,
 		FetchInterval:    s.config.FetchInterval,
 		RefCheckInterval: s.config.RefCheckInterval,
-		CloneDepth:       s.config.CloneDepth,
 		GitConfig:        gitclone.DefaultGitTuningConfig(),
 	}
 
