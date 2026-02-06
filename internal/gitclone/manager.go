@@ -258,6 +258,12 @@ func (r *Repository) WithReadLock(fn func()) {
 	fn()
 }
 
+func WithReadLockReturn[T any](repo *Repository, fn func() (T, error)) (T, error) {
+	repo.mu.RLock()
+	defer repo.mu.RUnlock()
+	return fn()
+}
+
 func (r *Repository) Clone(ctx context.Context, config Config) error {
 	r.mu.Lock()
 	if r.state != StateEmpty {
