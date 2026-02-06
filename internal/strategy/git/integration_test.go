@@ -6,11 +6,14 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -265,4 +268,103 @@ func TestIntegrationPushForwardsToUpstream(t *testing.T) {
 	// attempted to forward it (which we can verify through logs or the pushReceived flag
 	// if we had wired up the server properly)
 	t.Logf("Push forwarding test completed, pushReceived=%v", pushReceived)
+}
+
+// countingTransport wraps an http.RoundTripper to count outbound requests by URL path pattern.
+type countingTransport struct {
+	inner   http.RoundTripper
+	counter *atomic.Int32
+	pattern string
+}
+
+func (ct *countingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if strings.Contains(req.URL.Path, ct.pattern) {
+		ct.counter.Add(1)
+	}
+	return ct.inner.RoundTrip(req)
+}
+
+// TestIntegrationSpoolReusesDuringClone clones github.com/git/git through the proxy,
+// waits 5 seconds (enough for the first clone to start but not finish), then clones
+// again. The second clone should be served from the spool rather than making a new
+// upstream request.
+func TestIntegrationSpoolReusesDuringClone(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not found in PATH")
+	}
+
+	_, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelDebug})
+	tmpDir := t.TempDir()
+	clonesDir := filepath.Join(tmpDir, "clones")
+	workDir := filepath.Join(tmpDir, "work")
+	err := os.MkdirAll(workDir, 0o750)
+	assert.NoError(t, err)
+
+	// Count actual outbound upstream requests via a transport wrapper.
+	var upstreamUploadPackRequests atomic.Int32
+
+	mux := http.NewServeMux()
+	strategy, err := git.New(ctx, git.Config{
+		MirrorRoot:    clonesDir,
+		FetchInterval: 15,
+	}, jobscheduler.New(ctx, jobscheduler.Config{}), nil, mux)
+	assert.NoError(t, err)
+
+	strategy.SetHTTPTransport(&countingTransport{
+		inner:   http.DefaultTransport,
+		counter: &upstreamUploadPackRequests,
+		pattern: "git-upload-pack",
+	})
+
+	server := testServerWithLogging(ctx, mux)
+	defer server.Close()
+
+	repoURL := fmt.Sprintf("%s/git/github.com/git/git", server.URL)
+
+	// First clone – triggers upstream pass-through and background clone.
+	t.Log("Starting first clone")
+	cmd := exec.Command("git", "clone", "--depth=1", repoURL, filepath.Join(workDir, "repo1"))
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Logf("first clone output: %s", output)
+	}
+	assert.NoError(t, err)
+
+	// Record how many upstream upload-pack requests the first clone made.
+	firstCloneCount := upstreamUploadPackRequests.Load()
+	t.Logf("Upstream upload-pack requests after first clone: %d", firstCloneCount)
+	assert.True(t, firstCloneCount > 0, "first clone should have made upstream requests")
+
+	// Wait long enough for the background clone to have started but (likely) not
+	// finished for a repo as large as git/git.
+	t.Log("Waiting 5 seconds for background clone to be in progress")
+	time.Sleep(5 * time.Second)
+
+	// Second clone – should be served from the spool if the background clone is
+	// still running, or from the local backend if it already finished.
+	t.Log("Starting second clone")
+	cmd = exec.Command("git", "clone", "--depth=1", repoURL, filepath.Join(workDir, "repo2"))
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	output, err = cmd.CombinedOutput()
+	if err != nil {
+		t.Logf("second clone output: %s", output)
+	}
+	assert.NoError(t, err)
+
+	// Verify both clones produced a working checkout.
+	for _, name := range []string{"repo1", "repo2"} {
+		gitDir := filepath.Join(workDir, name, ".git")
+		_, statErr := os.Stat(gitDir)
+		assert.NoError(t, statErr, "expected .git in %s", name)
+	}
+
+	// The second clone should not have generated any new upstream upload-pack
+	// requests — it should have been served entirely from the spool or local backend.
+	totalCount := upstreamUploadPackRequests.Load()
+	t.Logf("Total upstream upload-pack requests: %d (first clone: %d)", totalCount, firstCloneCount)
+	assert.Equal(t, firstCloneCount, totalCount, "second clone should not have made additional upstream upload-pack requests")
 }
