@@ -89,7 +89,6 @@ func (s *Strategy) ensureRefsUpToDate(ctx context.Context, repo *gitclone.Reposi
 		RootDir:          s.config.MirrorRoot,
 		FetchInterval:    s.config.FetchInterval,
 		RefCheckInterval: s.config.RefCheckInterval,
-		CloneDepth:       s.config.CloneDepth,
 		GitConfig:        gitclone.DefaultGitTuningConfig(),
 	}
 	if err := repo.EnsureRefsUpToDate(ctx, gitcloneConfig); err != nil {

@@ -10,7 +10,6 @@
 
 git {
   mirror-root = "./state/git-mirrors"
-  clone-depth = 1000
   bundle-interval = "24h"
 }
 
