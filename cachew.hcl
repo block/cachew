@@ -8,10 +8,14 @@
 # }
 
 url = "http://127.0.0.1:8080"
+logging {
+  level = "debug"
+}
 
 git {
   mirror-root = "./state/git-mirrors"
   bundle-interval = "24h"
+  snapshot-interval = "24h"
 }
 
 host "https://w3.org" {}

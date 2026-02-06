@@ -70,7 +70,7 @@ func Split[GlobalConfig any](ast *hcl.AST) (global, providers *hcl.AST) {
 		switch node := node.(type) {
 		case *hcl.Block:
 			if globals[node.Name] {
-				global.Entries = append(global.Entries, node.Body...)
+				global.Entries = append(global.Entries, node)
 			} else {
 				providers.Entries = append(providers.Entries, node)
 			}

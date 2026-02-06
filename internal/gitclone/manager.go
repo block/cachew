@@ -152,7 +152,8 @@ func (m *Manager) Config() Config {
 	return m.config
 }
 
-func (m *Manager) DiscoverExisting(_ context.Context) error {
+func (m *Manager) DiscoverExisting(_ context.Context) ([]*Repository, error) {
+	var discovered []*Repository
 	err := filepath.Walk(m.config.RootDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
@@ -205,14 +206,16 @@ func (m *Manager) DiscoverExisting(_ context.Context) error {
 		m.clones[upstreamURL] = repo
 		m.clonesMu.Unlock()
 
+		discovered = append(discovered, repo)
+
 		return fs.SkipDir
 	})
 
 	if err != nil {
-		return errors.Wrap(err, "walk root directory")
+		return nil, errors.Wrap(err, "walk root directory")
 	}
 
-	return nil
+	return discovered, nil
 }
 
 func (m *Manager) clonePathForURL(upstreamURL string) string {
@@ -251,10 +254,10 @@ func (r *Repository) NeedsFetch(fetchInterval time.Duration) bool {
 	return time.Since(r.lastFetch) >= fetchInterval
 }
 
-func (r *Repository) WithReadLock(fn func()) {
+func (r *Repository) WithReadLock(fn func() error) error {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	fn()
+	return fn()
 }
 
 func WithReadLockReturn[T any](repo *Repository, fn func() (T, error)) (T, error) {

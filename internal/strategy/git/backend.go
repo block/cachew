@@ -57,7 +57,7 @@ func (s *Strategy) serveFromBackend(w http.ResponseWriter, r *http.Request, repo
 		slog.String("backend_path", backendPath),
 		slog.String("clone_path", repo.Path()))
 
-	repo.WithReadLock(func() {
+	repo.WithReadLock(func() error { //nolint:errcheck,gosec
 		var stderrBuf bytes.Buffer
 
 		handler := &cgi.Handler{
@@ -81,6 +81,8 @@ func (s *Strategy) serveFromBackend(w http.ResponseWriter, r *http.Request, repo
 				slog.String("stderr", stderrBuf.String()),
 				slog.String("path", backendPath))
 		}
+
+		return nil
 	})
 }
 

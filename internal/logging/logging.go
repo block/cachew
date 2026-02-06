@@ -10,8 +10,8 @@ import (
 )
 
 type Config struct {
-	JSON  bool       `help:"Enable JSON logging."`
-	Level slog.Level `help:"Set the logging level." default:"info"`
+	JSON  bool       `hcl:"json,optional" help:"Enable JSON logging."`
+	Level slog.Level `hcl:"level" help:"Set the logging level." default:"info"`
 }
 
 type logKey struct{}

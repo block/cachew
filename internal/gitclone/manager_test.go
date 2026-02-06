@@ -138,8 +138,9 @@ func TestManager_DiscoverExisting(t *testing.T) {
 		assert.NoError(t, os.WriteFile(filepath.Join(gitDir, "HEAD"), []byte("ref: refs/heads/main\n"), 0o644))
 	}
 
-	err = manager.DiscoverExisting(context.Background())
+	discovered, err := manager.DiscoverExisting(context.Background())
 	assert.NoError(t, err)
+	assert.Equal(t, 3, len(discovered))
 
 	repo1 := manager.Get("https://github.com/user1/repo1")
 	assert.NotZero(t, repo1)

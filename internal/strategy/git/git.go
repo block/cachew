@@ -31,6 +31,7 @@ type Config struct {
 	FetchInterval    time.Duration `hcl:"fetch-interval,optional" help:"How often to fetch from upstream in minutes." default:"15m"`
 	RefCheckInterval time.Duration `hcl:"ref-check-interval,optional" help:"How long to cache ref checks." default:"10s"`
 	BundleInterval   time.Duration `hcl:"bundle-interval,optional" help:"How often to generate bundles. 0 disables bundling." default:"0"`
+	SnapshotInterval time.Duration `hcl:"snapshot-interval,optional" help:"How often to generate tar.zstd snapshots. 0 disables snapshots." default:"0"`
 }
 
 type Strategy struct {
@@ -79,9 +80,18 @@ func New(ctx context.Context, config Config, scheduler jobscheduler.Scheduler, c
 		scheduler:    scheduler.WithQueuePrefix("git"),
 	}
 
-	if err := s.cloneManager.DiscoverExisting(ctx); err != nil {
+	existing, err := s.cloneManager.DiscoverExisting(ctx)
+	if err != nil {
 		logger.WarnContext(ctx, "Failed to discover existing clones",
 			slog.String("error", err.Error()))
+	}
+	for _, repo := range existing {
+		if s.config.BundleInterval > 0 {
+			s.scheduleBundleJobs(repo)
+		}
+		if s.config.SnapshotInterval > 0 {
+			s.scheduleSnapshotJobs(repo)
+		}
 	}
 
 	s.proxy = &httputil.ReverseProxy{
@@ -105,7 +115,8 @@ func New(ctx context.Context, config Config, scheduler jobscheduler.Scheduler, c
 		"mirror_root", config.MirrorRoot,
 		"fetch_interval", config.FetchInterval,
 		"ref_check_interval", config.RefCheckInterval,
-		"bundle_interval", config.BundleInterval)
+		"bundle_interval", config.BundleInterval,
+		"snapshot_interval", config.SnapshotInterval)
 
 	return s, nil
 }
@@ -128,6 +139,11 @@ func (s *Strategy) handleRequest(w http.ResponseWriter, r *http.Request) {
 
 	if strings.HasSuffix(pathValue, "/bundle") {
 		s.handleBundleRequest(w, r, host, pathValue)
+		return
+	}
+
+	if strings.HasSuffix(pathValue, "/snapshot") {
+		s.handleSnapshotRequest(w, r, host, pathValue)
 		return
 	}
 
@@ -189,27 +205,31 @@ func ExtractRepoPath(pathValue string) string {
 }
 
 func (s *Strategy) handleBundleRequest(w http.ResponseWriter, r *http.Request, host, pathValue string) {
+	s.serveCachedArtifact(w, r, host, pathValue, "bundle")
+}
+
+func (s *Strategy) serveCachedArtifact(w http.ResponseWriter, r *http.Request, host, pathValue, artifact string) {
 	ctx := r.Context()
 	logger := logging.FromContext(ctx)
 
-	logger.DebugContext(ctx, "Bundle request",
+	logger.DebugContext(ctx, artifact+" request",
 		slog.String("host", host),
 		slog.String("path", pathValue))
 
-	pathValue = strings.TrimSuffix(pathValue, "/bundle")
+	pathValue = strings.TrimSuffix(pathValue, "/"+artifact)
 	repoPath := ExtractRepoPath(pathValue)
 	upstreamURL := "https://" + host + "/" + repoPath
-	cacheKey := cache.NewKey(upstreamURL + ".bundle")
+	cacheKey := cache.NewKey(upstreamURL + "." + artifact)
 
 	reader, headers, err := s.cache.Open(ctx, cacheKey)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			logger.DebugContext(ctx, "Bundle not found in cache",
+			logger.DebugContext(ctx, artifact+" not found in cache",
 				slog.String("upstream", upstreamURL))
 			http.NotFound(w, r)
 			return
 		}
-		logger.ErrorContext(ctx, "Failed to open bundle from cache",
+		logger.ErrorContext(ctx, "Failed to open "+artifact+" from cache",
 			slog.String("upstream", upstreamURL),
 			slog.String("error", err.Error()))
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
@@ -225,7 +245,7 @@ func (s *Strategy) handleBundleRequest(w http.ResponseWriter, r *http.Request, h
 
 	_, err = io.Copy(w, reader)
 	if err != nil {
-		logger.ErrorContext(ctx, "Failed to stream bundle",
+		logger.ErrorContext(ctx, "Failed to stream "+artifact,
 			slog.String("upstream", upstreamURL),
 			slog.String("error", err.Error()))
 	}
@@ -260,6 +280,10 @@ func (s *Strategy) startClone(ctx context.Context, repo *gitclone.Repository) {
 
 	if s.config.BundleInterval > 0 {
 		s.scheduleBundleJobs(repo)
+	}
+
+	if s.config.SnapshotInterval > 0 {
+		s.scheduleSnapshotJobs(repo)
 	}
 }
 
@@ -301,7 +325,6 @@ func (s *Strategy) backgroundFetch(ctx context.Context, repo *gitclone.Repositor
 
 func (s *Strategy) scheduleBundleJobs(repo *gitclone.Repository) {
 	s.scheduler.SubmitPeriodicJob(repo.UpstreamURL(), "bundle-periodic", s.config.BundleInterval, func(ctx context.Context) error {
-		s.generateAndUploadBundle(ctx, repo)
-		return nil
+		return s.generateAndUploadBundle(ctx, repo)
 	})
 }

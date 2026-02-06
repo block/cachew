@@ -1,25 +1,27 @@
 package git
 
 import (
+	"bytes"
 	"context"
-	"io"
 	"log/slog"
 	"net/http"
 	"os/exec"
 	"time"
+
+	"github.com/alecthomas/errors"
 
 	"github.com/block/cachew/internal/cache"
 	"github.com/block/cachew/internal/gitclone"
 	"github.com/block/cachew/internal/logging"
 )
 
-func (s *Strategy) generateAndUploadBundle(ctx context.Context, repo *gitclone.Repository) {
+func (s *Strategy) generateAndUploadBundle(ctx context.Context, repo *gitclone.Repository) error {
 	logger := logging.FromContext(ctx)
+	upstream := repo.UpstreamURL()
 
-	logger.InfoContext(ctx, "Generating bundle",
-		slog.String("upstream", repo.UpstreamURL()))
+	logger.InfoContext(ctx, "Bundle generation started", slog.String("upstream", upstream))
 
-	cacheKey := cache.NewKey(repo.UpstreamURL() + ".bundle")
+	cacheKey := cache.NewKey(upstream + ".bundle")
 
 	headers := http.Header{
 		"Content-Type": []string{"application/x-git-bundle"},
@@ -27,55 +29,29 @@ func (s *Strategy) generateAndUploadBundle(ctx context.Context, repo *gitclone.R
 	ttl := 7 * 24 * time.Hour
 	w, err := s.cache.Create(ctx, cacheKey, headers, ttl)
 	if err != nil {
-		logger.ErrorContext(ctx, "Failed to create cache entry",
-			slog.String("upstream", repo.UpstreamURL()),
-			slog.String("error", err.Error()))
-		return
+		return errors.Wrap(err, "create cache entry")
 	}
 	defer w.Close()
 
-	repo.WithReadLock(func() {
+	err = errors.Wrap(repo.WithReadLock(func() error {
+		var stderr bytes.Buffer
 		// Use --branches --remotes to include all branches but exclude tags (which can be massive)
 		// #nosec G204 - repo.Path() is controlled by us
 		cmd := exec.CommandContext(ctx, "git", "-C", repo.Path(), "bundle", "create", "-", "--branches", "--remotes")
 		cmd.Stdout = w
+		cmd.Stderr = &stderr
 
-		stderrPipe, err := cmd.StderrPipe()
-		if err != nil {
-			logger.ErrorContext(ctx, "Failed to create stderr pipe",
-				slog.String("upstream", repo.UpstreamURL()),
-				slog.String("error", err.Error()))
-			return
+		if err := cmd.Run(); err != nil {
+			return errors.Wrapf(err, "bundle generation failed: %s", stderr.String())
 		}
 
-		logger.DebugContext(ctx, "Starting bundle generation",
-			slog.String("upstream", repo.UpstreamURL()),
-			slog.String("path", repo.Path()))
+		return nil
+	}), "generate bundle")
+	if err != nil {
+		logger.ErrorContext(ctx, "Bundle generation failed", slog.String("upstream", upstream), slog.String("error", err.Error()))
+		return err
+	}
 
-		if err := cmd.Start(); err != nil {
-			logger.ErrorContext(ctx, "Failed to start bundle generation",
-				slog.String("upstream", repo.UpstreamURL()),
-				slog.String("error", err.Error()))
-			return
-		}
-
-		stderr, _ := io.ReadAll(stderrPipe) //nolint:errcheck
-
-		if err := cmd.Wait(); err != nil {
-			logger.ErrorContext(ctx, "Failed to generate bundle",
-				slog.String("upstream", repo.UpstreamURL()),
-				slog.String("error", err.Error()),
-				slog.String("stderr", string(stderr)))
-			return
-		}
-
-		if len(stderr) > 0 {
-			logger.DebugContext(ctx, "Bundle generation stderr",
-				slog.String("upstream", repo.UpstreamURL()),
-				slog.String("stderr", string(stderr)))
-		}
-
-		logger.InfoContext(ctx, "Bundle uploaded successfully",
-			slog.String("upstream", repo.UpstreamURL()))
-	})
+	logger.InfoContext(ctx, "Bundle generation completed", slog.String("upstream", upstream))
+	return nil
 }
