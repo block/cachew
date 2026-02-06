@@ -185,13 +185,10 @@ func (p *privateFetcher) resolveVersionQuery(ctx context.Context, repo *gitclone
 }
 
 func (p *privateFetcher) listVersions(ctx context.Context, repo *gitclone.Repository) ([]string, error) {
-	var output []byte
-	var err error
-
-	repo.WithReadLock(func() {
+	output, err := gitclone.WithReadLockReturn(repo, func() ([]byte, error) {
 		// #nosec G204 - repo.Path() is controlled by us
 		cmd := exec.CommandContext(ctx, "git", "-C", repo.Path(), "tag", "-l", "v*")
-		output, err = cmd.CombinedOutput()
+		return cmd.CombinedOutput()
 	})
 
 	if err != nil {
@@ -214,13 +211,10 @@ func (p *privateFetcher) listVersions(ctx context.Context, repo *gitclone.Reposi
 }
 
 func (p *privateFetcher) getCommitTime(ctx context.Context, repo *gitclone.Repository, ref string) (time.Time, error) {
-	var output []byte
-	var err error
-
-	repo.WithReadLock(func() {
+	output, err := gitclone.WithReadLockReturn(repo, func() ([]byte, error) {
 		// #nosec G204 - repo.Path() and ref are controlled by us
 		cmd := exec.CommandContext(ctx, "git", "-C", repo.Path(), "log", "-1", "--format=%cI", ref)
-		output, err = cmd.CombinedOutput()
+		return cmd.CombinedOutput()
 	})
 
 	if err != nil {
@@ -233,13 +227,10 @@ func (p *privateFetcher) getCommitTime(ctx context.Context, repo *gitclone.Repos
 }
 
 func (p *privateFetcher) getDefaultBranchVersion(ctx context.Context, repo *gitclone.Repository) (string, time.Time, error) {
-	var output []byte
-	var err error
-
-	repo.WithReadLock(func() {
+	output, err := gitclone.WithReadLockReturn(repo, func() ([]byte, error) {
 		// #nosec G204 - repo.Path() is controlled by us
 		cmd := exec.CommandContext(ctx, "git", "-C", repo.Path(), "rev-parse", "HEAD")
-		output, err = cmd.CombinedOutput()
+		return cmd.CombinedOutput()
 	})
 
 	if err != nil {
@@ -279,13 +270,10 @@ func (p *privateFetcher) generateInfo(ctx context.Context, repo *gitclone.Reposi
 }
 
 func (p *privateFetcher) generateMod(ctx context.Context, repo *gitclone.Repository, modulePath, version string) io.ReadSeekCloser {
-	var output []byte
-	var err error
-
-	repo.WithReadLock(func() {
+	output, err := gitclone.WithReadLockReturn(repo, func() ([]byte, error) {
 		// #nosec G204 - version and repo.Path() are controlled by this package, not user input
 		cmd := exec.CommandContext(ctx, "git", "-C", repo.Path(), "show", fmt.Sprintf("%s:go.mod", version))
-		output, err = cmd.CombinedOutput()
+		return cmd.CombinedOutput()
 	})
 
 	if err != nil {
@@ -298,16 +286,13 @@ func (p *privateFetcher) generateMod(ctx context.Context, repo *gitclone.Reposit
 
 func (p *privateFetcher) generateZip(ctx context.Context, repo *gitclone.Repository, modulePath, version string) (io.ReadSeekCloser, error) {
 	prefix := fmt.Sprintf("%s@%s/", modulePath, version)
-	var output []byte
-	var err error
-
-	repo.WithReadLock(func() {
+	output, err := gitclone.WithReadLockReturn(repo, func() ([]byte, error) {
 		// #nosec G204 - version and repo.Path() are controlled by this package, not user input
 		cmd := exec.CommandContext(ctx, "git", "-C", repo.Path(), "archive",
 			"--format=zip",
 			fmt.Sprintf("--prefix=%s", prefix),
 			version)
-		output, err = cmd.CombinedOutput()
+		return cmd.CombinedOutput()
 	})
 
 	if err != nil {
