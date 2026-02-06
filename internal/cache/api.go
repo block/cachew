@@ -67,6 +67,11 @@ func (r *Registry) Schema() *hcl.AST {
 	return ast
 }
 
+func (r *Registry) Exists(name string) bool {
+	_, ok := r.registry[name]
+	return ok
+}
+
 // Create a new cache instance from the given name and configuration.
 //
 // Will return "ErrNotFound" if the cache backend is not found.

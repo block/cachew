@@ -3,7 +3,6 @@ package config
 
 import (
 	"context"
-	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -36,27 +35,64 @@ func (l *loggingMux) HandleFunc(pattern string, handler func(http.ResponseWriter
 var _ strategy.Mux = (*loggingMux)(nil)
 
 // Schema returns the configuration file schema.
-func Schema(cr *cache.Registry, sr *strategy.Registry) *hcl.AST {
+func Schema[GlobalConfig any](cr *cache.Registry, sr *strategy.Registry) *hcl.AST {
+	globalSchema, err := hcl.Schema(new(GlobalConfig))
+	if err != nil {
+		panic(err)
+	}
 	return &hcl.AST{
-		Entries: append(sr.Schema().Entries, cr.Schema().Entries...),
+		Entries: append(globalSchema.Entries, append(sr.Schema().Entries, cr.Schema().Entries...)...),
 	}
 }
 
-// Load HCL configuration and uses that to construct the cache backend, and proxy strategies.
+// Split configuration into global config and provider-specific config.
+//
+// At this point we don't know what config the providers require, so we just pull out the global config and assume
+// everything else is for the providers.
+func Split[GlobalConfig any](ast *hcl.AST) (global, providers *hcl.AST) {
+	globalSchema, err := hcl.Schema(new(GlobalConfig))
+	if err != nil {
+		panic(err)
+	}
+
+	globals := map[string]bool{}
+	for _, entry := range globalSchema.Entries {
+		switch entry.(type) {
+		case *hcl.Attribute, *hcl.Block:
+			globals[entry.EntryKey()] = true
+		}
+	}
+
+	global = &hcl.AST{Pos: ast.Pos}
+	providers = &hcl.AST{Pos: ast.Pos}
+
+	for _, node := range ast.Entries {
+		switch node := node.(type) {
+		case *hcl.Block:
+			if globals[node.Name] {
+				global.Entries = append(global.Entries, node.Body...)
+			} else {
+				providers.Entries = append(providers.Entries, node)
+			}
+
+		case *hcl.Attribute: // Attributes are always for the global config
+			global.Entries = append(global.Entries, node)
+		}
+	}
+
+	return global, providers
+}
+
+// Load HCL configuration and use that to construct the cache backend, and proxy strategies.
 func Load(
 	ctx context.Context,
 	cr *cache.Registry,
 	sr *strategy.Registry,
-	r io.Reader,
+	ast *hcl.AST,
 	mux *http.ServeMux,
 	vars map[string]string,
 ) error {
 	logger := logging.FromContext(ctx)
-	ast, err := hcl.Parse(r)
-	if err != nil {
-		return errors.WithStack(err)
-	}
-
 	expandVars(ast, vars)
 
 	strategyCandidates := []*hcl.Block{

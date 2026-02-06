@@ -4,8 +4,8 @@ github.com/alecthomas/chroma/v2 v2.23.1 h1:nv2AVZdTyClGbVQkIzlDm/rnhk1E9bU9nXwmZ
 github.com/alecthomas/chroma/v2 v2.23.1/go.mod h1:NqVhfBR0lte5Ouh3DcthuUCTUpDC9cxBOfyMbMQPs3o=
 github.com/alecthomas/errors v0.9.1 h1:JNXtU30rtMNARCkW41OTZ4yL6Lyocq20xIJgIw2raqI=
 github.com/alecthomas/errors v0.9.1/go.mod h1:l8mjMEHMGUdIWPMNtvDyRYPVS1fQFXHFXc/iVCCLGkI=
-github.com/alecthomas/hcl/v2 v2.4.0 h1:j7sPnff/f6FLAPTZmpFzHS2ENwE/dHj6K40bRb9nk4g=
-github.com/alecthomas/hcl/v2 v2.4.0/go.mod h1:4UUp66q8ony5j8tm2bANErujUpZ3GgHBLgaKxTUQlQI=
+github.com/alecthomas/hcl/v2 v2.5.0 h1:0L0oGrZPHokiXaKtsEcLa3hBjfVrRLUUK3u5vXQSybg=
+github.com/alecthomas/hcl/v2 v2.5.0/go.mod h1:4UUp66q8ony5j8tm2bANErujUpZ3GgHBLgaKxTUQlQI=
 github.com/alecthomas/kong v1.13.0 h1:5e/7XC3ugvhP1DQBmTS+WuHtCbcv44hsohMgcvVxSrA=
 github.com/alecthomas/kong v1.13.0/go.mod h1:wrlbXem1CWqUV5Vbmss5ISYhsVPkBb1Yo7YKJghju2I=
 github.com/alecthomas/participle/v2 v2.1.4 h1:W/H79S8Sat/krZ3el6sQMvMaahJ+XcM9WSI2naI7w2U=

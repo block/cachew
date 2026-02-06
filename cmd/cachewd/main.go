@@ -28,19 +28,33 @@ import (
 	"github.com/block/cachew/internal/strategy/gomod"
 )
 
+type GlobalConfig struct {
+	Bind            string              `hcl:"bind" default:"127.0.0.1:8080" help:"Bind address for the server."`
+	URL             string              `hcl:"url" default:"http://127.0.0.1:8080/" help:"Base URL for cachewd."`
+	SchedulerConfig jobscheduler.Config `embed:"" hcl:"scheduler,block" prefix:"scheduler-"`
+	LoggingConfig   logging.Config      `embed:"" hcl:"logging,block" prefix:"log-"`
+	MetricsConfig   metrics.Config      `embed:"" hcl:"metrics,block" prefix:"metrics-"`
+}
+
 var cli struct {
 	Schema bool `help:"Print the configuration file schema." xor:"command"`
 
-	Config          *os.File            `hcl:"-" help:"Configuration file path." placeholder:"PATH" required:"" default:"cachew.hcl"`
-	Bind            string              `hcl:"bind" default:"127.0.0.1:8080" help:"Bind address for the server."`
-	URL             string              `hcl:"url" default:"http://127.0.0.1:8080/" help:"Base URL for cachewd."`
-	SchedulerConfig jobscheduler.Config `embed:"" prefix:"scheduler-"`
-	LoggingConfig   logging.Config      `embed:"" prefix:"log-"`
-	MetricsConfig   metrics.Config      `embed:"" prefix:"metrics-"`
+	Config *os.File `hcl:"-" help:"Configuration file path." placeholder:"PATH" required:"" default:"cachew.hcl"`
+
+	// GlobalConfig accepts command-line, but can also be parsed from HCL.
+	GlobalConfig
 }
 
 func main() {
 	kctx := kong.Parse(&cli, kong.DefaultEnvars("CACHEW"))
+
+	ast, err := hcl.Parse(cli.Config)
+	kctx.FatalIfErrorf(err)
+
+	globalConfig, providersConfig := config.Split[GlobalConfig](ast)
+
+	err = hcl.UnmarshalAST(globalConfig, &cli.GlobalConfig)
+	kctx.FatalIfErrorf(err)
 
 	ctx := context.Background()
 	logger, ctx := logging.Configure(ctx, cli.LoggingConfig)
@@ -64,7 +78,7 @@ func main() {
 	// Commands
 	switch { //nolint:gocritic
 	case cli.Schema:
-		schema := config.Schema(cr, sr)
+		schema := config.Schema[GlobalConfig](cr, sr)
 		slices.SortStableFunc(schema.Entries, func(a, b hcl.Entry) int {
 			return strings.Compare(a.EntryKey(), b.EntryKey())
 		})
@@ -93,7 +107,7 @@ func main() {
 		_, _ = w.Write([]byte("OK")) //nolint:errcheck
 	})
 
-	err := config.Load(ctx, cr, sr, cli.Config, mux, parseEnvars())
+	err = config.Load(ctx, cr, sr, providersConfig, mux, parseEnvars())
 	kctx.FatalIfErrorf(err)
 
 	metricsClient, err := metrics.New(ctx, cli.MetricsConfig)

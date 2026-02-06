@@ -70,6 +70,11 @@ func (r *Registry) Schema() *hcl.AST {
 	return ast
 }
 
+func (r *Registry) Exists(name string) bool {
+	_, ok := r.registry[name]
+	return ok
+}
+
 // Create a new proxy strategy.
 //
 // Will return "ErrNotFound" if the strategy is not found.
