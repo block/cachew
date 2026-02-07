@@ -19,6 +19,7 @@ import (
 
 	"github.com/block/cachew/internal/cache"
 	"github.com/block/cachew/internal/config"
+	"github.com/block/cachew/internal/gitclone"
 	"github.com/block/cachew/internal/httputil"
 	"github.com/block/cachew/internal/jobscheduler"
 	"github.com/block/cachew/internal/logging"
@@ -34,9 +35,10 @@ type GlobalConfig struct {
 	SchedulerConfig jobscheduler.Config `embed:"" hcl:"scheduler,block" prefix:"scheduler-"`
 	LoggingConfig   logging.Config      `embed:"" hcl:"log,block" prefix:"log-"`
 	MetricsConfig   metrics.Config      `embed:"" hcl:"metrics,block" prefix:"metrics-"`
+	GitCloneConfig  gitclone.Config     `embed:"" hcl:"git-clone,block" prefix:"git-clone-"`
 }
 
-var cli struct {
+var cli struct { //nolint:gochecknoglobals
 	Schema bool `help:"Print the configuration file schema." xor:"command"`
 
 	Config kong.ConfigFlag `hcl:"-" help:"Configuration file path." placeholder:"PATH" required:"" default:"cachew.hcl"`
@@ -60,9 +62,12 @@ func main() {
 	ctx := context.Background()
 	logger, ctx := logging.Configure(ctx, cli.LoggingConfig)
 
+	// Start initialising
+	managerProvider := gitclone.NewManagerProvider(ctx, cli.GitCloneConfig)
+
 	scheduler := jobscheduler.New(ctx, cli.SchedulerConfig)
 
-	cr, sr := newRegistries(scheduler)
+	cr, sr := newRegistries(scheduler, managerProvider)
 
 	// Commands
 	switch { //nolint:gocritic
@@ -93,7 +98,7 @@ func main() {
 	kctx.FatalIfErrorf(err)
 }
 
-func newRegistries(scheduler jobscheduler.Scheduler) (*cache.Registry, *strategy.Registry) {
+func newRegistries(scheduler jobscheduler.Scheduler, cloneManagerProvider gitclone.ManagerProvider) (*cache.Registry, *strategy.Registry) {
 	cr := cache.NewRegistry()
 	cache.RegisterMemory(cr)
 	cache.RegisterDisk(cr)
@@ -105,8 +110,8 @@ func newRegistries(scheduler jobscheduler.Scheduler) (*cache.Registry, *strategy
 	strategy.RegisterGitHubReleases(sr)
 	strategy.RegisterHermit(sr, cli.URL)
 	strategy.RegisterHost(sr)
-	git.Register(sr, scheduler)
-	gomod.Register(sr)
+	git.Register(sr, scheduler, cloneManagerProvider)
+	gomod.Register(sr, cloneManagerProvider)
 
 	return cr, sr
 }

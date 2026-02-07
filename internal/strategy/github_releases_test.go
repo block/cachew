@@ -20,7 +20,7 @@ import (
 
 // httpTransportMutex ensures GitHub release tests don't run in parallel
 // since they modify the global http.DefaultTransport
-var httpTransportMutex sync.Mutex
+var httpTransportMutex sync.Mutex //nolint:gochecknoglobals
 
 type mockGitHubServer struct {
 	server            *httptest.Server

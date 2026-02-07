@@ -2,6 +2,7 @@ package gitclone //nolint:testpackage // white-box testing required for unexport
 
 import (
 	"context"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -9,45 +10,48 @@ import (
 	"time"
 
 	"github.com/alecthomas/assert/v2"
+
+	"github.com/block/cachew/internal/logging"
 )
 
 func TestNewManager(t *testing.T) {
+	_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelError})
 	tmpDir := t.TempDir()
 
 	config := Config{
-		RootDir:          tmpDir,
+		MirrorRoot:       tmpDir,
 		FetchInterval:    15 * time.Minute,
 		RefCheckInterval: 10 * time.Second,
-		GitConfig:        DefaultGitTuningConfig(),
 	}
 
-	manager, err := NewManager(context.Background(), config)
+	manager, err := NewManager(ctx, config)
 	assert.NoError(t, err)
 	assert.NotZero(t, manager)
-	assert.Equal(t, tmpDir, manager.config.RootDir)
+	assert.Equal(t, tmpDir, manager.config.MirrorRoot)
 }
 
 func TestNewManager_RequiresRootDir(t *testing.T) {
+	_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelError})
 	config := Config{
 		FetchInterval:    15 * time.Minute,
 		RefCheckInterval: 10 * time.Second,
 	}
 
-	_, err := NewManager(context.Background(), config)
+	_, err := NewManager(ctx, config)
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "RootDir is required")
+	assert.Contains(t, err.Error(), "mirror-root is required")
 }
 
 func TestManager_GetOrCreate(t *testing.T) {
+	_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelError})
 	tmpDir := t.TempDir()
 	config := Config{
-		RootDir:          tmpDir,
+		MirrorRoot:       tmpDir,
 		FetchInterval:    15 * time.Minute,
 		RefCheckInterval: 10 * time.Second,
-		GitConfig:        DefaultGitTuningConfig(),
 	}
 
-	manager, err := NewManager(context.Background(), config)
+	manager, err := NewManager(ctx, config)
 	assert.NoError(t, err)
 
 	upstreamURL := "https://github.com/user/repo"
@@ -65,15 +69,15 @@ func TestManager_GetOrCreate(t *testing.T) {
 }
 
 func TestManager_GetOrCreate_ExistingClone(t *testing.T) {
+	_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelError})
 	tmpDir := t.TempDir()
 	config := Config{
-		RootDir:          tmpDir,
+		MirrorRoot:       tmpDir,
 		FetchInterval:    15 * time.Minute,
 		RefCheckInterval: 10 * time.Second,
-		GitConfig:        DefaultGitTuningConfig(),
 	}
 
-	manager, err := NewManager(context.Background(), config)
+	manager, err := NewManager(ctx, config)
 	assert.NoError(t, err)
 
 	repoPath := filepath.Join(tmpDir, "github.com", "user", "repo")
@@ -90,15 +94,15 @@ func TestManager_GetOrCreate_ExistingClone(t *testing.T) {
 }
 
 func TestManager_Get(t *testing.T) {
+	_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelError})
 	tmpDir := t.TempDir()
 	config := Config{
-		RootDir:          tmpDir,
+		MirrorRoot:       tmpDir,
 		FetchInterval:    15 * time.Minute,
 		RefCheckInterval: 10 * time.Second,
-		GitConfig:        DefaultGitTuningConfig(),
 	}
 
-	manager, err := NewManager(context.Background(), config)
+	manager, err := NewManager(ctx, config)
 	assert.NoError(t, err)
 
 	upstreamURL := "https://github.com/user/repo"
@@ -115,15 +119,15 @@ func TestManager_Get(t *testing.T) {
 }
 
 func TestManager_DiscoverExisting(t *testing.T) {
+	_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelError})
 	tmpDir := t.TempDir()
 	config := Config{
-		RootDir:          tmpDir,
+		MirrorRoot:       tmpDir,
 		FetchInterval:    15 * time.Minute,
 		RefCheckInterval: 10 * time.Second,
-		GitConfig:        DefaultGitTuningConfig(),
 	}
 
-	manager, err := NewManager(context.Background(), config)
+	manager, err := NewManager(ctx, config)
 	assert.NoError(t, err)
 
 	repos := []string{
@@ -248,15 +252,10 @@ func TestRepository_Clone_StateVisibleDuringClone(t *testing.T) {
 	}
 	repo.fetchSem <- struct{}{}
 
-	config := Config{
-		RootDir:   tmpDir,
-		GitConfig: DefaultGitTuningConfig(),
-	}
-
 	// Start clone in background
 	cloneDone := make(chan error, 1)
 	go func() {
-		cloneDone <- repo.Clone(ctx, config)
+		cloneDone <- repo.Clone(ctx)
 	}()
 
 	// Poll until we observe StateCloning (should not block)

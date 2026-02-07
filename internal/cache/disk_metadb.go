@@ -10,6 +10,7 @@ import (
 	"go.etcd.io/bbolt"
 )
 
+//nolint:gochecknoglobals
 var (
 	ttlBucketName     = []byte("ttl")
 	headersBucketName = []byte("headers")

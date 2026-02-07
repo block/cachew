@@ -12,8 +12,11 @@ log {
   level = "debug"
 }
 
+git-clone {
+    mirror-root = "./state/git-mirrors"
+}
+
 git {
-  mirror-root = "./state/git-mirrors"
   bundle-interval = "24h"
   snapshot-interval = "24h"
 }

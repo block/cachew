@@ -10,6 +10,7 @@ import (
 	"github.com/alecthomas/assert/v2"
 
 	"github.com/block/cachew/internal/cache"
+	"github.com/block/cachew/internal/gitclone"
 	"github.com/block/cachew/internal/jobscheduler"
 	"github.com/block/cachew/internal/logging"
 	"github.com/block/cachew/internal/strategy/git"
@@ -19,14 +20,17 @@ func TestBundleHTTPEndpoint(t *testing.T) {
 	_, ctx := logging.Configure(context.Background(), logging.Config{})
 	tmpDir := t.TempDir()
 
+	cloneManager := gitclone.NewManagerProvider(ctx, gitclone.Config{
+		MirrorRoot: tmpDir,
+	})
+
 	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{})
 	assert.NoError(t, err)
 	mux := newTestMux()
 
 	_, err = git.New(ctx, git.Config{
-		MirrorRoot:     tmpDir,
 		BundleInterval: 24 * time.Hour,
-	}, jobscheduler.New(ctx, jobscheduler.Config{}), memCache, mux)
+	}, jobscheduler.New(ctx, jobscheduler.Config{}), memCache, mux, cloneManager)
 	assert.NoError(t, err)
 
 	// Create a fake bundle in the cache
@@ -99,10 +103,13 @@ func TestBundleInterval(t *testing.T) {
 			assert.NoError(t, err)
 			mux := newTestMux()
 
+			cloneManager := gitclone.NewManagerProvider(ctx, gitclone.Config{
+				MirrorRoot: tmpDir,
+			})
+
 			s, err := git.New(ctx, git.Config{
-				MirrorRoot:     tmpDir,
 				BundleInterval: tt.bundleInterval,
-			}, jobscheduler.New(ctx, jobscheduler.Config{}), memCache, mux)
+			}, jobscheduler.New(ctx, jobscheduler.Config{}), memCache, mux, cloneManager)
 			assert.NoError(t, err)
 			assert.NotZero(t, s)
 

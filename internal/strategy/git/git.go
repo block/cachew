@@ -26,16 +26,13 @@ import (
 	"github.com/block/cachew/internal/strategy"
 )
 
-func Register(r *strategy.Registry, scheduler jobscheduler.Scheduler) {
+func Register(r *strategy.Registry, scheduler jobscheduler.Scheduler, cloneManager gitclone.ManagerProvider) {
 	strategy.Register(r, "git", "Caches Git repositories, including bundle and tarball snapshots.", func(ctx context.Context, config Config, cache cache.Cache, mux strategy.Mux) (*Strategy, error) {
-		return New(ctx, config, scheduler, cache, mux)
+		return New(ctx, config, scheduler, cache, mux, cloneManager)
 	})
 }
 
 type Config struct {
-	MirrorRoot       string        `hcl:"mirror-root" help:"Directory to store git clones." required:""`
-	FetchInterval    time.Duration `hcl:"fetch-interval,optional" help:"How often to fetch from upstream in minutes." default:"15m"`
-	RefCheckInterval time.Duration `hcl:"ref-check-interval,optional" help:"How long to cache ref checks." default:"10s"`
 	BundleInterval   time.Duration `hcl:"bundle-interval,optional" help:"How often to generate bundles. 0 disables bundling." default:"0"`
 	SnapshotInterval time.Duration `hcl:"snapshot-interval,optional" help:"How often to generate tar.zstd snapshots. 0 disables snapshots." default:"0"`
 }
@@ -52,34 +49,21 @@ type Strategy struct {
 	spools       map[string]*RepoSpools
 }
 
-func New(ctx context.Context, config Config, scheduler jobscheduler.Scheduler, cache cache.Cache, mux strategy.Mux) (*Strategy, error) {
+func New(
+	ctx context.Context,
+	config Config,
+	scheduler jobscheduler.Scheduler,
+	cache cache.Cache,
+	mux strategy.Mux,
+	cloneManagerProvider gitclone.ManagerProvider,
+) (*Strategy, error) {
 	logger := logging.FromContext(ctx)
 
-	if config.MirrorRoot == "" {
-		return nil, errors.New("mirror-root is required")
-	}
-
-	if config.FetchInterval == 0 {
-		config.FetchInterval = 15 * time.Minute
-	}
-
-	if config.RefCheckInterval == 0 {
-		config.RefCheckInterval = 10 * time.Second
-	}
-
-	cloneManager, err := gitclone.NewManager(ctx, gitclone.Config{
-		RootDir:          config.MirrorRoot,
-		FetchInterval:    config.FetchInterval,
-		RefCheckInterval: config.RefCheckInterval,
-		GitConfig:        gitclone.DefaultGitTuningConfig(),
-	})
+	cloneManager, err := cloneManagerProvider()
 	if err != nil {
-		return nil, errors.Wrap(err, "create clone manager")
+		return nil, errors.Wrap(err, "failed to create clone manager")
 	}
-
-	gitclone.SetShared(cloneManager)
-
-	if err := os.RemoveAll(filepath.Join(config.MirrorRoot, ".spools")); err != nil {
+	if err := os.RemoveAll(filepath.Join(cloneManager.Config().MirrorRoot, ".spools")); err != nil {
 		return nil, errors.Wrap(err, "clean up stale spools")
 	}
 
@@ -125,9 +109,6 @@ func New(ctx context.Context, config Config, scheduler jobscheduler.Scheduler, c
 	mux.Handle("POST /git/{host}/{path...}", http.HandlerFunc(s.handleRequest))
 
 	logger.InfoContext(ctx, "Git strategy initialized",
-		"mirror_root", config.MirrorRoot,
-		"fetch_interval", config.FetchInterval,
-		"ref_check_interval", config.RefCheckInterval,
 		"bundle_interval", config.BundleInterval,
 		"snapshot_interval", config.SnapshotInterval)
 
@@ -247,7 +228,7 @@ func (s *Strategy) getOrCreateRepoSpools(upstreamURL string) *RepoSpools {
 	defer s.spoolsMu.Unlock()
 	rp, exists := s.spools[upstreamURL]
 	if !exists {
-		dir := spoolDirForURL(s.config.MirrorRoot, upstreamURL)
+		dir := spoolDirForURL(s.cloneManager.Config().MirrorRoot, upstreamURL)
 		rp = NewRepoSpools(dir)
 		s.spools[upstreamURL] = rp
 	}
@@ -391,14 +372,7 @@ func (s *Strategy) startClone(ctx context.Context, repo *gitclone.Repository) {
 		slog.String("upstream", repo.UpstreamURL()),
 		slog.String("path", repo.Path()))
 
-	gitcloneConfig := gitclone.Config{
-		RootDir:          s.config.MirrorRoot,
-		FetchInterval:    s.config.FetchInterval,
-		RefCheckInterval: s.config.RefCheckInterval,
-		GitConfig:        gitclone.DefaultGitTuningConfig(),
-	}
-
-	err := repo.Clone(ctx, gitcloneConfig)
+	err := repo.Clone(ctx)
 
 	// Clean up spools regardless of clone success or failure, so that subsequent
 	// requests either serve from the local backend or go directly to upstream.
@@ -425,7 +399,7 @@ func (s *Strategy) startClone(ctx context.Context, repo *gitclone.Repository) {
 }
 
 func (s *Strategy) maybeBackgroundFetch(repo *gitclone.Repository) {
-	if !repo.NeedsFetch(s.config.FetchInterval) {
+	if !repo.NeedsFetch(s.cloneManager.Config().FetchInterval) {
 		return
 	}
 
@@ -438,7 +412,7 @@ func (s *Strategy) maybeBackgroundFetch(repo *gitclone.Repository) {
 func (s *Strategy) backgroundFetch(ctx context.Context, repo *gitclone.Repository) {
 	logger := logging.FromContext(ctx)
 
-	if !repo.NeedsFetch(s.config.FetchInterval) {
+	if !repo.NeedsFetch(s.cloneManager.Config().FetchInterval) {
 		return
 	}
 
@@ -446,14 +420,7 @@ func (s *Strategy) backgroundFetch(ctx context.Context, repo *gitclone.Repositor
 		slog.String("upstream", repo.UpstreamURL()),
 		slog.String("path", repo.Path()))
 
-	gitcloneConfig := gitclone.Config{
-		RootDir:          s.config.MirrorRoot,
-		FetchInterval:    s.config.FetchInterval,
-		RefCheckInterval: s.config.RefCheckInterval,
-		GitConfig:        gitclone.DefaultGitTuningConfig(),
-	}
-
-	if err := repo.Fetch(ctx, gitcloneConfig); err != nil {
+	if err := repo.Fetch(ctx); err != nil {
 		logger.ErrorContext(ctx, "Fetch failed",
 			slog.String("upstream", repo.UpstreamURL()),
 			slog.String("error", err.Error()))

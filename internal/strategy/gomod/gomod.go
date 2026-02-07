@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"net/url"
 
-	"github.com/alecthomas/errors"
 	"github.com/goproxy/goproxy"
 
 	"github.com/block/cachew/internal/cache"
@@ -16,8 +15,10 @@ import (
 	"github.com/block/cachew/internal/strategy"
 )
 
-func Register(r *strategy.Registry) {
-	strategy.Register(r, "gomod", "Caches Go module proxy requests.", New)
+func Register(r *strategy.Registry, cloneManager gitclone.ManagerProvider) {
+	strategy.Register(r, "gomod", "Caches Go module proxy requests.", func(ctx context.Context, config Config, cache cache.Cache, mux strategy.Mux) (*Strategy, error) {
+		return New(ctx, config, cache, mux, cloneManager)
+	})
 }
 
 type Config struct {
@@ -36,17 +37,23 @@ type Strategy struct {
 
 var _ strategy.Strategy = (*Strategy)(nil)
 
-func New(ctx context.Context, config Config, cache cache.Cache, mux strategy.Mux) (*Strategy, error) {
+func New(ctx context.Context, config Config, cache cache.Cache, mux strategy.Mux, cloneManagerProvider gitclone.ManagerProvider) (*Strategy, error) {
 	parsedURL, err := url.Parse(config.Proxy)
 	if err != nil {
 		return nil, fmt.Errorf("invalid proxy URL: %w", err)
 	}
 
+	cloneManager, err := cloneManagerProvider()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create clone manager: %w", err)
+	}
+
 	s := &Strategy{
-		config: config,
-		cache:  cache,
-		logger: logging.FromContext(ctx),
-		proxy:  parsedURL,
+		config:       config,
+		cache:        cache,
+		logger:       logging.FromContext(ctx),
+		proxy:        parsedURL,
+		cloneManager: cloneManager,
 	}
 
 	publicFetcher := &goproxy.GoFetcher{
@@ -59,11 +66,6 @@ func New(ctx context.Context, config Config, cache cache.Cache, mux strategy.Mux
 	var fetcher goproxy.Fetcher = publicFetcher
 
 	if len(config.PrivatePaths) > 0 {
-		cloneManager := gitclone.GetShared()
-		if cloneManager == nil {
-			return nil, errors.New("private-paths configured but git strategy not initialized - git strategy with mirror-root is required for private module support")
-		}
-
 		s.cloneManager = cloneManager
 		privateFetcher := newPrivateFetcher(s.logger, cloneManager)
 		fetcher = NewCompositeFetcher(publicFetcher, privateFetcher, config.PrivatePaths)

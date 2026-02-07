@@ -18,7 +18,7 @@ import (
 
 // httpTransportMutexHermit ensures hermit tests don't run in parallel
 // since they modify the global http.DefaultTransport
-var httpTransportMutexHermit sync.Mutex
+var httpTransportMutexHermit sync.Mutex //nolint:gochecknoglobals
 
 func setupHermitTest(t *testing.T) (*http.ServeMux, context.Context, cache.Cache) {
 	t.Helper()

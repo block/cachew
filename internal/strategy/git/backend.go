@@ -28,7 +28,7 @@ func (s *Strategy) serveFromBackend(w http.ResponseWriter, r *http.Request, repo
 		return
 	}
 
-	absRoot, err := filepath.Abs(s.config.MirrorRoot)
+	absRoot, err := filepath.Abs(s.cloneManager.Config().MirrorRoot)
 	if err != nil {
 		httputil.ErrorResponse(w, r, http.StatusInternalServerError, "failed to get absolute path")
 		return
@@ -87,13 +87,7 @@ func (s *Strategy) serveFromBackend(w http.ResponseWriter, r *http.Request, repo
 }
 
 func (s *Strategy) ensureRefsUpToDate(ctx context.Context, repo *gitclone.Repository) error {
-	gitcloneConfig := gitclone.Config{
-		RootDir:          s.config.MirrorRoot,
-		FetchInterval:    s.config.FetchInterval,
-		RefCheckInterval: s.config.RefCheckInterval,
-		GitConfig:        gitclone.DefaultGitTuningConfig(),
-	}
-	if err := repo.EnsureRefsUpToDate(ctx, gitcloneConfig); err != nil {
+	if err := repo.EnsureRefsUpToDate(ctx); err != nil {
 		return errors.Wrap(err, "ensure refs up to date")
 	}
 	return nil

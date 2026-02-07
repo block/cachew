@@ -13,24 +13,9 @@ import (
 	"time"
 
 	"github.com/alecthomas/errors"
+
+	"github.com/block/cachew/internal/logging"
 )
-
-var (
-	sharedManager   *Manager
-	sharedManagerMu sync.RWMutex
-)
-
-func SetShared(m *Manager) {
-	sharedManagerMu.Lock()
-	defer sharedManagerMu.Unlock()
-	sharedManager = m
-}
-
-func GetShared() *Manager {
-	sharedManagerMu.RLock()
-	defer sharedManagerMu.RUnlock()
-	return sharedManager
-}
 
 type State int
 
@@ -68,14 +53,14 @@ func DefaultGitTuningConfig() GitTuningConfig {
 }
 
 type Config struct {
-	RootDir          string
-	FetchInterval    time.Duration
-	RefCheckInterval time.Duration
-	GitConfig        GitTuningConfig
+	MirrorRoot       string        `hcl:"mirror-root" help:"Directory to store git clones."`
+	FetchInterval    time.Duration `hcl:"fetch-interval,optional" help:"How often to fetch from upstream in minutes." default:"15m"`
+	RefCheckInterval time.Duration `hcl:"ref-check-interval,optional" help:"How long to cache ref checks." default:"10s"`
 }
 
 type Repository struct {
 	mu            sync.RWMutex
+	config        Config
 	state         State
 	path          string
 	upstreamURL   string
@@ -86,24 +71,52 @@ type Repository struct {
 }
 
 type Manager struct {
-	config   Config
-	clones   map[string]*Repository
-	clonesMu sync.RWMutex
+	config          Config
+	gitTuningConfig GitTuningConfig
+	clones          map[string]*Repository
+	clonesMu        sync.RWMutex
 }
 
-func NewManager(_ context.Context, config Config) (*Manager, error) {
-	if config.RootDir == "" {
-		return nil, errors.New("RootDir is required")
+// ManagerProvider is a function that lazily creates a singleton Manager.
+type ManagerProvider func() (*Manager, error)
+
+func NewManagerProvider(ctx context.Context, config Config) ManagerProvider {
+	return sync.OnceValues(func() (*Manager, error) {
+		return NewManager(ctx, config)
+	})
+}
+
+func NewManager(ctx context.Context, config Config) (*Manager, error) {
+	if config.MirrorRoot == "" {
+		return nil, errors.New("mirror-root is required")
 	}
 
-	if err := os.MkdirAll(config.RootDir, 0o750); err != nil {
+	if config.FetchInterval == 0 {
+		config.FetchInterval = 15 * time.Minute
+	}
+
+	if config.RefCheckInterval == 0 {
+		config.RefCheckInterval = 10 * time.Second
+	}
+
+	if err := os.MkdirAll(config.MirrorRoot, 0o750); err != nil {
 		return nil, errors.Wrap(err, "create root directory")
 	}
 
+	logging.FromContext(ctx).InfoContext(ctx, "Git clone manager initialised",
+		"mirror_root", config.MirrorRoot,
+		"fetch_interval", config.FetchInterval,
+		"ref_check_interval", config.RefCheckInterval)
+
 	return &Manager{
-		config: config,
-		clones: make(map[string]*Repository),
+		config:          config,
+		gitTuningConfig: DefaultGitTuningConfig(),
+		clones:          make(map[string]*Repository),
 	}, nil
+}
+
+func (m *Manager) Config() Config {
+	return m.config
 }
 
 func (m *Manager) GetOrCreate(_ context.Context, upstreamURL string) (*Repository, error) {
@@ -126,6 +139,7 @@ func (m *Manager) GetOrCreate(_ context.Context, upstreamURL string) (*Repositor
 
 	repo = &Repository{
 		state:       StateEmpty,
+		config:      m.config,
 		path:        clonePath,
 		upstreamURL: upstreamURL,
 		fetchSem:    make(chan struct{}, 1),
@@ -148,13 +162,9 @@ func (m *Manager) Get(upstreamURL string) *Repository {
 	return m.clones[upstreamURL]
 }
 
-func (m *Manager) Config() Config {
-	return m.config
-}
-
 func (m *Manager) DiscoverExisting(_ context.Context) ([]*Repository, error) {
 	var discovered []*Repository
-	err := filepath.Walk(m.config.RootDir, func(path string, info os.FileInfo, err error) error {
+	err := filepath.Walk(m.config.MirrorRoot, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
@@ -178,7 +188,7 @@ func (m *Manager) DiscoverExisting(_ context.Context) ([]*Repository, error) {
 			return errors.Wrap(statErr, "stat HEAD file")
 		}
 
-		relPath, err := filepath.Rel(m.config.RootDir, path)
+		relPath, err := filepath.Rel(m.config.MirrorRoot, path)
 		if err != nil {
 			return errors.Wrap(err, "get relative path")
 		}
@@ -221,11 +231,11 @@ func (m *Manager) DiscoverExisting(_ context.Context) ([]*Repository, error) {
 func (m *Manager) clonePathForURL(upstreamURL string) string {
 	parsed, err := url.Parse(upstreamURL)
 	if err != nil {
-		return filepath.Join(m.config.RootDir, "unknown")
+		return filepath.Join(m.config.MirrorRoot, "unknown")
 	}
 
 	repoPath := strings.TrimSuffix(parsed.Path, ".git")
-	return filepath.Join(m.config.RootDir, parsed.Host, repoPath)
+	return filepath.Join(m.config.MirrorRoot, parsed.Host, repoPath)
 }
 
 func (r *Repository) State() State {
@@ -266,7 +276,7 @@ func WithReadLockReturn[T any](repo *Repository, fn func() (T, error)) (T, error
 	return fn()
 }
 
-func (r *Repository) Clone(ctx context.Context, config Config) error {
+func (r *Repository) Clone(ctx context.Context) error {
 	r.mu.Lock()
 	if r.state != StateEmpty {
 		r.mu.Unlock()
@@ -275,7 +285,7 @@ func (r *Repository) Clone(ctx context.Context, config Config) error {
 	r.state = StateCloning
 	r.mu.Unlock()
 
-	err := r.executeClone(ctx, config)
+	err := r.executeClone(ctx)
 
 	r.mu.Lock()
 	if err != nil {
@@ -290,17 +300,18 @@ func (r *Repository) Clone(ctx context.Context, config Config) error {
 	return nil
 }
 
-func (r *Repository) executeClone(ctx context.Context, config Config) error {
+func (r *Repository) executeClone(ctx context.Context) error {
 	if err := os.MkdirAll(filepath.Dir(r.path), 0o750); err != nil {
 		return errors.Wrap(err, "create clone directory")
 	}
 
+	config := DefaultGitTuningConfig()
 	// #nosec G204 - r.upstreamURL and r.path are controlled by us
 	args := []string{
 		"clone",
-		"-c", "http.postBuffer=" + strconv.Itoa(config.GitConfig.PostBuffer),
-		"-c", "http.lowSpeedLimit=" + strconv.Itoa(config.GitConfig.LowSpeedLimit),
-		"-c", "http.lowSpeedTime=" + strconv.Itoa(int(config.GitConfig.LowSpeedTime.Seconds())),
+		"-c", "http.postBuffer=" + strconv.Itoa(config.PostBuffer),
+		"-c", "http.lowSpeedLimit=" + strconv.Itoa(config.LowSpeedLimit),
+		"-c", "http.lowSpeedTime=" + strconv.Itoa(int(config.LowSpeedTime.Seconds())),
 		r.upstreamURL, r.path,
 	}
 
@@ -321,9 +332,9 @@ func (r *Repository) executeClone(ctx context.Context, config Config) error {
 	}
 
 	cmd, err = gitCommand(ctx, r.upstreamURL, "-C", r.path,
-		"-c", "http.postBuffer="+strconv.Itoa(config.GitConfig.PostBuffer),
-		"-c", "http.lowSpeedLimit="+strconv.Itoa(config.GitConfig.LowSpeedLimit),
-		"-c", "http.lowSpeedTime="+strconv.Itoa(int(config.GitConfig.LowSpeedTime.Seconds())),
+		"-c", "http.postBuffer="+strconv.Itoa(config.PostBuffer),
+		"-c", "http.lowSpeedLimit="+strconv.Itoa(config.LowSpeedLimit),
+		"-c", "http.lowSpeedTime="+strconv.Itoa(int(config.LowSpeedTime.Seconds())),
 		"fetch", "--all")
 	if err != nil {
 		return errors.Wrap(err, "create git command for fetch")
@@ -336,7 +347,7 @@ func (r *Repository) executeClone(ctx context.Context, config Config) error {
 	return nil
 }
 
-func (r *Repository) Fetch(ctx context.Context, config Config) error {
+func (r *Repository) Fetch(ctx context.Context) error {
 	select {
 	case <-r.fetchSem:
 		defer func() {
@@ -356,11 +367,13 @@ func (r *Repository) Fetch(ctx context.Context, config Config) error {
 
 	r.mu.Lock()
 
+	config := DefaultGitTuningConfig()
+
 	// #nosec G204 - r.path is controlled by us
 	cmd, err := gitCommand(ctx, r.upstreamURL, "-C", r.path,
-		"-c", "http.postBuffer="+strconv.Itoa(config.GitConfig.PostBuffer),
-		"-c", "http.lowSpeedLimit="+strconv.Itoa(config.GitConfig.LowSpeedLimit),
-		"-c", "http.lowSpeedTime="+strconv.Itoa(int(config.GitConfig.LowSpeedTime.Seconds())),
+		"-c", "http.postBuffer="+strconv.Itoa(config.PostBuffer),
+		"-c", "http.lowSpeedLimit="+strconv.Itoa(config.LowSpeedLimit),
+		"-c", "http.lowSpeedTime="+strconv.Itoa(int(config.LowSpeedTime.Seconds())),
 		"remote", "update", "--prune")
 	if err != nil {
 		return errors.Wrap(err, "create git command")
@@ -376,9 +389,9 @@ func (r *Repository) Fetch(ctx context.Context, config Config) error {
 	return nil
 }
 
-func (r *Repository) EnsureRefsUpToDate(ctx context.Context, config Config) error {
+func (r *Repository) EnsureRefsUpToDate(ctx context.Context) error {
 	r.mu.Lock()
-	if r.refCheckValid && time.Since(r.lastRefCheck) < config.RefCheckInterval {
+	if r.refCheckValid && time.Since(r.lastRefCheck) < r.config.RefCheckInterval {
 		r.mu.Unlock()
 		return nil
 	}
@@ -419,7 +432,7 @@ func (r *Repository) EnsureRefsUpToDate(ctx context.Context, config Config) erro
 		return nil
 	}
 
-	err = r.Fetch(ctx, config)
+	err = r.Fetch(ctx)
 	if err != nil {
 		r.mu.Lock()
 		r.refCheckValid = false

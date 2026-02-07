@@ -15,6 +15,7 @@ import (
 	"github.com/alecthomas/assert/v2"
 
 	"github.com/block/cachew/internal/cache"
+	"github.com/block/cachew/internal/gitclone"
 	"github.com/block/cachew/internal/logging"
 	"github.com/block/cachew/internal/strategy/gomod"
 )
@@ -174,10 +175,14 @@ func setupGoModTest(t *testing.T) (*mockGoModServer, *http.ServeMux, context.Con
 	assert.NoError(t, err)
 	t.Cleanup(func() { _ = memCache.Close() })
 
+	cm := gitclone.NewManagerProvider(ctx, gitclone.Config{
+		MirrorRoot: t.TempDir(),
+	})
+	assert.NoError(t, err)
 	mux := http.NewServeMux()
 	_, err = gomod.New(ctx, gomod.Config{
 		Proxy: mock.server.URL,
-	}, memCache, mux)
+	}, memCache, mux, cm)
 	assert.NoError(t, err)
 
 	return mock, mux, ctx

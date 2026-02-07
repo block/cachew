@@ -121,8 +121,7 @@ func (p *privateFetcher) ensureReady(ctx context.Context, repo *gitclone.Reposit
 		return nil
 	}
 
-	config := p.cloneManager.Config()
-	if err := repo.Clone(ctx, config); err != nil {
+	if err := repo.Clone(ctx); err != nil {
 		return errors.Wrap(err, "clone repository")
 	}
 

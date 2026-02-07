@@ -38,26 +38,26 @@ func TestNew(t *testing.T) {
 
 	tests := []struct {
 		name      string
-		config    git.Config
+		config    gitclone.Config
 		wantError string
 	}{
 		{
 			name: "ValidConfig",
-			config: git.Config{
+			config: gitclone.Config{
 				MirrorRoot:    filepath.Join(tmpDir, "clones"),
 				FetchInterval: 15,
 			},
 		},
 		{
 			name: "MissingClonesRoot",
-			config: git.Config{
+			config: gitclone.Config{
 				FetchInterval: 15,
 			},
 			wantError: "mirror-root is required",
 		},
 		{
 			name: "DefaultFetchInterval",
-			config: git.Config{
+			config: gitclone.Config{
 				MirrorRoot: filepath.Join(tmpDir, "clones2"),
 			},
 		},
@@ -66,7 +66,8 @@ func TestNew(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			mux := newTestMux()
-			s, err := git.New(ctx, tt.config, jobscheduler.New(ctx, jobscheduler.Config{}), nil, mux)
+			cm := gitclone.NewManagerProvider(ctx, tt.config)
+			s, err := git.New(ctx, git.Config{}, jobscheduler.New(ctx, jobscheduler.Config{}), nil, mux, cm)
 			if tt.wantError != "" {
 				assert.Error(t, err)
 				assert.Contains(t, err.Error(), tt.wantError)
@@ -146,10 +147,11 @@ func TestNewWithExistingCloneOnDisk(t *testing.T) {
 	assert.NoError(t, err)
 
 	mux := newTestMux()
-	s, err := git.New(ctx, git.Config{
+	cm := gitclone.NewManagerProvider(ctx, gitclone.Config{
 		MirrorRoot:    tmpDir,
 		FetchInterval: 15,
-	}, jobscheduler.New(ctx, jobscheduler.Config{}), nil, mux)
+	})
+	s, err := git.New(ctx, git.Config{}, jobscheduler.New(ctx, jobscheduler.Config{}), nil, mux, cm)
 	assert.NoError(t, err)
 	assert.NotZero(t, s)
 }
@@ -169,10 +171,11 @@ func TestIntegrationWithMockUpstream(t *testing.T) {
 
 	// Create strategy - it will register handlers
 	mux := newTestMux()
-	_, err := git.New(ctx, git.Config{
+	cm := gitclone.NewManagerProvider(ctx, gitclone.Config{
 		MirrorRoot:    tmpDir,
 		FetchInterval: 15,
-	}, jobscheduler.New(ctx, jobscheduler.Config{}), nil, mux)
+	})
+	_, err := git.New(ctx, git.Config{}, jobscheduler.New(ctx, jobscheduler.Config{}), nil, mux, cm)
 	assert.NoError(t, err)
 
 	// Verify handlers exist
