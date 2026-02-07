@@ -23,13 +23,13 @@ import (
 
 // Config holds metrics configuration.
 type Config struct {
-	ServiceName        string `help:"Service name for metrics." default:"cachew"`
-	Port               int    `help:"Port for Prometheus metrics server." default:"9102"`
-	EnablePrometheus   bool   `help:"Enable Prometheus exporter." default:"true"`
-	EnableOTLP         bool   `help:"Enable OTLP exporter." default:"false"`
-	OTLPEndpoint       string `help:"OTLP endpoint URL." default:"http://localhost:4318"`
-	OTLPInsecure       bool   `help:"Use insecure connection for OTLP." default:"false"`
-	OTLPExportInterval int    `help:"OTLP export interval in seconds." default:"60"`
+	ServiceName        string `hcl:"service-name" help:"Service name for metrics." default:"cachew"`
+	Port               int    `hcl:"port" help:"Port for Prometheus metrics server." default:"9102"`
+	EnablePrometheus   bool   `hcl:"enable-prometheus" help:"Enable Prometheus exporter." default:"true"`
+	EnableOTLP         bool   `hcl:"enable-otlp" help:"Enable OTLP exporter." default:"false"`
+	OTLPEndpoint       string `hcl:"otlp-endpoint" help:"OTLP endpoint URL." default:"http://localhost:4318"`
+	OTLPInsecure       bool   `hcl:"otlp-insecure" help:"Use insecure connection for OTLP." default:"false"`
+	OTLPExportInterval int    `hcl:"otlp-export-interval" help:"OTLP export interval in seconds." default:"60"`
 }
 
 // Client provides OpenTelemetry metrics with configurable exporters.

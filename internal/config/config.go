@@ -4,8 +4,12 @@ package config
 import (
 	"context"
 	"log/slog"
+	"math/big"
 	"net/http"
 	"os"
+	"slices"
+	"strconv"
+	"strings"
 
 	"github.com/alecthomas/errors"
 	"github.com/alecthomas/hcl/v2"
@@ -151,4 +155,121 @@ func expandVars(ast *hcl.AST, vars map[string]string) {
 		}
 		return next()
 	})
+}
+
+// InjectEnvars walks the schema and for each attribute not present in the config,
+// checks for a corresponding environment variable and injects it.
+//
+// Environment variable names are derived from the path to the attribute:
+// prefix + block names + attr name, joined with "_", uppercased, hyphens replaced with "_".
+// e.g. prefix="CACHEW", path=["scheduler", "concurrency"] -> "CACHEW_SCHEDULER_CONCURRENCY".
+func InjectEnvars(schema *hcl.AST, config *hcl.AST, prefix string, vars map[string]string) {
+	container := &entryContainer{ast: config}
+	injectEntries(schema.Entries, container, []string{prefix}, vars)
+	_ = hcl.AddParentRefs(config) //nolint:errcheck
+}
+
+// entryContainer abstracts over AST (top-level) and Block (nested) for inserting entries.
+type entryContainer struct {
+	ast   *hcl.AST
+	block *hcl.Block
+}
+
+func (c *entryContainer) entries() hcl.Entries {
+	if c.block != nil {
+		return c.block.Body
+	}
+	return c.ast.Entries
+}
+
+func (c *entryContainer) append(entry hcl.Entry) {
+	if c.block != nil {
+		c.block.Body = append(c.block.Body, entry)
+	} else {
+		c.ast.Entries = append(c.ast.Entries, entry)
+	}
+}
+
+func (c *entryContainer) findBlock(name string) *entryContainer {
+	for _, e := range c.entries() {
+		if block, ok := e.(*hcl.Block); ok && block.Name == name {
+			return &entryContainer{ast: c.ast, block: block}
+		}
+	}
+	return nil
+}
+
+func injectEntries(schemaEntries hcl.Entries, container *entryContainer, path []string, vars map[string]string) {
+	for _, entry := range schemaEntries {
+		switch entry := entry.(type) {
+		case *hcl.Attribute:
+			typ, ok := entry.Value.(*hcl.Type)
+			if !ok {
+				continue
+			}
+			envarName := pathToEnvar(append(slices.Clone(path), entry.Key))
+			val, ok := vars[envarName]
+			if !ok {
+				continue
+			}
+			if hasAttr(container.entries(), entry.Key) {
+				continue
+			}
+			hclVal, err := parseValue(val, typ.Type)
+			if err != nil {
+				continue
+			}
+			container.append(&hcl.Attribute{Key: entry.Key, Value: hclVal})
+
+		case *hcl.Block:
+			child := container.findBlock(entry.Name)
+			if child == nil {
+				// Create a temporary container; only add the block to the
+				// config if at least one envar populated it.
+				tmp := &entryContainer{ast: container.ast, block: &hcl.Block{Name: entry.Name}}
+				injectEntries(entry.Body, tmp, append(path, entry.Name), vars)
+				if len(tmp.block.Body) > 0 {
+					container.append(tmp.block)
+				}
+			} else {
+				injectEntries(entry.Body, child, append(path, entry.Name), vars)
+			}
+		}
+	}
+}
+
+func pathToEnvar(path []string) string {
+	s := strings.Join(path, "_")
+	s = strings.ReplaceAll(s, "-", "_")
+	return strings.ToUpper(s)
+}
+
+func hasAttr(entries hcl.Entries, key string) bool {
+	for _, e := range entries {
+		if attr, ok := e.(*hcl.Attribute); ok && attr.Key == key {
+			return true
+		}
+	}
+	return false
+}
+
+func parseValue(raw string, typ string) (hcl.Value, error) {
+	switch typ {
+	case "string":
+		return &hcl.String{Str: raw}, nil
+	case "number":
+		f, _, err := big.ParseFloat(raw, 10, 256, big.ToNearestEven)
+		if err != nil {
+			return nil, errors.Wrap(err, raw)
+		}
+		return &hcl.Number{Float: f}, nil
+	case "boolean":
+		b, err := strconv.ParseBool(raw)
+		if err != nil {
+			return nil, errors.Wrap(err, raw)
+		}
+		return &hcl.Bool{Bool: b}, nil
+	default:
+		return nil, errors.Errorf("unsupported type %q", typ)
+	}
 }

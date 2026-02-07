@@ -7,7 +7,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"slices"
 	"strings"
 	"time"
 
@@ -32,42 +31,45 @@ import (
 type GlobalConfig struct {
 	Bind            string              `hcl:"bind" default:"127.0.0.1:8080" help:"Bind address for the server."`
 	URL             string              `hcl:"url" default:"http://127.0.0.1:8080/" help:"Base URL for cachewd."`
-	SchedulerConfig jobscheduler.Config `embed:"" hcl:"scheduler,block" prefix:"scheduler-"`
-	LoggingConfig   logging.Config      `embed:"" hcl:"log,block" prefix:"log-"`
-	MetricsConfig   metrics.Config      `embed:"" hcl:"metrics,block" prefix:"metrics-"`
-	GitCloneConfig  gitclone.Config     `embed:"" hcl:"git-clone,block" prefix:"git-clone-"`
+	SchedulerConfig jobscheduler.Config `hcl:"scheduler,block"`
+	LoggingConfig   logging.Config      `hcl:"log,block"`
+	MetricsConfig   metrics.Config      `hcl:"metrics,block"`
+	GitCloneConfig  gitclone.Config     `hcl:"git-clone,block"`
 }
 
-var cli struct { //nolint:gochecknoglobals
+type CLI struct {
 	Schema bool `help:"Print the configuration file schema." xor:"command"`
 
-	Config kong.ConfigFlag `hcl:"-" help:"Configuration file path." placeholder:"PATH" required:"" default:"cachew.hcl"`
-
-	// GlobalConfig accepts command-line, but can also be parsed from HCL.
-	GlobalConfig
+	Config *os.File `hcl:"-" help:"Configuration file path." required:"" default:"cachew.hcl"`
 }
 
 func main() {
-	kctx := kong.Parse(&cli, kong.DefaultEnvars("CACHEW"), kong.Configuration(config.KongLoader[GlobalConfig], "cachew.hcl"))
+	var cli CLI
+	kctx := kong.Parse(&cli, kong.DefaultEnvars("CACHEW"))
 
-	configReader, err := os.Open(string(cli.Config))
-	kctx.FatalIfErrorf(err)
-	defer configReader.Close()
-
-	ast, err := hcl.Parse(configReader)
+	defer cli.Config.Close()
+	ast, err := hcl.Parse(cli.Config)
 	kctx.FatalIfErrorf(err)
 
-	_, providersConfig := config.Split[GlobalConfig](ast)
+	globalConfigHCL, providersConfigHCL := config.Split[GlobalConfig](ast)
+
+	// Load global config.
+	var globalConfig GlobalConfig
+	globalSchema, err := hcl.Schema(&globalConfig)
+	kctx.FatalIfErrorf(err)
+	config.InjectEnvars(globalSchema, globalConfigHCL, "CACHEW", parseEnvars())
+	err = hcl.UnmarshalAST(globalConfigHCL, &globalConfig, hcl.HydratedImplicitBlocks(true))
+	kctx.FatalIfErrorf(err)
 
 	ctx := context.Background()
-	logger, ctx := logging.Configure(ctx, cli.LoggingConfig)
+	logger, ctx := logging.Configure(ctx, globalConfig.LoggingConfig)
 
 	// Start initialising
-	managerProvider := gitclone.NewManagerProvider(ctx, cli.GitCloneConfig)
+	managerProvider := gitclone.NewManagerProvider(ctx, globalConfig.GitCloneConfig)
 
-	scheduler := jobscheduler.New(ctx, cli.SchedulerConfig)
+	scheduler := jobscheduler.New(ctx, globalConfig.SchedulerConfig)
 
-	cr, sr := newRegistries(scheduler, managerProvider)
+	cr, sr := newRegistries(globalConfig.URL, scheduler, managerProvider)
 
 	// Commands
 	switch { //nolint:gocritic
@@ -76,10 +78,10 @@ func main() {
 		return
 	}
 
-	mux, err := newMux(ctx, cr, sr, providersConfig)
+	mux, err := newMux(ctx, cr, sr, providersConfigHCL)
 	kctx.FatalIfErrorf(err)
 
-	metricsClient, err := metrics.New(ctx, cli.MetricsConfig)
+	metricsClient, err := metrics.New(ctx, globalConfig.MetricsConfig)
 	kctx.FatalIfErrorf(err, "failed to create metrics client")
 	defer func() {
 		if err := metricsClient.Close(); err != nil {
@@ -91,14 +93,14 @@ func main() {
 		kctx.FatalIfErrorf(err, "failed to start metrics server")
 	}
 
-	logger.InfoContext(ctx, "Starting cachewd", slog.String("bind", cli.Bind))
+	logger.InfoContext(ctx, "Starting cachewd", slog.String("bind", globalConfig.Bind))
 
-	server := newServer(ctx, logger, mux)
+	server := newServer(ctx, mux, globalConfig.Bind, globalConfig.MetricsConfig)
 	err = server.ListenAndServe()
 	kctx.FatalIfErrorf(err)
 }
 
-func newRegistries(scheduler jobscheduler.Scheduler, cloneManagerProvider gitclone.ManagerProvider) (*cache.Registry, *strategy.Registry) {
+func newRegistries(cachewURL string, scheduler jobscheduler.Scheduler, cloneManagerProvider gitclone.ManagerProvider) (*cache.Registry, *strategy.Registry) {
 	cr := cache.NewRegistry()
 	cache.RegisterMemory(cr)
 	cache.RegisterDisk(cr)
@@ -108,7 +110,7 @@ func newRegistries(scheduler jobscheduler.Scheduler, cloneManagerProvider gitclo
 	strategy.RegisterAPIV1(sr)
 	strategy.RegisterArtifactory(sr)
 	strategy.RegisterGitHubReleases(sr)
-	strategy.RegisterHermit(sr, cli.URL)
+	strategy.RegisterHermit(sr, cachewURL)
 	strategy.RegisterHost(sr)
 	git.Register(sr, scheduler, cloneManagerProvider)
 	gomod.Register(sr, cloneManagerProvider)
@@ -118,9 +120,6 @@ func newRegistries(scheduler jobscheduler.Scheduler, cloneManagerProvider gitclo
 
 func printSchema(kctx *kong.Context, cr *cache.Registry, sr *strategy.Registry) {
 	schema := config.Schema[GlobalConfig](cr, sr)
-	slices.SortStableFunc(schema.Entries, func(a, b hcl.Entry) int {
-		return strings.Compare(a.EntryKey(), b.EntryKey())
-	})
 	text, err := hcl.MarshalAST(schema)
 	kctx.FatalIfErrorf(err)
 
@@ -132,7 +131,7 @@ func printSchema(kctx *kong.Context, cr *cache.Registry, sr *strategy.Registry) 
 	}
 }
 
-func newMux(ctx context.Context, cr *cache.Registry, sr *strategy.Registry, providersConfig *hcl.AST) (*http.ServeMux, error) {
+func newMux(ctx context.Context, cr *cache.Registry, sr *strategy.Registry, providersConfigHCL *hcl.AST) (*http.ServeMux, error) {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /_liveness", func(w http.ResponseWriter, _ *http.Request) {
@@ -145,17 +144,18 @@ func newMux(ctx context.Context, cr *cache.Registry, sr *strategy.Registry, prov
 		_, _ = w.Write([]byte("OK")) //nolint:errcheck
 	})
 
-	if err := config.Load(ctx, cr, sr, providersConfig, mux, parseEnvars()); err != nil {
+	if err := config.Load(ctx, cr, sr, providersConfigHCL, mux, parseEnvars()); err != nil {
 		return nil, fmt.Errorf("load config: %w", err)
 	}
 
 	return mux, nil
 }
 
-func newServer(ctx context.Context, logger *slog.Logger, mux *http.ServeMux) *http.Server {
+func newServer(ctx context.Context, mux *http.ServeMux, bind string, metricsConfig metrics.Config) *http.Server {
+	logger := logging.FromContext(ctx)
 	var handler http.Handler = mux
 
-	handler = otelhttp.NewMiddleware(cli.MetricsConfig.ServiceName,
+	handler = otelhttp.NewMiddleware(metricsConfig.ServiceName,
 		otelhttp.WithMeterProvider(otel.GetMeterProvider()),
 		otelhttp.WithTracerProvider(otel.GetTracerProvider()),
 	)(handler)
@@ -163,7 +163,7 @@ func newServer(ctx context.Context, logger *slog.Logger, mux *http.ServeMux) *ht
 	handler = httputil.LoggingMiddleware(handler)
 
 	return &http.Server{
-		Addr:              cli.Bind,
+		Addr:              bind,
 		Handler:           handler,
 		ReadTimeout:       30 * time.Minute,
 		WriteTimeout:      30 * time.Minute,
