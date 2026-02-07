@@ -16,6 +16,8 @@ git-clone {
     mirror-root = "./state/git-mirrors"
 }
 
+metrics {}
+
 git {
   bundle-interval = "24h"
   snapshot-interval = "24h"

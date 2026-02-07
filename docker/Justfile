@@ -2,6 +2,7 @@ set positional-arguments := true
 set shell := ["bash", "-c"]
 
 # Configuration
+
 ROOT := `git rev-parse --show-toplevel 2>/dev/null || echo "."`
 TAG := `git rev-parse --short HEAD 2>/dev/null || echo "dev"`
 VERSION := `git describe --tags --always --dirty 2>/dev/null || echo "dev"`
@@ -41,7 +42,7 @@ build-multi:
 run log_level="info":
     @just build
     @echo "→ Starting cachew at http://localhost:8080 (log-level={{ log_level }})"
-    @docker run --rm -it -p 8080:8080 -v {{ ROOT }}/state:/app/state --name cachew cachew:local --log-level={{ log_level }}
+    @docker run --rm -it -p 8080:8080 -e CACHEW_LOG_LEVEL={{ log_level }} -v {{ ROOT }}/state:/app/state --name cachew cachew:local
 
 # Clean up Docker images
 clean:
