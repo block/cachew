@@ -68,9 +68,9 @@ func main() {
 
 	// Start initialising
 	tokenManagerProvider := githubapp.NewTokenManagerProvider(globalConfig.GithubAppConfig, logger)
-	tokenManager, err := tokenManagerProvider()
-	kctx.FatalIfErrorf(err)
-	managerProvider := gitclone.NewManagerProvider(ctx, globalConfig.GitCloneConfig, tokenManager)
+	managerProvider := gitclone.NewManagerProvider(ctx, globalConfig.GitCloneConfig, func() (gitclone.CredentialProvider, error) {
+		return tokenManagerProvider()
+	})
 
 	scheduler := jobscheduler.New(ctx, globalConfig.SchedulerConfig)
 

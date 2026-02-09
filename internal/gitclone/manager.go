@@ -63,6 +63,8 @@ type CredentialProvider interface {
 	GetTokenForURL(ctx context.Context, url string) (string, error)
 }
 
+type CredentialProviderProvider func() (CredentialProvider, error)
+
 type Repository struct {
 	mu                 sync.RWMutex
 	config             Config
@@ -87,8 +89,16 @@ type Manager struct {
 // ManagerProvider is a function that lazily creates a singleton Manager.
 type ManagerProvider func() (*Manager, error)
 
-func NewManagerProvider(ctx context.Context, config Config, credentialProvider CredentialProvider) ManagerProvider {
+func NewManagerProvider(ctx context.Context, config Config, credentialProviderProvider CredentialProviderProvider) ManagerProvider {
 	return sync.OnceValues(func() (*Manager, error) {
+		var credentialProvider CredentialProvider
+		if credentialProviderProvider != nil {
+			var err error
+			credentialProvider, err = credentialProviderProvider()
+			if err != nil {
+				return nil, errors.WithStack(err)
+			}
+		}
 		return NewManager(ctx, config, credentialProvider)
 	})
 }
