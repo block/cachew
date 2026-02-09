@@ -11,6 +11,7 @@ import (
 
 	"github.com/block/cachew/internal/cache"
 	"github.com/block/cachew/internal/gitclone"
+	"github.com/block/cachew/internal/githubapp"
 	"github.com/block/cachew/internal/jobscheduler"
 	"github.com/block/cachew/internal/logging"
 	"github.com/block/cachew/internal/strategy/git"
@@ -26,10 +27,10 @@ func TestSnapshotHTTPEndpoint(t *testing.T) {
 
 	cm := gitclone.NewManagerProvider(ctx, gitclone.Config{
 		MirrorRoot: tmpDir,
-	})
+	}, nil)
 	_, err = git.New(ctx, git.Config{
 		SnapshotInterval: 24 * time.Hour,
-	}, jobscheduler.New(ctx, jobscheduler.Config{}), memCache, mux, cm)
+	}, jobscheduler.New(ctx, jobscheduler.Config{}), memCache, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
 	assert.NoError(t, err)
 
 	// Create a fake snapshot in the cache
@@ -100,10 +101,10 @@ func TestSnapshotInterval(t *testing.T) {
 
 			cm := gitclone.NewManagerProvider(ctx, gitclone.Config{
 				MirrorRoot: tmpDir,
-			})
+			}, nil)
 			s, err := git.New(ctx, git.Config{
 				SnapshotInterval: tt.snapshotInterval,
-			}, jobscheduler.New(ctx, jobscheduler.Config{}), memCache, mux, cm)
+			}, jobscheduler.New(ctx, jobscheduler.Config{}), memCache, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
 			assert.NoError(t, err)
 			assert.NotZero(t, s)
 		})

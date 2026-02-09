@@ -11,6 +11,7 @@ import (
 	"github.com/alecthomas/assert/v2"
 
 	"github.com/block/cachew/internal/gitclone"
+	"github.com/block/cachew/internal/githubapp"
 	"github.com/block/cachew/internal/jobscheduler"
 	"github.com/block/cachew/internal/logging"
 	"github.com/block/cachew/internal/strategy/git"
@@ -66,8 +67,8 @@ func TestNew(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			mux := newTestMux()
-			cm := gitclone.NewManagerProvider(ctx, tt.config)
-			s, err := git.New(ctx, git.Config{}, jobscheduler.New(ctx, jobscheduler.Config{}), nil, mux, cm)
+			cm := gitclone.NewManagerProvider(ctx, tt.config, nil)
+			s, err := git.New(ctx, git.Config{}, jobscheduler.New(ctx, jobscheduler.Config{}), nil, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
 			if tt.wantError != "" {
 				assert.Error(t, err)
 				assert.Contains(t, err.Error(), tt.wantError)
@@ -150,8 +151,8 @@ func TestNewWithExistingCloneOnDisk(t *testing.T) {
 	cm := gitclone.NewManagerProvider(ctx, gitclone.Config{
 		MirrorRoot:    tmpDir,
 		FetchInterval: 15,
-	})
-	s, err := git.New(ctx, git.Config{}, jobscheduler.New(ctx, jobscheduler.Config{}), nil, mux, cm)
+	}, nil)
+	s, err := git.New(ctx, git.Config{}, jobscheduler.New(ctx, jobscheduler.Config{}), nil, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
 	assert.NoError(t, err)
 	assert.NotZero(t, s)
 }
@@ -174,8 +175,8 @@ func TestIntegrationWithMockUpstream(t *testing.T) {
 	cm := gitclone.NewManagerProvider(ctx, gitclone.Config{
 		MirrorRoot:    tmpDir,
 		FetchInterval: 15,
-	})
-	_, err := git.New(ctx, git.Config{}, jobscheduler.New(ctx, jobscheduler.Config{}), nil, mux, cm)
+	}, nil)
+	_, err := git.New(ctx, git.Config{}, jobscheduler.New(ctx, jobscheduler.Config{}), nil, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
 	assert.NoError(t, err)
 
 	// Verify handlers exist

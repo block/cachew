@@ -24,7 +24,7 @@ func TestNewManager(t *testing.T) {
 		RefCheckInterval: 10 * time.Second,
 	}
 
-	manager, err := NewManager(ctx, config)
+	manager, err := NewManager(ctx, config, nil)
 	assert.NoError(t, err)
 	assert.NotZero(t, manager)
 	assert.Equal(t, tmpDir, manager.config.MirrorRoot)
@@ -37,7 +37,7 @@ func TestNewManager_RequiresRootDir(t *testing.T) {
 		RefCheckInterval: 10 * time.Second,
 	}
 
-	_, err := NewManager(ctx, config)
+	_, err := NewManager(ctx, config, nil)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "mirror-root is required")
 }
@@ -51,7 +51,7 @@ func TestManager_GetOrCreate(t *testing.T) {
 		RefCheckInterval: 10 * time.Second,
 	}
 
-	manager, err := NewManager(ctx, config)
+	manager, err := NewManager(ctx, config, nil)
 	assert.NoError(t, err)
 
 	upstreamURL := "https://github.com/user/repo"
@@ -77,7 +77,7 @@ func TestManager_GetOrCreate_ExistingClone(t *testing.T) {
 		RefCheckInterval: 10 * time.Second,
 	}
 
-	manager, err := NewManager(ctx, config)
+	manager, err := NewManager(ctx, config, nil)
 	assert.NoError(t, err)
 
 	repoPath := filepath.Join(tmpDir, "github.com", "user", "repo")
@@ -102,7 +102,7 @@ func TestManager_Get(t *testing.T) {
 		RefCheckInterval: 10 * time.Second,
 	}
 
-	manager, err := NewManager(ctx, config)
+	manager, err := NewManager(ctx, config, nil)
 	assert.NoError(t, err)
 
 	upstreamURL := "https://github.com/user/repo"
@@ -127,7 +127,7 @@ func TestManager_DiscoverExisting(t *testing.T) {
 		RefCheckInterval: 10 * time.Second,
 	}
 
-	manager, err := NewManager(ctx, config)
+	manager, err := NewManager(ctx, config, nil)
 	assert.NoError(t, err)
 
 	repos := []string{

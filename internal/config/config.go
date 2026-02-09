@@ -142,6 +142,7 @@ func Load(
 	return nil
 }
 
+// ExpandVars expands environment variable references in HCL strings and heredocs.
 func expandVars(ast *hcl.AST, vars map[string]string) {
 	_ = hcl.Visit(ast, func(node hcl.Node, next func() error) error { //nolint:errcheck
 		attr, ok := node.(*hcl.Attribute)

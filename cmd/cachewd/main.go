@@ -19,6 +19,7 @@ import (
 	"github.com/block/cachew/internal/cache"
 	"github.com/block/cachew/internal/config"
 	"github.com/block/cachew/internal/gitclone"
+	"github.com/block/cachew/internal/githubapp"
 	"github.com/block/cachew/internal/httputil"
 	"github.com/block/cachew/internal/jobscheduler"
 	"github.com/block/cachew/internal/logging"
@@ -35,6 +36,7 @@ type GlobalConfig struct {
 	LoggingConfig   logging.Config      `hcl:"log,block"`
 	MetricsConfig   metrics.Config      `hcl:"metrics,block"`
 	GitCloneConfig  gitclone.Config     `hcl:"git-clone,block"`
+	GithubAppConfig githubapp.Config    `embed:"" hcl:"github-app,block,optional" prefix:"github-app-"`
 }
 
 type CLI struct {
@@ -65,11 +67,14 @@ func main() {
 	logger, ctx := logging.Configure(ctx, globalConfig.LoggingConfig)
 
 	// Start initialising
-	managerProvider := gitclone.NewManagerProvider(ctx, globalConfig.GitCloneConfig)
+	tokenManagerProvider := githubapp.NewTokenManagerProvider(globalConfig.GithubAppConfig, logger)
+	tokenManager, err := tokenManagerProvider()
+	kctx.FatalIfErrorf(err)
+	managerProvider := gitclone.NewManagerProvider(ctx, globalConfig.GitCloneConfig, tokenManager)
 
 	scheduler := jobscheduler.New(ctx, globalConfig.SchedulerConfig)
 
-	cr, sr := newRegistries(globalConfig.URL, scheduler, managerProvider)
+	cr, sr := newRegistries(globalConfig.URL, scheduler, managerProvider, tokenManagerProvider)
 
 	// Commands
 	switch { //nolint:gocritic
@@ -100,7 +105,7 @@ func main() {
 	kctx.FatalIfErrorf(err)
 }
 
-func newRegistries(cachewURL string, scheduler jobscheduler.Scheduler, cloneManagerProvider gitclone.ManagerProvider) (*cache.Registry, *strategy.Registry) {
+func newRegistries(cachewURL string, scheduler jobscheduler.Scheduler, cloneManagerProvider gitclone.ManagerProvider, tokenManagerProvider githubapp.TokenManagerProvider) (*cache.Registry, *strategy.Registry) {
 	cr := cache.NewRegistry()
 	cache.RegisterMemory(cr)
 	cache.RegisterDisk(cr)
@@ -109,10 +114,10 @@ func newRegistries(cachewURL string, scheduler jobscheduler.Scheduler, cloneMana
 	sr := strategy.NewRegistry()
 	strategy.RegisterAPIV1(sr)
 	strategy.RegisterArtifactory(sr)
-	strategy.RegisterGitHubReleases(sr)
+	strategy.RegisterGitHubReleases(sr, tokenManagerProvider)
 	strategy.RegisterHermit(sr, cachewURL)
 	strategy.RegisterHost(sr)
-	git.Register(sr, scheduler, cloneManagerProvider)
+	git.Register(sr, scheduler, cloneManagerProvider, tokenManagerProvider)
 	gomod.Register(sr, cloneManagerProvider)
 
 	return cr, sr

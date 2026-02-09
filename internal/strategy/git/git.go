@@ -21,14 +21,15 @@ import (
 
 	"github.com/block/cachew/internal/cache"
 	"github.com/block/cachew/internal/gitclone"
+	"github.com/block/cachew/internal/githubapp"
 	"github.com/block/cachew/internal/jobscheduler"
 	"github.com/block/cachew/internal/logging"
 	"github.com/block/cachew/internal/strategy"
 )
 
-func Register(r *strategy.Registry, scheduler jobscheduler.Scheduler, cloneManager gitclone.ManagerProvider) {
+func Register(r *strategy.Registry, scheduler jobscheduler.Scheduler, cloneManagerProvider gitclone.ManagerProvider, tokenManagerProvider githubapp.TokenManagerProvider) {
 	strategy.Register(r, "git", "Caches Git repositories, including bundle and tarball snapshots.", func(ctx context.Context, config Config, cache cache.Cache, mux strategy.Mux) (*Strategy, error) {
-		return New(ctx, config, scheduler, cache, mux, cloneManager)
+		return New(ctx, config, scheduler, cache, mux, cloneManagerProvider, tokenManagerProvider)
 	})
 }
 
@@ -47,6 +48,7 @@ type Strategy struct {
 	scheduler    jobscheduler.Scheduler
 	spoolsMu     sync.Mutex
 	spools       map[string]*RepoSpools
+	tokenManager *githubapp.TokenManager
 }
 
 func New(
@@ -56,8 +58,20 @@ func New(
 	cache cache.Cache,
 	mux strategy.Mux,
 	cloneManagerProvider gitclone.ManagerProvider,
+	tokenManagerProvider githubapp.TokenManagerProvider,
 ) (*Strategy, error) {
 	logger := logging.FromContext(ctx)
+
+	// Get GitHub App token manager if configured
+	tokenManager, err := tokenManagerProvider()
+	if err != nil {
+		return nil, errors.Wrap(err, "create token manager")
+	}
+	if tokenManager != nil {
+		logger.InfoContext(ctx, "Using GitHub App authentication for git strategy")
+	} else {
+		logger.WarnContext(ctx, "GitHub App not configured, using system git credentials")
+	}
 
 	cloneManager, err := cloneManagerProvider()
 	if err != nil {
@@ -75,6 +89,7 @@ func New(
 		ctx:          ctx,
 		scheduler:    scheduler.WithQueuePrefix("git"),
 		spools:       make(map[string]*RepoSpools),
+		tokenManager: tokenManager,
 	}
 
 	existing, err := s.cloneManager.DiscoverExisting(ctx)
@@ -97,6 +112,22 @@ func New(
 			req.URL.Host = req.PathValue("host")
 			req.URL.Path = "/" + req.PathValue("path")
 			req.Host = req.URL.Host
+
+			// Inject GitHub App authentication for github.com requests
+			if s.tokenManager != nil && req.URL.Host == "github.com" {
+				// Extract org from path (e.g., /squareup/blox.git/...)
+				parts := strings.Split(strings.TrimPrefix(req.URL.Path, "/"), "/")
+				if len(parts) >= 1 && parts[0] != "" {
+					org := parts[0]
+					token, err := s.tokenManager.GetTokenForOrg(req.Context(), org)
+					if err == nil && token != "" {
+						// Inject token as Basic auth with "x-access-token" username
+						req.SetBasicAuth("x-access-token", token)
+						logger.DebugContext(req.Context(), "Injecting GitHub App auth into upstream request",
+							slog.String("org", org))
+					}
+				}
+			}
 		},
 		Transport: s.httpClient.Transport,
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
