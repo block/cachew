@@ -23,7 +23,7 @@ func TestBundleHTTPEndpoint(t *testing.T) {
 
 	cloneManager := gitclone.NewManagerProvider(ctx, gitclone.Config{
 		MirrorRoot: tmpDir,
-	})
+	}, nil)
 
 	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{})
 	assert.NoError(t, err)
@@ -31,7 +31,7 @@ func TestBundleHTTPEndpoint(t *testing.T) {
 
 	_, err = git.New(ctx, git.Config{
 		BundleInterval: 24 * time.Hour,
-	}, jobscheduler.New(ctx, jobscheduler.Config{}), memCache, mux, cloneManager)
+	}, jobscheduler.New(ctx, jobscheduler.Config{}), memCache, mux, cloneManager, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
 	assert.NoError(t, err)
 
 	// Create a fake bundle in the cache
@@ -106,11 +106,11 @@ func TestBundleInterval(t *testing.T) {
 
 			cloneManager := gitclone.NewManagerProvider(ctx, gitclone.Config{
 				MirrorRoot: tmpDir,
-			})
+			}, nil)
 
 			s, err := git.New(ctx, git.Config{
 				BundleInterval: tt.bundleInterval,
-			}, jobscheduler.New(ctx, jobscheduler.Config{}), memCache, mux, cloneManager)
+			}, jobscheduler.New(ctx, jobscheduler.Config{}), memCache, mux, cloneManager, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
 			assert.NoError(t, err)
 			assert.NotZero(t, s)
 

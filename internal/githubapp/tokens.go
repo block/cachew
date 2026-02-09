@@ -21,7 +21,7 @@ type TokenManagerProvider func() (*TokenManager, error)
 // NewTokenManagerProvider creates a provider that lazily initializes a TokenManager.
 func NewTokenManagerProvider(config Config, logger *slog.Logger) TokenManagerProvider {
 	return sync.OnceValues(func() (*TokenManager, error) {
-		if config.AppID == "" || config.PrivateKeyPath == "" || config.InstallationsJSON == "" {
+		if config.AppID == "" || config.PrivateKeyPath == "" || len(config.Installations) == 0 {
 			return nil, nil // Not configured, return nil without error
 		}
 

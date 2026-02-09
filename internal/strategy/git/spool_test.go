@@ -12,7 +12,6 @@ import (
 
 	"github.com/alecthomas/assert/v2"
 
-	"github.com/block/cachew/internal/githubapp"
 	"github.com/block/cachew/internal/strategy/git"
 )
 

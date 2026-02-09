@@ -177,7 +177,7 @@ func setupGoModTest(t *testing.T) (*mockGoModServer, *http.ServeMux, context.Con
 
 	cm := gitclone.NewManagerProvider(ctx, gitclone.Config{
 		MirrorRoot: t.TempDir(),
-	})
+	}, nil)
 	assert.NoError(t, err)
 	mux := http.NewServeMux()
 	_, err = gomod.New(ctx, gomod.Config{

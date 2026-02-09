@@ -2,7 +2,6 @@
 package githubapp
 
 import (
-	"encoding/json"
 	"log/slog"
 	"time"
 
@@ -10,9 +9,9 @@ import (
 )
 
 type Config struct {
-	AppID             string `hcl:"app-id" help:"GitHub App ID"`
-	PrivateKeyPath    string `hcl:"private-key-path" help:"Path to GitHub App private key (PEM format)"`
-	InstallationsJSON string `hcl:"installations-json" help:"JSON string mapping org names to installation IDs"`
+	AppID          string            `hcl:"app-id,optional" help:"GitHub App ID"`
+	PrivateKeyPath string            `hcl:"private-key-path,optional" help:"Path to GitHub App private key (PEM format)"`
+	Installations  map[string]string `hcl:"installations,optional" help:"Mapping of org names to installation IDs"`
 }
 
 // Installations maps organization names to GitHub App installation IDs.
@@ -24,31 +23,19 @@ type Installations struct {
 
 // NewInstallations creates an Installations instance from config.
 func NewInstallations(config Config, logger *slog.Logger) (*Installations, error) {
-	if config.InstallationsJSON == "" {
-		return nil, errors.New("installations-json is required")
-	}
-
-	var orgs map[string]string
-	if err := json.Unmarshal([]byte(config.InstallationsJSON), &orgs); err != nil {
-		logger.Error("Failed to parse installations-json",
-			"error", err,
-			"installations_json", config.InstallationsJSON)
-		return nil, errors.Wrap(err, "parse installations-json")
-	}
-
-	if len(orgs) == 0 {
-		return nil, errors.New("installations-json must contain at least one organization")
+	if len(config.Installations) == 0 {
+		return nil, errors.New("installations is required")
 	}
 
 	logger.Info("GitHub App config initialized",
 		"app_id", config.AppID,
 		"private_key_path", config.PrivateKeyPath,
-		"installations", len(orgs))
+		"installations", len(config.Installations))
 
 	return &Installations{
 		appID:          config.AppID,
 		privateKeyPath: config.PrivateKeyPath,
-		orgs:           orgs,
+		orgs:           config.Installations,
 	}, nil
 }
 

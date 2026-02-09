@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/alecthomas/chroma/v2/quick"
@@ -35,7 +36,7 @@ type GlobalConfig struct {
 	LoggingConfig   logging.Config      `hcl:"log,block"`
 	MetricsConfig   metrics.Config      `hcl:"metrics,block"`
 	GitCloneConfig  gitclone.Config     `hcl:"git-clone,block"`
-	GithubAppConfig githubapp.Config    `embed:"" hcl:"github-app,block" prefix:"github-app-"`
+	GithubAppConfig githubapp.Config    `embed:"" hcl:"github-app,block,optional" prefix:"github-app-"`
 }
 
 type CLI struct {
@@ -52,16 +53,13 @@ func main() {
 	ast, err := hcl.Parse(cli.Config)
 	kctx.FatalIfErrorf(err)
 
-	// Expand environment variables in HCL (e.g., ${GITHUB_APP_ID})
-	config.ExpandVars(ast, config.ParseEnvars())
-
 	globalConfigHCL, providersConfigHCL := config.Split[GlobalConfig](ast)
 
 	// Load global config.
 	var globalConfig GlobalConfig
 	globalSchema, err := hcl.Schema(&globalConfig)
 	kctx.FatalIfErrorf(err)
-	config.InjectEnvars(globalSchema, globalConfigHCL, "CACHEW", config.ParseEnvars())
+	config.InjectEnvars(globalSchema, globalConfigHCL, "CACHEW", parseEnvars())
 	err = hcl.UnmarshalAST(globalConfigHCL, &globalConfig, hcl.HydratedImplicitBlocks(true))
 	kctx.FatalIfErrorf(err)
 
@@ -69,8 +67,10 @@ func main() {
 	logger, ctx := logging.Configure(ctx, globalConfig.LoggingConfig)
 
 	// Start initialising
-	managerProvider := gitclone.NewManagerProvider(ctx, globalConfig.GitCloneConfig)
 	tokenManagerProvider := githubapp.NewTokenManagerProvider(globalConfig.GithubAppConfig, logger)
+	tokenManager, err := tokenManagerProvider()
+	kctx.FatalIfErrorf(err)
+	managerProvider := gitclone.NewManagerProvider(ctx, globalConfig.GitCloneConfig, tokenManager)
 
 	scheduler := jobscheduler.New(ctx, globalConfig.SchedulerConfig)
 
@@ -149,7 +149,7 @@ func newMux(ctx context.Context, cr *cache.Registry, sr *strategy.Registry, prov
 		_, _ = w.Write([]byte("OK")) //nolint:errcheck
 	})
 
-	if err := config.Load(ctx, cr, sr, providersConfigHCL, mux, config.ParseEnvars()); err != nil {
+	if err := config.Load(ctx, cr, sr, providersConfigHCL, mux, parseEnvars()); err != nil {
 		return nil, fmt.Errorf("load config: %w", err)
 	}
 
@@ -180,4 +180,14 @@ func newServer(ctx context.Context, mux *http.ServeMux, bind string, metricsConf
 			return logging.ContextWithLogger(ctx, logger.With("client", c.RemoteAddr().String()))
 		},
 	}
+}
+
+func parseEnvars() map[string]string {
+	envars := map[string]string{}
+	for _, env := range os.Environ() {
+		if key, value, ok := strings.Cut(env, "="); ok {
+			envars[key] = value
+		}
+	}
+	return envars
 }

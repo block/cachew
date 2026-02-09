@@ -5,17 +5,18 @@ package gitclone
 import (
 	"bufio"
 	"context"
-	neturl "net/url"
+	"net/url"
 	"os/exec"
 	"strings"
 
 	"github.com/alecthomas/errors"
 )
 
-func gitCommand(ctx context.Context, repoURL string, credentialProvider CredentialProvider, args ...string) (*exec.Cmd, error) {
+func (r *Repository) gitCommand(ctx context.Context, args ...string) (*exec.Cmd, error) {
+	repoURL := r.upstreamURL
 	modifiedURL := repoURL
-	if credentialProvider != nil && strings.Contains(repoURL, "github.com") {
-		token, err := credentialProvider.GetTokenForURL(ctx, repoURL)
+	if r.credentialProvider != nil && strings.Contains(repoURL, "github.com") {
+		token, err := r.credentialProvider.GetTokenForURL(ctx, repoURL)
 		if err == nil && token != "" {
 			modifiedURL = injectTokenIntoURL(repoURL, token)
 		}
@@ -51,7 +52,7 @@ func injectTokenIntoURL(rawURL, token string) string {
 		return rawURL
 	}
 
-	u, err := neturl.Parse(rawURL)
+	u, err := url.Parse(rawURL)
 	if err != nil {
 		return rawURL
 	}
@@ -66,7 +67,7 @@ func injectTokenIntoURL(rawURL, token string) string {
 		u.Scheme = "https"
 	}
 
-	u.User = neturl.UserPassword("x-access-token", token)
+	u.User = url.UserPassword("x-access-token", token)
 	return u.String()
 }
 

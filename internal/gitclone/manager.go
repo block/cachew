@@ -87,9 +87,9 @@ type Manager struct {
 // ManagerProvider is a function that lazily creates a singleton Manager.
 type ManagerProvider func() (*Manager, error)
 
-func NewManagerProvider(ctx context.Context, config Config) ManagerProvider {
+func NewManagerProvider(ctx context.Context, config Config, credentialProvider CredentialProvider) ManagerProvider {
 	return sync.OnceValues(func() (*Manager, error) {
-		return NewManager(ctx, config, nil)
+		return NewManager(ctx, config, credentialProvider)
 	})
 }
 
@@ -326,7 +326,7 @@ func (r *Repository) executeClone(ctx context.Context) error {
 		r.upstreamURL, r.path,
 	}
 
-	cmd, err := gitCommand(ctx, r.upstreamURL, r.credentialProvider, args...)
+	cmd, err := r.gitCommand(ctx, args...)
 	if err != nil {
 		return errors.Wrap(err, "create git command")
 	}
@@ -342,7 +342,7 @@ func (r *Repository) executeClone(ctx context.Context) error {
 		return errors.Wrapf(err, "configure fetch refspec: %s", string(output))
 	}
 
-	cmd, err = gitCommand(ctx, r.upstreamURL, r.credentialProvider, "-C", r.path,
+	cmd, err = r.gitCommand(ctx, "-C", r.path,
 		"-c", "http.postBuffer="+strconv.Itoa(config.PostBuffer),
 		"-c", "http.lowSpeedLimit="+strconv.Itoa(config.LowSpeedLimit),
 		"-c", "http.lowSpeedTime="+strconv.Itoa(int(config.LowSpeedTime.Seconds())),
@@ -381,7 +381,7 @@ func (r *Repository) Fetch(ctx context.Context) error {
 	config := DefaultGitTuningConfig()
 
 	// #nosec G204 - r.path is controlled by us
-	cmd, err := gitCommand(ctx, r.upstreamURL, r.credentialProvider, "-C", r.path,
+	cmd, err := r.gitCommand(ctx, "-C", r.path,
 		"-c", "http.postBuffer="+strconv.Itoa(config.PostBuffer),
 		"-c", "http.lowSpeedLimit="+strconv.Itoa(config.LowSpeedLimit),
 		"-c", "http.lowSpeedTime="+strconv.Itoa(int(config.LowSpeedTime.Seconds())),
@@ -471,7 +471,7 @@ func (r *Repository) GetLocalRefs(ctx context.Context) (map[string]string, error
 
 func (r *Repository) GetUpstreamRefs(ctx context.Context) (map[string]string, error) {
 	// #nosec G204 - r.upstreamURL is controlled by us
-	cmd, err := gitCommand(ctx, r.upstreamURL, r.credentialProvider, "ls-remote", r.upstreamURL)
+	cmd, err := r.gitCommand(ctx, "ls-remote", r.upstreamURL)
 	if err != nil {
 		return nil, errors.Wrap(err, "create git command")
 	}

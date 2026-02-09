@@ -97,7 +97,7 @@ func Load(
 	vars map[string]string,
 ) error {
 	logger := logging.FromContext(ctx)
-	ExpandVars(ast, vars)
+	expandVars(ast, vars)
 
 	strategyCandidates := []*hcl.Block{
 		// Always enable the default API strategy
@@ -142,19 +142,8 @@ func Load(
 	return nil
 }
 
-// ParseEnvars returns a map of all environment variables.
-func ParseEnvars() map[string]string {
-	envars := make(map[string]string)
-	for _, env := range os.Environ() {
-		if key, value, ok := strings.Cut(env, "="); ok {
-			envars[key] = value
-		}
-	}
-	return envars
-}
-
 // ExpandVars expands environment variable references in HCL strings and heredocs.
-func ExpandVars(ast *hcl.AST, vars map[string]string) {
+func expandVars(ast *hcl.AST, vars map[string]string) {
 	_ = hcl.Visit(ast, func(node hcl.Node, next func() error) error { //nolint:errcheck
 		attr, ok := node.(*hcl.Attribute)
 		if ok {

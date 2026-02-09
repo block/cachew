@@ -45,7 +45,12 @@ func TestGetInsteadOfDisableArgsForURL(t *testing.T) {
 func TestGitCommand(t *testing.T) {
 	ctx := context.Background()
 
-	cmd, err := gitCommand(ctx, "https://github.com/user/repo", nil, "version")
+	repo := &Repository{
+		upstreamURL:        "https://github.com/user/repo",
+		credentialProvider: nil,
+	}
+
+	cmd, err := repo.gitCommand(ctx, "version")
 	assert.NoError(t, err)
 
 	assert.NotZero(t, cmd)
@@ -59,7 +64,12 @@ func TestGitCommand(t *testing.T) {
 func TestGitCommandWithEmptyURL(t *testing.T) {
 	ctx := context.Background()
 
-	cmd, err := gitCommand(ctx, "", nil, "version")
+	repo := &Repository{
+		upstreamURL:        "",
+		credentialProvider: nil,
+	}
+
+	cmd, err := repo.gitCommand(ctx, "version")
 	assert.NoError(t, err)
 
 	assert.NotZero(t, cmd)

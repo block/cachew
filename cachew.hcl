@@ -13,9 +13,10 @@ git-clone {
 }
 
 github-app {
-  app-id             = "${GITHUB_APP_ID}"
-  private-key-path   = "${GITHUB_APP_PRIVATE_KEY_PATH}"
-  installations-json = "${GITHUB_APP_INSTALLATIONS}"
+  # Uncomment and add:
+  # app-id = "app-id-value" (Can also be passed via setting envar CACHEW_GITHUB_APP_APP_ID)
+  # private-key-path = "private-key-path-value" (Can also be passed via envar CACHEW_GITHUB_APP_PRIVATE_KEY_PATH)
+  # installations = { "myorg" : "installation-id" }
 }
 
 metrics {}
