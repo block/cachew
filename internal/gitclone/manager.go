@@ -387,6 +387,7 @@ func (r *Repository) Fetch(ctx context.Context) error {
 	}
 
 	r.mu.Lock()
+	defer r.mu.Unlock()
 
 	config := DefaultGitTuningConfig()
 
@@ -405,8 +406,6 @@ func (r *Repository) Fetch(ctx context.Context) error {
 	}
 
 	r.lastFetch = time.Now()
-	r.mu.Unlock()
-
 	return nil
 }
 
