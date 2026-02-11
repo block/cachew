@@ -366,6 +366,7 @@ func (s *Strategy) serveCachedArtifact(w http.ResponseWriter, r *http.Request, h
 	upstreamURL := "https://" + host + "/" + repoPath
 	cacheKey := cache.NewKey(upstreamURL + "." + artifact)
 
+	ctx = cache.WithStrategyName(ctx, "git")
 	reader, headers, err := s.cache.Open(ctx, cacheKey)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {

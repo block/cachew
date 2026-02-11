@@ -13,6 +13,23 @@ import (
 	"github.com/alecthomas/hcl/v2"
 )
 
+type contextKey int
+
+const strategyNameKey contextKey = iota
+
+// WithStrategyName returns a new context with the strategy name set.
+func WithStrategyName(ctx context.Context, name string) context.Context {
+	return context.WithValue(ctx, strategyNameKey, name)
+}
+
+// StrategyNameFromContext retrieves the strategy name from the context.
+func StrategyNameFromContext(ctx context.Context) string {
+	if name, ok := ctx.Value(strategyNameKey).(string); ok {
+		return name
+	}
+	return ""
+}
+
 // ErrNotFound is returned when a cache backend is not found.
 var ErrNotFound = errors.New("cache backend not found")
 

@@ -66,6 +66,7 @@ func NewArtifactory(ctx context.Context, config ArtifactoryConfig, cache cache.C
 	}
 
 	hdlr := handler.New(a.client, cache).
+		StrategyName("artifactory").
 		CacheKey(func(r *http.Request) string {
 			return a.buildTargetURL(r).String()
 		}).

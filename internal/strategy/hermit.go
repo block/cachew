@@ -74,6 +74,7 @@ func (s *Hermit) String() string { return "hermit" }
 
 func (s *Hermit) createDirectHandler(c cache.Cache) http.Handler {
 	return handler.New(s.client, c).
+		StrategyName("hermit").
 		CacheKey(func(r *http.Request) string {
 			return s.buildOriginalURL(r)
 		}).
@@ -91,6 +92,7 @@ func (s *Hermit) createRedirectHandler(isInternalRedirect bool, c cache.Cache) h
 	}
 
 	return handler.New(s.client, cacheBackend).
+		StrategyName("hermit").
 		CacheKey(func(r *http.Request) string {
 			return s.buildGitHubURL(r)
 		}).

@@ -159,7 +159,7 @@ func (d *Disk) Create(ctx context.Context, key Key, headers http.Header, ttl tim
 		clonedHeaders.Set("Last-Modified", now.UTC().Format(http.TimeFormat))
 	}
 
-	path := d.keyToPath(key)
+	path := d.keyToPath(ctx, key)
 	fullPath := filepath.Join(d.config.Root, path)
 
 	dir := filepath.Dir(fullPath)
@@ -186,8 +186,8 @@ func (d *Disk) Create(ctx context.Context, key Key, headers http.Header, ttl tim
 	}, nil
 }
 
-func (d *Disk) Delete(_ context.Context, key Key) error {
-	path := d.keyToPath(key)
+func (d *Disk) Delete(ctx context.Context, key Key) error {
+	path := d.keyToPath(ctx, key)
 	fullPath := filepath.Join(d.config.Root, path)
 
 	// Check if file is expired
@@ -220,7 +220,7 @@ func (d *Disk) Delete(_ context.Context, key Key) error {
 }
 
 func (d *Disk) Stat(ctx context.Context, key Key) (http.Header, error) {
-	path := d.keyToPath(key)
+	path := d.keyToPath(ctx, key)
 	fullPath := filepath.Join(d.config.Root, path)
 
 	if _, err := os.Stat(fullPath); err != nil {
@@ -245,7 +245,7 @@ func (d *Disk) Stat(ctx context.Context, key Key) (http.Header, error) {
 }
 
 func (d *Disk) Open(ctx context.Context, key Key) (io.ReadCloser, http.Header, error) {
-	path := d.keyToPath(key)
+	path := d.keyToPath(ctx, key)
 	fullPath := filepath.Join(d.config.Root, path)
 
 	f, err := os.Open(fullPath)
@@ -279,9 +279,19 @@ func (d *Disk) Open(ctx context.Context, key Key) (io.ReadCloser, http.Header, e
 	return f, headers, nil
 }
 
-func (d *Disk) keyToPath(key Key) string {
+func (d *Disk) keyToPath(ctx context.Context, key Key) string {
 	hexKey := key.String()
+	prefix := ""
+
+	// Add strategy name as prefix if available
+	if strategyName := StrategyNameFromContext(ctx); strategyName != "" {
+		prefix = strategyName
+	}
+
 	// Use first two hex digits as directory, full hex as filename
+	if prefix != "" {
+		return filepath.Join(prefix, hexKey[:2], hexKey)
+	}
 	return filepath.Join(hexKey[:2], hexKey)
 }
 
@@ -321,7 +331,7 @@ func (d *Disk) evict() error {
 	now := time.Now()
 
 	err := d.db.walk(func(key Key, expiresAt time.Time) error {
-		path := d.keyToPath(key)
+		path := d.keyToPath(context.Background(), key)
 		fullPath := filepath.Join(d.config.Root, path)
 
 		info, err := os.Stat(fullPath)

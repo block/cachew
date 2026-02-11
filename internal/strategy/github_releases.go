@@ -59,6 +59,7 @@ func NewGitHubReleases(ctx context.Context, config GitHubReleasesConfig, cache c
 	}
 	// eg. https://github.com/alecthomas/chroma/releases/download/v2.21.1/chroma-2.21.1-darwin-amd64.tar.gz
 	h := handler.New(s.client, cache).
+		StrategyName("github-releases").
 		CacheKey(func(r *http.Request) string {
 			org := r.PathValue("org")
 			repo := r.PathValue("repo")

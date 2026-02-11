@@ -17,6 +17,7 @@ type goproxyCacher struct {
 func (g *goproxyCacher) Get(ctx context.Context, name string) (io.ReadCloser, error) {
 	key := cache.NewKey(name)
 
+	ctx = cache.WithStrategyName(ctx, "gomod")
 	rc, _, err := g.cache.Open(ctx, key)
 	if err != nil {
 		return nil, fs.ErrNotExist
@@ -32,6 +33,7 @@ func (g *goproxyCacher) Put(ctx context.Context, name string, content io.ReadSee
 
 	key := cache.NewKey(name)
 
+	ctx = cache.WithStrategyName(ctx, "gomod")
 	wc, err := g.cache.Create(ctx, key, nil, 0)
 	if err != nil {
 		return fmt.Errorf("create cache entry: %w", err)

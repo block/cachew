@@ -27,6 +27,7 @@ func (s *Strategy) generateAndUploadBundle(ctx context.Context, repo *gitclone.R
 		"Content-Type": []string{"application/x-git-bundle"},
 	}
 	ttl := 7 * 24 * time.Hour
+	ctx = cache.WithStrategyName(ctx, "git")
 	w, err := s.cache.Create(ctx, cacheKey, headers, ttl)
 	if err != nil {
 		return errors.Wrap(err, "create cache entry")

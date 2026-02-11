@@ -55,6 +55,7 @@ func NewHost(ctx context.Context, config HostConfig, cache cache.Cache, mux Mux)
 	}
 
 	hdlr := handler.New(h.client, cache).
+		StrategyName("host").
 		CacheKey(func(r *http.Request) string {
 			return h.buildTargetURL(r).String()
 		}).

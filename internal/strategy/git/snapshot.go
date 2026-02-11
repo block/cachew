@@ -24,6 +24,7 @@ func (s *Strategy) generateAndUploadSnapshot(ctx context.Context, repo *gitclone
 	ttl := 7 * 24 * time.Hour
 	excludePatterns := []string{"*.lock"}
 
+	ctx = cache.WithStrategyName(ctx, "git")
 	err := errors.Wrap(snapshot.Create(ctx, s.cache, cacheKey, repo.Path(), ttl, excludePatterns), "create snapshot")
 	if err != nil {
 		logger.ErrorContext(ctx, "Snapshot generation failed", slog.String("upstream", upstream), slog.String("error", err.Error()))

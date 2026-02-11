@@ -49,7 +49,8 @@ func (d *APIV1) statObject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	headers, err := d.cache.Stat(r.Context(), key)
+	ctx := cache.WithStrategyName(r.Context(), "apiv1")
+	headers, err := d.cache.Stat(ctx, key)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			http.Error(w, "Cache object not found", http.StatusNotFound)
@@ -70,7 +71,8 @@ func (d *APIV1) getObject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cr, headers, err := d.cache.Open(r.Context(), key)
+	ctx := cache.WithStrategyName(r.Context(), "apiv1")
+	cr, headers, err := d.cache.Open(ctx, key)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			http.Error(w, "Cache object not found", http.StatusNotFound)
@@ -111,7 +113,8 @@ func (d *APIV1) putObject(w http.ResponseWriter, r *http.Request) {
 	// Extract and filter headers from request
 	headers := cache.FilterTransportHeaders(r.Header)
 
-	cw, err := d.cache.Create(r.Context(), key, headers, ttl)
+	ctx := cache.WithStrategyName(r.Context(), "apiv1")
+	cw, err := d.cache.Create(ctx, key, headers, ttl)
 	if err != nil {
 		d.httpError(w, http.StatusInternalServerError, err, "Failed to create cache writer", slog.String("key", key.String()))
 		return
@@ -135,7 +138,8 @@ func (d *APIV1) deleteObject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err = d.cache.Delete(r.Context(), key)
+	ctx := cache.WithStrategyName(r.Context(), "apiv1")
+	err = d.cache.Delete(ctx, key)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			http.Error(w, "Cache object not found", http.StatusNotFound)

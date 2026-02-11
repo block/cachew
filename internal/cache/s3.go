@@ -156,14 +156,21 @@ func (s *S3) Close() error {
 	return nil
 }
 
-func (s *S3) keyToPath(key Key) string {
+func (s *S3) keyToPath(ctx context.Context, key Key) string {
 	hexKey := key.String()
+	prefix := ""
+
+	// Add strategy name as prefix if available
+	if strategyName := StrategyNameFromContext(ctx); strategyName != "" {
+		prefix = strategyName + "/"
+	}
+
 	// Use first two hex digits as directory, full hex as filename
-	return hexKey[:2] + "/" + hexKey
+	return prefix + hexKey[:2] + "/" + hexKey
 }
 
 func (s *S3) Stat(ctx context.Context, key Key) (http.Header, error) {
-	objectName := s.keyToPath(key)
+	objectName := s.keyToPath(ctx, key)
 
 	// Get object info to check metadata
 	objInfo, err := s.client.StatObject(ctx, s.config.Bucket, objectName, minio.StatObjectOptions{})
@@ -206,7 +213,7 @@ func (s *S3) Stat(ctx context.Context, key Key) (http.Header, error) {
 }
 
 func (s *S3) Open(ctx context.Context, key Key) (io.ReadCloser, http.Header, error) {
-	objectName := s.keyToPath(key)
+	objectName := s.keyToPath(ctx, key)
 
 	// Get object info to retrieve metadata and check expiration
 	objInfo, err := s.client.StatObject(ctx, s.config.Bucket, objectName, minio.StatObjectOptions{})
@@ -305,7 +312,7 @@ func (s *S3) Create(ctx context.Context, key Key, headers http.Header, ttl time.
 }
 
 func (s *S3) Delete(ctx context.Context, key Key) error {
-	objectName := s.keyToPath(key)
+	objectName := s.keyToPath(ctx, key)
 
 	err := s.client.RemoveObject(ctx, s.config.Bucket, objectName, minio.RemoveObjectOptions{})
 	if err != nil {
@@ -376,7 +383,7 @@ func (w *s3Writer) upload(pr *io.PipeReader) {
 		_ = pr.CloseWithError(uploadErr)
 	}()
 
-	objectName := w.s3.keyToPath(w.key)
+	objectName := w.s3.keyToPath(w.ctx, w.key)
 
 	// Prepare user metadata
 	userMetadata := make(map[string]string)

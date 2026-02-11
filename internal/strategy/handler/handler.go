@@ -20,6 +20,7 @@ import (
 // Example usage:
 //
 //	h := handler.New(client, cache).
+//		StrategyName("my-strategy").
 //		CacheKey(func(r *http.Request) string {
 //			return "custom-key"
 //		}).
@@ -30,6 +31,7 @@ import (
 type Handler struct {
 	client        *http.Client
 	cache         cache.Cache
+	strategyName  string
 	cacheKeyFunc  func(*http.Request) string
 	transformFunc func(*http.Request) (*http.Request, error)
 	errorHandler  func(error, http.ResponseWriter, *http.Request)
@@ -56,6 +58,13 @@ func New(client *http.Client, c cache.Cache) *Handler {
 			return 0
 		},
 	}
+}
+
+// StrategyName sets the strategy name to be included in the request context.
+// This is used by cache implementations to organize storage (e.g., S3 prefix).
+func (h *Handler) StrategyName(name string) *Handler {
+	h.strategyName = name
+	return h
 }
 
 // CacheKey sets the function used to determine the cache key for a request.
@@ -97,12 +106,20 @@ func (h *Handler) TTL(f func(*http.Request) time.Duration) *Handler {
 // 4. If not cached, transform the request and fetch from upstream
 // 5. Cache the response while streaming to the client.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	logger := logging.FromContext(r.Context())
+	ctx := r.Context()
+
+	// Inject strategy name into context if set
+	if h.strategyName != "" {
+		ctx = cache.WithStrategyName(ctx, h.strategyName)
+		r = r.WithContext(ctx)
+	}
+
+	logger := logging.FromContext(ctx)
 
 	cacheKeyStr := h.cacheKeyFunc(r)
 	key := cache.NewKey(cacheKeyStr)
 
-	logger.DebugContext(r.Context(), "Processing request", slog.String("cache_key", cacheKeyStr))
+	logger.DebugContext(ctx, "Processing request", slog.String("cache_key", cacheKeyStr))
 
 	if h.serveCached(w, r, key, logger) {
 		return
