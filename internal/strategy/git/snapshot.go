@@ -57,13 +57,12 @@ func (s *Strategy) generateAndUploadSnapshot(ctx context.Context, repo *gitclone
 	ttl := 7 * 24 * time.Hour
 	excludePatterns := []string{"*.lock"}
 
-	err = snapshot.Create(ctx, s.cache, cacheKey, snapshotDir, ttl, excludePatterns)
+	err = snapshot.Create(ctx, s.cache, StrategyName, cacheKey, snapshotDir, ttl, excludePatterns)
 
 	// Always clean up the snapshot working directory.
 	if rmErr := os.RemoveAll(snapshotDir); rmErr != nil {
 		logger.WarnContext(ctx, "Failed to clean up snapshot dir", slog.String("error", rmErr.Error()))
 	}
-
 	if err != nil {
 		logger.ErrorContext(ctx, "Snapshot generation failed", slog.String("upstream", upstream), slog.String("error", err.Error()))
 		return errors.Wrap(err, "create snapshot")

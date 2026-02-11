@@ -21,7 +21,7 @@ import (
 // The archive preserves all file permissions, ownership, and symlinks.
 // The operation is fully streaming - no temporary files are created.
 // Exclude patterns use tar's --exclude syntax.
-func Create(ctx context.Context, remote cache.Cache, key cache.Key, directory string, ttl time.Duration, excludePatterns []string) error {
+func Create(ctx context.Context, remote cache.Cache, strategyName string, key cache.Key, directory string, ttl time.Duration, excludePatterns []string) error {
 	// Verify directory exists
 	if info, err := os.Stat(directory); err != nil {
 		return errors.Wrap(err, "failed to stat directory")
@@ -33,7 +33,7 @@ func Create(ctx context.Context, remote cache.Cache, key cache.Key, directory st
 	headers.Set("Content-Type", "application/zstd")
 	headers.Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filepath.Base(directory)+".tar.zst"))
 
-	wc, err := remote.Create(ctx, key, headers, ttl)
+	wc, err := remote.Create(ctx, strategyName, key, headers, ttl)
 	if err != nil {
 		return errors.Wrap(err, "failed to create object")
 	}
@@ -90,8 +90,8 @@ func Create(ctx context.Context, remote cache.Cache, key cache.Key, directory st
 // The archive is decompressed with zstd and extracted with tar, preserving
 // all file permissions, ownership, and symlinks.
 // The operation is fully streaming - no temporary files are created.
-func Restore(ctx context.Context, remote cache.Cache, key cache.Key, directory string) error {
-	rc, _, err := remote.Open(ctx, key)
+func Restore(ctx context.Context, remote cache.Cache, strategyName string, key cache.Key, directory string) error {
+	rc, _, err := remote.Open(ctx, strategyName, key)
 	if err != nil {
 		return errors.Wrap(err, "failed to open object")
 	}

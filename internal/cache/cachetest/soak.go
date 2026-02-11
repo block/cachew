@@ -194,7 +194,7 @@ func doWrite(
 	}
 
 	key := cache.NewKey(fmt.Sprintf("soak-key-%d", keyIdx))
-	writer, err := c.Create(ctx, key, nil, config.TTL)
+	writer, err := c.Create(ctx, "", key, nil, config.TTL)
 	if err != nil {
 		t.Errorf("failed to create cache entry: %+v", err)
 		return
@@ -248,7 +248,7 @@ func doRead(
 	keyIdx := rng.IntN(config.NumObjects)
 	key := cache.NewKey(fmt.Sprintf("soak-key-%d", keyIdx))
 
-	reader, _, err := c.Open(ctx, key)
+	reader, _, err := c.Open(ctx, "", key)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			atomic.AddInt64(&result.ReadMisses, 1)
@@ -299,7 +299,7 @@ func doDelete(
 	keyIdx := rng.IntN(config.NumObjects)
 	key := cache.NewKey(fmt.Sprintf("soak-key-%d", keyIdx))
 
-	if err := c.Delete(ctx, key); err != nil {
+	if err := c.Delete(ctx, "", key); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return
 		}
