@@ -18,7 +18,7 @@ func Fetch(client *http.Client, r *http.Request, c Cache) (*http.Response, error
 	url := r.URL.String()
 	key := NewKey(url)
 
-	cr, headers, err := c.Open(r.Context(), key)
+	cr, headers, err := c.Open(r.Context(), "", key)
 	if err == nil {
 		return &http.Response{
 			Status:        "200 OK",
@@ -53,7 +53,7 @@ func FetchDirect(client *http.Client, r *http.Request, c Cache, key Key) (*http.
 	}
 
 	responseHeaders := maps.Clone(resp.Header)
-	cw, err := c.Create(r.Context(), key, responseHeaders, 0)
+	cw, err := c.Create(r.Context(), "", key, responseHeaders, 0)
 	if err != nil {
 		_ = resp.Body.Close()
 		return nil, httputil.Errorf(http.StatusInternalServerError, "failed to create cache entry: %w", err)

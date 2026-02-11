@@ -14,8 +14,10 @@ import (
 	"github.com/block/cachew/internal/strategy/handler"
 )
 
+const artifactoryStrategyName = "artifactory"
+
 func RegisterArtifactory(r *Registry) {
-	Register(r, "artifactory", "Caches artifacts from an Artifactory server.", NewArtifactory)
+	Register(r, artifactoryStrategyName, "Caches artifacts from an Artifactory server.", NewArtifactory)
 }
 
 // ArtifactoryConfig represents the configuration for the Artifactory strategy.
@@ -66,6 +68,7 @@ func NewArtifactory(ctx context.Context, config ArtifactoryConfig, cache cache.C
 	}
 
 	hdlr := handler.New(a.client, cache).
+		StrategyName(artifactoryStrategyName).
 		CacheKey(func(r *http.Request) string {
 			return a.buildTargetURL(r).String()
 		}).

@@ -156,14 +156,21 @@ func (s *S3) Close() error {
 	return nil
 }
 
-func (s *S3) keyToPath(key Key) string {
+func (s *S3) keyToPath(strategyName string, key Key) string {
 	hexKey := key.String()
+	prefix := ""
+
+	// Add strategy name as prefix if available
+	if strategyName != "" {
+		prefix = strategyName + "/"
+	}
+
 	// Use first two hex digits as directory, full hex as filename
-	return hexKey[:2] + "/" + hexKey
+	return prefix + hexKey[:2] + "/" + hexKey
 }
 
-func (s *S3) Stat(ctx context.Context, key Key) (http.Header, error) {
-	objectName := s.keyToPath(key)
+func (s *S3) Stat(ctx context.Context, strategyName string, key Key) (http.Header, error) {
+	objectName := s.keyToPath(strategyName, key)
 
 	// Get object info to check metadata
 	objInfo, err := s.client.StatObject(ctx, s.config.Bucket, objectName, minio.StatObjectOptions{})
@@ -183,7 +190,7 @@ func (s *S3) Stat(ctx context.Context, key Key) (http.Header, error) {
 		if err := expiresAt.UnmarshalText([]byte(expiresAtStr)); err == nil {
 			if time.Now().After(expiresAt) {
 				// Object expired, delete it and return not found
-				return nil, errors.Join(os.ErrNotExist, s.Delete(ctx, key))
+				return nil, errors.Join(os.ErrNotExist, s.Delete(ctx, strategyName, key))
 			}
 		}
 	}
@@ -205,8 +212,8 @@ func (s *S3) Stat(ctx context.Context, key Key) (http.Header, error) {
 	return headers, nil
 }
 
-func (s *S3) Open(ctx context.Context, key Key) (io.ReadCloser, http.Header, error) {
-	objectName := s.keyToPath(key)
+func (s *S3) Open(ctx context.Context, strategyName string, key Key) (io.ReadCloser, http.Header, error) {
+	objectName := s.keyToPath(strategyName, key)
 
 	// Get object info to retrieve metadata and check expiration
 	objInfo, err := s.client.StatObject(ctx, s.config.Bucket, objectName, minio.StatObjectOptions{})
@@ -224,7 +231,7 @@ func (s *S3) Open(ctx context.Context, key Key) (io.ReadCloser, http.Header, err
 		var expiresAt time.Time
 		if err := expiresAt.UnmarshalText([]byte(expiresAtStr)); err == nil {
 			if time.Now().After(expiresAt) {
-				return nil, nil, errors.Join(os.ErrNotExist, s.Delete(ctx, key))
+				return nil, nil, errors.Join(os.ErrNotExist, s.Delete(ctx, strategyName, key))
 			}
 		}
 	}
@@ -275,7 +282,7 @@ func (r *s3Reader) Close() error {
 	return errors.WithStack(r.obj.Close())
 }
 
-func (s *S3) Create(ctx context.Context, key Key, headers http.Header, ttl time.Duration) (io.WriteCloser, error) {
+func (s *S3) Create(ctx context.Context, strategyName string, key Key, headers http.Header, ttl time.Duration) (io.WriteCloser, error) {
 	if ttl > s.config.MaxTTL || ttl == 0 {
 		ttl = s.config.MaxTTL
 	}
@@ -289,13 +296,14 @@ func (s *S3) Create(ctx context.Context, key Key, headers http.Header, ttl time.
 	pr, pw := io.Pipe()
 
 	writer := &s3Writer{
-		s3:        s,
-		key:       key,
-		pipe:      pw,
-		expiresAt: expiresAt,
-		headers:   clonedHeaders,
-		ctx:       ctx,
-		errCh:     make(chan error, 1),
+		s3:           s,
+		key:          key,
+		strategyName: strategyName,
+		pipe:         pw,
+		expiresAt:    expiresAt,
+		headers:      clonedHeaders,
+		ctx:          ctx,
+		errCh:        make(chan error, 1),
 	}
 
 	// Start upload in background goroutine
@@ -304,8 +312,8 @@ func (s *S3) Create(ctx context.Context, key Key, headers http.Header, ttl time.
 	return writer, nil
 }
 
-func (s *S3) Delete(ctx context.Context, key Key) error {
-	objectName := s.keyToPath(key)
+func (s *S3) Delete(ctx context.Context, strategyName string, key Key) error {
+	objectName := s.keyToPath(strategyName, key)
 
 	err := s.client.RemoveObject(ctx, s.config.Bucket, objectName, minio.RemoveObjectOptions{})
 	if err != nil {
@@ -322,14 +330,15 @@ func (s *S3) Stats(_ context.Context) (Stats, error) {
 }
 
 type s3Writer struct {
-	s3        *S3
-	key       Key
-	pipe      *io.PipeWriter
-	expiresAt time.Time
-	headers   http.Header
-	ctx       context.Context
-	errCh     chan error
-	uploadErr error
+	s3           *S3
+	key          Key
+	strategyName string
+	pipe         *io.PipeWriter
+	expiresAt    time.Time
+	headers      http.Header
+	ctx          context.Context
+	errCh        chan error
+	uploadErr    error
 }
 
 func (w *s3Writer) Write(p []byte) (int, error) {
@@ -376,7 +385,7 @@ func (w *s3Writer) upload(pr *io.PipeReader) {
 		_ = pr.CloseWithError(uploadErr)
 	}()
 
-	objectName := w.s3.keyToPath(w.key)
+	objectName := w.s3.keyToPath(w.strategyName, w.key)
 
 	// Prepare user metadata
 	userMetadata := make(map[string]string)

@@ -148,13 +148,13 @@ type Cache interface {
 	//
 	// Expired files MUST not be returned.
 	// Must return os.ErrNotExist if the file does not exist.
-	Stat(ctx context.Context, key Key) (http.Header, error)
+	Stat(ctx context.Context, strategyName string, key Key) (http.Header, error)
 	// Open an existing file in the cache.
 	//
 	// Expired files MUST NOT be returned.
 	// The returned headers MUST include a Last-Modified header.
 	// Must return os.ErrNotExist if the file does not exist.
-	Open(ctx context.Context, key Key) (io.ReadCloser, http.Header, error)
+	Open(ctx context.Context, strategyName string, key Key) (io.ReadCloser, http.Header, error)
 	// Create a new file in the cache.
 	//
 	// If "ttl" is zero, a maximum TTL MUST be used by the implementation.
@@ -162,11 +162,11 @@ type Cache interface {
 	// The file MUST NOT be available for read until completely written and closed.
 	//
 	// If the context is cancelled the object MUST NOT be made available in the cache.
-	Create(ctx context.Context, key Key, headers http.Header, ttl time.Duration) (io.WriteCloser, error)
+	Create(ctx context.Context, strategyName string, key Key, headers http.Header, ttl time.Duration) (io.WriteCloser, error)
 	// Delete a file from the cache.
 	//
 	// MUST be atomic.
-	Delete(ctx context.Context, key Key) error
+	Delete(ctx context.Context, strategyName string, key Key) error
 	// Stats returns health and usage statistics for the cache.
 	Stats(ctx context.Context) (Stats, error)
 	// Close the Cache.

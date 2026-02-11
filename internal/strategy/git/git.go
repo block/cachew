@@ -27,6 +27,8 @@ import (
 	"github.com/block/cachew/internal/strategy"
 )
 
+const StrategyName = "git"
+
 func Register(r *strategy.Registry, scheduler jobscheduler.Scheduler, cloneManagerProvider gitclone.ManagerProvider, tokenManagerProvider githubapp.TokenManagerProvider) {
 	strategy.Register(r, "git", "Caches Git repositories, including tarball snapshots.", func(ctx context.Context, config Config, cache cache.Cache, mux strategy.Mux) (*Strategy, error) {
 		return New(ctx, config, scheduler, cache, mux, cloneManagerProvider, tokenManagerProvider)
@@ -352,7 +354,7 @@ func (s *Strategy) serveCachedArtifact(w http.ResponseWriter, r *http.Request, h
 	upstreamURL := "https://" + host + "/" + repoPath
 	cacheKey := cache.NewKey(upstreamURL + "." + artifact)
 
-	reader, headers, err := s.cache.Open(ctx, cacheKey)
+	reader, headers, err := s.cache.Open(ctx, StrategyName, cacheKey)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			logger.DebugContext(ctx, artifact+" not found in cache",

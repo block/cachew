@@ -20,6 +20,7 @@ import (
 // Example usage:
 //
 //	h := handler.New(client, cache).
+//		StrategyName("my-strategy").
 //		CacheKey(func(r *http.Request) string {
 //			return "custom-key"
 //		}).
@@ -30,6 +31,7 @@ import (
 type Handler struct {
 	client        *http.Client
 	cache         cache.Cache
+	strategyName  string
 	cacheKeyFunc  func(*http.Request) string
 	transformFunc func(*http.Request) (*http.Request, error)
 	errorHandler  func(error, http.ResponseWriter, *http.Request)
@@ -56,6 +58,11 @@ func New(client *http.Client, c cache.Cache) *Handler {
 			return 0
 		},
 	}
+}
+
+func (h *Handler) StrategyName(name string) *Handler {
+	h.strategyName = name
+	return h
 }
 
 // CacheKey sets the function used to determine the cache key for a request.
@@ -97,12 +104,14 @@ func (h *Handler) TTL(f func(*http.Request) time.Duration) *Handler {
 // 4. If not cached, transform the request and fetch from upstream
 // 5. Cache the response while streaming to the client.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	logger := logging.FromContext(r.Context())
+	ctx := r.Context()
+
+	logger := logging.FromContext(ctx)
 
 	cacheKeyStr := h.cacheKeyFunc(r)
 	key := cache.NewKey(cacheKeyStr)
 
-	logger.DebugContext(r.Context(), "Processing request", slog.String("cache_key", cacheKeyStr))
+	logger.DebugContext(ctx, "Processing request", slog.String("cache_key", cacheKeyStr))
 
 	if h.serveCached(w, r, key, logger) {
 		return
@@ -112,7 +121,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) serveCached(w http.ResponseWriter, r *http.Request, key cache.Key, logger *slog.Logger) bool {
-	cr, headers, err := h.cache.Open(r.Context(), key)
+	cr, headers, err := h.cache.Open(r.Context(), h.strategyName, key)
 	if err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
 			h.errorHandler(httputil.Errorf(http.StatusInternalServerError, "failed to open cache: %w", err), w, r)
@@ -169,7 +178,7 @@ func (h *Handler) streamNonOKResponse(w http.ResponseWriter, resp *http.Response
 func (h *Handler) streamAndCache(w http.ResponseWriter, r *http.Request, key cache.Key, resp *http.Response, logger *slog.Logger) {
 	ttl := h.ttlFunc(r)
 	responseHeaders := maps.Clone(resp.Header)
-	cw, err := h.cache.Create(r.Context(), key, responseHeaders, ttl)
+	cw, err := h.cache.Create(r.Context(), h.strategyName, key, responseHeaders, ttl)
 	if err != nil {
 		h.errorHandler(httputil.Errorf(http.StatusInternalServerError, "failed to create cache entry: %w", err), w, r)
 		return

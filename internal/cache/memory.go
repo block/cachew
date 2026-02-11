@@ -53,7 +53,7 @@ func NewMemory(ctx context.Context, config MemoryConfig) (*Memory, error) {
 
 func (m *Memory) String() string { return fmt.Sprintf("memory:%dMB", m.config.LimitMB) }
 
-func (m *Memory) Stat(_ context.Context, key Key) (http.Header, error) {
+func (m *Memory) Stat(_ context.Context, _ string, key Key) (http.Header, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -69,7 +69,7 @@ func (m *Memory) Stat(_ context.Context, key Key) (http.Header, error) {
 	return entry.headers, nil
 }
 
-func (m *Memory) Open(_ context.Context, key Key) (io.ReadCloser, http.Header, error) {
+func (m *Memory) Open(_ context.Context, _ string, key Key) (io.ReadCloser, http.Header, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -85,7 +85,7 @@ func (m *Memory) Open(_ context.Context, key Key) (io.ReadCloser, http.Header, e
 	return io.NopCloser(bytes.NewReader(entry.data)), entry.headers, nil
 }
 
-func (m *Memory) Create(ctx context.Context, key Key, headers http.Header, ttl time.Duration) (io.WriteCloser, error) {
+func (m *Memory) Create(ctx context.Context, _ string, key Key, headers http.Header, ttl time.Duration) (io.WriteCloser, error) {
 	if ttl == 0 {
 		ttl = m.config.MaxTTL
 	}
@@ -110,7 +110,7 @@ func (m *Memory) Create(ctx context.Context, key Key, headers http.Header, ttl t
 	return writer, nil
 }
 
-func (m *Memory) Delete(_ context.Context, key Key) error {
+func (m *Memory) Delete(_ context.Context, _ string, key Key) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 

@@ -40,7 +40,7 @@ func TestSnapshotHTTPEndpoint(t *testing.T) {
 
 	headers := make(map[string][]string)
 	headers["Content-Type"] = []string{"application/zstd"}
-	writer, err := memCache.Create(ctx, cacheKey, headers, 24*time.Hour)
+	writer, err := memCache.Create(ctx, "", cacheKey, headers, 24*time.Hour)
 	assert.NoError(t, err)
 	_, err = writer.Write(snapshotData)
 	assert.NoError(t, err)

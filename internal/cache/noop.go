@@ -22,20 +22,20 @@ func NoOpCache() Cache {
 
 func (n *noOpCache) String() string { return "noop" }
 
-func (n *noOpCache) Stat(_ context.Context, _ Key) (http.Header, error) {
+func (n *noOpCache) Stat(_ context.Context, _ string, _ Key) (http.Header, error) {
 	return nil, os.ErrNotExist
 }
 
-func (n *noOpCache) Open(_ context.Context, _ Key) (io.ReadCloser, http.Header, error) {
+func (n *noOpCache) Open(_ context.Context, _ string, _ Key) (io.ReadCloser, http.Header, error) {
 	return nil, nil, os.ErrNotExist
 }
 
-func (n *noOpCache) Create(_ context.Context, _ Key, _ http.Header, _ time.Duration) (io.WriteCloser, error) {
+func (n *noOpCache) Create(_ context.Context, _ string, _ Key, _ http.Header, _ time.Duration) (io.WriteCloser, error) {
 	// Return a discard writer that does nothing
 	return &noOpWriter{}, nil
 }
 
-func (n *noOpCache) Delete(_ context.Context, _ Key) error {
+func (n *noOpCache) Delete(_ context.Context, _ string, _ Key) error {
 	return nil
 }
 

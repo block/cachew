@@ -57,7 +57,7 @@ type GetCmd struct {
 func (c *GetCmd) Run(ctx context.Context, cache cache.Cache) error {
 	defer c.Output.Close()
 
-	rc, headers, err := cache.Open(ctx, c.Key.Key())
+	rc, headers, err := cache.Open(ctx, "", c.Key.Key())
 	if err != nil {
 		return errors.Wrap(err, "failed to open object")
 	}
@@ -78,7 +78,7 @@ type StatCmd struct {
 }
 
 func (c *StatCmd) Run(ctx context.Context, cache cache.Cache) error {
-	headers, err := cache.Stat(ctx, c.Key.Key())
+	headers, err := cache.Stat(ctx, "", c.Key.Key())
 	if err != nil {
 		return errors.Wrap(err, "failed to stat object")
 	}
@@ -111,7 +111,7 @@ func (c *PutCmd) Run(ctx context.Context, cache cache.Cache) error {
 		headers.Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filepath.Base(filename))) //nolint:perfsprint
 	}
 
-	wc, err := cache.Create(ctx, c.Key.Key(), headers, c.TTL)
+	wc, err := cache.Create(ctx, "", c.Key.Key(), headers, c.TTL)
 	if err != nil {
 		return errors.Wrap(err, "failed to create object")
 	}
@@ -128,7 +128,7 @@ type DeleteCmd struct {
 }
 
 func (c *DeleteCmd) Run(ctx context.Context, cache cache.Cache) error {
-	return errors.Wrap(cache.Delete(ctx, c.Key.Key()), "failed to delete object")
+	return errors.Wrap(cache.Delete(ctx, "", c.Key.Key()), "failed to delete object")
 }
 
 type SnapshotCmd struct {
@@ -140,7 +140,7 @@ type SnapshotCmd struct {
 
 func (c *SnapshotCmd) Run(ctx context.Context, cache cache.Cache) error {
 	fmt.Fprintf(os.Stderr, "Archiving %s...\n", c.Directory) //nolint:forbidigo
-	if err := snapshot.Create(ctx, cache, c.Key.Key(), c.Directory, c.TTL, c.Exclude); err != nil {
+	if err := snapshot.Create(ctx, cache, "", c.Key.Key(), c.Directory, c.TTL, c.Exclude); err != nil {
 		return errors.Wrap(err, "failed to create snapshot")
 	}
 
@@ -155,7 +155,7 @@ type RestoreCmd struct {
 
 func (c *RestoreCmd) Run(ctx context.Context, cache cache.Cache) error {
 	fmt.Fprintf(os.Stderr, "Restoring to %s...\n", c.Directory) //nolint:forbidigo
-	if err := snapshot.Restore(ctx, cache, c.Key.Key(), c.Directory); err != nil {
+	if err := snapshot.Restore(ctx, cache, "", c.Key.Key(), c.Directory); err != nil {
 		return errors.Wrap(err, "failed to restore snapshot")
 	}
 

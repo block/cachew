@@ -12,8 +12,9 @@ import (
 
 //nolint:gochecknoglobals
 var (
-	ttlBucketName     = []byte("ttl")
-	headersBucketName = []byte("headers")
+	ttlBucketName      = []byte("ttl")
+	headersBucketName  = []byte("headers")
+	strategyBucketName = []byte("strategy")
 )
 
 // diskMetaDB manages expiration times and headers for cache entries using bbolt.
@@ -37,6 +38,9 @@ func newDiskMetaDB(dbPath string) (*diskMetaDB, error) {
 		if _, err := tx.CreateBucketIfNotExists(headersBucketName); err != nil {
 			return errors.WithStack(err)
 		}
+		if _, err := tx.CreateBucketIfNotExists(strategyBucketName); err != nil {
+			return errors.WithStack(err)
+		}
 		return nil
 	}); err != nil {
 		return nil, errors.Join(errors.Errorf("failed to create buckets: %w", err), db.Close())
@@ -57,7 +61,7 @@ func (s *diskMetaDB) setTTL(key Key, expiresAt time.Time) error {
 	}))
 }
 
-func (s *diskMetaDB) set(key Key, expiresAt time.Time, headers http.Header) error {
+func (s *diskMetaDB) set(key Key, strategyName string, expiresAt time.Time, headers http.Header) error {
 	ttlBytes, err := expiresAt.MarshalBinary()
 	if err != nil {
 		return errors.Errorf("failed to marshal TTL: %w", err)
@@ -75,7 +79,12 @@ func (s *diskMetaDB) set(key Key, expiresAt time.Time, headers http.Header) erro
 		}
 
 		headersBucket := tx.Bucket(headersBucketName)
-		return errors.WithStack(headersBucket.Put(key[:], headersBytes))
+		if err := headersBucket.Put(key[:], headersBytes); err != nil {
+			return errors.WithStack(err)
+		}
+
+		strategyBucket := tx.Bucket(strategyBucketName)
+		return errors.WithStack(strategyBucket.Put(key[:], []byte(strategyName)))
 	}))
 }
 
@@ -113,7 +122,12 @@ func (s *diskMetaDB) delete(key Key) error {
 		}
 
 		headersBucket := tx.Bucket(headersBucketName)
-		return errors.WithStack(headersBucket.Delete(key[:]))
+		if err := headersBucket.Delete(key[:]); err != nil {
+			return errors.WithStack(err)
+		}
+
+		strategyBucket := tx.Bucket(strategyBucketName)
+		return errors.WithStack(strategyBucket.Delete(key[:]))
 	}))
 }
 
@@ -124,6 +138,7 @@ func (s *diskMetaDB) deleteAll(keys []Key) error {
 	return errors.WithStack(s.db.Update(func(tx *bbolt.Tx) error {
 		ttlBucket := tx.Bucket(ttlBucketName)
 		headersBucket := tx.Bucket(headersBucketName)
+		strategyBucket := tx.Bucket(strategyBucketName)
 
 		for _, key := range keys {
 			if err := ttlBucket.Delete(key[:]); err != nil {
@@ -132,18 +147,22 @@ func (s *diskMetaDB) deleteAll(keys []Key) error {
 			if err := headersBucket.Delete(key[:]); err != nil {
 				return errors.Errorf("failed to delete headers: %w", err)
 			}
+			if err := strategyBucket.Delete(key[:]); err != nil {
+				return errors.Errorf("failed to delete strategy: %w", err)
+			}
 		}
 		return nil
 	}))
 }
 
-func (s *diskMetaDB) walk(fn func(key Key, expiresAt time.Time) error) error {
+func (s *diskMetaDB) walk(fn func(key Key, strategyName string, expiresAt time.Time) error) error {
 	return errors.WithStack(s.db.View(func(tx *bbolt.Tx) error {
-		bucket := tx.Bucket(ttlBucketName)
-		if bucket == nil {
+		ttlBucket := tx.Bucket(ttlBucketName)
+		if ttlBucket == nil {
 			return nil
 		}
-		return bucket.ForEach(func(k, v []byte) error {
+		strategyBucket := tx.Bucket(strategyBucketName)
+		return ttlBucket.ForEach(func(k, v []byte) error {
 			if len(k) != 32 {
 				return nil
 			}
@@ -153,7 +172,13 @@ func (s *diskMetaDB) walk(fn func(key Key, expiresAt time.Time) error) error {
 			if err := expiresAt.UnmarshalBinary(v); err != nil {
 				return nil //nolint:nilerr
 			}
-			return fn(key, expiresAt)
+			strategyName := ""
+			if strategyBucket != nil {
+				if strategyBytes := strategyBucket.Get(k); strategyBytes != nil {
+					strategyName = string(strategyBytes)
+				}
+			}
+			return fn(key, strategyName, expiresAt)
 		})
 	}))
 }
