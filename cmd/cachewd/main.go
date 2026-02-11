@@ -74,7 +74,7 @@ func main() {
 
 	scheduler := jobscheduler.New(ctx, globalConfig.SchedulerConfig)
 
-	cr, sr := newRegistries(globalConfig.URL, scheduler, managerProvider, tokenManagerProvider)
+	cr, sr := newRegistries(scheduler, managerProvider, tokenManagerProvider)
 
 	// Commands
 	switch { //nolint:gocritic
@@ -105,7 +105,7 @@ func main() {
 	kctx.FatalIfErrorf(err)
 }
 
-func newRegistries(cachewURL string, scheduler jobscheduler.Scheduler, cloneManagerProvider gitclone.ManagerProvider, tokenManagerProvider githubapp.TokenManagerProvider) (*cache.Registry, *strategy.Registry) {
+func newRegistries(scheduler jobscheduler.Scheduler, cloneManagerProvider gitclone.ManagerProvider, tokenManagerProvider githubapp.TokenManagerProvider) (*cache.Registry, *strategy.Registry) {
 	cr := cache.NewRegistry()
 	cache.RegisterMemory(cr)
 	cache.RegisterDisk(cr)
@@ -115,7 +115,7 @@ func newRegistries(cachewURL string, scheduler jobscheduler.Scheduler, cloneMana
 	strategy.RegisterAPIV1(sr)
 	strategy.RegisterArtifactory(sr)
 	strategy.RegisterGitHubReleases(sr, tokenManagerProvider)
-	strategy.RegisterHermit(sr, cachewURL)
+	strategy.RegisterHermit(sr)
 	strategy.RegisterHost(sr)
 	git.Register(sr, scheduler, cloneManagerProvider, tokenManagerProvider)
 	gomod.Register(sr, cloneManagerProvider)

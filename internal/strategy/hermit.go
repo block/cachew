@@ -15,14 +15,16 @@ import (
 	"github.com/block/cachew/internal/strategy/handler"
 )
 
-func RegisterHermit(r *Registry, cachewURL string) {
+func RegisterHermit(r *Registry) {
 	Register(r, "hermit", "Caches Hermit package downloads.", func(ctx context.Context, config HermitConfig, c cache.Cache, mux Mux) (*Hermit, error) {
-		return NewHermit(ctx, cachewURL, config, nil, c, mux)
+		return NewHermit(ctx, config, nil, c, mux)
 	})
 }
 
+const defaultGitHubBaseURL = "http://127.0.0.1:8080/github.com"
+
 type HermitConfig struct {
-	GitHubBaseURL string `hcl:"github-base-url" help:"Base URL for GitHub release redirects" default:"${CACHEW_URL}/github.com"`
+	GitHubBaseURL string `hcl:"github-base-url" help:"Base URL for GitHub release redirects" default:"http://127.0.0.1:8080/github.com"`
 }
 
 // Hermit caches Hermit package downloads.
@@ -40,7 +42,7 @@ type Hermit struct {
 
 var _ Strategy = (*Hermit)(nil)
 
-func NewHermit(ctx context.Context, cachewURL string, config HermitConfig, _ jobscheduler.Scheduler, c cache.Cache, mux Mux) (*Hermit, error) {
+func NewHermit(ctx context.Context, config HermitConfig, _ jobscheduler.Scheduler, c cache.Cache, mux Mux) (*Hermit, error) {
 	logger := logging.FromContext(ctx)
 
 	s := &Hermit{
@@ -55,7 +57,7 @@ func NewHermit(ctx context.Context, cachewURL string, config HermitConfig, _ job
 	mux.Handle("GET /hermit/{host}/{path...}", s.directHandler)
 
 	if config.GitHubBaseURL != "" {
-		isInternalRedirect := strings.HasPrefix(config.GitHubBaseURL, cachewURL)
+		isInternalRedirect := config.GitHubBaseURL == defaultGitHubBaseURL
 		s.redirectHandler = s.createRedirectHandler(isInternalRedirect, c)
 		mux.Handle("GET /hermit/github.com/{path...}", s.redirectHandler)
 		logger.InfoContext(ctx, "Hermit strategy initialized",
