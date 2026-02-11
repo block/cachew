@@ -15,8 +15,10 @@ import (
 func (r *Repository) gitCommand(ctx context.Context, args ...string) (*exec.Cmd, error) {
 	repoURL := r.upstreamURL
 	modifiedURL := repoURL
+	var token string
 	if r.credentialProvider != nil && strings.Contains(repoURL, "github.com") {
-		token, err := r.credentialProvider.GetTokenForURL(ctx, repoURL)
+		var err error
+		token, err = r.credentialProvider.GetTokenForURL(ctx, repoURL)
 		if err == nil && token != "" {
 			modifiedURL = injectTokenIntoURL(repoURL, token)
 		}
@@ -32,6 +34,19 @@ func (r *Repository) gitCommand(ctx context.Context, args ...string) (*exec.Cmd,
 	if len(configArgs) > 0 {
 		allArgs = append(allArgs, configArgs...)
 	}
+
+	// Add credential helper configuration if we have a token
+	// This ensures git uses our GitHub App token for authentication
+	// even when the URL is read from .git/config (e.g., for git remote update)
+	if token != "" {
+		// Use a credential helper that approves all requests with our token
+		// The '!f() { ... }; f' syntax runs an inline shell function
+		// We use printf to safely output the token without shell interpretation issues
+		escapedToken := strings.ReplaceAll(token, "'", "'\\''")
+		credHelper := "!f() { test \"$1\" = get && echo username=x-access-token && printf 'password=%s\\n' '" + escapedToken + "'; }; f"
+		allArgs = append(allArgs, "-c", "credential.helper="+credHelper)
+	}
+
 	allArgs = append(allArgs, args...)
 
 	// Replace URL in args if it was modified for authentication
