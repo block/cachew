@@ -9,10 +9,12 @@ import (
 	"time"
 
 	"github.com/alecthomas/errors"
+	"go.opentelemetry.io/otel/attribute"
 
 	"github.com/block/cachew/internal/cache"
 	"github.com/block/cachew/internal/gitclone"
 	"github.com/block/cachew/internal/logging"
+	"github.com/block/cachew/internal/metrics"
 )
 
 func (s *Strategy) generateAndUploadBundle(ctx context.Context, repo *gitclone.Repository) error {
@@ -21,6 +23,7 @@ func (s *Strategy) generateAndUploadBundle(ctx context.Context, repo *gitclone.R
 
 	logger.InfoContext(ctx, "Bundle generation started", slog.String("upstream", upstream))
 
+	startTime := time.Now()
 	cacheKey := cache.NewKey(upstream + ".bundle")
 
 	headers := http.Header{
@@ -47,11 +50,21 @@ func (s *Strategy) generateAndUploadBundle(ctx context.Context, repo *gitclone.R
 
 		return nil
 	}), "generate bundle")
+
+	duration := time.Since(startTime)
 	if err != nil {
 		logger.ErrorContext(ctx, "Bundle generation failed", slog.String("upstream", upstream), slog.String("error", err.Error()))
+		if ops := metrics.FromContext(ctx); ops != nil {
+			ops.RecordOperation(ctx, "git.bundle.generate", "failure", duration,
+				attribute.String("repository_url", upstream))
+		}
 		return err
 	}
 
 	logger.InfoContext(ctx, "Bundle generation completed", slog.String("upstream", upstream))
+	if ops := metrics.FromContext(ctx); ops != nil {
+		ops.RecordOperation(ctx, "git.bundle.generate", "success", duration,
+			attribute.String("repository_url", upstream))
+	}
 	return nil
 }

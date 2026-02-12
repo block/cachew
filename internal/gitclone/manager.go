@@ -13,8 +13,10 @@ import (
 	"time"
 
 	"github.com/alecthomas/errors"
+	"go.opentelemetry.io/otel/attribute"
 
 	"github.com/block/cachew/internal/logging"
+	"github.com/block/cachew/internal/metrics"
 )
 
 type State int
@@ -306,18 +308,22 @@ func (r *Repository) Clone(ctx context.Context) error {
 	r.state = StateCloning
 	r.mu.Unlock()
 
+	startTime := time.Now()
 	err := r.executeClone(ctx)
+	duration := time.Since(startTime)
 
 	r.mu.Lock()
 	if err != nil {
 		r.state = StateEmpty
 		r.mu.Unlock()
+		r.recordCloneMetrics(ctx, duration, false)
 		return err
 	}
 
 	r.state = StateReady
 	r.lastFetch = time.Now()
 	r.mu.Unlock()
+	r.recordCloneMetrics(ctx, duration, true)
 	return nil
 }
 
@@ -391,6 +397,7 @@ func (r *Repository) Fetch(ctx context.Context) error {
 
 	config := DefaultGitTuningConfig()
 
+	startTime := time.Now()
 	// #nosec G204 - r.path is controlled by us
 	cmd, err := r.gitCommand(ctx, "-C", r.path,
 		"-c", "http.postBuffer="+strconv.Itoa(config.PostBuffer),
@@ -401,12 +408,48 @@ func (r *Repository) Fetch(ctx context.Context) error {
 		return errors.Wrap(err, "create git command")
 	}
 	output, err := cmd.CombinedOutput()
+	duration := time.Since(startTime)
+
 	if err != nil {
+		r.recordFetchMetrics(ctx, duration, false)
 		return errors.Wrapf(err, "git remote update: %s", string(output))
 	}
 
 	r.lastFetch = time.Now()
+	r.recordFetchMetrics(ctx, duration, true)
 	return nil
+}
+
+// recordCloneMetrics records timing metrics for git clone operations.
+func (r *Repository) recordCloneMetrics(ctx context.Context, duration time.Duration, success bool) {
+	ops := metrics.FromContext(ctx)
+	if ops == nil {
+		return
+	}
+
+	result := "success"
+	if !success {
+		result = "failure"
+	}
+
+	ops.RecordOperation(ctx, "git.clone", result, duration,
+		attribute.String("repository_url", r.upstreamURL))
+}
+
+// recordFetchMetrics records timing metrics for git fetch operations.
+func (r *Repository) recordFetchMetrics(ctx context.Context, duration time.Duration, success bool) {
+	ops := metrics.FromContext(ctx)
+	if ops == nil {
+		return
+	}
+
+	result := "success"
+	if !success {
+		result = "failure"
+	}
+
+	ops.RecordOperation(ctx, "git.fetch", result, duration,
+		attribute.String("repository_url", r.upstreamURL))
 }
 
 func (r *Repository) EnsureRefsUpToDate(ctx context.Context) error {

@@ -84,9 +84,7 @@ func main() {
 		return
 	}
 
-	mux, err := newMux(ctx, cr, sr, providersConfigHCL)
-	kctx.FatalIfErrorf(err)
-
+	// Initialize metrics client early so strategies can use it
 	metricsClient, err := metrics.New(ctx, globalConfig.MetricsConfig)
 	kctx.FatalIfErrorf(err, "failed to create metrics client")
 	defer func() {
@@ -98,6 +96,14 @@ func main() {
 	if err := metricsClient.ServeMetrics(ctx); err != nil {
 		kctx.FatalIfErrorf(err, "failed to start metrics server")
 	}
+
+	// Add operation metrics to context so strategies can use them
+	if metricsClient.Operations() != nil {
+		ctx = metrics.ContextWithOperations(ctx, metricsClient.Operations())
+	}
+
+	mux, err := newMux(ctx, cr, sr, providersConfigHCL)
+	kctx.FatalIfErrorf(err)
 
 	logger.InfoContext(ctx, "Starting cachewd", slog.String("bind", globalConfig.Bind))
 

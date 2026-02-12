@@ -9,10 +9,12 @@ import (
 	"time"
 
 	"github.com/alecthomas/errors"
+	"go.opentelemetry.io/otel/attribute"
 
 	"github.com/block/cachew/internal/cache"
 	"github.com/block/cachew/internal/httputil"
 	"github.com/block/cachew/internal/logging"
+	"github.com/block/cachew/internal/metrics"
 )
 
 // Handler provides a fluent API for creating cache-backed HTTP handlers.
@@ -112,6 +114,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) serveCached(w http.ResponseWriter, r *http.Request, key cache.Key, logger *slog.Logger) bool {
+	startTime := time.Now()
 	cr, headers, err := h.cache.Open(r.Context(), key)
 	if err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
@@ -123,6 +126,14 @@ func (h *Handler) serveCached(w http.ResponseWriter, r *http.Request, key cache.
 
 	logger.DebugContext(r.Context(), "Cache hit")
 	defer cr.Close()
+
+	// Record cache hit metric
+	if ops := metrics.FromContext(r.Context()); ops != nil {
+		duration := time.Since(startTime)
+		ops.RecordOperation(r.Context(), "cache.read", "hit", duration,
+			attribute.String("cache_backend", h.cache.String()))
+	}
+
 	maps.Copy(w.Header(), headers)
 	if _, err := io.Copy(w, cr); err != nil {
 		logger.ErrorContext(r.Context(), "Failed to stream from cache", slog.String("error", err.Error()))
@@ -134,6 +145,13 @@ func (h *Handler) serveCached(w http.ResponseWriter, r *http.Request, key cache.
 func (h *Handler) fetchAndCache(w http.ResponseWriter, r *http.Request, key cache.Key, logger *slog.Logger) {
 	logger.DebugContext(r.Context(), "Cache miss, fetching from upstream")
 
+	// Record cache miss metric
+	if ops := metrics.FromContext(r.Context()); ops != nil {
+		ops.RecordCount(r.Context(), "cache.miss", 1,
+			attribute.String("cache_backend", h.cache.String()))
+	}
+
+	startTime := time.Now()
 	upstreamReq, err := h.transformFunc(r)
 	if err != nil {
 		h.errorHandler(err, w, r)
@@ -150,6 +168,18 @@ func (h *Handler) fetchAndCache(w http.ResponseWriter, r *http.Request, key cach
 			logger.ErrorContext(r.Context(), "Failed to close response body", slog.String("error", closeErr.Error()))
 		}
 	}()
+
+	// Record upstream fetch timing
+	if ops := metrics.FromContext(r.Context()); ops != nil {
+		duration := time.Since(startTime)
+		result := "success"
+		if resp.StatusCode != http.StatusOK {
+			result = "failure"
+		}
+		ops.RecordOperation(r.Context(), "upstream.fetch", result, duration,
+			attribute.Int("status_code", resp.StatusCode),
+			attribute.String("cache_backend", h.cache.String()))
+	}
 
 	if resp.StatusCode != http.StatusOK {
 		h.streamNonOKResponse(w, resp, logger)

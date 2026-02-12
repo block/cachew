@@ -40,6 +40,7 @@ type Client struct {
 	registry          *prometheus.Registry
 	serviceName       string
 	port              int
+	operations        *OperationMetrics
 }
 
 // New creates a new OpenTelemetry metrics client with configurable exporters.
@@ -114,6 +115,12 @@ func New(ctx context.Context, cfg Config) (*Client, error) {
 	provider := sdkmetric.NewMeterProvider(providerOpts...)
 	otel.SetMeterProvider(provider)
 
+	// Initialize generic operation metrics for any operation (git, hermit, http, etc.)
+	operations, err := NewOperationMetrics()
+	if err != nil {
+		logger.WarnContext(ctx, "Failed to initialize operation metrics, continuing without them", "error", err)
+	}
+
 	client := &Client{
 		provider:          provider,
 		prometheusEnabled: cfg.EnablePrometheus,
@@ -121,6 +128,7 @@ func New(ctx context.Context, cfg Config) (*Client, error) {
 		registry:          registry,
 		serviceName:       cfg.ServiceName,
 		port:              cfg.Port,
+		operations:        operations,
 	}
 
 	logger.InfoContext(ctx, "OpenTelemetry metrics initialized",
@@ -128,6 +136,7 @@ func New(ctx context.Context, cfg Config) (*Client, error) {
 		"exporters", exporters,
 		"prometheus_port", cfg.Port,
 		"otlp_endpoint", cfg.OTLPEndpoint,
+		"operation_metrics_enabled", operations != nil,
 	)
 
 	return client, nil
@@ -156,6 +165,17 @@ func (c *Client) Handler() http.Handler {
 	return promhttp.HandlerFor(c.registry, promhttp.HandlerOpts{
 		ErrorHandling: promhttp.ContinueOnError,
 	})
+}
+
+// Operations returns the generic operation metrics recorder.
+// Use this to record any operation (git clone, fetch, hermit download, etc.)
+// without needing to create separate metric structs.
+// Returns nil if operation metrics were not initialized.
+func (c *Client) Operations() *OperationMetrics {
+	if c == nil {
+		return nil
+	}
+	return c.operations
 }
 
 // ServeMetrics starts a dedicated HTTP server for Prometheus metrics scraping.
