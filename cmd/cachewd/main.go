@@ -15,6 +15,7 @@ import (
 	"github.com/alecthomas/kong"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 
 	"github.com/block/cachew/internal/cache"
 	"github.com/block/cachew/internal/config"
@@ -156,10 +157,27 @@ func newMux(ctx context.Context, cr *cache.Registry, sr *strategy.Registry, prov
 	return mux, nil
 }
 
+// extractPathPrefix extracts the strategy name, path prefix from a request path.
+// Examples: /git/... -> "git", /gomod/... -> "gomod", /api/v1/... -> "api".
+func extractPathPrefix(path string) string {
+	if path == "" || path == "/" {
+		return ""
+	}
+	trimmed := strings.TrimPrefix(path, "/")
+	prefix, _, _ := strings.Cut(trimmed, "/")
+	return prefix
+}
+
 func newServer(ctx context.Context, mux *http.ServeMux, bind string, metricsConfig metrics.Config) *http.Server {
 	logger := logging.FromContext(ctx)
-	var handler http.Handler = mux
 
+	var handler http.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		labeler, _ := otelhttp.LabelerFromContext(r.Context())
+		labeler.Add(attribute.String("cachew.http.path.prefix", extractPathPrefix(r.URL.Path)))
+		mux.ServeHTTP(w, r)
+	})
+
+	// Add standard otelhttp middleware
 	handler = otelhttp.NewMiddleware(metricsConfig.ServiceName,
 		otelhttp.WithMeterProvider(otel.GetMeterProvider()),
 		otelhttp.WithTracerProvider(otel.GetTracerProvider()),
