@@ -10,8 +10,9 @@ import (
 )
 
 type Config struct {
-	JSON  bool       `hcl:"json,optional" help:"Enable JSON logging."`
-	Level slog.Level `hcl:"level" help:"Set the logging level." default:"info"`
+	JSON  bool              `hcl:"json,optional" help:"Enable JSON logging."`
+	Level slog.Level        `hcl:"level" help:"Set the logging level." default:"info"`
+	Remap map[string]string `hcl:"remap,optional" help:"Remap field names from old to new (e.g., msg=message, time=timestamp)."`
 }
 
 type logKey struct{}
@@ -19,7 +20,19 @@ type logKey struct{}
 func Configure(ctx context.Context, config Config) (*slog.Logger, context.Context) {
 	var handler slog.Handler
 	if config.JSON {
-		handler = slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: config.Level})
+		options := &slog.HandlerOptions{Level: config.Level}
+		if len(config.Remap) > 0 {
+			options.ReplaceAttr = func(groups []string, a slog.Attr) slog.Attr {
+				if len(groups) > 0 {
+					return a
+				}
+				if newName, ok := config.Remap[a.Key]; ok {
+					a.Key = newName
+				}
+				return a
+			}
+		}
+		handler = slog.NewJSONHandler(os.Stdout, options)
 	} else {
 		handler = tint.NewHandler(os.Stderr, &tint.Options{
 			Level: config.Level,
