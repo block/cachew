@@ -5,7 +5,6 @@ package gitclone
 import (
 	"bufio"
 	"context"
-	"net/url"
 	"os/exec"
 	"strings"
 
@@ -14,13 +13,14 @@ import (
 
 func (r *Repository) gitCommand(ctx context.Context, args ...string) (*exec.Cmd, error) {
 	repoURL := r.upstreamURL
-	modifiedURL := repoURL
+	var token string
 	if r.credentialProvider != nil && strings.Contains(repoURL, "github.com") {
-		token, err := r.credentialProvider.GetTokenForURL(ctx, repoURL)
-		if err == nil && token != "" {
-			modifiedURL = injectTokenIntoURL(repoURL, token)
-		}
+		var err error
+		token, err = r.credentialProvider.GetTokenForURL(ctx, repoURL)
 		// If error getting token, fall back to original URL (system credentials)
+		if err != nil {
+			token = ""
+		}
 	}
 
 	configArgs, err := getInsteadOfDisableArgsForURL(ctx, repoURL)
@@ -32,43 +32,19 @@ func (r *Repository) gitCommand(ctx context.Context, args ...string) (*exec.Cmd,
 	if len(configArgs) > 0 {
 		allArgs = append(allArgs, configArgs...)
 	}
+
+	// Add credential helper configuration if we have a token
+	// This ensures git uses the GitHub App token for authentication
+	// for all operations (clone, fetch, remote update, etc.)
+	if token != "" {
+		escapedToken := strings.ReplaceAll(token, "'", "'\\''")
+		credHelper := "!f() { test \"$1\" = get && echo username=x-access-token && printf 'password=%s\\n' '" + escapedToken + "'; }; f"
+		allArgs = append(allArgs, "-c", "credential.helper="+credHelper)
+	}
+
 	allArgs = append(allArgs, args...)
 
-	// Replace URL in args if it was modified for authentication
-	if modifiedURL != repoURL {
-		for i, arg := range allArgs {
-			if arg == repoURL {
-				allArgs[i] = modifiedURL
-			}
-		}
-	}
-
 	return exec.CommandContext(ctx, "git", allArgs...), nil
-}
-
-// Converts https://github.com/org/repo to https://x-access-token:TOKEN@github.com/org/repo
-func injectTokenIntoURL(rawURL, token string) string {
-	if token == "" {
-		return rawURL
-	}
-
-	u, err := url.Parse(rawURL)
-	if err != nil {
-		return rawURL
-	}
-
-	// Only inject token for GitHub URLs
-	if !strings.Contains(u.Host, "github.com") {
-		return rawURL
-	}
-
-	// Upgrade http to https for security
-	if u.Scheme == "http" {
-		u.Scheme = "https"
-	}
-
-	u.User = url.UserPassword("x-access-token", token)
-	return u.String()
 }
 
 func getInsteadOfDisableArgsForURL(ctx context.Context, targetURL string) ([]string, error) {
