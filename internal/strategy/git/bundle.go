@@ -21,6 +21,26 @@ func (s *Strategy) generateAndUploadBundle(ctx context.Context, repo *gitclone.R
 
 	logger.InfoContext(ctx, "Bundle generation started", slog.String("upstream", upstream))
 
+	// Run git maintenance to optimize repository before creating bundle
+	err := repo.WithReadLock(func() error {
+		// #nosec G204 - repo.Path() is controlled by us
+		cmd := exec.CommandContext(ctx, "git", "-C", repo.Path(), "repack", "-Adbl")
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			logger.WarnContext(ctx, "Git repack failed, continuing with bundle generation",
+				slog.String("upstream", upstream),
+				slog.String("error", err.Error()),
+				slog.String("output", string(output)))
+		} else {
+			logger.DebugContext(ctx, "Git repack completed",
+				slog.String("upstream", upstream))
+		}
+		return nil
+	})
+	if err != nil {
+		return errors.Wrap(err, "repack repository")
+	}
+
 	cacheKey := cache.NewKey(upstream + ".bundle")
 
 	headers := http.Header{

@@ -352,6 +352,21 @@ func (r *Repository) executeClone(ctx context.Context) error {
 		return errors.Wrapf(err, "configure fetch refspec: %s", string(output))
 	}
 
+	// Set git configs for optimal performance
+	configs := map[string]string{
+		"pack.threads":              "4",
+		"pack.windowMemory":         "256m",
+		"repack.useDeltaBaseOffset": "true",
+	}
+	for key, value := range configs {
+		// #nosec G204 - r.path, key, and value are controlled by us
+		cmd = exec.CommandContext(ctx, "git", "-C", r.path, "config", key, value)
+		output, err = cmd.CombinedOutput()
+		if err != nil {
+			return errors.Wrapf(err, "configure %s: %s", key, string(output))
+		}
+	}
+
 	cmd, err = r.gitCommand(ctx, "-C", r.path,
 		"-c", "http.postBuffer="+strconv.Itoa(config.PostBuffer),
 		"-c", "http.lowSpeedLimit="+strconv.Itoa(config.LowSpeedLimit),
@@ -363,6 +378,14 @@ func (r *Repository) executeClone(ctx context.Context) error {
 	output, err = cmd.CombinedOutput()
 	if err != nil {
 		return errors.Wrapf(err, "fetch all branches: %s", string(output))
+	}
+
+	// Generate pack with bitmaps for fast object counting during clone operations
+	// #nosec G204 - r.path is controlled by us
+	cmd = exec.CommandContext(ctx, "git", "-C", r.path, "repack", "-adb")
+	output, err = cmd.CombinedOutput()
+	if err != nil {
+		return errors.Wrapf(err, "git repack with bitmaps: %s", string(output))
 	}
 
 	return nil

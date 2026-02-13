@@ -68,6 +68,16 @@ func (s *Strategy) serveFromBackend(w http.ResponseWriter, r *http.Request, repo
 				"GIT_PROJECT_ROOT=" + absRoot,
 				"GIT_HTTP_EXPORT_ALL=1",
 				"PATH=" + os.Getenv("PATH"),
+				// Optimize upload-pack performance
+				"GIT_CONFIG_COUNT=4",
+				"GIT_CONFIG_KEY_0=pack.threads",
+				"GIT_CONFIG_VALUE_0=4",
+				"GIT_CONFIG_KEY_1=pack.windowMemory",
+				"GIT_CONFIG_VALUE_1=256m",
+				"GIT_CONFIG_KEY_2=core.compression",
+				"GIT_CONFIG_VALUE_2=1",
+				"GIT_CONFIG_KEY_3=pack.compression",
+				"GIT_CONFIG_VALUE_3=1",
 			},
 		}
 
