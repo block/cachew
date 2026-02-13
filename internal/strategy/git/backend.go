@@ -37,7 +37,7 @@ func (s *Strategy) serveFromBackend(w http.ResponseWriter, r *http.Request, repo
 	host := r.PathValue("host")
 	pathValue := r.PathValue("path")
 
-	// Insert /.git before the git protocol paths to match the filesystem layout
+	// Extract git operation from path (for bare repositories, no /.git subdirectory)
 	var gitOperation string
 	var repoPathWithSuffix string
 
@@ -50,7 +50,7 @@ func (s *Strategy) serveFromBackend(w http.ResponseWriter, r *http.Request, repo
 	}
 
 	repoPath := strings.TrimSuffix(repoPathWithSuffix, ".git")
-	backendPath := "/" + host + "/" + repoPath + "/.git" + gitOperation
+	backendPath := "/" + host + "/" + repoPath + gitOperation
 
 	logger.DebugContext(r.Context(), "Serving with git http-backend",
 		slog.String("original_path", r.URL.Path),

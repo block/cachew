@@ -35,9 +35,9 @@ func (s *Strategy) generateAndUploadBundle(ctx context.Context, repo *gitclone.R
 
 	err = errors.Wrap(repo.WithReadLock(func() error {
 		var stderr bytes.Buffer
-		// Use --branches --remotes to include all branches but exclude tags (which can be massive)
+		// Use --all to include all refs (branches and tags) for mirror repositories
 		// #nosec G204 - repo.Path() is controlled by us
-		cmd := exec.CommandContext(ctx, "git", "-C", repo.Path(), "bundle", "create", "-", "--branches", "--remotes")
+		cmd := exec.CommandContext(ctx, "git", "-C", repo.Path(), "bundle", "create", "-", "--all")
 		cmd.Stdout = w
 		cmd.Stderr = &stderr
 

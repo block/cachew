@@ -164,9 +164,22 @@ func (m *Manager) GetOrCreate(_ context.Context, upstreamURL string) (*Repositor
 		credentialProvider: m.credentialProvider,
 	}
 
+	// Check if repository exists (either bare or non-bare)
+	bareHeadPath := filepath.Join(clonePath, "HEAD")
+	bareConfigPath := filepath.Join(clonePath, "config")
 	gitDir := filepath.Join(clonePath, ".git")
-	if _, err := os.Stat(gitDir); err == nil {
-		repo.state = StateReady
+
+	// Bare repository check
+	if _, err := os.Stat(bareHeadPath); err == nil {
+		if _, err := os.Stat(bareConfigPath); err == nil {
+			repo.state = StateReady
+		}
+	}
+	// Non-bare repository check (old format)
+	if repo.state == StateEmpty {
+		if _, err := os.Stat(gitDir); err == nil {
+			repo.state = StateReady
+		}
 	}
 
 	repo.fetchSem <- struct{}{}
@@ -192,19 +205,29 @@ func (m *Manager) DiscoverExisting(_ context.Context) ([]*Repository, error) {
 			return nil
 		}
 
+		// Check for bare repository (mirror clone) - has HEAD and config at root
+		bareHeadPath := filepath.Join(path, "HEAD")
+		bareConfigPath := filepath.Join(path, "config")
+		isBare := false
+		if _, err := os.Stat(bareHeadPath); err == nil {
+			if _, err := os.Stat(bareConfigPath); err == nil {
+				isBare = true
+			}
+		}
+
+		// Check for non-bare repository (old format) - has .git subdirectory
 		gitDir := filepath.Join(path, ".git")
 		headPath := filepath.Join(path, ".git", "HEAD")
-		if _, statErr := os.Stat(gitDir); statErr != nil {
-			if errors.Is(statErr, os.ErrNotExist) {
-				return nil
+		isNonBare := false
+		if _, err := os.Stat(gitDir); err == nil {
+			if _, err := os.Stat(headPath); err == nil {
+				isNonBare = true
 			}
-			return errors.Wrap(statErr, "stat .git directory")
 		}
-		if _, statErr := os.Stat(headPath); statErr != nil {
-			if errors.Is(statErr, os.ErrNotExist) {
-				return nil
-			}
-			return errors.Wrap(statErr, "stat HEAD file")
+
+		// Skip if not a git repository (neither bare nor non-bare)
+		if !isBare && !isNonBare {
+			return nil
 		}
 
 		relPath, err := filepath.Rel(m.config.MirrorRoot, path)
@@ -327,9 +350,12 @@ func (r *Repository) executeClone(ctx context.Context) error {
 	}
 
 	config := DefaultGitTuningConfig()
+	// Use --mirror to create a bare repository with correct ref structure (refs/heads/*)
+	// This ensures git clients see the correct ref paths when querying via ls-remote
 	// #nosec G204 - r.upstreamURL and r.path are controlled by us
 	args := []string{
 		"clone",
+		"--mirror",
 		"-c", "http.postBuffer=" + strconv.Itoa(config.PostBuffer),
 		"-c", "http.lowSpeedLimit=" + strconv.Itoa(config.LowSpeedLimit),
 		"-c", "http.lowSpeedTime=" + strconv.Itoa(int(config.LowSpeedTime.Seconds())),
@@ -343,26 +369,6 @@ func (r *Repository) executeClone(ctx context.Context) error {
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return errors.Wrapf(err, "git clone: %s", string(output))
-	}
-
-	// #nosec G204 - r.path is controlled by us
-	cmd = exec.CommandContext(ctx, "git", "-C", r.path, "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*")
-	output, err = cmd.CombinedOutput()
-	if err != nil {
-		return errors.Wrapf(err, "configure fetch refspec: %s", string(output))
-	}
-
-	cmd, err = r.gitCommand(ctx, "-C", r.path,
-		"-c", "http.postBuffer="+strconv.Itoa(config.PostBuffer),
-		"-c", "http.lowSpeedLimit="+strconv.Itoa(config.LowSpeedLimit),
-		"-c", "http.lowSpeedTime="+strconv.Itoa(int(config.LowSpeedTime.Seconds())),
-		"fetch", "--all")
-	if err != nil {
-		return errors.Wrap(err, "create git command for fetch")
-	}
-	output, err = cmd.CombinedOutput()
-	if err != nil {
-		return errors.Wrapf(err, "fetch all branches: %s", string(output))
 	}
 
 	return nil
