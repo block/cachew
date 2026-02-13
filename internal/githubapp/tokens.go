@@ -72,7 +72,7 @@ func (tm *TokenManager) GetTokenForOrg(ctx context.Context, org string) (string,
 	if tm == nil {
 		return "", errors.New("token manager not initialized")
 	}
-	logger := logging.FromContext(ctx).With(slog.String("org", org))
+	logger := logging.FromContext(ctx).With("org", org)
 
 	installationID := tm.installations.GetInstallationID(org)
 	if installationID == "" {
@@ -84,12 +84,13 @@ func (tm *TokenManager) GetTokenForOrg(ctx context.Context, org string) (string,
 	tm.mu.RUnlock()
 
 	if exists && time.Now().Add(tm.cacheConfig.RefreshBuffer).Before(cached.expiresAt) {
-		logger.DebugContext(ctx, "Using cached GitHub App token")
+		logger.DebugContext(ctx, fmt.Sprintf("Using cached GitHub App token for org %s", org), "org", org, "installation_id", installationID)
 		return cached.token, nil
 	}
 
-	logger.DebugContext(ctx, "Fetching new GitHub App installation token",
-		slog.String("installation_id", installationID))
+	logger.DebugContext(ctx, fmt.Sprintf("Fetching new GitHub App installation token for org %s", org),
+		"org", org,
+		"installation_id", installationID)
 
 	token, expiresAt, err := tm.fetchInstallationToken(ctx, installationID)
 	if err != nil {

@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"net/http"
 	"slices"
 
@@ -95,8 +94,8 @@ func (g *GitHubReleases) newGitHubRequest(ctx context.Context, url, accept, org 
 		token, err := g.tokenManager.GetTokenForOrg(ctx, org)
 		if err != nil {
 			logging.FromContext(ctx).WarnContext(ctx, "Failed to get GitHub App token, falling back to static token",
-				slog.String("org", org),
-				slog.String("error", err.Error()))
+				"org", org,
+				"error", err)
 		} else if token != "" {
 			req.Header.Set("Authorization", "Bearer "+token)
 		}
@@ -117,15 +116,15 @@ func (g *GitHubReleases) downloadRelease(ctx context.Context, org, repo, release
 	isPrivate := slices.Contains(g.config.PrivateOrgs, org)
 
 	logger := logging.FromContext(ctx).With(
-		slog.String("org", org),
-		slog.String("repo", repo),
-		slog.String("release", release),
-		slog.String("file", file))
+		"org", org,
+		"repo", repo,
+		"release", release,
+		"file", file)
 
 	realURL := fmt.Sprintf("https://github.com/%s/%s/releases/download/%s/%s", org, repo, release, file)
 	if !isPrivate {
 		// Public release - use direct download URL
-		logger.DebugContext(ctx, "Using public download URL")
+		logger.DebugContext(ctx, fmt.Sprintf("Using public download URL for %s/%s/%s", org, repo, file), "org", org, "repo", repo, "file", file)
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, realURL, nil)
 		if err != nil {
 			return nil, httputil.Errorf(http.StatusInternalServerError, "create download request")
@@ -134,7 +133,7 @@ func (g *GitHubReleases) downloadRelease(ctx context.Context, org, repo, release
 	}
 
 	// Use GitHub API to get release info and find the asset
-	logger.DebugContext(ctx, "Using GitHub API for private release")
+	logger.DebugContext(ctx, fmt.Sprintf("Using GitHub API for private release %s/%s:%s", org, repo, release), "org", org, "repo", repo, "release", release)
 	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/tags/%s", org, repo, release)
 	req, err := g.newGitHubRequest(ctx, apiURL, "application/vnd.github+json", org)
 	if err != nil {
@@ -170,11 +169,11 @@ func (g *GitHubReleases) downloadRelease(ctx context.Context, org, repo, release
 		}
 	}
 	if assetURL == "" {
-		logger.ErrorContext(ctx, "Asset not found in release", slog.Int("assets_count", len(releaseInfo.Assets)))
+		logger.ErrorContext(ctx, fmt.Sprintf("Asset not found in release (found %d assets)", len(releaseInfo.Assets)), "assets_count", len(releaseInfo.Assets))
 		return nil, httputil.Errorf(http.StatusNotFound, "asset %s not found in release %s", file, release)
 	}
 
-	logger.DebugContext(ctx, "Found asset in release", slog.String("asset_url", assetURL))
+	logger.DebugContext(ctx, fmt.Sprintf("Found asset in release: %s", assetURL), "asset_url", assetURL)
 
 	// Create request for the asset download
 	req, err = g.newGitHubRequest(ctx, assetURL, "application/octet-stream", org)

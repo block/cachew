@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"maps"
@@ -55,7 +56,7 @@ func (d *APIV1) statObject(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Cache object not found", http.StatusNotFound)
 			return
 		}
-		d.httpError(w, http.StatusInternalServerError, err, "Failed to open cache object", slog.String("key", key.String()))
+		d.httpError(w, http.StatusInternalServerError, err, "Failed to open cache object", "key", key.String())
 		return
 	}
 
@@ -76,7 +77,7 @@ func (d *APIV1) getObject(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Cache object not found", http.StatusNotFound)
 			return
 		}
-		d.httpError(w, http.StatusInternalServerError, err, "Failed to open cache object", slog.String("key", key.String()))
+		d.httpError(w, http.StatusInternalServerError, err, "Failed to open cache object", "key", key.String())
 		return
 	}
 
@@ -84,10 +85,10 @@ func (d *APIV1) getObject(w http.ResponseWriter, r *http.Request) {
 
 	_, err = io.Copy(w, cr)
 	if err != nil {
-		d.logger.Error("Failed to copy cache object to response", slog.String("error", err.Error()), slog.String("key", key.String()))
+		d.logger.Error(fmt.Sprintf("Failed to copy cache object to response (key: %s): %v", key.String(), err), "error", err, "key", key.String())
 	}
 	if cerr := cr.Close(); cerr != nil {
-		d.logger.Error("Failed to close cache reader", slog.String("error", cerr.Error()), slog.String("key", key.String()))
+		d.logger.Error(fmt.Sprintf("Failed to close cache reader (key: %s): %v", key.String(), cerr), "error", cerr, "key", key.String())
 	}
 }
 
@@ -113,7 +114,7 @@ func (d *APIV1) putObject(w http.ResponseWriter, r *http.Request) {
 
 	cw, err := d.cache.Create(r.Context(), key, headers, ttl)
 	if err != nil {
-		d.httpError(w, http.StatusInternalServerError, err, "Failed to create cache writer", slog.String("key", key.String()))
+		d.httpError(w, http.StatusInternalServerError, err, "Failed to create cache writer", "key", key.String())
 		return
 	}
 
@@ -141,7 +142,7 @@ func (d *APIV1) deleteObject(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Cache object not found", http.StatusNotFound)
 			return
 		}
-		d.httpError(w, http.StatusInternalServerError, err, "Failed to delete cache object", slog.String("key", key.String()))
+		d.httpError(w, http.StatusInternalServerError, err, "Failed to delete cache object", "key", key.String())
 		return
 	}
 }
@@ -159,12 +160,12 @@ func (d *APIV1) getStats(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(stats); err != nil {
-		d.logger.Error("Failed to encode stats response", slog.String("error", err.Error()))
+		d.logger.Error("Failed to encode stats response", "error", err)
 	}
 }
 
 func (d *APIV1) httpError(w http.ResponseWriter, code int, err error, message string, args ...any) {
-	args = append(args, slog.String("error", err.Error()))
+	args = append(args, "error", err)
 	d.logger.Error(message, args...)
 	http.Error(w, message, code)
 }

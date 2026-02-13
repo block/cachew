@@ -2,7 +2,7 @@ package git
 
 import (
 	"context"
-	"log/slog"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -18,7 +18,7 @@ func (s *Strategy) generateAndUploadSnapshot(ctx context.Context, repo *gitclone
 	logger := logging.FromContext(ctx)
 	upstream := repo.UpstreamURL()
 
-	logger.InfoContext(ctx, "Snapshot generation started", slog.String("upstream", upstream))
+	logger.InfoContext(ctx, fmt.Sprintf("Snapshot generation started: %s", upstream), "upstream", upstream)
 
 	cacheKey := cache.NewKey(upstream + ".snapshot")
 	ttl := 7 * 24 * time.Hour
@@ -26,11 +26,11 @@ func (s *Strategy) generateAndUploadSnapshot(ctx context.Context, repo *gitclone
 
 	err := errors.Wrap(snapshot.Create(ctx, s.cache, cacheKey, repo.Path(), ttl, excludePatterns), "create snapshot")
 	if err != nil {
-		logger.ErrorContext(ctx, "Snapshot generation failed", slog.String("upstream", upstream), slog.String("error", err.Error()))
+		logger.ErrorContext(ctx, fmt.Sprintf("Snapshot generation failed for %s: %v", upstream, err), "upstream", upstream, "error", err)
 		return err
 	}
 
-	logger.InfoContext(ctx, "Snapshot generation completed", slog.String("upstream", upstream))
+	logger.InfoContext(ctx, fmt.Sprintf("Snapshot generation completed: %s", upstream), "upstream", upstream)
 	return nil
 }
 

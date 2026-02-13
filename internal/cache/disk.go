@@ -2,6 +2,7 @@ package cache
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"io/fs"
 	"log/slog"
@@ -297,11 +298,11 @@ func (d *Disk) evictionLoop(ctx context.Context) {
 			return
 		case <-ticker.C:
 			if err := d.evict(); err != nil {
-				d.logger.ErrorContext(ctx, "eviction failed", "error", err)
+				d.logger.ErrorContext(ctx, fmt.Sprintf("Cache eviction failed: %v", err), "error", err)
 			}
 		case <-d.runEviction:
 			if err := d.evict(); err != nil {
-				d.logger.ErrorContext(ctx, "eviction failed", "error", err)
+				d.logger.ErrorContext(ctx, fmt.Sprintf("Cache eviction failed: %v", err), "error", err)
 			}
 		}
 	}

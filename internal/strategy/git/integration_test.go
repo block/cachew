@@ -31,7 +31,7 @@ func testServerWithLogging(ctx context.Context, handler http.Handler) *httptest.
 	wrapper := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		logger := logging.FromContext(ctx).With("request", fmt.Sprintf("%s %s", r.Method, r.RequestURI))
 		r = r.WithContext(logging.ContextWithLogger(r.Context(), logger))
-		logger.Debug("Request received")
+		logger.Debug(fmt.Sprintf("Request received: %s %s", r.Method, r.RequestURI))
 		handler.ServeHTTP(w, r)
 	})
 	return httptest.NewServer(wrapper)
