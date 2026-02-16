@@ -22,23 +22,17 @@ comments should explain WHY something is happening, not WHAT is happening.
 
 ## Logging Standards
 
-Include relevant contextual information in log message text for searchability and clarity.
-
-```go
-// ❌ BAD - no context in message
-logger.ErrorContext(ctx, "Clone failed", "upstream", upstream)
-
-// ✅ GOOD - context in both message and structured fields
-logger.ErrorContext(ctx, fmt.Sprintf("Clone failed for %s: %v", upstream, err), "upstream", upstream, "error", err)
-```
-
-- Include relevant identifying information for this operation in message text
-- Include error in message text: `fmt.Sprintf("Operation failed: %v", err)`
+- Include identifying context in message text: `"Clone failed"` → `fmt.Sprintf("Clone failed for %s: %v", upstream, err)`
 - Use bare key-value pairs: `"error", err` not `slog.String("error", err.Error())`
-- Capitalize log messages, never log sensitive data
+- Capitalize messages, never log sensitive data
 
 **Enriched loggers - avoid duplication:**
 ```go
-enrichedLogger := logger.With("entity_id", id)
-enrichedLogger.ErrorContext(ctx, fmt.Sprintf("Action failed for entity %s: %v", id, err), "error", err) // Don't duplicate entity_id
+// ❌ BAD - duplicating "org" field already in .With()
+logger := logging.FromContext(ctx).With("org", org)
+logger.DebugContext(ctx, "Using token", "org", org, "installation_id", installationID)
+
+// ✅ GOOD - add repeated fields to .With() early, don't duplicate
+logger := logging.FromContext(ctx).With("org", org, "installation_id", installationID)
+logger.DebugContext(ctx, "Using token")
 ```

@@ -160,7 +160,7 @@ func (d *APIV1) getStats(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(stats); err != nil {
-		d.logger.Error("Failed to encode stats response", "error", err)
+		d.logger.Error(fmt.Sprintf("Failed to encode stats response: %v", err), "error", err)
 	}
 }
 

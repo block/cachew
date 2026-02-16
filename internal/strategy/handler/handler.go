@@ -127,7 +127,7 @@ func (h *Handler) serveCached(w http.ResponseWriter, r *http.Request, key cache.
 	maps.Copy(w.Header(), headers)
 	if _, err := io.Copy(w, cr); err != nil {
 		logger.ErrorContext(r.Context(), fmt.Sprintf("Failed to stream from cache (key: %s): %v", key.String(), err), "cache_key", key.String(), "error", err)
-		httputil.ErrorResponse(w, r, http.StatusInternalServerError, "Failed to stream from cache", "error", err.Error())
+		httputil.ErrorResponse(w, r, http.StatusInternalServerError, "Failed to stream from cache", "error", err)
 	}
 	return true
 }

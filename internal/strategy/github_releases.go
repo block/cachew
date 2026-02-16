@@ -124,7 +124,7 @@ func (g *GitHubReleases) downloadRelease(ctx context.Context, org, repo, release
 	realURL := fmt.Sprintf("https://github.com/%s/%s/releases/download/%s/%s", org, repo, release, file)
 	if !isPrivate {
 		// Public release - use direct download URL
-		logger.DebugContext(ctx, fmt.Sprintf("Using public download URL for %s/%s/%s", org, repo, file), "org", org, "repo", repo, "file", file)
+		logger.DebugContext(ctx, fmt.Sprintf("Using public download URL for %s/%s/%s", org, repo, file))
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, realURL, nil)
 		if err != nil {
 			return nil, httputil.Errorf(http.StatusInternalServerError, "create download request")
@@ -133,7 +133,7 @@ func (g *GitHubReleases) downloadRelease(ctx context.Context, org, repo, release
 	}
 
 	// Use GitHub API to get release info and find the asset
-	logger.DebugContext(ctx, fmt.Sprintf("Using GitHub API for private release %s/%s:%s", org, repo, release), "org", org, "repo", repo, "release", release)
+	logger.DebugContext(ctx, fmt.Sprintf("Using GitHub API for private release %s/%s:%s", org, repo, release))
 	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/tags/%s", org, repo, release)
 	req, err := g.newGitHubRequest(ctx, apiURL, "application/vnd.github+json", org)
 	if err != nil {

@@ -15,10 +15,10 @@ import (
 )
 
 func (s *Strategy) generateAndUploadSnapshot(ctx context.Context, repo *gitclone.Repository) error {
-	logger := logging.FromContext(ctx)
 	upstream := repo.UpstreamURL()
+	logger := logging.FromContext(ctx).With("upstream", upstream)
 
-	logger.InfoContext(ctx, fmt.Sprintf("Snapshot generation started: %s", upstream), "upstream", upstream)
+	logger.InfoContext(ctx, fmt.Sprintf("Snapshot generation started: %s", upstream))
 
 	cacheKey := cache.NewKey(upstream + ".snapshot")
 	ttl := 7 * 24 * time.Hour
@@ -26,11 +26,11 @@ func (s *Strategy) generateAndUploadSnapshot(ctx context.Context, repo *gitclone
 
 	err := errors.Wrap(snapshot.Create(ctx, s.cache, cacheKey, repo.Path(), ttl, excludePatterns), "create snapshot")
 	if err != nil {
-		logger.ErrorContext(ctx, fmt.Sprintf("Snapshot generation failed for %s: %v", upstream, err), "upstream", upstream, "error", err)
+		logger.ErrorContext(ctx, fmt.Sprintf("Snapshot generation failed for %s: %v", upstream, err), "error", err)
 		return err
 	}
 
-	logger.InfoContext(ctx, fmt.Sprintf("Snapshot generation completed: %s", upstream), "upstream", upstream)
+	logger.InfoContext(ctx, fmt.Sprintf("Snapshot generation completed: %s", upstream))
 	return nil
 }
 

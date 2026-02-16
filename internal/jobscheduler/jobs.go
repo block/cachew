@@ -124,7 +124,7 @@ func (q *RootScheduler) worker(ctx context.Context, id int) {
 	for {
 		select {
 		case <-ctx.Done():
-			logger.InfoContext(ctx, fmt.Sprintf("Scheduler worker %d terminated", id), "worker_id", id)
+			logger.InfoContext(ctx, fmt.Sprintf("Scheduler worker %d terminated", id))
 			return
 
 		case <-q.workAvailable:

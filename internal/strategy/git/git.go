@@ -132,7 +132,7 @@ func New(
 		},
 		Transport: s.httpClient.Transport,
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
-			logging.FromContext(r.Context()).ErrorContext(r.Context(), "Upstream request failed", "error", err)
+			logging.FromContext(r.Context()).ErrorContext(r.Context(), fmt.Sprintf("Upstream request failed: %v", err), "error", err)
 			w.WriteHeader(http.StatusBadGateway)
 		},
 	}
