@@ -3,7 +3,7 @@ package git
 import (
 	"bytes"
 	"context"
-	"log/slog"
+	"fmt"
 	"net/http"
 	"os/exec"
 	"time"
@@ -16,10 +16,10 @@ import (
 )
 
 func (s *Strategy) generateAndUploadBundle(ctx context.Context, repo *gitclone.Repository) error {
-	logger := logging.FromContext(ctx)
 	upstream := repo.UpstreamURL()
+	logger := logging.FromContext(ctx).With("upstream", upstream)
 
-	logger.InfoContext(ctx, "Bundle generation started", slog.String("upstream", upstream))
+	logger.InfoContext(ctx, fmt.Sprintf("Bundle generation started: %s", upstream))
 
 	cacheKey := cache.NewKey(upstream + ".bundle")
 
@@ -48,10 +48,10 @@ func (s *Strategy) generateAndUploadBundle(ctx context.Context, repo *gitclone.R
 		return nil
 	}), "generate bundle")
 	if err != nil {
-		logger.ErrorContext(ctx, "Bundle generation failed", slog.String("upstream", upstream), slog.String("error", err.Error()))
+		logger.ErrorContext(ctx, fmt.Sprintf("Bundle generation failed for %s: %v", upstream, err), "error", err)
 		return err
 	}
 
-	logger.InfoContext(ctx, "Bundle generation completed", slog.String("upstream", upstream))
+	logger.InfoContext(ctx, fmt.Sprintf("Bundle generation completed: %s", upstream))
 	return nil
 }

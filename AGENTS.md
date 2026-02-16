@@ -19,3 +19,20 @@ The codebase uses Hermit to manage toolchains. It is written in Go, and uses Jus
 Only add comments for relatively large blocks of code, 20+ lines or more, and ONLY if it is not obvious what the code is
 doing. ALWAYS add Go-style documentation comments for public variables/types/functions. If you do add comments, the
 comments should explain WHY something is happening, not WHAT is happening.
+
+## Logging Standards
+
+- Include identifying context in message text: `"Clone failed"` → `fmt.Sprintf("Clone failed for %s: %v", upstream, err)`
+- Use bare key-value pairs: `"error", err` not `slog.String("error", err.Error())`
+- Capitalize messages, never log sensitive data
+
+**Enriched loggers - avoid duplication:**
+```go
+// ❌ BAD - duplicating "org" field already in .With()
+logger := logging.FromContext(ctx).With("org", org)
+logger.DebugContext(ctx, "Using token", "org", org, "installation_id", installationID)
+
+// ✅ GOOD - add repeated fields to .With() early, don't duplicate
+logger := logging.FromContext(ctx).With("org", org, "installation_id", installationID)
+logger.DebugContext(ctx, "Using token")
+```

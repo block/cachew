@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"fmt"
 	"io"
 	"log/slog"
 	"maps"
@@ -102,7 +103,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	cacheKeyStr := h.cacheKeyFunc(r)
 	key := cache.NewKey(cacheKeyStr)
 
-	logger.DebugContext(r.Context(), "Processing request", slog.String("cache_key", cacheKeyStr))
+	logger.DebugContext(r.Context(), fmt.Sprintf("Processing request for cache key: %s", cacheKeyStr), "cache_key", cacheKeyStr)
 
 	if h.serveCached(w, r, key, logger) {
 		return
@@ -121,18 +122,18 @@ func (h *Handler) serveCached(w http.ResponseWriter, r *http.Request, key cache.
 		return false
 	}
 
-	logger.DebugContext(r.Context(), "Cache hit")
+	logger.DebugContext(r.Context(), fmt.Sprintf("Cache hit for key: %s", key.String()), "cache_key", key.String())
 	defer cr.Close()
 	maps.Copy(w.Header(), headers)
 	if _, err := io.Copy(w, cr); err != nil {
-		logger.ErrorContext(r.Context(), "Failed to stream from cache", slog.String("error", err.Error()))
-		httputil.ErrorResponse(w, r, http.StatusInternalServerError, "Failed to stream from cache", "error", err.Error())
+		logger.ErrorContext(r.Context(), fmt.Sprintf("Failed to stream from cache (key: %s): %v", key.String(), err), "cache_key", key.String(), "error", err)
+		httputil.ErrorResponse(w, r, http.StatusInternalServerError, "Failed to stream from cache", "error", err)
 	}
 	return true
 }
 
 func (h *Handler) fetchAndCache(w http.ResponseWriter, r *http.Request, key cache.Key, logger *slog.Logger) {
-	logger.DebugContext(r.Context(), "Cache miss, fetching from upstream")
+	logger.DebugContext(r.Context(), fmt.Sprintf("Cache miss for key: %s, fetching from upstream", key.String()), "cache_key", key.String())
 
 	upstreamReq, err := h.transformFunc(r)
 	if err != nil {
@@ -147,7 +148,7 @@ func (h *Handler) fetchAndCache(w http.ResponseWriter, r *http.Request, key cach
 	}
 	defer func() {
 		if closeErr := resp.Body.Close(); closeErr != nil {
-			logger.ErrorContext(r.Context(), "Failed to close response body", slog.String("error", closeErr.Error()))
+			logger.ErrorContext(r.Context(), fmt.Sprintf("Failed to close response body: %v", closeErr), "error", closeErr)
 		}
 	}()
 
@@ -162,7 +163,7 @@ func (h *Handler) fetchAndCache(w http.ResponseWriter, r *http.Request, key cach
 func (h *Handler) streamNonOKResponse(w http.ResponseWriter, resp *http.Response, logger *slog.Logger) {
 	w.WriteHeader(resp.StatusCode)
 	if _, err := io.Copy(w, resp.Body); err != nil {
-		logger.ErrorContext(resp.Request.Context(), "Failed to stream error response", slog.String("error", err.Error()))
+		logger.ErrorContext(resp.Request.Context(), fmt.Sprintf("Failed to stream error response (status %d): %v", resp.StatusCode, err), "status_code", resp.StatusCode, "error", err)
 	}
 }
 
@@ -185,10 +186,10 @@ func (h *Handler) streamAndCache(w http.ResponseWriter, r *http.Request, key cac
 
 	maps.Copy(w.Header(), resp.Header)
 	if _, err := io.Copy(w, pr); err != nil {
-		logger.ErrorContext(r.Context(), "Failed to stream response", slog.String("error", err.Error()))
+		logger.ErrorContext(r.Context(), fmt.Sprintf("Failed to stream response: %v", err), "error", err)
 	}
 	if closeErr := pr.Close(); closeErr != nil {
-		logger.ErrorContext(r.Context(), "Failed to close pipe", slog.String("error", closeErr.Error()))
+		logger.ErrorContext(r.Context(), fmt.Sprintf("Failed to close pipe: %v", closeErr), "error", closeErr)
 	}
 }
 
