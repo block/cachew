@@ -365,6 +365,13 @@ func (r *Repository) executeClone(ctx context.Context) error {
 		return errors.Wrapf(err, "fetch all branches: %s", string(output))
 	}
 
+	// Enable partial clone support (e.g. --filter=blob:none) when serving via git http-backend.
+	cmd = exec.CommandContext(ctx, "git", "-C", r.path, "config", "uploadpack.allowFilter", "true") // #nosec G204
+	output, err = cmd.CombinedOutput()
+	if err != nil {
+		return errors.Wrapf(err, "configure uploadpack.allowFilter: %s", string(output))
+	}
+
 	return nil
 }
 

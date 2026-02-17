@@ -29,7 +29,7 @@ lint:
 fmt:
     just --unstable --fmt
     git ls-files | grep '\.go$' | xargs gosimports -local github.com/block -w
-    go fmt ./...
+    git ls-files | grep '\.go$' | xargs dirname | uniq | sed 's,^,./,' | xargs go fmt
     go mod tidy
 
 # ============================================================================

@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -277,6 +278,46 @@ func TestRepository_Clone_StateVisibleDuringClone(t *testing.T) {
 	// Wait for clone to finish
 	assert.NoError(t, <-cloneDone)
 	assert.Equal(t, StateReady, repo.State())
+}
+
+func TestRepository_CloneSetsAllowFilter(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+
+	upstreamPath := filepath.Join(tmpDir, "upstream.git")
+	workPath := filepath.Join(tmpDir, "work")
+	assert.NoError(t, os.MkdirAll(workPath, 0o755))
+
+	cmd := exec.Command("git", "-C", workPath, "init")
+	assert.NoError(t, cmd.Run())
+	cmd = exec.Command("git", "-C", workPath, "config", "user.email", "test@example.com")
+	assert.NoError(t, cmd.Run())
+	cmd = exec.Command("git", "-C", workPath, "config", "user.name", "Test")
+	assert.NoError(t, cmd.Run())
+	assert.NoError(t, os.WriteFile(filepath.Join(workPath, "f.txt"), []byte("x"), 0o644))
+	cmd = exec.Command("git", "-C", workPath, "add", ".")
+	assert.NoError(t, cmd.Run())
+	cmd = exec.Command("git", "-C", workPath, "commit", "-m", "init")
+	assert.NoError(t, cmd.Run())
+	cmd = exec.Command("git", "clone", "--bare", workPath, upstreamPath)
+	assert.NoError(t, cmd.Run())
+
+	clonePath := filepath.Join(tmpDir, "clone")
+	repo := &Repository{
+		state:       StateEmpty,
+		path:        clonePath,
+		upstreamURL: upstreamPath,
+		fetchSem:    make(chan struct{}, 1),
+	}
+	repo.fetchSem <- struct{}{}
+
+	assert.NoError(t, repo.Clone(ctx))
+	assert.Equal(t, StateReady, repo.State())
+
+	cmd = exec.Command("git", "-C", clonePath, "config", "uploadpack.allowFilter")
+	output, err := cmd.Output()
+	assert.NoError(t, err)
+	assert.Equal(t, "true", strings.TrimSpace(string(output)))
 }
 
 func TestRepository_HasCommit(t *testing.T) {
