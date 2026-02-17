@@ -28,13 +28,12 @@ import (
 )
 
 func Register(r *strategy.Registry, scheduler jobscheduler.Scheduler, cloneManagerProvider gitclone.ManagerProvider, tokenManagerProvider githubapp.TokenManagerProvider) {
-	strategy.Register(r, "git", "Caches Git repositories, including bundle and tarball snapshots.", func(ctx context.Context, config Config, cache cache.Cache, mux strategy.Mux) (*Strategy, error) {
+	strategy.Register(r, "git", "Caches Git repositories, including tarball snapshots.", func(ctx context.Context, config Config, cache cache.Cache, mux strategy.Mux) (*Strategy, error) {
 		return New(ctx, config, scheduler, cache, mux, cloneManagerProvider, tokenManagerProvider)
 	})
 }
 
 type Config struct {
-	BundleInterval   time.Duration `hcl:"bundle-interval,optional" help:"How often to generate bundles. 0 disables bundling." default:"0"`
 	SnapshotInterval time.Duration `hcl:"snapshot-interval,optional" help:"How often to generate tar.zstd snapshots. 0 disables snapshots." default:"0"`
 }
 
@@ -98,9 +97,6 @@ func New(
 			slog.String("error", err.Error()))
 	}
 	for _, repo := range existing {
-		if s.config.BundleInterval > 0 {
-			s.scheduleBundleJobs(repo)
-		}
 		if s.config.SnapshotInterval > 0 {
 			s.scheduleSnapshotJobs(repo)
 		}
@@ -140,7 +136,6 @@ func New(
 	mux.Handle("POST /git/{host}/{path...}", http.HandlerFunc(s.handleRequest))
 
 	logger.InfoContext(ctx, "Git strategy initialized",
-		"bundle_interval", config.BundleInterval,
 		"snapshot_interval", config.SnapshotInterval)
 
 	return s, nil
@@ -168,11 +163,6 @@ func (s *Strategy) handleRequest(w http.ResponseWriter, r *http.Request) {
 		slog.String("method", r.Method),
 		slog.String("host", host),
 		slog.String("path", pathValue))
-
-	if strings.HasSuffix(pathValue, "/bundle") {
-		s.handleBundleRequest(w, r, host, pathValue)
-		return
-	}
 
 	if strings.HasSuffix(pathValue, "/snapshot") {
 		s.handleSnapshotRequest(w, r, host, pathValue)
@@ -349,10 +339,6 @@ func ExtractRepoPath(pathValue string) string {
 	return repoPath
 }
 
-func (s *Strategy) handleBundleRequest(w http.ResponseWriter, r *http.Request, host, pathValue string) {
-	s.serveCachedArtifact(w, r, host, pathValue, "bundle")
-}
-
 func (s *Strategy) serveCachedArtifact(w http.ResponseWriter, r *http.Request, host, pathValue, artifact string) {
 	ctx := r.Context()
 	logger := logging.FromContext(ctx)
@@ -420,10 +406,6 @@ func (s *Strategy) startClone(ctx context.Context, repo *gitclone.Repository) {
 		slog.String("upstream", repo.UpstreamURL()),
 		slog.String("path", repo.Path()))
 
-	if s.config.BundleInterval > 0 {
-		s.scheduleBundleJobs(repo)
-	}
-
 	if s.config.SnapshotInterval > 0 {
 		s.scheduleSnapshotJobs(repo)
 	}
@@ -456,10 +438,4 @@ func (s *Strategy) backgroundFetch(ctx context.Context, repo *gitclone.Repositor
 			slog.String("upstream", repo.UpstreamURL()),
 			slog.String("error", err.Error()))
 	}
-}
-
-func (s *Strategy) scheduleBundleJobs(repo *gitclone.Repository) {
-	s.scheduler.SubmitPeriodicJob(repo.UpstreamURL(), "bundle-periodic", s.config.BundleInterval, func(ctx context.Context) error {
-		return s.generateAndUploadBundle(ctx, repo)
-	})
 }
