@@ -23,8 +23,8 @@ metrics {}
 
 
 git {
-  bundle-interval = "24h"
-  snapshot-interval = "24h"
+  #bundle-interval = "24h"
+  #snapshot-interval = "24h"
 }
 
 host "https://w3.org" {}
