@@ -61,10 +61,9 @@ build-all:
 # Run
 # ============================================================================
 
-# Run natively
-run: build
-    @echo "→ Starting cachew at http://localhost:8080"
-    proctor
+# Run dev server with hot reload
+dev:
+    @proctor
 
 # Clean up build artifacts
 clean:
