@@ -3,7 +3,6 @@ package config
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 	"math/big"
 	"net/http"
@@ -129,7 +128,7 @@ func Load(
 
 	cache := cache.MaybeNewTiered(ctx, caches)
 
-	logger.DebugContext(ctx, fmt.Sprintf("Cache backend initialized: %v", cache), "cache", cache)
+	logger.DebugContext(ctx, "Cache backend", "cache", cache)
 
 	// Second pass, instantiate strategies and bind them to the mux.
 	for _, block := range strategyCandidates {

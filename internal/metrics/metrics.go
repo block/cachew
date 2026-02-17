@@ -178,9 +178,9 @@ func (c *Client) ServeMetrics(ctx context.Context) error {
 	}
 
 	go func() {
-		logger.InfoContext(ctx, fmt.Sprintf("Starting Prometheus metrics server on port %d", c.port), "port", c.port)
+		logger.InfoContext(ctx, "Starting Prometheus metrics server", "port", c.port)
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			logger.ErrorContext(ctx, fmt.Sprintf("Failed to serve metrics on port %d: %v", c.port, err), "port", c.port, "error", err)
+			logger.ErrorContext(ctx, "Metrics server error", "error", err)
 		}
 	}()
 
@@ -189,7 +189,7 @@ func (c *Client) ServeMetrics(ctx context.Context) error {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if err := server.Shutdown(shutdownCtx); err != nil {
-			logger.ErrorContext(shutdownCtx, fmt.Sprintf("Failed to shutdown metrics server: %v", err), "error", err)
+			logger.ErrorContext(shutdownCtx, "Metrics server shutdown error", "error", err)
 		}
 	}()
 

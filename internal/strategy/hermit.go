@@ -2,7 +2,6 @@ package strategy
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -61,11 +60,11 @@ func NewHermit(ctx context.Context, config HermitConfig, _ jobscheduler.Schedule
 		isInternalRedirect := config.GitHubBaseURL == defaultGitHubBaseURL
 		s.redirectHandler = s.createRedirectHandler(isInternalRedirect, c)
 		mux.Handle("GET /hermit/github.com/{path...}", s.redirectHandler)
-		logger.InfoContext(ctx, fmt.Sprintf("Hermit strategy initialized with GitHub base URL: %s", config.GitHubBaseURL),
-			"github_base_url", config.GitHubBaseURL,
-			"internal_redirect", isInternalRedirect)
+		logger.InfoContext(ctx, "Hermit strategy initialized",
+			slog.String("github_base_url", config.GitHubBaseURL),
+			slog.Bool("internal_redirect", isInternalRedirect))
 	} else {
-		logger.InfoContext(ctx, "Hermit strategy initialized without GitHub base URL")
+		logger.InfoContext(ctx, "Hermit strategy initialized")
 	}
 
 	return s, nil
@@ -96,7 +95,7 @@ func (s *Hermit) createRedirectHandler(isInternalRedirect bool, c cache.Cache) h
 			return s.buildGitHubURL(r)
 		}).
 		Transform(func(r *http.Request) (*http.Request, error) {
-			s.logger.DebugContext(r.Context(), fmt.Sprintf("Redirect handler called for GitHub release: %s", r.PathValue("path")), "path", r.PathValue("path"))
+			s.logger.DebugContext(r.Context(), "Redirect handler called for GitHub release")
 			return s.buildRedirectRequest(r)
 		})
 }

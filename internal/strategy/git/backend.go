@@ -3,7 +3,6 @@ package git
 import (
 	"bytes"
 	"context"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/cgi" //nolint:gosec // CVE-2016-5386 only affects Go < 1.6.3
@@ -78,9 +77,9 @@ func (s *Strategy) serveFromBackend(w http.ResponseWriter, r *http.Request, repo
 		handler.ServeHTTP(w, r2)
 
 		if stderrBuf.Len() > 0 {
-			logger.ErrorContext(r.Context(), fmt.Sprintf("Git http-backend error for path %s: %s", backendPath, stderrBuf.String()),
-				"stderr", stderrBuf.String(),
-				"path", backendPath)
+			logger.ErrorContext(r.Context(), "git http-backend error",
+				slog.String("stderr", stderrBuf.String()),
+				slog.String("path", backendPath))
 		}
 
 		return nil

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -90,7 +91,7 @@ func main() {
 	kctx.FatalIfErrorf(err, "failed to create metrics client")
 	defer func() {
 		if err := metricsClient.Close(); err != nil {
-			logger.ErrorContext(ctx, fmt.Sprintf("Failed to close metrics client: %v", err), "error", err)
+			logger.ErrorContext(ctx, "failed to close metrics client", "error", err)
 		}
 	}()
 
@@ -98,7 +99,7 @@ func main() {
 		kctx.FatalIfErrorf(err, "failed to start metrics server")
 	}
 
-	logger.InfoContext(ctx, fmt.Sprintf("Starting cachewd on %s", globalConfig.Bind), "bind", globalConfig.Bind)
+	logger.InfoContext(ctx, "Starting cachewd", slog.String("bind", globalConfig.Bind))
 
 	server := newServer(ctx, mux, globalConfig.Bind, globalConfig.MetricsConfig)
 	err = server.ListenAndServe()

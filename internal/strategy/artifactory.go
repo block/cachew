@@ -90,9 +90,9 @@ func (a *Artifactory) registerPathBased(ctx context.Context, target *url.URL, hd
 
 	pattern := "GET " + a.prefix + "/"
 	mux.Handle(pattern, hdlr)
-	a.logger.InfoContext(ctx, fmt.Sprintf("Registered Artifactory path-based route: %s -> %s", a.prefix, target.String()),
-		"prefix", a.prefix,
-		"target", target.String())
+	a.logger.InfoContext(ctx, "Registered Artifactory path-based route",
+		slog.String("prefix", a.prefix),
+		slog.String("target", target.String()))
 }
 
 // registerHostBased registers host-based routing patterns for the configured hosts.
@@ -103,9 +103,9 @@ func (a *Artifactory) registerHostBased(ctx context.Context, hosts []string, hdl
 	for _, host := range hosts {
 		pattern := "GET " + host + "/"
 		mux.Handle(pattern, hdlr)
-		a.logger.InfoContext(ctx, fmt.Sprintf("Registered Artifactory host-based route: %s -> %s", pattern, a.target.String()),
-			"pattern", pattern,
-			"target", a.target.String())
+		a.logger.InfoContext(ctx, "Registered Artifactory host-based route",
+			slog.String("pattern", pattern),
+			slog.String("target", a.target.String()))
 	}
 }
 
