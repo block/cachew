@@ -27,7 +27,7 @@ jobs:
       (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
     steps:
       - name: Checkout code
-        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # pin@v6
+        uses: actions/checkout@0c366fd6a839edf440554fa01a7085ccba70ac98 # pin@v6
         with:
           fetch-depth: 0
 
