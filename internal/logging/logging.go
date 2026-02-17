@@ -32,7 +32,7 @@ func Configure(ctx context.Context, config Config) (*slog.Logger, context.Contex
 				return a
 			}
 		}
-		handler = slog.NewJSONHandler(os.Stdout, options)
+		handler = &messageHandler{inner: slog.NewJSONHandler(os.Stdout, options)}
 	} else {
 		handler = tint.NewHandler(os.Stderr, &tint.Options{
 			Level: config.Level,
