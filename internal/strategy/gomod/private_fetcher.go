@@ -37,8 +37,8 @@ func newPrivateFetcher(logger *slog.Logger, cloneManager *gitclone.Manager) *pri
 }
 
 func (p *privateFetcher) Query(ctx context.Context, path, query string) (version string, t time.Time, err error) {
-	logger := p.logger.With("module", path, "query", query)
-	logger.DebugContext(ctx, fmt.Sprintf("Private fetcher query for module %s: %s", path, query))
+	logger := p.logger.With(slog.String("module", path), slog.String("query", query))
+	logger.DebugContext(ctx, "Private fetcher: Query")
 
 	gitURL := p.modulePathToGitURL(path)
 
@@ -60,8 +60,8 @@ func (p *privateFetcher) Query(ctx context.Context, path, query string) (version
 }
 
 func (p *privateFetcher) List(ctx context.Context, path string) (versions []string, err error) {
-	logger := p.logger.With("module", path)
-	logger.DebugContext(ctx, fmt.Sprintf("Private fetcher list for module %s", path))
+	logger := p.logger.With(slog.String("module", path))
+	logger.DebugContext(ctx, "Private fetcher: List")
 
 	gitURL := p.modulePathToGitURL(path)
 	repo, err := p.cloneManager.GetOrCreate(ctx, gitURL)
@@ -82,8 +82,8 @@ func (p *privateFetcher) List(ctx context.Context, path string) (versions []stri
 }
 
 func (p *privateFetcher) Download(ctx context.Context, path, version string) (info, mod, zip io.ReadSeekCloser, err error) {
-	logger := p.logger.With("module", path, "version", version)
-	logger.DebugContext(ctx, fmt.Sprintf("Private fetcher download for module %s version %s", path, version))
+	logger := p.logger.With(slog.String("module", path), slog.String("version", version))
+	logger.DebugContext(ctx, "Private fetcher: Download")
 
 	gitURL := p.modulePathToGitURL(path)
 	repo, err := p.cloneManager.GetOrCreate(ctx, gitURL)

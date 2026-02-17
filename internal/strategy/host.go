@@ -82,7 +82,7 @@ func (d *Host) buildTargetURL(r *http.Request) *url.URL {
 
 	targetURL, err := url.Parse(d.target.String())
 	if err != nil {
-		d.logger.Error(fmt.Sprintf("Failed to parse target URL: %v", err), "error", err, "target", d.target.String())
+		d.logger.Error("Failed to parse target URL", "error", err.Error(), "target", d.target.String())
 		return &url.URL{}
 	}
 	targetURL.Path = path

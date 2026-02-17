@@ -124,7 +124,7 @@ func (q *RootScheduler) worker(ctx context.Context, id int) {
 	for {
 		select {
 		case <-ctx.Done():
-			logger.InfoContext(ctx, fmt.Sprintf("Scheduler worker %d terminated", id))
+			logger.InfoContext(ctx, "Worker terminated")
 			return
 
 		case <-q.workAvailable:
@@ -133,9 +133,9 @@ func (q *RootScheduler) worker(ctx context.Context, id int) {
 				continue
 			}
 			jlogger := logger.With("job", job.String())
-			jlogger.InfoContext(ctx, fmt.Sprintf("Running job: %s", job.String()))
+			jlogger.InfoContext(ctx, "Running job")
 			if err := job.run(ctx); err != nil {
-				jlogger.ErrorContext(ctx, fmt.Sprintf("Job failed (%s): %v", job.String(), err), "error", err)
+				jlogger.ErrorContext(ctx, "Job failed", "error", err)
 			}
 			q.markQueueInactive(job.queue)
 			q.workAvailable <- true

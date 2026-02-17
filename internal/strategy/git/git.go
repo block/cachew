@@ -6,7 +6,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -96,7 +95,7 @@ func New(
 	existing, err := s.cloneManager.DiscoverExisting(ctx)
 	if err != nil {
 		logger.WarnContext(ctx, "Failed to discover existing clones",
-			"error", err)
+			slog.String("error", err.Error()))
 	}
 	for _, repo := range existing {
 		if s.config.BundleInterval > 0 {
@@ -125,14 +124,14 @@ func New(
 						// Inject token as Basic auth with "x-access-token" username
 						req.SetBasicAuth("x-access-token", token)
 						logger.DebugContext(req.Context(), "Injecting GitHub App auth into upstream request",
-							"org", org)
+							slog.String("org", org))
 					}
 				}
 			}
 		},
 		Transport: s.httpClient.Transport,
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
-			logging.FromContext(r.Context()).ErrorContext(r.Context(), fmt.Sprintf("Upstream request failed: %v", err), "error", err)
+			logging.FromContext(r.Context()).ErrorContext(r.Context(), "Upstream request failed", slog.String("error", err.Error()))
 			w.WriteHeader(http.StatusBadGateway)
 		},
 	}
@@ -165,10 +164,10 @@ func (s *Strategy) handleRequest(w http.ResponseWriter, r *http.Request) {
 	host := r.PathValue("host")
 	pathValue := r.PathValue("path")
 
-	logger.DebugContext(ctx, fmt.Sprintf("Git request: %s %s%s", r.Method, host, pathValue),
-		"method", r.Method,
-		"host", host,
-		"path", pathValue)
+	logger.DebugContext(ctx, "Git request",
+		slog.String("method", r.Method),
+		slog.String("host", host),
+		slog.String("path", pathValue))
 
 	if strings.HasSuffix(pathValue, "/bundle") {
 		s.handleBundleRequest(w, r, host, pathValue)
@@ -184,10 +183,7 @@ func (s *Strategy) handleRequest(w http.ResponseWriter, r *http.Request) {
 	isReceivePack := service == "git-receive-pack" || strings.HasSuffix(pathValue, "/git-receive-pack")
 
 	if isReceivePack {
-		logger.DebugContext(ctx, fmt.Sprintf("Forwarding write operation to upstream: %s %s%s", r.Method, host, pathValue),
-			slog.String("method", r.Method),
-			slog.String("host", host),
-			slog.String("path", pathValue))
+		logger.DebugContext(ctx, "Forwarding write operation to upstream")
 		s.forwardToUpstream(w, r, host, pathValue)
 		return
 	}
@@ -197,9 +193,8 @@ func (s *Strategy) handleRequest(w http.ResponseWriter, r *http.Request) {
 
 	repo, err := s.cloneManager.GetOrCreate(ctx, upstreamURL)
 	if err != nil {
-		logger.ErrorContext(ctx, fmt.Sprintf("Failed to get or create clone for %s: %v", upstreamURL, err),
-			"upstream", upstreamURL,
-			"error", err)
+		logger.ErrorContext(ctx, "Failed to get or create clone",
+			slog.String("error", err.Error()))
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
@@ -211,9 +206,8 @@ func (s *Strategy) handleRequest(w http.ResponseWriter, r *http.Request) {
 	case gitclone.StateReady:
 		if isInfoRefs {
 			if err := s.ensureRefsUpToDate(ctx, repo); err != nil {
-				logger.WarnContext(ctx, fmt.Sprintf("Failed to ensure refs up to date for %s: %v", repo.UpstreamURL(), err),
-					"upstream", repo.UpstreamURL(),
-					"error", err)
+				logger.WarnContext(ctx, "Failed to ensure refs up to date",
+					slog.String("error", err.Error()))
 			}
 		}
 		s.maybeBackgroundFetch(repo)
@@ -221,8 +215,7 @@ func (s *Strategy) handleRequest(w http.ResponseWriter, r *http.Request) {
 
 	case gitclone.StateCloning, gitclone.StateEmpty:
 		if state == gitclone.StateEmpty {
-			logger.DebugContext(ctx, fmt.Sprintf("Starting background clone for %s, forwarding to upstream", repo.UpstreamURL()),
-				"upstream", repo.UpstreamURL())
+			logger.DebugContext(ctx, "Starting background clone, forwarding to upstream")
 			s.scheduler.Submit(repo.UpstreamURL(), "clone", func(ctx context.Context) error {
 				s.startClone(ctx, repo)
 				return nil
@@ -283,8 +276,8 @@ func (s *Strategy) cleanupSpools(upstreamURL string) {
 	if rp != nil {
 		if err := rp.Close(); err != nil {
 			logging.FromContext(s.ctx).WarnContext(s.ctx, "Failed to clean up spools",
-				"upstream", upstreamURL,
-				"error", err)
+				slog.String("upstream", upstreamURL),
+				slog.String("error", err.Error()))
 		}
 	}
 }
@@ -296,7 +289,7 @@ func (s *Strategy) serveWithSpool(w http.ResponseWriter, r *http.Request, host, 
 	key, err := SpoolKeyForRequest(pathValue, r)
 	if err != nil {
 		logger.WarnContext(ctx, "Failed to compute spool key, forwarding to upstream",
-			"error", err)
+			slog.String("error", err.Error()))
 		s.forwardToUpstream(w, r, host, pathValue)
 		return
 	}
@@ -309,15 +302,15 @@ func (s *Strategy) serveWithSpool(w http.ResponseWriter, r *http.Request, host, 
 	spool, isWriter, err := rp.GetOrCreate(key)
 	if err != nil {
 		logger.WarnContext(ctx, "Failed to create spool, forwarding to upstream",
-			"error", err)
+			slog.String("error", err.Error()))
 		s.forwardToUpstream(w, r, host, pathValue)
 		return
 	}
 
 	if isWriter {
 		logger.DebugContext(ctx, "Spooling upstream response",
-			"key", key,
-			"upstream", upstreamURL)
+			slog.String("key", key),
+			slog.String("upstream", upstreamURL))
 		tw := NewSpoolTeeWriter(w, spool)
 		s.forwardToUpstream(tw, r, host, pathValue)
 		spool.MarkComplete()
@@ -326,24 +319,24 @@ func (s *Strategy) serveWithSpool(w http.ResponseWriter, r *http.Request, host, 
 
 	if spool.Failed() {
 		logger.DebugContext(ctx, "Spool failed, forwarding to upstream",
-			"key", key)
+			slog.String("key", key))
 		s.forwardToUpstream(w, r, host, pathValue)
 		return
 	}
 
 	logger.DebugContext(ctx, "Serving from spool",
-		"key", key,
-		"upstream", upstreamURL)
+		slog.String("key", key),
+		slog.String("upstream", upstreamURL))
 	if err := spool.ServeTo(w); err != nil {
 		if errors.Is(err, ErrSpoolFailed) {
 			logger.DebugContext(ctx, "Spool failed before response started, forwarding to upstream",
-				"key", key)
+				slog.String("key", key))
 			s.forwardToUpstream(w, r, host, pathValue)
 			return
 		}
-		logger.WarnContext(ctx, fmt.Sprintf("Spool read failed mid-stream for key %s: %v", key, err),
-			"key", key,
-			"error", err)
+		logger.WarnContext(ctx, "Spool read failed mid-stream",
+			slog.String("key", key),
+			slog.String("error", err.Error()))
 	}
 }
 
@@ -365,8 +358,8 @@ func (s *Strategy) serveCachedArtifact(w http.ResponseWriter, r *http.Request, h
 	logger := logging.FromContext(ctx)
 
 	logger.DebugContext(ctx, artifact+" request",
-		"host", host,
-		"path", pathValue)
+		slog.String("host", host),
+		slog.String("path", pathValue))
 
 	pathValue = strings.TrimSuffix(pathValue, "/"+artifact)
 	repoPath := ExtractRepoPath(pathValue)
@@ -377,14 +370,13 @@ func (s *Strategy) serveCachedArtifact(w http.ResponseWriter, r *http.Request, h
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			logger.DebugContext(ctx, artifact+" not found in cache",
-				"upstream", upstreamURL)
+				slog.String("upstream", upstreamURL))
 			http.NotFound(w, r)
 			return
 		}
-		logger.ErrorContext(ctx, fmt.Sprintf("Failed to open %s from cache for %s: %v", artifact, upstreamURL, err),
-			"artifact", artifact,
-			"upstream", upstreamURL,
-			"error", err)
+		logger.ErrorContext(ctx, "Failed to open "+artifact+" from cache",
+			slog.String("upstream", upstreamURL),
+			slog.String("error", err.Error()))
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
@@ -398,10 +390,9 @@ func (s *Strategy) serveCachedArtifact(w http.ResponseWriter, r *http.Request, h
 
 	_, err = io.Copy(w, reader)
 	if err != nil {
-		logger.ErrorContext(ctx, fmt.Sprintf("Failed to stream %s for %s: %v", artifact, upstreamURL, err),
-			"artifact", artifact,
-			"upstream", upstreamURL,
-			"error", err)
+		logger.ErrorContext(ctx, "Failed to stream "+artifact,
+			slog.String("upstream", upstreamURL),
+			slog.String("error", err.Error()))
 	}
 }
 
@@ -409,8 +400,8 @@ func (s *Strategy) startClone(ctx context.Context, repo *gitclone.Repository) {
 	logger := logging.FromContext(ctx)
 
 	logger.InfoContext(ctx, "Starting clone",
-		"upstream", repo.UpstreamURL(),
-		"path", repo.Path())
+		slog.String("upstream", repo.UpstreamURL()),
+		slog.String("path", repo.Path()))
 
 	err := repo.Clone(ctx)
 
@@ -419,15 +410,15 @@ func (s *Strategy) startClone(ctx context.Context, repo *gitclone.Repository) {
 	s.cleanupSpools(repo.UpstreamURL())
 
 	if err != nil {
-		logger.ErrorContext(ctx, fmt.Sprintf("Clone failed for %s: %v", repo.UpstreamURL(), err),
-			"upstream", repo.UpstreamURL(),
-			"error", err)
+		logger.ErrorContext(ctx, "Clone failed",
+			slog.String("upstream", repo.UpstreamURL()),
+			slog.String("error", err.Error()))
 		return
 	}
 
 	logger.InfoContext(ctx, "Clone completed",
-		"upstream", repo.UpstreamURL(),
-		"path", repo.Path())
+		slog.String("upstream", repo.UpstreamURL()),
+		slog.String("path", repo.Path()))
 
 	if s.config.BundleInterval > 0 {
 		s.scheduleBundleJobs(repo)
@@ -457,13 +448,13 @@ func (s *Strategy) backgroundFetch(ctx context.Context, repo *gitclone.Repositor
 	}
 
 	logger.DebugContext(ctx, "Fetching updates",
-		"upstream", repo.UpstreamURL(),
-		"path", repo.Path())
+		slog.String("upstream", repo.UpstreamURL()),
+		slog.String("path", repo.Path()))
 
 	if err := repo.Fetch(ctx); err != nil {
-		logger.ErrorContext(ctx, fmt.Sprintf("Fetch failed for %s: %v", repo.UpstreamURL(), err),
-			"upstream", repo.UpstreamURL(),
-			"error", err)
+		logger.ErrorContext(ctx, "Fetch failed",
+			slog.String("upstream", repo.UpstreamURL()),
+			slog.String("error", err.Error()))
 	}
 }
 
