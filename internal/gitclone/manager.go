@@ -164,8 +164,8 @@ func (m *Manager) GetOrCreate(_ context.Context, upstreamURL string) (*Repositor
 		credentialProvider: m.credentialProvider,
 	}
 
-	gitDir := filepath.Join(clonePath, ".git")
-	if _, err := os.Stat(gitDir); err == nil {
+	headFile := filepath.Join(clonePath, "HEAD")
+	if _, err := os.Stat(headFile); err == nil {
 		repo.state = StateReady
 	}
 
@@ -192,14 +192,7 @@ func (m *Manager) DiscoverExisting(_ context.Context) ([]*Repository, error) {
 			return nil
 		}
 
-		gitDir := filepath.Join(path, ".git")
-		headPath := filepath.Join(path, ".git", "HEAD")
-		if _, statErr := os.Stat(gitDir); statErr != nil {
-			if errors.Is(statErr, os.ErrNotExist) {
-				return nil
-			}
-			return errors.Wrap(statErr, "stat .git directory")
-		}
+		headPath := filepath.Join(path, "HEAD")
 		if _, statErr := os.Stat(headPath); statErr != nil {
 			if errors.Is(statErr, os.ErrNotExist) {
 				return nil
@@ -329,7 +322,7 @@ func (r *Repository) executeClone(ctx context.Context) error {
 	config := DefaultGitTuningConfig()
 	// #nosec G204 - r.upstreamURL and r.path are controlled by us
 	args := []string{
-		"clone",
+		"clone", "--mirror",
 		"-c", "http.postBuffer=" + strconv.Itoa(config.PostBuffer),
 		"-c", "http.lowSpeedLimit=" + strconv.Itoa(config.LowSpeedLimit),
 		"-c", "http.lowSpeedTime=" + strconv.Itoa(int(config.LowSpeedTime.Seconds())),
@@ -342,27 +335,7 @@ func (r *Repository) executeClone(ctx context.Context) error {
 	}
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return errors.Wrapf(err, "git clone: %s", string(output))
-	}
-
-	// #nosec G204 - r.path is controlled by us
-	cmd = exec.CommandContext(ctx, "git", "-C", r.path, "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*")
-	output, err = cmd.CombinedOutput()
-	if err != nil {
-		return errors.Wrapf(err, "configure fetch refspec: %s", string(output))
-	}
-
-	cmd, err = r.gitCommand(ctx, "-C", r.path,
-		"-c", "http.postBuffer="+strconv.Itoa(config.PostBuffer),
-		"-c", "http.lowSpeedLimit="+strconv.Itoa(config.LowSpeedLimit),
-		"-c", "http.lowSpeedTime="+strconv.Itoa(int(config.LowSpeedTime.Seconds())),
-		"fetch", "--all")
-	if err != nil {
-		return errors.Wrap(err, "create git command for fetch")
-	}
-	output, err = cmd.CombinedOutput()
-	if err != nil {
-		return errors.Wrapf(err, "fetch all branches: %s", string(output))
+		return errors.Wrapf(err, "git clone --mirror: %s", string(output))
 	}
 
 	// Enable partial clone support (e.g. --filter=blob:none) when serving via git http-backend.
@@ -403,13 +376,13 @@ func (r *Repository) Fetch(ctx context.Context) error {
 		"-c", "http.postBuffer="+strconv.Itoa(config.PostBuffer),
 		"-c", "http.lowSpeedLimit="+strconv.Itoa(config.LowSpeedLimit),
 		"-c", "http.lowSpeedTime="+strconv.Itoa(int(config.LowSpeedTime.Seconds())),
-		"remote", "update", "--prune")
+		"fetch", "--prune", "--prune-tags")
 	if err != nil {
 		return errors.Wrap(err, "create git command")
 	}
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return errors.Wrapf(err, "git remote update: %s", string(output))
+		return errors.Wrapf(err, "git fetch: %s", string(output))
 	}
 
 	r.lastFetch = time.Now()
@@ -444,8 +417,7 @@ func (r *Repository) EnsureRefsUpToDate(ctx context.Context) error {
 		if !strings.HasPrefix(ref, "refs/heads/") {
 			continue
 		}
-		localRef := "refs/remotes/origin/" + strings.TrimPrefix(ref, "refs/heads/")
-		localSHA, exists := localRefs[localRef]
+		localSHA, exists := localRefs[ref]
 		if !exists || localSHA != upstreamSHA {
 			needsFetch = true
 			break
