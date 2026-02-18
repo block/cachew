@@ -112,11 +112,10 @@ func TestIntegrationGitCloneViaProxy(t *testing.T) {
 	assert.NoError(t, err)
 	assert.True(t, info.IsDir())
 
-	// Verify it has a .git directory (regular clone)
-	gitDir := filepath.Join(clonePath, ".git")
-	gitInfo, err := os.Stat(gitDir)
+	// Verify it has a HEAD file (bare mirror clone)
+	headFile := filepath.Join(clonePath, "HEAD")
+	_, err = os.Stat(headFile)
 	assert.NoError(t, err)
-	assert.True(t, gitInfo.IsDir())
 }
 
 // TestIntegrationGitFetchViaProxy tests fetching updates through the proxy.

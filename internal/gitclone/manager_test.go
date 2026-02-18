@@ -82,9 +82,8 @@ func TestManager_GetOrCreate_ExistingClone(t *testing.T) {
 	assert.NoError(t, err)
 
 	repoPath := filepath.Join(tmpDir, "github.com", "user", "repo")
-	gitDir := filepath.Join(repoPath, ".git")
-	assert.NoError(t, os.MkdirAll(gitDir, 0o755))
-	assert.NoError(t, os.WriteFile(filepath.Join(gitDir, "HEAD"), []byte("ref: refs/heads/main\n"), 0o644))
+	assert.NoError(t, os.MkdirAll(repoPath, 0o755))
+	assert.NoError(t, os.WriteFile(filepath.Join(repoPath, "HEAD"), []byte("ref: refs/heads/main\n"), 0o644))
 
 	upstreamURL := "https://github.com/user/repo"
 	repo, err := manager.GetOrCreate(context.Background(), upstreamURL)
@@ -138,9 +137,8 @@ func TestManager_DiscoverExisting(t *testing.T) {
 	}
 
 	for _, repoPath := range repos {
-		gitDir := filepath.Join(repoPath, ".git")
-		assert.NoError(t, os.MkdirAll(gitDir, 0o755))
-		assert.NoError(t, os.WriteFile(filepath.Join(gitDir, "HEAD"), []byte("ref: refs/heads/main\n"), 0o644))
+		assert.NoError(t, os.MkdirAll(repoPath, 0o755))
+		assert.NoError(t, os.WriteFile(filepath.Join(repoPath, "HEAD"), []byte("ref: refs/heads/main\n"), 0o644))
 	}
 
 	discovered, err := manager.DiscoverExisting(context.Background())
