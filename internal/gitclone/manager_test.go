@@ -72,8 +72,9 @@ func TestManager_GetOrCreate(t *testing.T) {
 func TestManager_GetOrCreate_ExistingClone(t *testing.T) {
 	_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelError})
 	tmpDir := t.TempDir()
+	mirrorRoot := filepath.Join(tmpDir, "mirrors")
 	config := Config{
-		MirrorRoot:       tmpDir,
+		MirrorRoot:       mirrorRoot,
 		FetchInterval:    15 * time.Minute,
 		RefCheckInterval: 10 * time.Second,
 	}
@@ -81,9 +82,23 @@ func TestManager_GetOrCreate_ExistingClone(t *testing.T) {
 	manager, err := NewManager(ctx, config, nil)
 	assert.NoError(t, err)
 
-	repoPath := filepath.Join(tmpDir, "github.com", "user", "repo")
-	assert.NoError(t, os.MkdirAll(repoPath, 0o755))
-	assert.NoError(t, os.WriteFile(filepath.Join(repoPath, "HEAD"), []byte("ref: refs/heads/main\n"), 0o644))
+	workPath := filepath.Join(tmpDir, "work")
+	assert.NoError(t, os.MkdirAll(workPath, 0o755))
+	cmd := exec.Command("git", "-C", workPath, "init")
+	assert.NoError(t, cmd.Run())
+	cmd = exec.Command("git", "-C", workPath, "config", "user.email", "test@example.com")
+	assert.NoError(t, cmd.Run())
+	cmd = exec.Command("git", "-C", workPath, "config", "user.name", "Test")
+	assert.NoError(t, cmd.Run())
+	assert.NoError(t, os.WriteFile(filepath.Join(workPath, "f.txt"), []byte("x"), 0o644))
+	cmd = exec.Command("git", "-C", workPath, "add", ".")
+	assert.NoError(t, cmd.Run())
+	cmd = exec.Command("git", "-C", workPath, "commit", "-m", "init")
+	assert.NoError(t, cmd.Run())
+
+	repoPath := filepath.Join(mirrorRoot, "github.com", "user", "repo")
+	cmd = exec.Command("git", "clone", "--bare", workPath, repoPath)
+	assert.NoError(t, cmd.Run())
 
 	upstreamURL := "https://github.com/user/repo"
 	repo, err := manager.GetOrCreate(context.Background(), upstreamURL)
@@ -121,8 +136,9 @@ func TestManager_Get(t *testing.T) {
 func TestManager_DiscoverExisting(t *testing.T) {
 	_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelError})
 	tmpDir := t.TempDir()
+	mirrorRoot := filepath.Join(tmpDir, "mirrors")
 	config := Config{
-		MirrorRoot:       tmpDir,
+		MirrorRoot:       mirrorRoot,
 		FetchInterval:    15 * time.Minute,
 		RefCheckInterval: 10 * time.Second,
 	}
@@ -130,15 +146,29 @@ func TestManager_DiscoverExisting(t *testing.T) {
 	manager, err := NewManager(ctx, config, nil)
 	assert.NoError(t, err)
 
+	workPath := filepath.Join(tmpDir, "work")
+	assert.NoError(t, os.MkdirAll(workPath, 0o755))
+	cmd := exec.Command("git", "-C", workPath, "init")
+	assert.NoError(t, cmd.Run())
+	cmd = exec.Command("git", "-C", workPath, "config", "user.email", "test@example.com")
+	assert.NoError(t, cmd.Run())
+	cmd = exec.Command("git", "-C", workPath, "config", "user.name", "Test")
+	assert.NoError(t, cmd.Run())
+	assert.NoError(t, os.WriteFile(filepath.Join(workPath, "f.txt"), []byte("x"), 0o644))
+	cmd = exec.Command("git", "-C", workPath, "add", ".")
+	assert.NoError(t, cmd.Run())
+	cmd = exec.Command("git", "-C", workPath, "commit", "-m", "init")
+	assert.NoError(t, cmd.Run())
+
 	repos := []string{
-		filepath.Join(tmpDir, "github.com", "user1", "repo1"),
-		filepath.Join(tmpDir, "github.com", "user2", "repo2"),
-		filepath.Join(tmpDir, "gitlab.com", "org", "project"),
+		filepath.Join(mirrorRoot, "github.com", "user1", "repo1"),
+		filepath.Join(mirrorRoot, "github.com", "user2", "repo2"),
+		filepath.Join(mirrorRoot, "gitlab.com", "org", "project"),
 	}
 
 	for _, repoPath := range repos {
-		assert.NoError(t, os.MkdirAll(repoPath, 0o755))
-		assert.NoError(t, os.WriteFile(filepath.Join(repoPath, "HEAD"), []byte("ref: refs/heads/main\n"), 0o644))
+		cmd = exec.Command("git", "clone", "--bare", workPath, repoPath)
+		assert.NoError(t, cmd.Run())
 	}
 
 	discovered, err := manager.DiscoverExisting(context.Background())
@@ -312,10 +342,31 @@ func TestRepository_CloneSetsAllowFilter(t *testing.T) {
 	assert.NoError(t, repo.Clone(ctx))
 	assert.Equal(t, StateReady, repo.State())
 
-	cmd = exec.Command("git", "-C", clonePath, "config", "uploadpack.allowFilter")
-	output, err := cmd.Output()
-	assert.NoError(t, err)
-	assert.Equal(t, "true", strings.TrimSpace(string(output)))
+	expectedConfigs := map[string]string{
+		"protocol.version":                    "2",
+		"uploadpack.allowFilter":              "true",
+		"uploadpack.allowReachableSHA1InWant": "true",
+		"repack.writeBitmaps":                 "true",
+		"pack.useBitmaps":                     "true",
+		"pack.useBitmapBoundaryTraversal":     "true",
+		"core.commitGraph":                    "true",
+		"gc.writeCommitGraph":                 "true",
+		"fetch.writeCommitGraph":              "true",
+		"core.multiPackIndex":                 "true",
+		"transfer.unpackLimit":                "1",
+		"fetch.unpackLimit":                   "1",
+		"gc.auto":                             "0",
+		"pack.threads":                        "0",
+		"pack.deltaCacheSize":                 "512m",
+		"pack.windowMemory":                   "1g",
+	}
+
+	for key, expectedValue := range expectedConfigs {
+		cmd = exec.Command("git", "-C", clonePath, "config", "--get", key)
+		output, err := cmd.Output()
+		assert.NoError(t, err, "failed to get config for %s", key)
+		assert.Equal(t, expectedValue, strings.TrimSpace(string(output)), "config %s has wrong value", key)
+	}
 }
 
 func TestRepository_HasCommit(t *testing.T) {
@@ -356,4 +407,67 @@ func TestRepository_HasCommit(t *testing.T) {
 
 	assert.False(t, repo.HasCommit(ctx, "nonexistent"))
 	assert.False(t, repo.HasCommit(ctx, "v9.9.9"))
+}
+
+func TestManager_DiscoverExistingAppliesConfig(t *testing.T) {
+	_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelError})
+	tmpDir := t.TempDir()
+
+	workPath := filepath.Join(tmpDir, "work")
+	assert.NoError(t, os.MkdirAll(workPath, 0o755))
+
+	cmd := exec.Command("git", "-C", workPath, "init")
+	assert.NoError(t, cmd.Run())
+	cmd = exec.Command("git", "-C", workPath, "config", "user.email", "test@example.com")
+	assert.NoError(t, cmd.Run())
+	cmd = exec.Command("git", "-C", workPath, "config", "user.name", "Test")
+	assert.NoError(t, cmd.Run())
+	assert.NoError(t, os.WriteFile(filepath.Join(workPath, "f.txt"), []byte("x"), 0o644))
+	cmd = exec.Command("git", "-C", workPath, "add", ".")
+	assert.NoError(t, cmd.Run())
+	cmd = exec.Command("git", "-C", workPath, "commit", "-m", "init")
+	assert.NoError(t, cmd.Run())
+
+	repoPath := filepath.Join(tmpDir, "mirrors", "github.com", "user", "repo")
+	cmd = exec.Command("git", "clone", "--bare", workPath, repoPath)
+	assert.NoError(t, cmd.Run())
+
+	config := Config{
+		MirrorRoot:       filepath.Join(tmpDir, "mirrors"),
+		FetchInterval:    15 * time.Minute,
+		RefCheckInterval: 10 * time.Second,
+	}
+
+	manager, err := NewManager(ctx, config, nil)
+	assert.NoError(t, err)
+
+	discovered, err := manager.DiscoverExisting(ctx)
+	assert.NoError(t, err)
+	assert.Equal(t, 1, len(discovered))
+
+	expectedConfigs := map[string]string{
+		"protocol.version":                    "2",
+		"uploadpack.allowFilter":              "true",
+		"uploadpack.allowReachableSHA1InWant": "true",
+		"repack.writeBitmaps":                 "true",
+		"pack.useBitmaps":                     "true",
+		"pack.useBitmapBoundaryTraversal":     "true",
+		"core.commitGraph":                    "true",
+		"gc.writeCommitGraph":                 "true",
+		"fetch.writeCommitGraph":              "true",
+		"core.multiPackIndex":                 "true",
+		"transfer.unpackLimit":                "1",
+		"fetch.unpackLimit":                   "1",
+		"gc.auto":                             "0",
+		"pack.threads":                        "0",
+		"pack.deltaCacheSize":                 "512m",
+		"pack.windowMemory":                   "1g",
+	}
+
+	for key, expectedValue := range expectedConfigs {
+		cmd = exec.Command("git", "-C", repoPath, "config", "--get", key)
+		output, err := cmd.Output()
+		assert.NoError(t, err, "failed to get config for %s", key)
+		assert.Equal(t, expectedValue, strings.TrimSpace(string(output)), "config %s has wrong value", key)
+	}
 }

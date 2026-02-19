@@ -181,7 +181,7 @@ func (m *Manager) Get(upstreamURL string) *Repository {
 	return m.clones[upstreamURL]
 }
 
-func (m *Manager) DiscoverExisting(_ context.Context) ([]*Repository, error) {
+func (m *Manager) DiscoverExisting(ctx context.Context) ([]*Repository, error) {
 	var discovered []*Repository
 	err := filepath.Walk(m.config.MirrorRoot, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
@@ -225,6 +225,10 @@ func (m *Manager) DiscoverExisting(_ context.Context) ([]*Repository, error) {
 			credentialProvider: m.credentialProvider,
 		}
 		repo.fetchSem <- struct{}{}
+
+		if err := repo.configureMirror(ctx); err != nil {
+			return errors.Wrapf(err, "configure mirror for %s", upstreamURL)
+		}
 
 		m.clonesMu.Lock()
 		m.clones[upstreamURL] = repo
@@ -338,11 +342,56 @@ func (r *Repository) executeClone(ctx context.Context) error {
 		return errors.Wrapf(err, "git clone --mirror: %s", string(output))
 	}
 
-	// Enable partial clone support (e.g. --filter=blob:none) when serving via git http-backend.
-	cmd = exec.CommandContext(ctx, "git", "-C", r.path, "config", "uploadpack.allowFilter", "true") // #nosec G204
-	output, err = cmd.CombinedOutput()
-	if err != nil {
-		return errors.Wrapf(err, "configure uploadpack.allowFilter: %s", string(output))
+	if err := r.configureMirror(ctx); err != nil {
+		return errors.Wrap(err, "configure mirror")
+	}
+
+	return nil
+}
+
+func (r *Repository) configureMirror(ctx context.Context) error {
+	configs := []struct {
+		key   string
+		value string
+	}{
+		// Protocol
+		{"protocol.version", "2"},
+		{"uploadpack.allowFilter", "true"},
+		{"uploadpack.allowReachableSHA1InWant", "true"},
+
+		// Bitmaps (biggest win for upload-pack)
+		{"repack.writeBitmaps", "true"},
+		{"pack.useBitmaps", "true"},
+		{"pack.useBitmapBoundaryTraversal", "true"},
+
+		// Commit graph (no --changed-paths; Bloom filters do not help upload-pack)
+		{"core.commitGraph", "true"},
+		{"gc.writeCommitGraph", "true"},
+		{"fetch.writeCommitGraph", "true"},
+
+		// Multi-pack-index (avoids full repack on every fetch)
+		{"core.multiPackIndex", "true"},
+
+		// Never unpack loose — keep fetched objects as packs
+		{"transfer.unpackLimit", "1"},
+		{"fetch.unpackLimit", "1"},
+
+		// Disable auto GC — maintenance is explicit
+		{"gc.auto", "0"},
+
+		// Pack performance
+		{"pack.threads", "0"},
+		{"pack.deltaCacheSize", "512m"},
+		{"pack.windowMemory", "1g"},
+	}
+
+	for _, cfg := range configs {
+		// #nosec G204 - r.path is controlled by us
+		cmd := exec.CommandContext(ctx, "git", "-C", r.path, "config", cfg.key, cfg.value)
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			return errors.Wrapf(err, "configure %s: %s", cfg.key, string(output))
+		}
 	}
 
 	return nil
