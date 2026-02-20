@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"io"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/alecthomas/errors"
@@ -21,7 +22,7 @@ var ErrStatsUnavailable = errors.New("stats unavailable")
 
 type registryEntry struct {
 	schema  *hcl.Block
-	factory func(ctx context.Context, config *hcl.Block) (Cache, error)
+	factory func(ctx context.Context, config *hcl.Block, vars map[string]string) (Cache, error)
 }
 
 type Registry struct {
@@ -48,9 +49,12 @@ func Register[Config any, C Cache](r *Registry, id, description string, factory 
 	block.Comments = hcl.CommentList{description}
 	r.registry[id] = registryEntry{
 		schema: block,
-		factory: func(ctx context.Context, config *hcl.Block) (Cache, error) {
+		factory: func(ctx context.Context, config *hcl.Block, vars map[string]string) (Cache, error) {
 			var cfg Config
-			if err := hcl.UnmarshalBlock(config, &cfg); err != nil {
+			transformer := func(defaultValue string) string {
+				return os.Expand(defaultValue, func(key string) string { return vars[key] })
+			}
+			if err := hcl.UnmarshalBlock(config, &cfg, hcl.WithDefaultTransformer(transformer)); err != nil {
 				return nil, errors.WithStack(err)
 			}
 			return factory(ctx, cfg)
@@ -75,9 +79,9 @@ func (r *Registry) Exists(name string) bool {
 // Create a new cache instance from the given name and configuration.
 //
 // Will return "ErrNotFound" if the cache backend is not found.
-func (r *Registry) Create(ctx context.Context, name string, config *hcl.Block) (Cache, error) {
+func (r *Registry) Create(ctx context.Context, name string, config *hcl.Block, vars map[string]string) (Cache, error) {
 	if entry, ok := r.registry[name]; ok {
-		return errors.WithStack2(entry.factory(ctx, config))
+		return errors.WithStack2(entry.factory(ctx, config, vars))
 	}
 	return nil, errors.Errorf("%s: %w", name, ErrNotFound)
 }

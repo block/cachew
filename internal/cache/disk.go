@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/alecthomas/errors"
-	"github.com/alecthomas/kong"
 
 	"github.com/block/cachew/internal/logging"
 )
@@ -30,7 +29,7 @@ func RegisterDisk(r *Registry) {
 }
 
 type DiskConfig struct {
-	Root          string        `hcl:"root" help:"Root directory for the disk storage."`
+	Root          string        `hcl:"root,optional" help:"Root directory for the disk storage." default:"${CACHEW_STATE}/cache"`
 	LimitMB       int           `hcl:"limit-mb,optional" help:"Maximum size of the disk cache in megabytes (defaults to 10GB)." default:"10240"`
 	MaxTTL        time.Duration `hcl:"max-ttl,optional" help:"Maximum time-to-live for entries in the disk cache (defaults to 1 hour)." default:"1h"`
 	EvictInterval time.Duration `hcl:"evict-interval,optional" help:"Interval at which to check files for eviction (defaults to 1 minute)." default:"1m"`
@@ -61,10 +60,16 @@ func NewDisk(ctx context.Context, config DiskConfig) (*Disk, error) {
 	if config.Root == "" {
 		return nil, errors.New("root directory is required")
 	}
-	err := kong.ApplyDefaults(&config)
-	if err != nil {
-		return nil, errors.Errorf("failed to apply defaults: %w", err)
+	if config.LimitMB == 0 {
+		config.LimitMB = 10240
 	}
+	if config.MaxTTL == 0 {
+		config.MaxTTL = time.Hour
+	}
+	if config.EvictInterval == 0 {
+		config.EvictInterval = time.Minute
+	}
+	var err error
 	config.Root, err = filepath.Abs(config.Root)
 	if err != nil {
 		return nil, errors.Errorf("failed to get absolute path for cache root: %w", err)
