@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -207,5 +208,6 @@ func (t Tiered) ListNamespaces(ctx context.Context) ([]string, error) {
 	for ns := range namespaceSet {
 		namespaces = append(namespaces, ns)
 	}
+	sort.Strings(namespaces)
 	return namespaces, nil
 }
