@@ -38,8 +38,9 @@ type DiskConfig struct {
 type Disk struct {
 	logger       *slog.Logger
 	config       DiskConfig
+	namespace    string
 	db           *diskMetaDB
-	size         atomic.Int64
+	size         *atomic.Int64
 	runEviction  chan struct{}
 	stop         context.CancelFunc
 	evictionDone chan struct{}
@@ -113,6 +114,7 @@ func NewDisk(ctx context.Context, config DiskConfig) (*Disk, error) {
 		logger:       logger,
 		config:       config,
 		db:           db,
+		size:         &atomic.Int64{},
 		runEviction:  make(chan struct{}),
 		stop:         stop,
 		evictionDone: make(chan struct{}),
@@ -151,7 +153,7 @@ func (d *Disk) Stats(_ context.Context) (Stats, error) {
 	}, nil
 }
 
-func (d *Disk) Create(ctx context.Context, strategyName string, key Key, headers http.Header, ttl time.Duration) (io.WriteCloser, error) {
+func (d *Disk) Create(ctx context.Context, key Key, headers http.Header, ttl time.Duration) (io.WriteCloser, error) {
 	if ttl > d.config.MaxTTL || ttl == 0 {
 		ttl = d.config.MaxTTL
 	}
@@ -164,7 +166,7 @@ func (d *Disk) Create(ctx context.Context, strategyName string, key Key, headers
 		clonedHeaders.Set("Last-Modified", now.UTC().Format(http.TimeFormat))
 	}
 
-	path := d.keyToPath(strategyName, key)
+	path := d.keyToPath(d.namespace, key)
 	fullPath := filepath.Join(d.config.Root, path)
 
 	dir := filepath.Dir(fullPath)
@@ -180,20 +182,20 @@ func (d *Disk) Create(ctx context.Context, strategyName string, key Key, headers
 	expiresAt := now.Add(ttl)
 
 	return &diskWriter{
-		disk:         d,
-		file:         f,
-		key:          key,
-		strategyName: strategyName,
-		path:         fullPath,
-		tempPath:     f.Name(),
-		expiresAt:    expiresAt,
-		headers:      clonedHeaders,
-		ctx:          ctx,
+		disk:      d,
+		file:      f,
+		key:       key,
+		namespace: d.namespace,
+		path:      fullPath,
+		tempPath:  f.Name(),
+		expiresAt: expiresAt,
+		headers:   clonedHeaders,
+		ctx:       ctx,
 	}, nil
 }
 
-func (d *Disk) Delete(_ context.Context, strategyName string, key Key) error {
-	path := d.keyToPath(strategyName, key)
+func (d *Disk) Delete(_ context.Context, key Key) error {
+	path := d.keyToPath(d.namespace, key)
 	fullPath := filepath.Join(d.config.Root, path)
 
 	// Check if file is expired
@@ -225,8 +227,8 @@ func (d *Disk) Delete(_ context.Context, strategyName string, key Key) error {
 	return nil
 }
 
-func (d *Disk) Stat(ctx context.Context, strategyName string, key Key) (http.Header, error) {
-	path := d.keyToPath(strategyName, key)
+func (d *Disk) Stat(ctx context.Context, key Key) (http.Header, error) {
+	path := d.keyToPath(d.namespace, key)
 	fullPath := filepath.Join(d.config.Root, path)
 
 	if _, err := os.Stat(fullPath); err != nil {
@@ -239,7 +241,7 @@ func (d *Disk) Stat(ctx context.Context, strategyName string, key Key) (http.Hea
 	}
 
 	if time.Now().After(expiresAt) {
-		return nil, errors.Join(fs.ErrNotExist, d.Delete(ctx, strategyName, key))
+		return nil, errors.Join(fs.ErrNotExist, d.Delete(ctx, key))
 	}
 
 	headers, err := d.db.getHeaders(key)
@@ -250,8 +252,8 @@ func (d *Disk) Stat(ctx context.Context, strategyName string, key Key) (http.Hea
 	return headers, nil
 }
 
-func (d *Disk) Open(ctx context.Context, strategyName string, key Key) (io.ReadCloser, http.Header, error) {
-	path := d.keyToPath(strategyName, key)
+func (d *Disk) Open(ctx context.Context, key Key) (io.ReadCloser, http.Header, error) {
+	path := d.keyToPath(d.namespace, key)
 	fullPath := filepath.Join(d.config.Root, path)
 
 	f, err := os.Open(fullPath)
@@ -266,7 +268,7 @@ func (d *Disk) Open(ctx context.Context, strategyName string, key Key) (io.ReadC
 
 	now := time.Now()
 	if now.After(expiresAt) {
-		return nil, nil, errors.Join(fs.ErrNotExist, f.Close(), d.Delete(ctx, strategyName, key))
+		return nil, nil, errors.Join(fs.ErrNotExist, f.Close(), d.Delete(ctx, key))
 	}
 
 	headers, err := d.db.getHeaders(key)
@@ -285,12 +287,12 @@ func (d *Disk) Open(ctx context.Context, strategyName string, key Key) (io.ReadC
 	return f, headers, nil
 }
 
-func (d *Disk) keyToPath(strategyName string, key Key) string {
+func (d *Disk) keyToPath(namespace string, key Key) string {
 	hexKey := key.String()
 
 	// Use first two hex digits as directory, full hex as filename
-	if strategyName != "" {
-		return filepath.Join(strategyName, hexKey[:2], hexKey)
+	if namespace != "" {
+		return filepath.Join(namespace, hexKey[:2], hexKey)
 	}
 	return filepath.Join(hexKey[:2], hexKey)
 }
@@ -330,8 +332,8 @@ func (d *Disk) evict() error {
 	var expiredKeys []Key
 	now := time.Now()
 
-	err := d.db.walk(func(key Key, strategyName string, expiresAt time.Time) error {
-		path := d.keyToPath(strategyName, key)
+	err := d.db.walk(func(key Key, namespace string, expiresAt time.Time) error {
+		path := d.keyToPath(namespace, key)
 		fullPath := filepath.Join(d.config.Root, path)
 
 		info, err := os.Stat(fullPath)
@@ -399,16 +401,16 @@ func (d *Disk) evict() error {
 }
 
 type diskWriter struct {
-	disk         *Disk
-	file         *os.File
-	key          Key
-	strategyName string
-	path         string
-	tempPath     string
-	expiresAt    time.Time
-	headers      http.Header
-	size         int64
-	ctx          context.Context
+	disk      *Disk
+	file      *os.File
+	key       Key
+	namespace string
+	path      string
+	tempPath  string
+	expiresAt time.Time
+	headers   http.Header
+	size      int64
+	ctx       context.Context
 }
 
 func (w *diskWriter) Write(p []byte) (int, error) {
@@ -443,7 +445,7 @@ func (w *diskWriter) Close() error {
 		return errors.Errorf("failed to rename temp file: %w", err)
 	}
 
-	if err := w.disk.db.set(w.key, w.strategyName, w.expiresAt, w.headers); err != nil {
+	if err := w.disk.db.set(w.key, w.namespace, w.expiresAt, w.headers); err != nil {
 		return errors.Join(errors.Errorf("failed to set metadata: %w", err), os.Remove(w.path))
 	}
 
@@ -455,4 +457,17 @@ func (w *diskWriter) Close() error {
 	}
 
 	return nil
+}
+
+// Namespace creates a namespaced view of the disk cache.
+func (d *Disk) Namespace(namespace string) Cache {
+	// Create a shallow copy with the namespace set
+	c := *d
+	c.namespace = namespace
+	return &c
+}
+
+// ListNamespaces returns all unique namespaces in the disk cache.
+func (d *Disk) ListNamespaces(_ context.Context) ([]string, error) {
+	return d.db.listNamespaces()
 }

@@ -87,7 +87,9 @@ func (r *Registry) Create(
 	vars map[string]string,
 ) (Strategy, error) {
 	if entry, ok := r.registry[name]; ok {
-		return errors.WithStack2(entry.factory(ctx, config, cache, mux, vars))
+		// Create a namespaced view of the cache for this strategy
+		namespacedCache := cache.Namespace(name)
+		return errors.WithStack2(entry.factory(ctx, config, namespacedCache, mux, vars))
 	}
 	return nil, errors.Errorf("%s: %w", name, ErrNotFound)
 }

@@ -17,10 +17,8 @@ import (
 	"github.com/block/cachew/internal/strategy/handler"
 )
 
-const githubReleasesStrategyName = "github-releases"
-
 func RegisterGitHubReleases(r *Registry, tokenManagerProvider githubapp.TokenManagerProvider) {
-	Register(r, githubReleasesStrategyName, "Caches public and authenticated GitHub releases.", func(ctx context.Context, config GitHubReleasesConfig, cache cache.Cache, mux Mux) (*GitHubReleases, error) {
+	Register(r, "github-releases", "Caches public and authenticated GitHub releases.", func(ctx context.Context, config GitHubReleasesConfig, cache cache.Cache, mux Mux) (*GitHubReleases, error) {
 		return NewGitHubReleases(ctx, config, cache, mux, tokenManagerProvider)
 	})
 }
@@ -61,7 +59,6 @@ func NewGitHubReleases(ctx context.Context, config GitHubReleasesConfig, cache c
 	}
 	// eg. https://github.com/alecthomas/chroma/releases/download/v2.21.1/chroma-2.21.1-darwin-amd64.tar.gz
 	h := handler.New(s.client, cache).
-		StrategyName(githubReleasesStrategyName).
 		CacheKey(func(r *http.Request) string {
 			org := r.PathValue("org")
 			repo := r.PathValue("repo")
@@ -82,7 +79,7 @@ func NewGitHubReleases(ctx context.Context, config GitHubReleasesConfig, cache c
 
 var _ Strategy = (*GitHubReleases)(nil)
 
-func (g *GitHubReleases) String() string { return githubReleasesStrategyName }
+func (g *GitHubReleases) String() string { return "github-releases" }
 
 // newGitHubRequest creates a new HTTP request with GitHub API headers and authentication.
 func (g *GitHubReleases) newGitHubRequest(ctx context.Context, url, accept, org string) (*http.Request, error) {

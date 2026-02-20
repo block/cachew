@@ -63,7 +63,7 @@ func testCreateAndOpen(t *testing.T, c cache.Cache) {
 
 	key := cache.NewKey("test-key")
 
-	writer, err := c.Create(ctx, "", key, nil, time.Hour)
+	writer, err := c.Create(ctx, key, nil, time.Hour)
 	assert.NoError(t, err)
 
 	_, err = writer.Write([]byte("hello world"))
@@ -72,7 +72,7 @@ func testCreateAndOpen(t *testing.T, c cache.Cache) {
 	err = writer.Close()
 	assert.NoError(t, err)
 
-	reader, _, err := c.Open(ctx, "", key)
+	reader, _, err := c.Open(ctx, key)
 	assert.NoError(t, err)
 	defer reader.Close()
 
@@ -87,7 +87,7 @@ func testNotFound(t *testing.T, c cache.Cache) {
 
 	key := cache.NewKey("nonexistent")
 
-	_, _, err := c.Open(ctx, "", key)
+	_, _, err := c.Open(ctx, key)
 	assert.IsError(t, err, os.ErrNotExist)
 }
 
@@ -97,7 +97,7 @@ func testExpiration(t *testing.T, c cache.Cache) {
 
 	key := cache.NewKey("test-key")
 
-	writer, err := c.Create(ctx, "", key, nil, time.Millisecond*250)
+	writer, err := c.Create(ctx, key, nil, time.Millisecond*250)
 	assert.NoError(t, err)
 
 	_, err = writer.Write([]byte("test data"))
@@ -106,13 +106,13 @@ func testExpiration(t *testing.T, c cache.Cache) {
 	err = writer.Close()
 	assert.NoError(t, err)
 
-	reader, _, err := c.Open(ctx, "", key)
+	reader, _, err := c.Open(ctx, key)
 	assert.NoError(t, err)
 	assert.NoError(t, reader.Close())
 
 	time.Sleep(500 * time.Millisecond)
 
-	_, _, err = c.Open(ctx, "", key)
+	_, _, err = c.Open(ctx, key)
 	assert.IsError(t, err, os.ErrNotExist)
 }
 
@@ -122,7 +122,7 @@ func testDefaultTTL(t *testing.T, c cache.Cache) {
 
 	key := cache.NewKey("test-key")
 
-	writer, err := c.Create(ctx, "", key, nil, 0)
+	writer, err := c.Create(ctx, key, nil, 0)
 	assert.NoError(t, err)
 
 	_, err = writer.Write([]byte("test data"))
@@ -131,7 +131,7 @@ func testDefaultTTL(t *testing.T, c cache.Cache) {
 	err = writer.Close()
 	assert.NoError(t, err)
 
-	reader, _, err := c.Open(ctx, "", key)
+	reader, _, err := c.Open(ctx, key)
 	assert.NoError(t, err)
 	assert.NoError(t, reader.Close())
 }
@@ -142,7 +142,7 @@ func testDelete(t *testing.T, c cache.Cache) {
 
 	key := cache.NewKey("test-key")
 
-	writer, err := c.Create(ctx, "", key, nil, time.Hour)
+	writer, err := c.Create(ctx, key, nil, time.Hour)
 	assert.NoError(t, err)
 
 	_, err = writer.Write([]byte("test data"))
@@ -151,10 +151,10 @@ func testDelete(t *testing.T, c cache.Cache) {
 	err = writer.Close()
 	assert.NoError(t, err)
 
-	err = c.Delete(ctx, "", key)
+	err = c.Delete(ctx, key)
 	assert.NoError(t, err)
 
-	_, _, err = c.Open(ctx, "", key)
+	_, _, err = c.Open(ctx, key)
 	assert.IsError(t, err, os.ErrNotExist)
 }
 
@@ -164,7 +164,7 @@ func testMultipleWrites(t *testing.T, c cache.Cache) {
 
 	key := cache.NewKey("test-key")
 
-	writer, err := c.Create(ctx, "", key, nil, time.Hour)
+	writer, err := c.Create(ctx, key, nil, time.Hour)
 	assert.NoError(t, err)
 
 	_, err = writer.Write([]byte("hello "))
@@ -176,7 +176,7 @@ func testMultipleWrites(t *testing.T, c cache.Cache) {
 	err = writer.Close()
 	assert.NoError(t, err)
 
-	reader, _, err := c.Open(ctx, "", key)
+	reader, _, err := c.Open(ctx, key)
 	assert.NoError(t, err)
 	defer reader.Close()
 
@@ -191,19 +191,19 @@ func testNotAvailableUntilClosed(t *testing.T, c cache.Cache) {
 
 	key := cache.NewKey("test-key")
 
-	writer, err := c.Create(ctx, "", key, nil, time.Hour)
+	writer, err := c.Create(ctx, key, nil, time.Hour)
 	assert.NoError(t, err)
 
 	_, err = writer.Write([]byte("test data"))
 	assert.NoError(t, err)
 
-	_, _, err = c.Open(ctx, "", key)
+	_, _, err = c.Open(ctx, key)
 	assert.IsError(t, err, os.ErrNotExist)
 
 	err = writer.Close()
 	assert.NoError(t, err)
 
-	_, _, err = c.Open(ctx, "", key)
+	_, _, err = c.Open(ctx, key)
 	assert.NoError(t, err)
 }
 
@@ -220,7 +220,7 @@ func testHeaders(t *testing.T, c cache.Cache) {
 		"X-Custom-Field": []string{"custom-value"},
 	}
 
-	writer, err := c.Create(ctx, "", key, headers, time.Hour)
+	writer, err := c.Create(ctx, key, headers, time.Hour)
 	assert.NoError(t, err)
 
 	_, err = writer.Write([]byte("test data with headers"))
@@ -230,7 +230,7 @@ func testHeaders(t *testing.T, c cache.Cache) {
 	assert.NoError(t, err)
 
 	// Open and verify headers are returned
-	reader, returnedHeaders, err := c.Open(ctx, "", key)
+	reader, returnedHeaders, err := c.Open(ctx, key)
 	assert.NoError(t, err)
 	defer reader.Close()
 
@@ -257,7 +257,7 @@ func testContextCancellation(t *testing.T, c cache.Cache) {
 
 	// Create an object with the cancellable context
 	key := cache.NewKey("test-cancelled")
-	writer, err := c.Create(cancelledCtx, "", key, http.Header{}, time.Hour)
+	writer, err := c.Create(cancelledCtx, key, http.Header{}, time.Hour)
 	assert.NoError(t, err)
 
 	// Write some data
@@ -273,7 +273,7 @@ func testContextCancellation(t *testing.T, c cache.Cache) {
 	assert.Contains(t, err.Error(), "cancel")
 
 	// Object should not be in cache
-	_, _, err = c.Open(ctx, "", key)
+	_, _, err = c.Open(ctx, key)
 	assert.IsError(t, err, os.ErrNotExist)
 }
 
@@ -284,7 +284,7 @@ func testLastModified(t *testing.T, c cache.Cache) {
 	key := cache.NewKey("test-last-modified")
 
 	// Create an object without specifying Last-Modified
-	writer, err := c.Create(ctx, "", key, nil, time.Hour)
+	writer, err := c.Create(ctx, key, nil, time.Hour)
 	assert.NoError(t, err)
 
 	_, err = writer.Write([]byte("test data"))
@@ -294,7 +294,7 @@ func testLastModified(t *testing.T, c cache.Cache) {
 	assert.NoError(t, err)
 
 	// Open and verify Last-Modified header is present
-	reader, headers, err := c.Open(ctx, "", key)
+	reader, headers, err := c.Open(ctx, key)
 	assert.NoError(t, err)
 	defer reader.Close()
 
@@ -313,7 +313,7 @@ func testLastModified(t *testing.T, c cache.Cache) {
 		"Last-Modified": []string{explicitTime.Format(http.TimeFormat)},
 	}
 
-	writer2, err := c.Create(ctx, "", key2, explicitHeaders, time.Hour)
+	writer2, err := c.Create(ctx, key2, explicitHeaders, time.Hour)
 	assert.NoError(t, err)
 
 	_, err = writer2.Write([]byte("test data 2"))
@@ -323,7 +323,7 @@ func testLastModified(t *testing.T, c cache.Cache) {
 	assert.NoError(t, err)
 
 	// Verify explicit Last-Modified is preserved
-	reader2, headers2, err := c.Open(ctx, "", key2)
+	reader2, headers2, err := c.Open(ctx, key2)
 	assert.NoError(t, err)
 	defer reader2.Close()
 

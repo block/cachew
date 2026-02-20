@@ -231,7 +231,7 @@ func TestGitHubReleasesPublicRepoNotFound(t *testing.T) {
 	assert.NoError(t, err)
 	defer memCache.Close()
 
-	_, _, err = memCache.Open(context.Background(), "", key)
+	_, _, err = memCache.Open(context.Background(), key)
 	assert.Error(t, err, "non-OK responses should not be cached")
 }
 
