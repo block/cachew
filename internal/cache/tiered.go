@@ -50,7 +50,7 @@ func (t Tiered) Close() error {
 }
 
 // Create a new object. All underlying caches will be written to in sequence.
-func (t Tiered) Create(ctx context.Context, strategyName string, key Key, headers http.Header, ttl time.Duration) (io.WriteCloser, error) {
+func (t Tiered) Create(ctx context.Context, key Key, headers http.Header, ttl time.Duration) (io.WriteCloser, error) {
 	// The first error will cancel all outstanding writes.
 	ctx, cancel := context.WithCancelCause(ctx)
 
@@ -59,7 +59,7 @@ func (t Tiered) Create(ctx context.Context, strategyName string, key Key, header
 	wg := sync.WaitGroup{}
 	for i, cache := range t.caches {
 		wg.Go(func() {
-			w, err := cache.Create(ctx, strategyName, key, headers, ttl)
+			w, err := cache.Create(ctx, key, headers, ttl)
 			if err != nil {
 				cancel(err)
 			}
@@ -78,11 +78,11 @@ func (t Tiered) Create(ctx context.Context, strategyName string, key Key, header
 }
 
 // Delete from all underlying caches. All errors are returned.
-func (t Tiered) Delete(ctx context.Context, strategyName string, key Key) error {
+func (t Tiered) Delete(ctx context.Context, key Key) error {
 	wg := sync.WaitGroup{}
 	errs := make([]error, len(t.caches))
 	for i, cache := range t.caches {
-		wg.Go(func() { errs[i] = errors.WithStack(cache.Delete(ctx, strategyName, key)) })
+		wg.Go(func() { errs[i] = errors.WithStack(cache.Delete(ctx, key)) })
 	}
 	wg.Wait()
 	return errors.Join(errs...)
@@ -91,10 +91,10 @@ func (t Tiered) Delete(ctx context.Context, strategyName string, key Key) error 
 // Stat returns headers from the first cache that succeeds.
 //
 // If all caches fail, all errors are returned.
-func (t Tiered) Stat(ctx context.Context, strategyName string, key Key) (http.Header, error) {
+func (t Tiered) Stat(ctx context.Context, key Key) (http.Header, error) {
 	errs := make([]error, len(t.caches))
 	for i, c := range t.caches {
-		headers, err := c.Stat(ctx, strategyName, key)
+		headers, err := c.Stat(ctx, key)
 		errs[i] = err
 		if errors.Is(err, os.ErrNotExist) {
 			continue
@@ -109,10 +109,10 @@ func (t Tiered) Stat(ctx context.Context, strategyName string, key Key) (http.He
 // Open returns a reader from the first cache that succeeds.
 //
 // If all caches fail, all errors are returned.
-func (t Tiered) Open(ctx context.Context, strategyName string, key Key) (io.ReadCloser, http.Header, error) {
+func (t Tiered) Open(ctx context.Context, key Key) (io.ReadCloser, http.Header, error) {
 	errs := make([]error, len(t.caches))
 	for i, c := range t.caches {
-		r, headers, err := c.Open(ctx, strategyName, key)
+		r, headers, err := c.Open(ctx, key)
 		errs[i] = err
 		if errors.Is(err, os.ErrNotExist) {
 			continue
@@ -178,4 +178,34 @@ func (t tieredWriter) Write(p []byte) (n int, err error) {
 		}
 	}
 	return
+}
+
+// Namespace creates a namespaced view of the tiered cache.
+// All underlying caches are also namespaced.
+func (t Tiered) Namespace(namespace string) Cache {
+	namespaced := make([]Cache, len(t.caches))
+	for i, c := range t.caches {
+		namespaced[i] = c.Namespace(namespace)
+	}
+	return Tiered{caches: namespaced}
+}
+
+// ListNamespaces returns unique namespaces from all underlying caches.
+func (t Tiered) ListNamespaces(ctx context.Context) ([]string, error) {
+	namespaceSet := make(map[string]bool)
+	for _, c := range t.caches {
+		namespaces, err := c.ListNamespaces(ctx)
+		if err != nil && !errors.Is(err, ErrStatsUnavailable) {
+			return nil, errors.WithStack(err)
+		}
+		for _, ns := range namespaces {
+			namespaceSet[ns] = true
+		}
+	}
+
+	namespaces := make([]string, 0, len(namespaceSet))
+	for ns := range namespaceSet {
+		namespaces = append(namespaces, ns)
+	}
+	return namespaces, nil
 }

@@ -12,10 +12,8 @@ import (
 	"github.com/block/cachew/internal/strategy/handler"
 )
 
-const hostStrategyName = "host"
-
 func RegisterHost(r *Registry) {
-	Register(r, hostStrategyName, "A generic host-based proxying strategy.", NewHost)
+	Register(r, "host", "A generic host-based proxying strategy.", NewHost)
 }
 
 // HostConfig represents the configuration for the Host strategy.
@@ -57,7 +55,6 @@ func NewHost(ctx context.Context, config HostConfig, cache cache.Cache, mux Mux)
 	}
 
 	hdlr := handler.New(h.client, cache).
-		StrategyName(hostStrategyName).
 		CacheKey(func(r *http.Request) string {
 			return h.buildTargetURL(r).String()
 		}).

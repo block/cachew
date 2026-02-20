@@ -21,15 +21,17 @@ import (
 type CLI struct {
 	LoggingConfig logging.Config `embed:"" prefix:"log-"`
 
-	URL      string `help:"Remote cache server URL." default:"http://127.0.0.1:8080"`
-	Platform bool   `help:"Prefix keys with platform ($${os}-$${arch}-)."`
-	Daily    bool   `help:"Prefix keys with date ($${YYYY}-$${MM}-$${DD}-). Mutually exclusive with --hourly." xor:"timeprefix"`
-	Hourly   bool   `help:"Prefix keys with date and hour ($${YYYY}-$${MM}-$${DD}-$${HH}-). Mutually exclusive with --daily." xor:"timeprefix"`
+	URL       string `help:"Remote cache server URL." default:"http://127.0.0.1:8080"`
+	Namespace string `help:"Namespace for organizing cache objects." default:""`
+	Platform  bool   `help:"Prefix keys with platform ($${os}-$${arch}-)."`
+	Daily     bool   `help:"Prefix keys with date ($${YYYY}-$${MM}-$${DD}-). Mutually exclusive with --hourly." xor:"timeprefix"`
+	Hourly    bool   `help:"Prefix keys with date and hour ($${YYYY}-$${MM}-$${DD}-$${HH}-). Mutually exclusive with --daily." xor:"timeprefix"`
 
-	Get    GetCmd    `cmd:"" help:"Download object from cache." group:"Operations:"`
-	Stat   StatCmd   `cmd:"" help:"Show metadata for cached object." group:"Operations:"`
-	Put    PutCmd    `cmd:"" help:"Upload object to cache." group:"Operations:"`
-	Delete DeleteCmd `cmd:"" help:"Remove object from cache." group:"Operations:"`
+	Get            GetCmd            `cmd:"" help:"Download object from cache." group:"Operations:"`
+	Stat           StatCmd           `cmd:"" help:"Show metadata for cached object." group:"Operations:"`
+	Put            PutCmd            `cmd:"" help:"Upload object to cache." group:"Operations:"`
+	Delete         DeleteCmd         `cmd:"" help:"Remove object from cache." group:"Operations:"`
+	ListNamespaces ListNamespacesCmd `cmd:"" help:"List available namespaces in cache." group:"Operations:"`
 
 	Snapshot SnapshotCmd `cmd:"" help:"Create compressed archive of directory and upload." group:"Snapshots:"`
 	Restore  RestoreCmd  `cmd:"" help:"Download and extract archive to directory." group:"Snapshots:"`
@@ -57,7 +59,7 @@ type GetCmd struct {
 func (c *GetCmd) Run(ctx context.Context, cache cache.Cache) error {
 	defer c.Output.Close()
 
-	rc, headers, err := cache.Open(ctx, "", c.Key.Key())
+	rc, headers, err := cache.Open(ctx, c.Key.Key())
 	if err != nil {
 		return errors.Wrap(err, "failed to open object")
 	}
@@ -78,7 +80,7 @@ type StatCmd struct {
 }
 
 func (c *StatCmd) Run(ctx context.Context, cache cache.Cache) error {
-	headers, err := cache.Stat(ctx, "", c.Key.Key())
+	headers, err := cache.Stat(ctx, c.Key.Key())
 	if err != nil {
 		return errors.Wrap(err, "failed to stat object")
 	}
@@ -111,7 +113,7 @@ func (c *PutCmd) Run(ctx context.Context, cache cache.Cache) error {
 		headers.Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filepath.Base(filename))) //nolint:perfsprint
 	}
 
-	wc, err := cache.Create(ctx, "", c.Key.Key(), headers, c.TTL)
+	wc, err := cache.Create(ctx, c.Key.Key(), headers, c.TTL)
 	if err != nil {
 		return errors.Wrap(err, "failed to create object")
 	}
@@ -128,7 +130,26 @@ type DeleteCmd struct {
 }
 
 func (c *DeleteCmd) Run(ctx context.Context, cache cache.Cache) error {
-	return errors.Wrap(cache.Delete(ctx, "", c.Key.Key()), "failed to delete object")
+	return errors.Wrap(cache.Delete(ctx, c.Key.Key()), "failed to delete object")
+}
+
+type ListNamespacesCmd struct{}
+
+func (c *ListNamespacesCmd) Run(ctx context.Context, cache cache.Cache) error {
+	namespaces, err := cache.ListNamespaces(ctx)
+	if err != nil {
+		return errors.Wrap(err, "failed to list namespaces")
+	}
+
+	if len(namespaces) == 0 {
+		fmt.Println("No namespaces found") //nolint:forbidigo
+		return nil
+	}
+
+	for _, ns := range namespaces {
+		fmt.Println(ns) //nolint:forbidigo
+	}
+	return nil
 }
 
 type SnapshotCmd struct {
@@ -140,7 +161,7 @@ type SnapshotCmd struct {
 
 func (c *SnapshotCmd) Run(ctx context.Context, cache cache.Cache) error {
 	fmt.Fprintf(os.Stderr, "Archiving %s...\n", c.Directory) //nolint:forbidigo
-	if err := snapshot.Create(ctx, cache, "", c.Key.Key(), c.Directory, c.TTL, c.Exclude); err != nil {
+	if err := snapshot.Create(ctx, cache, c.Key.Key(), c.Directory, c.TTL, c.Exclude); err != nil {
 		return errors.Wrap(err, "failed to create snapshot")
 	}
 
@@ -155,7 +176,7 @@ type RestoreCmd struct {
 
 func (c *RestoreCmd) Run(ctx context.Context, cache cache.Cache) error {
 	fmt.Fprintf(os.Stderr, "Restoring to %s...\n", c.Directory) //nolint:forbidigo
-	if err := snapshot.Restore(ctx, cache, "", c.Key.Key(), c.Directory); err != nil {
+	if err := snapshot.Restore(ctx, cache, c.Key.Key(), c.Directory); err != nil {
 		return errors.Wrap(err, "failed to restore snapshot")
 	}
 

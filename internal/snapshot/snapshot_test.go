@@ -30,15 +30,15 @@ func TestCreateAndRestoreRoundTrip(t *testing.T) {
 	assert.NoError(t, os.Mkdir(filepath.Join(srcDir, "subdir"), 0o755))
 	assert.NoError(t, os.WriteFile(filepath.Join(srcDir, "subdir", "file3.txt"), []byte("content3"), 0o644))
 
-	err = snapshot.Create(ctx, mem, "", key, srcDir, time.Hour, nil)
+	err = snapshot.Create(ctx, mem, key, srcDir, time.Hour, nil)
 	assert.NoError(t, err)
 
-	headers, err := mem.Stat(ctx, "", key)
+	headers, err := mem.Stat(ctx, key)
 	assert.NoError(t, err)
 	assert.Equal(t, "application/zstd", headers.Get("Content-Type"))
 
 	dstDir := t.TempDir()
-	err = snapshot.Restore(ctx, mem, "", key, dstDir)
+	err = snapshot.Restore(ctx, mem, key, dstDir)
 	assert.NoError(t, err)
 
 	content1, err := os.ReadFile(filepath.Join(dstDir, "file1.txt"))
@@ -71,11 +71,11 @@ func TestCreateWithExcludePatterns(t *testing.T) {
 	assert.NoError(t, os.Mkdir(filepath.Join(srcDir, "logs"), 0o755))
 	assert.NoError(t, os.WriteFile(filepath.Join(srcDir, "logs", "app.log"), []byte("excluded"), 0o644))
 
-	err = snapshot.Create(ctx, mem, "", key, srcDir, time.Hour, []string{"*.log", "logs"})
+	err = snapshot.Create(ctx, mem, key, srcDir, time.Hour, []string{"*.log", "logs"})
 	assert.NoError(t, err)
 
 	dstDir := t.TempDir()
-	err = snapshot.Restore(ctx, mem, "", key, dstDir)
+	err = snapshot.Restore(ctx, mem, key, dstDir)
 	assert.NoError(t, err)
 
 	_, err = os.Stat(filepath.Join(dstDir, "include.txt"))
@@ -99,11 +99,11 @@ func TestCreatePreservesSymlinks(t *testing.T) {
 	assert.NoError(t, os.WriteFile(filepath.Join(srcDir, "target.txt"), []byte("target"), 0o644))
 	assert.NoError(t, os.Symlink("target.txt", filepath.Join(srcDir, "link.txt")))
 
-	err = snapshot.Create(ctx, mem, "", key, srcDir, time.Hour, nil)
+	err = snapshot.Create(ctx, mem, key, srcDir, time.Hour, nil)
 	assert.NoError(t, err)
 
 	dstDir := t.TempDir()
-	err = snapshot.Restore(ctx, mem, "", key, dstDir)
+	err = snapshot.Restore(ctx, mem, key, dstDir)
 	assert.NoError(t, err)
 
 	info, err := os.Lstat(filepath.Join(dstDir, "link.txt"))
@@ -122,7 +122,7 @@ func TestCreateNonexistentDirectory(t *testing.T) {
 	defer mem.Close()
 	key := cache.Key{1, 2, 3}
 
-	err = snapshot.Create(ctx, mem, "", key, "/nonexistent/directory", time.Hour, nil)
+	err = snapshot.Create(ctx, mem, key, "/nonexistent/directory", time.Hour, nil)
 	assert.Error(t, err)
 }
 
@@ -136,7 +136,7 @@ func TestCreateNotADirectory(t *testing.T) {
 	tmpFile := filepath.Join(t.TempDir(), "file.txt")
 	assert.NoError(t, os.WriteFile(tmpFile, []byte("content"), 0o644))
 
-	err = snapshot.Create(ctx, mem, "", key, tmpFile, time.Hour, nil)
+	err = snapshot.Create(ctx, mem, key, tmpFile, time.Hour, nil)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "not a directory")
 }
@@ -158,7 +158,7 @@ func TestCreateContextCancellation(t *testing.T) {
 	cancelCtx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	err = snapshot.Create(cancelCtx, mem, "", key, srcDir, time.Hour, nil)
+	err = snapshot.Create(cancelCtx, mem, key, srcDir, time.Hour, nil)
 	assert.Error(t, err)
 }
 
@@ -170,7 +170,7 @@ func TestRestoreNonexistentKey(t *testing.T) {
 	key := cache.Key{1, 2, 3}
 
 	dstDir := t.TempDir()
-	err = snapshot.Restore(ctx, mem, "", key, dstDir)
+	err = snapshot.Restore(ctx, mem, key, dstDir)
 	assert.Error(t, err)
 }
 
@@ -184,11 +184,11 @@ func TestRestoreCreatesTargetDirectory(t *testing.T) {
 	srcDir := t.TempDir()
 	assert.NoError(t, os.WriteFile(filepath.Join(srcDir, "file.txt"), []byte("content"), 0o644))
 
-	err = snapshot.Create(ctx, mem, "", key, srcDir, time.Hour, nil)
+	err = snapshot.Create(ctx, mem, key, srcDir, time.Hour, nil)
 	assert.NoError(t, err)
 
 	dstDir := filepath.Join(t.TempDir(), "nested", "target")
-	err = snapshot.Restore(ctx, mem, "", key, dstDir)
+	err = snapshot.Restore(ctx, mem, key, dstDir)
 	assert.NoError(t, err)
 
 	content, err := os.ReadFile(filepath.Join(dstDir, "file.txt"))
@@ -210,14 +210,14 @@ func TestRestoreContextCancellation(t *testing.T) {
 		assert.NoError(t, os.WriteFile(filename, content, 0o644))
 	}
 
-	err = snapshot.Create(ctx, mem, "", key, srcDir, time.Hour, nil)
+	err = snapshot.Create(ctx, mem, key, srcDir, time.Hour, nil)
 	assert.NoError(t, err)
 
 	cancelCtx, cancel := context.WithCancel(context.Background())
 	cancel()
 
 	dstDir := t.TempDir()
-	err = snapshot.Restore(cancelCtx, mem, "", key, dstDir)
+	err = snapshot.Restore(cancelCtx, mem, key, dstDir)
 	assert.Error(t, err)
 }
 
@@ -230,11 +230,11 @@ func TestCreateEmptyDirectory(t *testing.T) {
 
 	srcDir := t.TempDir()
 
-	err = snapshot.Create(ctx, mem, "", key, srcDir, time.Hour, nil)
+	err = snapshot.Create(ctx, mem, key, srcDir, time.Hour, nil)
 	assert.NoError(t, err)
 
 	dstDir := t.TempDir()
-	err = snapshot.Restore(ctx, mem, "", key, dstDir)
+	err = snapshot.Restore(ctx, mem, key, dstDir)
 	assert.NoError(t, err)
 
 	entries, err := os.ReadDir(dstDir)
@@ -254,11 +254,11 @@ func TestCreateWithNestedDirectories(t *testing.T) {
 	assert.NoError(t, os.MkdirAll(deepPath, 0o755))
 	assert.NoError(t, os.WriteFile(filepath.Join(deepPath, "deep.txt"), []byte("deep content"), 0o644))
 
-	err = snapshot.Create(ctx, mem, "", key, srcDir, time.Hour, nil)
+	err = snapshot.Create(ctx, mem, key, srcDir, time.Hour, nil)
 	assert.NoError(t, err)
 
 	dstDir := t.TempDir()
-	err = snapshot.Restore(ctx, mem, "", key, dstDir)
+	err = snapshot.Restore(ctx, mem, key, dstDir)
 	assert.NoError(t, err)
 
 	content, err := os.ReadFile(filepath.Join(dstDir, "a", "b", "c", "d", "e", "deep.txt"))
@@ -276,10 +276,10 @@ func TestCreateSetsCorrectHeaders(t *testing.T) {
 	srcDir := t.TempDir()
 	assert.NoError(t, os.WriteFile(filepath.Join(srcDir, "file.txt"), []byte("content"), 0o644))
 
-	err = snapshot.Create(ctx, mem, "", key, srcDir, time.Hour, nil)
+	err = snapshot.Create(ctx, mem, key, srcDir, time.Hour, nil)
 	assert.NoError(t, err)
 
-	headers, err := mem.Stat(ctx, "", key)
+	headers, err := mem.Stat(ctx, key)
 	assert.NoError(t, err)
 	assert.Equal(t, "application/zstd", headers.Get("Content-Type"))
 	assert.Contains(t, headers.Get("Content-Disposition"), "attachment")

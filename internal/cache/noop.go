@@ -22,20 +22,20 @@ func NoOpCache() Cache {
 
 func (n *noOpCache) String() string { return "noop" }
 
-func (n *noOpCache) Stat(_ context.Context, _ string, _ Key) (http.Header, error) {
+func (n *noOpCache) Stat(_ context.Context, _ Key) (http.Header, error) {
 	return nil, os.ErrNotExist
 }
 
-func (n *noOpCache) Open(_ context.Context, _ string, _ Key) (io.ReadCloser, http.Header, error) {
+func (n *noOpCache) Open(_ context.Context, _ Key) (io.ReadCloser, http.Header, error) {
 	return nil, nil, os.ErrNotExist
 }
 
-func (n *noOpCache) Create(_ context.Context, _ string, _ Key, _ http.Header, _ time.Duration) (io.WriteCloser, error) {
+func (n *noOpCache) Create(_ context.Context, _ Key, _ http.Header, _ time.Duration) (io.WriteCloser, error) {
 	// Return a discard writer that does nothing
 	return &noOpWriter{}, nil
 }
 
-func (n *noOpCache) Delete(_ context.Context, _ string, _ Key) error {
+func (n *noOpCache) Delete(_ context.Context, _ Key) error {
 	return nil
 }
 
@@ -60,3 +60,13 @@ func (n *noOpWriter) Close() error {
 
 var _ Cache = (*noOpCache)(nil)
 var _ io.WriteCloser = (*noOpWriter)(nil)
+
+// Namespace creates a namespaced view (no-op for noop cache).
+func (n *noOpCache) Namespace(_ string) Cache {
+	return n
+}
+
+// ListNamespaces returns empty list for noop cache.
+func (n *noOpCache) ListNamespaces(_ context.Context) ([]string, error) {
+	return []string{}, nil
+}

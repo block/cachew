@@ -36,7 +36,7 @@ func NewRemote(baseURL string) *Remote {
 func (c *Remote) String() string { return "remote:" + c.baseURL }
 
 // Open retrieves an object from the remote.
-func (c *Remote) Open(ctx context.Context, _ string, key Key) (io.ReadCloser, http.Header, error) {
+func (c *Remote) Open(ctx context.Context, key Key) (io.ReadCloser, http.Header, error) {
 	url := fmt.Sprintf("%s/object/%s", c.baseURL, key.String())
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -65,7 +65,7 @@ func (c *Remote) Open(ctx context.Context, _ string, key Key) (io.ReadCloser, ht
 }
 
 // Stat retrieves headers for an object from the remote.
-func (c *Remote) Stat(ctx context.Context, _ string, key Key) (http.Header, error) {
+func (c *Remote) Stat(ctx context.Context, key Key) (http.Header, error) {
 	url := fmt.Sprintf("%s/object/%s", c.baseURL, key.String())
 	req, err := http.NewRequestWithContext(ctx, http.MethodHead, url, nil)
 	if err != nil {
@@ -93,7 +93,7 @@ func (c *Remote) Stat(ctx context.Context, _ string, key Key) (http.Header, erro
 }
 
 // Create stores a new object in the remote.
-func (c *Remote) Create(ctx context.Context, _ string, key Key, headers http.Header, ttl time.Duration) (io.WriteCloser, error) {
+func (c *Remote) Create(ctx context.Context, key Key, headers http.Header, ttl time.Duration) (io.WriteCloser, error) {
 	pr, pw := io.Pipe()
 
 	url := fmt.Sprintf("%s/object/%s", c.baseURL, key.String())
@@ -135,7 +135,7 @@ func (c *Remote) Create(ctx context.Context, _ string, key Key, headers http.Hea
 }
 
 // Delete removes an object from the remote.
-func (c *Remote) Delete(ctx context.Context, _ string, key Key) error {
+func (c *Remote) Delete(ctx context.Context, key Key) error {
 	url := fmt.Sprintf("%s/object/%s", c.baseURL, key.String())
 	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, url, nil)
 	if err != nil {
@@ -222,4 +222,17 @@ func (wc *writeCloser) Close() error {
 		return errors.Wrap(err, "request failed")
 	}
 	return nil
+}
+
+// Namespace creates a namespaced view (which is ignored by remote cache).
+// Remote cache ignores namespaces since the server-side API v1 handles namespacing.
+func (c *Remote) Namespace(_ string) Cache {
+	// Remote cache doesn't use namespacing on client side
+	return c
+}
+
+// ListNamespaces requests namespace list from the remote server.
+func (c *Remote) ListNamespaces(_ context.Context) ([]string, error) {
+	// TODO: Could add an API endpoint for this
+	return nil, ErrStatsUnavailable
 }

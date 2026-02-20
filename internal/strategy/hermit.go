@@ -15,10 +15,8 @@ import (
 	"github.com/block/cachew/internal/strategy/handler"
 )
 
-const hermitStrategyName = "hermit"
-
 func RegisterHermit(r *Registry) {
-	Register(r, hermitStrategyName, "Caches Hermit package downloads.", func(ctx context.Context, config HermitConfig, c cache.Cache, mux Mux) (*Hermit, error) {
+	Register(r, "hermit", "Caches Hermit package downloads.", func(ctx context.Context, config HermitConfig, c cache.Cache, mux Mux) (*Hermit, error) {
 		return NewHermit(ctx, config, nil, c, mux)
 	})
 }
@@ -72,11 +70,10 @@ func NewHermit(ctx context.Context, config HermitConfig, _ jobscheduler.Schedule
 	return s, nil
 }
 
-func (s *Hermit) String() string { return hermitStrategyName }
+func (s *Hermit) String() string { return "hermit" }
 
 func (s *Hermit) createDirectHandler(c cache.Cache) http.Handler {
 	return handler.New(s.client, c).
-		StrategyName(hermitStrategyName).
 		CacheKey(func(r *http.Request) string {
 			return s.buildOriginalURL(r)
 		}).
@@ -94,7 +91,6 @@ func (s *Hermit) createRedirectHandler(isInternalRedirect bool, c cache.Cache) h
 	}
 
 	return handler.New(s.client, cacheBackend).
-		StrategyName(hermitStrategyName).
 		CacheKey(func(r *http.Request) string {
 			return s.buildGitHubURL(r)
 		}).

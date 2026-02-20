@@ -15,9 +15,6 @@ import (
 	"github.com/block/cachew/internal/logging"
 )
 
-// APIV1Name is the strategy name used for cache prefixing.
-const APIV1Name = "apiv1"
-
 func RegisterAPIV1(r *Registry) {
 	Register(r, "apiv1", "The stable API of the cache server.", NewAPIV1)
 }
@@ -52,7 +49,7 @@ func (d *APIV1) statObject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	headers, err := d.cache.Stat(r.Context(), APIV1Name, key)
+	headers, err := d.cache.Stat(r.Context(), key)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			http.Error(w, "Cache object not found", http.StatusNotFound)
@@ -73,7 +70,7 @@ func (d *APIV1) getObject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cr, headers, err := d.cache.Open(r.Context(), APIV1Name, key)
+	cr, headers, err := d.cache.Open(r.Context(), key)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			http.Error(w, "Cache object not found", http.StatusNotFound)
@@ -114,7 +111,7 @@ func (d *APIV1) putObject(w http.ResponseWriter, r *http.Request) {
 	// Extract and filter headers from request
 	headers := cache.FilterTransportHeaders(r.Header)
 
-	cw, err := d.cache.Create(r.Context(), APIV1Name, key, headers, ttl)
+	cw, err := d.cache.Create(r.Context(), key, headers, ttl)
 	if err != nil {
 		d.httpError(w, http.StatusInternalServerError, err, "Failed to create cache writer", slog.String("key", key.String()))
 		return
@@ -138,7 +135,7 @@ func (d *APIV1) deleteObject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err = d.cache.Delete(r.Context(), APIV1Name, key)
+	err = d.cache.Delete(r.Context(), key)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			http.Error(w, "Cache object not found", http.StatusNotFound)

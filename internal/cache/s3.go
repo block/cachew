@@ -41,9 +41,10 @@ type S3Config struct {
 }
 
 type S3 struct {
-	logger *slog.Logger
-	config S3Config
-	client *minio.Client
+	logger    *slog.Logger
+	config    S3Config
+	namespace string
+	client    *minio.Client
 }
 
 var _ Cache = (*S3)(nil)
@@ -156,21 +157,21 @@ func (s *S3) Close() error {
 	return nil
 }
 
-func (s *S3) keyToPath(strategyName string, key Key) string {
+func (s *S3) keyToPath(namespace string, key Key) string {
 	hexKey := key.String()
 	prefix := ""
 
 	// Add strategy name as prefix if available
-	if strategyName != "" {
-		prefix = strategyName + "/"
+	if namespace != "" {
+		prefix = namespace + "/"
 	}
 
 	// Use first two hex digits as directory, full hex as filename
 	return prefix + hexKey[:2] + "/" + hexKey
 }
 
-func (s *S3) Stat(ctx context.Context, strategyName string, key Key) (http.Header, error) {
-	objectName := s.keyToPath(strategyName, key)
+func (s *S3) Stat(ctx context.Context, key Key) (http.Header, error) {
+	objectName := s.keyToPath(s.namespace, key)
 
 	// Get object info to check metadata
 	objInfo, err := s.client.StatObject(ctx, s.config.Bucket, objectName, minio.StatObjectOptions{})
@@ -190,7 +191,7 @@ func (s *S3) Stat(ctx context.Context, strategyName string, key Key) (http.Heade
 		if err := expiresAt.UnmarshalText([]byte(expiresAtStr)); err == nil {
 			if time.Now().After(expiresAt) {
 				// Object expired, delete it and return not found
-				return nil, errors.Join(os.ErrNotExist, s.Delete(ctx, strategyName, key))
+				return nil, errors.Join(os.ErrNotExist, s.Delete(ctx, key))
 			}
 		}
 	}
@@ -212,8 +213,8 @@ func (s *S3) Stat(ctx context.Context, strategyName string, key Key) (http.Heade
 	return headers, nil
 }
 
-func (s *S3) Open(ctx context.Context, strategyName string, key Key) (io.ReadCloser, http.Header, error) {
-	objectName := s.keyToPath(strategyName, key)
+func (s *S3) Open(ctx context.Context, key Key) (io.ReadCloser, http.Header, error) {
+	objectName := s.keyToPath(s.namespace, key)
 
 	// Get object info to retrieve metadata and check expiration
 	objInfo, err := s.client.StatObject(ctx, s.config.Bucket, objectName, minio.StatObjectOptions{})
@@ -231,7 +232,7 @@ func (s *S3) Open(ctx context.Context, strategyName string, key Key) (io.ReadClo
 		var expiresAt time.Time
 		if err := expiresAt.UnmarshalText([]byte(expiresAtStr)); err == nil {
 			if time.Now().After(expiresAt) {
-				return nil, nil, errors.Join(os.ErrNotExist, s.Delete(ctx, strategyName, key))
+				return nil, nil, errors.Join(os.ErrNotExist, s.Delete(ctx, key))
 			}
 		}
 	}
@@ -282,7 +283,7 @@ func (r *s3Reader) Close() error {
 	return errors.WithStack(r.obj.Close())
 }
 
-func (s *S3) Create(ctx context.Context, strategyName string, key Key, headers http.Header, ttl time.Duration) (io.WriteCloser, error) {
+func (s *S3) Create(ctx context.Context, key Key, headers http.Header, ttl time.Duration) (io.WriteCloser, error) {
 	if ttl > s.config.MaxTTL || ttl == 0 {
 		ttl = s.config.MaxTTL
 	}
@@ -296,14 +297,14 @@ func (s *S3) Create(ctx context.Context, strategyName string, key Key, headers h
 	pr, pw := io.Pipe()
 
 	writer := &s3Writer{
-		s3:           s,
-		key:          key,
-		strategyName: strategyName,
-		pipe:         pw,
-		expiresAt:    expiresAt,
-		headers:      clonedHeaders,
-		ctx:          ctx,
-		errCh:        make(chan error, 1),
+		s3:        s,
+		key:       key,
+		namespace: s.namespace,
+		pipe:      pw,
+		expiresAt: expiresAt,
+		headers:   clonedHeaders,
+		ctx:       ctx,
+		errCh:     make(chan error, 1),
 	}
 
 	// Start upload in background goroutine
@@ -312,8 +313,8 @@ func (s *S3) Create(ctx context.Context, strategyName string, key Key, headers h
 	return writer, nil
 }
 
-func (s *S3) Delete(ctx context.Context, strategyName string, key Key) error {
-	objectName := s.keyToPath(strategyName, key)
+func (s *S3) Delete(ctx context.Context, key Key) error {
+	objectName := s.keyToPath(s.namespace, key)
 
 	err := s.client.RemoveObject(ctx, s.config.Bucket, objectName, minio.RemoveObjectOptions{})
 	if err != nil {
@@ -330,15 +331,15 @@ func (s *S3) Stats(_ context.Context) (Stats, error) {
 }
 
 type s3Writer struct {
-	s3           *S3
-	key          Key
-	strategyName string
-	pipe         *io.PipeWriter
-	expiresAt    time.Time
-	headers      http.Header
-	ctx          context.Context
-	errCh        chan error
-	uploadErr    error
+	s3        *S3
+	key       Key
+	namespace string
+	pipe      *io.PipeWriter
+	expiresAt time.Time
+	headers   http.Header
+	ctx       context.Context
+	errCh     chan error
+	uploadErr error
 }
 
 func (w *s3Writer) Write(p []byte) (int, error) {
@@ -385,7 +386,7 @@ func (w *s3Writer) upload(pr *io.PipeReader) {
 		_ = pr.CloseWithError(uploadErr)
 	}()
 
-	objectName := w.s3.keyToPath(w.strategyName, w.key)
+	objectName := w.s3.keyToPath(w.namespace, w.key)
 
 	// Prepare user metadata
 	userMetadata := make(map[string]string)
@@ -438,4 +439,17 @@ func (w *s3Writer) upload(pr *io.PipeReader) {
 	}
 
 	w.errCh <- nil
+}
+
+// Namespace creates a namespaced view of the S3 cache.
+func (s *S3) Namespace(namespace string) Cache {
+	c := *s
+	c.namespace = namespace
+	return &c
+}
+
+// ListNamespaces returns all unique namespaces in the S3 cache.
+// Not implemented for S3 - would require listing all objects.
+func (s *S3) ListNamespaces(_ context.Context) ([]string, error) {
+	return nil, ErrStatsUnavailable
 }

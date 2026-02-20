@@ -12,9 +12,9 @@ import (
 
 //nolint:gochecknoglobals
 var (
-	ttlBucketName      = []byte("ttl")
-	headersBucketName  = []byte("headers")
-	strategyBucketName = []byte("strategy")
+	ttlBucketName       = []byte("ttl")
+	headersBucketName   = []byte("headers")
+	namespaceBucketName = []byte("namespace")
 )
 
 // diskMetaDB manages expiration times and headers for cache entries using bbolt.
@@ -38,7 +38,7 @@ func newDiskMetaDB(dbPath string) (*diskMetaDB, error) {
 		if _, err := tx.CreateBucketIfNotExists(headersBucketName); err != nil {
 			return errors.WithStack(err)
 		}
-		if _, err := tx.CreateBucketIfNotExists(strategyBucketName); err != nil {
+		if _, err := tx.CreateBucketIfNotExists(namespaceBucketName); err != nil {
 			return errors.WithStack(err)
 		}
 		return nil
@@ -61,7 +61,7 @@ func (s *diskMetaDB) setTTL(key Key, expiresAt time.Time) error {
 	}))
 }
 
-func (s *diskMetaDB) set(key Key, strategyName string, expiresAt time.Time, headers http.Header) error {
+func (s *diskMetaDB) set(key Key, namespace string, expiresAt time.Time, headers http.Header) error {
 	ttlBytes, err := expiresAt.MarshalBinary()
 	if err != nil {
 		return errors.Errorf("failed to marshal TTL: %w", err)
@@ -83,8 +83,8 @@ func (s *diskMetaDB) set(key Key, strategyName string, expiresAt time.Time, head
 			return errors.WithStack(err)
 		}
 
-		strategyBucket := tx.Bucket(strategyBucketName)
-		return errors.WithStack(strategyBucket.Put(key[:], []byte(strategyName)))
+		namespaceBucket := tx.Bucket(namespaceBucketName)
+		return errors.WithStack(namespaceBucket.Put(key[:], []byte(namespace)))
 	}))
 }
 
@@ -126,8 +126,8 @@ func (s *diskMetaDB) delete(key Key) error {
 			return errors.WithStack(err)
 		}
 
-		strategyBucket := tx.Bucket(strategyBucketName)
-		return errors.WithStack(strategyBucket.Delete(key[:]))
+		namespaceBucket := tx.Bucket(namespaceBucketName)
+		return errors.WithStack(namespaceBucket.Delete(key[:]))
 	}))
 }
 
@@ -138,7 +138,7 @@ func (s *diskMetaDB) deleteAll(keys []Key) error {
 	return errors.WithStack(s.db.Update(func(tx *bbolt.Tx) error {
 		ttlBucket := tx.Bucket(ttlBucketName)
 		headersBucket := tx.Bucket(headersBucketName)
-		strategyBucket := tx.Bucket(strategyBucketName)
+		namespaceBucket := tx.Bucket(namespaceBucketName)
 
 		for _, key := range keys {
 			if err := ttlBucket.Delete(key[:]); err != nil {
@@ -147,21 +147,21 @@ func (s *diskMetaDB) deleteAll(keys []Key) error {
 			if err := headersBucket.Delete(key[:]); err != nil {
 				return errors.Errorf("failed to delete headers: %w", err)
 			}
-			if err := strategyBucket.Delete(key[:]); err != nil {
-				return errors.Errorf("failed to delete strategy: %w", err)
+			if err := namespaceBucket.Delete(key[:]); err != nil {
+				return errors.Errorf("failed to delete namespace: %w", err)
 			}
 		}
 		return nil
 	}))
 }
 
-func (s *diskMetaDB) walk(fn func(key Key, strategyName string, expiresAt time.Time) error) error {
+func (s *diskMetaDB) walk(fn func(key Key, namespace string, expiresAt time.Time) error) error {
 	return errors.WithStack(s.db.View(func(tx *bbolt.Tx) error {
 		ttlBucket := tx.Bucket(ttlBucketName)
 		if ttlBucket == nil {
 			return nil
 		}
-		strategyBucket := tx.Bucket(strategyBucketName)
+		namespaceBucket := tx.Bucket(namespaceBucketName)
 		return ttlBucket.ForEach(func(k, v []byte) error {
 			if len(k) != 32 {
 				return nil
@@ -172,13 +172,13 @@ func (s *diskMetaDB) walk(fn func(key Key, strategyName string, expiresAt time.T
 			if err := expiresAt.UnmarshalBinary(v); err != nil {
 				return nil //nolint:nilerr
 			}
-			strategyName := ""
-			if strategyBucket != nil {
-				if strategyBytes := strategyBucket.Get(k); strategyBytes != nil {
-					strategyName = string(strategyBytes)
+			namespace := ""
+			if namespaceBucket != nil {
+				if namespaceBytes := namespaceBucket.Get(k); namespaceBytes != nil {
+					namespace = string(namespaceBytes)
 				}
 			}
-			return fn(key, strategyName, expiresAt)
+			return fn(key, namespace, expiresAt)
 		})
 	}))
 }
@@ -201,4 +201,29 @@ func (s *diskMetaDB) close() error {
 		return errors.Errorf("failed to close bbolt database: %w", err)
 	}
 	return nil
+}
+
+func (s *diskMetaDB) listNamespaces() ([]string, error) {
+	namespaceSet := make(map[string]bool)
+	err := s.db.View(func(tx *bbolt.Tx) error {
+		namespaceBucket := tx.Bucket(namespaceBucketName)
+		if namespaceBucket == nil {
+			return nil
+		}
+		return namespaceBucket.ForEach(func(_, v []byte) error {
+			if len(v) > 0 {
+				namespaceSet[string(v)] = true
+			}
+			return nil
+		})
+	})
+	if err != nil {
+		return nil, errors.WithStack(err)
+	}
+
+	namespaces := make([]string, 0, len(namespaceSet))
+	for ns := range namespaceSet {
+		namespaces = append(namespaces, ns)
+	}
+	return namespaces, nil
 }
