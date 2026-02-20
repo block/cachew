@@ -23,7 +23,7 @@ type queueJob struct {
 	run   func(ctx context.Context) error
 }
 
-func (j *queueJob) String() string                { return fmt.Sprintf("job-%s-%s", j.queue, j.id) }
+func (j *queueJob) String() string                { return fmt.Sprintf("job-%s-%s", j.id, j.queue) }
 func (j *queueJob) Run(ctx context.Context) error { return errors.WithStack(j.run(ctx)) }
 
 // Scheduler runs background jobs concurrently across multiple serialised queues.
