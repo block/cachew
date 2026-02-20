@@ -37,6 +37,7 @@ func NewAPIV1(ctx context.Context, _ struct{}, cache cache.Cache, mux Mux) (*API
 	mux.Handle("POST /api/v1/object/{key}", http.HandlerFunc(s.putObject))
 	mux.Handle("DELETE /api/v1/object/{key}", http.HandlerFunc(s.deleteObject))
 	mux.Handle("GET /api/v1/stats", http.HandlerFunc(s.getStats))
+	mux.Handle("GET /api/v1/namespaces", http.HandlerFunc(s.getNamespaces))
 	return s, nil
 }
 
@@ -160,6 +161,19 @@ func (d *APIV1) getStats(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(stats); err != nil {
 		d.logger.Error("Failed to encode stats response", slog.String("error", err.Error()))
+	}
+}
+
+func (d *APIV1) getNamespaces(w http.ResponseWriter, r *http.Request) {
+	namespaces, err := d.cache.ListNamespaces(r.Context())
+	if err != nil {
+		d.httpError(w, http.StatusInternalServerError, err, "Failed to list namespaces")
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(namespaces); err != nil {
+		d.logger.Error("Failed to encode namespaces response", slog.String("error", err.Error()))
 	}
 }
 

@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"bytes"
 	"encoding/json"
 	"io/fs"
 	"net/http"
@@ -20,6 +21,16 @@ var (
 // diskMetaDB manages expiration times and headers for cache entries using bbolt.
 type diskMetaDB struct {
 	db *bbolt.DB
+}
+
+// compositeKey creates a unique database key from namespace and cache key.
+func compositeKey(namespace string, key Key) []byte {
+	if namespace == "" {
+		return key[:]
+	}
+	// Format: "namespace/hexkey"
+	hexKey := key.String()
+	return []byte(namespace + "/" + hexKey)
 }
 
 // newDiskMetaDB creates a new bbolt-backed metadata storage for the disk cache.
@@ -49,15 +60,16 @@ func newDiskMetaDB(dbPath string) (*diskMetaDB, error) {
 	return &diskMetaDB{db: db}, nil
 }
 
-func (s *diskMetaDB) setTTL(key Key, expiresAt time.Time) error {
+func (s *diskMetaDB) setTTL(namespace string, key Key, expiresAt time.Time) error {
 	ttlBytes, err := expiresAt.MarshalBinary()
 	if err != nil {
 		return errors.Errorf("failed to marshal TTL: %w", err)
 	}
 
+	dbKey := compositeKey(namespace, key)
 	return errors.WithStack(s.db.Update(func(tx *bbolt.Tx) error {
 		ttlBucket := tx.Bucket(ttlBucketName)
-		return errors.WithStack(ttlBucket.Put(key[:], ttlBytes))
+		return errors.WithStack(ttlBucket.Put(dbKey, ttlBytes))
 	}))
 }
 
@@ -72,27 +84,29 @@ func (s *diskMetaDB) set(key Key, namespace string, expiresAt time.Time, headers
 		return errors.Errorf("failed to encode headers: %w", err)
 	}
 
+	dbKey := compositeKey(namespace, key)
 	return errors.WithStack(s.db.Update(func(tx *bbolt.Tx) error {
 		ttlBucket := tx.Bucket(ttlBucketName)
-		if err := ttlBucket.Put(key[:], ttlBytes); err != nil {
+		if err := ttlBucket.Put(dbKey, ttlBytes); err != nil {
 			return errors.WithStack(err)
 		}
 
 		headersBucket := tx.Bucket(headersBucketName)
-		if err := headersBucket.Put(key[:], headersBytes); err != nil {
+		if err := headersBucket.Put(dbKey, headersBytes); err != nil {
 			return errors.WithStack(err)
 		}
 
 		namespaceBucket := tx.Bucket(namespaceBucketName)
-		return errors.WithStack(namespaceBucket.Put(key[:], []byte(namespace)))
+		return errors.WithStack(namespaceBucket.Put(dbKey, []byte(namespace)))
 	}))
 }
 
-func (s *diskMetaDB) getTTL(key Key) (time.Time, error) {
+func (s *diskMetaDB) getTTL(namespace string, key Key) (time.Time, error) {
 	var expiresAt time.Time
+	dbKey := compositeKey(namespace, key)
 	err := s.db.View(func(tx *bbolt.Tx) error {
 		bucket := tx.Bucket(ttlBucketName)
-		ttlBytes := bucket.Get(key[:])
+		ttlBytes := bucket.Get(dbKey)
 		if ttlBytes == nil {
 			return fs.ErrNotExist
 		}
@@ -101,11 +115,12 @@ func (s *diskMetaDB) getTTL(key Key) (time.Time, error) {
 	return expiresAt, errors.WithStack(err)
 }
 
-func (s *diskMetaDB) getHeaders(key Key) (http.Header, error) {
+func (s *diskMetaDB) getHeaders(namespace string, key Key) (http.Header, error) {
 	var headers http.Header
+	dbKey := compositeKey(namespace, key)
 	err := s.db.View(func(tx *bbolt.Tx) error {
 		bucket := tx.Bucket(headersBucketName)
-		headersBytes := bucket.Get(key[:])
+		headersBytes := bucket.Get(dbKey)
 		if headersBytes == nil {
 			return fs.ErrNotExist
 		}
@@ -114,25 +129,26 @@ func (s *diskMetaDB) getHeaders(key Key) (http.Header, error) {
 	return headers, errors.WithStack(err)
 }
 
-func (s *diskMetaDB) delete(key Key) error {
+func (s *diskMetaDB) delete(namespace string, key Key) error {
+	dbKey := compositeKey(namespace, key)
 	return errors.WithStack(s.db.Update(func(tx *bbolt.Tx) error {
 		ttlBucket := tx.Bucket(ttlBucketName)
-		if err := ttlBucket.Delete(key[:]); err != nil {
+		if err := ttlBucket.Delete(dbKey); err != nil {
 			return errors.WithStack(err)
 		}
 
 		headersBucket := tx.Bucket(headersBucketName)
-		if err := headersBucket.Delete(key[:]); err != nil {
+		if err := headersBucket.Delete(dbKey); err != nil {
 			return errors.WithStack(err)
 		}
 
 		namespaceBucket := tx.Bucket(namespaceBucketName)
-		return errors.WithStack(namespaceBucket.Delete(key[:]))
+		return errors.WithStack(namespaceBucket.Delete(dbKey))
 	}))
 }
 
-func (s *diskMetaDB) deleteAll(keys []Key) error {
-	if len(keys) == 0 {
+func (s *diskMetaDB) deleteAll(entries []evictEntryKey) error {
+	if len(entries) == 0 {
 		return nil
 	}
 	return errors.WithStack(s.db.Update(func(tx *bbolt.Tx) error {
@@ -140,14 +156,15 @@ func (s *diskMetaDB) deleteAll(keys []Key) error {
 		headersBucket := tx.Bucket(headersBucketName)
 		namespaceBucket := tx.Bucket(namespaceBucketName)
 
-		for _, key := range keys {
-			if err := ttlBucket.Delete(key[:]); err != nil {
+		for _, entry := range entries {
+			dbKey := compositeKey(entry.namespace, entry.key)
+			if err := ttlBucket.Delete(dbKey); err != nil {
 				return errors.Errorf("failed to delete TTL: %w", err)
 			}
-			if err := headersBucket.Delete(key[:]); err != nil {
+			if err := headersBucket.Delete(dbKey); err != nil {
 				return errors.Errorf("failed to delete headers: %w", err)
 			}
-			if err := namespaceBucket.Delete(key[:]); err != nil {
+			if err := namespaceBucket.Delete(dbKey); err != nil {
 				return errors.Errorf("failed to delete namespace: %w", err)
 			}
 		}
@@ -161,23 +178,35 @@ func (s *diskMetaDB) walk(fn func(key Key, namespace string, expiresAt time.Time
 		if ttlBucket == nil {
 			return nil
 		}
-		namespaceBucket := tx.Bucket(namespaceBucketName)
 		return ttlBucket.ForEach(func(k, v []byte) error {
-			if len(k) != 32 {
+			var namespace string
+			var key Key
+
+			// Check format: composite "namespace/hexkey" or raw 32-byte key
+			slashIdx := bytes.IndexByte(k, '/')
+			switch {
+			case slashIdx >= 0:
+				// Composite key: "namespace/hexkey"
+				namespace = string(k[:slashIdx])
+				hexKey := string(k[slashIdx+1:])
+				if len(hexKey) != 64 {
+					return nil
+				}
+				if err := key.UnmarshalText([]byte(hexKey)); err != nil {
+					return nil //nolint:nilerr
+				}
+			case len(k) == 32:
+				// Raw key (empty namespace)
+				copy(key[:], k)
+			default:
 				return nil
 			}
-			var key Key
-			copy(key[:], k)
+
 			var expiresAt time.Time
 			if err := expiresAt.UnmarshalBinary(v); err != nil {
 				return nil //nolint:nilerr
 			}
-			namespace := ""
-			if namespaceBucket != nil {
-				if namespaceBytes := namespaceBucket.Get(k); namespaceBytes != nil {
-					namespace = string(namespaceBytes)
-				}
-			}
+
 			return fn(key, namespace, expiresAt)
 		})
 	}))

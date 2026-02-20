@@ -195,7 +195,7 @@ func (d *Disk) Delete(_ context.Context, key Key) error {
 
 	// Check if file is expired
 	expired := false
-	expiresAt, err := d.db.getTTL(key)
+	expiresAt, err := d.db.getTTL(d.namespace, key)
 	if err == nil && time.Now().After(expiresAt) {
 		expired = true
 	}
@@ -210,7 +210,7 @@ func (d *Disk) Delete(_ context.Context, key Key) error {
 	}
 
 	// Remove metadata
-	if err := d.db.delete(key); err != nil {
+	if err := d.db.delete(d.namespace, key); err != nil {
 		return errors.Errorf("failed to delete TTL metadata: %w", err)
 	}
 
@@ -230,7 +230,7 @@ func (d *Disk) Stat(ctx context.Context, key Key) (http.Header, error) {
 		return nil, errors.Errorf("failed to stat file: %w", err)
 	}
 
-	expiresAt, err := d.db.getTTL(key)
+	expiresAt, err := d.db.getTTL(d.namespace, key)
 	if err != nil {
 		return nil, errors.Errorf("failed to get TTL: %w", err)
 	}
@@ -239,7 +239,7 @@ func (d *Disk) Stat(ctx context.Context, key Key) (http.Header, error) {
 		return nil, errors.Join(fs.ErrNotExist, d.Delete(ctx, key))
 	}
 
-	headers, err := d.db.getHeaders(key)
+	headers, err := d.db.getHeaders(d.namespace, key)
 	if err != nil {
 		return nil, errors.Errorf("failed to get headers: %w", err)
 	}
@@ -256,7 +256,7 @@ func (d *Disk) Open(ctx context.Context, key Key) (io.ReadCloser, http.Header, e
 		return nil, nil, errors.Errorf("failed to open file: %w", err)
 	}
 
-	expiresAt, err := d.db.getTTL(key)
+	expiresAt, err := d.db.getTTL(d.namespace, key)
 	if err != nil {
 		return nil, nil, errors.Join(err, f.Close())
 	}
@@ -266,7 +266,7 @@ func (d *Disk) Open(ctx context.Context, key Key) (io.ReadCloser, http.Header, e
 		return nil, nil, errors.Join(fs.ErrNotExist, f.Close(), d.Delete(ctx, key))
 	}
 
-	headers, err := d.db.getHeaders(key)
+	headers, err := d.db.getHeaders(d.namespace, key)
 	if err != nil {
 		return nil, nil, errors.Join(errors.Errorf("failed to get headers: %w", err), f.Close())
 	}
@@ -275,7 +275,7 @@ func (d *Disk) Open(ctx context.Context, key Key) (io.ReadCloser, http.Header, e
 	ttl := min(expiresAt.Sub(now), d.config.MaxTTL)
 	newExpiresAt := now.Add(ttl)
 
-	if err := d.db.setTTL(key, newExpiresAt); err != nil {
+	if err := d.db.setTTL(d.namespace, key, newExpiresAt); err != nil {
 		return nil, nil, errors.Join(errors.Errorf("failed to update expiration time: %w", err), f.Close())
 	}
 
@@ -314,17 +314,23 @@ func (d *Disk) evictionLoop(ctx context.Context) {
 	}
 }
 
-func (d *Disk) evict() error {
-	type fileInfo struct {
-		key        Key
-		path       string
-		size       int64
-		expiresAt  time.Time
-		accessedAt time.Time
-	}
+type evictFileInfo struct {
+	namespace  string
+	key        Key
+	path       string
+	size       int64
+	expiresAt  time.Time
+	accessedAt time.Time
+}
 
-	var remainingFiles []fileInfo
-	var expiredKeys []Key
+type evictEntryKey struct {
+	namespace string
+	key       Key
+}
+
+func (d *Disk) evict() error {
+	var remainingFiles []evictFileInfo
+	var expiredEntries []evictEntryKey
 	now := time.Now()
 
 	err := d.db.walk(func(key Key, namespace string, expiresAt time.Time) error {
@@ -334,7 +340,7 @@ func (d *Disk) evict() error {
 		info, err := os.Stat(fullPath)
 		if err != nil {
 			if errors.Is(err, fs.ErrNotExist) {
-				expiredKeys = append(expiredKeys, key)
+				expiredEntries = append(expiredEntries, evictEntryKey{namespace, key})
 			}
 			return nil
 		}
@@ -343,10 +349,11 @@ func (d *Disk) evict() error {
 			if err := os.Remove(fullPath); err != nil && !errors.Is(err, fs.ErrNotExist) {
 				return errors.Errorf("failed to delete expired file %s: %w", path, err)
 			}
-			expiredKeys = append(expiredKeys, key)
+			expiredEntries = append(expiredEntries, evictEntryKey{namespace, key})
 			d.size.Add(-info.Size())
 		} else {
-			remainingFiles = append(remainingFiles, fileInfo{
+			remainingFiles = append(remainingFiles, evictFileInfo{
+				namespace:  namespace,
 				key:        key,
 				path:       path,
 				size:       info.Size(),
@@ -360,10 +367,24 @@ func (d *Disk) evict() error {
 		return errors.Errorf("failed to walk TTL entries: %w", err)
 	}
 
-	if err := d.db.deleteAll(expiredKeys); err != nil {
-		return errors.Errorf("failed to delete TTL metadata: %w", err)
+	if err := d.deleteExpiredEntries(expiredEntries); err != nil {
+		return err
 	}
 
+	return d.evictBySize(remainingFiles)
+}
+
+func (d *Disk) deleteExpiredEntries(expiredEntries []evictEntryKey) error {
+	if len(expiredEntries) == 0 {
+		return nil
+	}
+	if err := d.db.deleteAll(expiredEntries); err != nil {
+		return errors.Errorf("failed to delete expired metadata: %w", err)
+	}
+	return nil
+}
+
+func (d *Disk) evictBySize(remainingFiles []evictFileInfo) error {
 	limitBytes := int64(d.config.LimitMB) * 1024 * 1024
 	if d.size.Load() <= limitBytes {
 		return nil
@@ -374,7 +395,7 @@ func (d *Disk) evict() error {
 		return remainingFiles[i].accessedAt.Before(remainingFiles[j].accessedAt)
 	})
 
-	var sizeEvictedKeys []Key
+	var sizeEvictedEntries []evictEntryKey
 	for _, f := range remainingFiles {
 		if d.size.Load() <= limitBytes {
 			break
@@ -384,12 +405,16 @@ func (d *Disk) evict() error {
 		if err := os.Remove(fullPath); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return errors.Errorf("failed to delete file during size eviction %s: %w", f.path, err)
 		}
-		sizeEvictedKeys = append(sizeEvictedKeys, f.key)
+		sizeEvictedEntries = append(sizeEvictedEntries, evictEntryKey{f.namespace, f.key})
 		d.size.Add(-f.size)
 	}
 
-	if err := d.db.deleteAll(sizeEvictedKeys); err != nil {
-		return errors.Errorf("failed to delete TTL metadata: %w", err)
+	if len(sizeEvictedEntries) == 0 {
+		return nil
+	}
+
+	if err := d.db.deleteAll(sizeEvictedEntries); err != nil {
+		return errors.Errorf("failed to delete size-evicted metadata: %w", err)
 	}
 
 	return nil
