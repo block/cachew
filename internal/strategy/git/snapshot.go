@@ -80,5 +80,5 @@ func (s *Strategy) scheduleSnapshotJobs(repo *gitclone.Repository) {
 }
 
 func (s *Strategy) handleSnapshotRequest(w http.ResponseWriter, r *http.Request, host, pathValue string) {
-	s.serveCachedArtifact(w, r, host, pathValue, "snapshot")
+	s.serveCachedArtifact(w, r, host, pathValue, "snapshot.tar.zst", "snapshot")
 }

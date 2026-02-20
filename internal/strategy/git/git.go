@@ -170,7 +170,7 @@ func (s *Strategy) handleRequest(w http.ResponseWriter, r *http.Request) {
 		slog.String("host", host),
 		slog.String("path", pathValue))
 
-	if strings.HasSuffix(pathValue, "/snapshot") {
+	if strings.HasSuffix(pathValue, "/snapshot.tar.zst") {
 		s.handleSnapshotRequest(w, r, host, pathValue)
 		return
 	}
@@ -345,7 +345,7 @@ func ExtractRepoPath(pathValue string) string {
 	return repoPath
 }
 
-func (s *Strategy) serveCachedArtifact(w http.ResponseWriter, r *http.Request, host, pathValue, artifact string) {
+func (s *Strategy) serveCachedArtifact(w http.ResponseWriter, r *http.Request, host, pathValue, urlSuffix, artifact string) {
 	ctx := r.Context()
 	logger := logging.FromContext(ctx)
 
@@ -353,7 +353,7 @@ func (s *Strategy) serveCachedArtifact(w http.ResponseWriter, r *http.Request, h
 		slog.String("host", host),
 		slog.String("path", pathValue))
 
-	pathValue = strings.TrimSuffix(pathValue, "/"+artifact)
+	pathValue = strings.TrimSuffix(pathValue, "/"+urlSuffix)
 	repoPath := ExtractRepoPath(pathValue)
 	upstreamURL := "https://" + host + "/" + repoPath
 	cacheKey := cache.NewKey(upstreamURL + "." + artifact)
