@@ -56,6 +56,7 @@ type Config struct {
 	MirrorRoot       string        `hcl:"mirror-root" help:"Directory to store git clones."`
 	FetchInterval    time.Duration `hcl:"fetch-interval,optional" help:"How often to fetch from upstream in minutes." default:"15m"`
 	RefCheckInterval time.Duration `hcl:"ref-check-interval,optional" help:"How long to cache ref checks." default:"10s"`
+	Maintenance      bool          `hcl:"maintenance,optional" help:"Enable git maintenance scheduling for mirror repos." default:"false"`
 }
 
 // CredentialProvider provides credentials for git operations.
@@ -118,6 +119,12 @@ func NewManager(ctx context.Context, config Config, credentialProvider Credentia
 
 	if err := os.MkdirAll(config.MirrorRoot, 0o750); err != nil {
 		return nil, errors.Wrap(err, "create root directory")
+	}
+
+	if config.Maintenance {
+		if err := startMaintenance(ctx); err != nil {
+			logging.FromContext(ctx).WarnContext(ctx, "Failed to start git maintenance scheduler", "error", err)
+		}
 	}
 
 	logging.FromContext(ctx).InfoContext(ctx, "Git clone manager initialised",
@@ -228,6 +235,12 @@ func (m *Manager) DiscoverExisting(ctx context.Context) ([]*Repository, error) {
 
 		if err := configureMirror(ctx, path); err != nil {
 			return errors.Wrapf(err, "configure mirror for %s", upstreamURL)
+		}
+
+		if m.config.Maintenance {
+			if err := registerMaintenance(ctx, path); err != nil {
+				return errors.Wrapf(err, "register maintenance for %s", upstreamURL)
+			}
 		}
 
 		m.clonesMu.Lock()
@@ -348,6 +361,28 @@ func mirrorConfigSettings() [][2]string {
 	}
 }
 
+func registerMaintenance(ctx context.Context, repoPath string) error {
+	// #nosec G204 - repoPath is controlled by us
+	cmd := exec.CommandContext(ctx, "git", "-C", repoPath, "config", "maintenance.strategy", "incremental")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return errors.Wrapf(err, "set maintenance.strategy: %s", string(output))
+	}
+	// #nosec G204 - repoPath is controlled by us
+	cmd = exec.CommandContext(ctx, "git", "-C", repoPath, "maintenance", "register")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return errors.Wrapf(err, "maintenance register: %s", string(output))
+	}
+	return nil
+}
+
+func startMaintenance(ctx context.Context) error {
+	cmd := exec.CommandContext(ctx, "git", "maintenance", "start")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return errors.Wrapf(err, "maintenance start: %s", string(output))
+	}
+	return nil
+}
+
 func configureMirror(ctx context.Context, repoPath string) error {
 	for _, kv := range mirrorConfigSettings() {
 		// #nosec G204 - repoPath and config values are controlled by us
@@ -386,6 +421,12 @@ func (r *Repository) executeClone(ctx context.Context) error {
 
 	if err := configureMirror(ctx, r.path); err != nil {
 		return errors.Wrap(err, "configure mirror")
+	}
+
+	if r.config.Maintenance {
+		if err := registerMaintenance(ctx, r.path); err != nil {
+			return errors.Wrap(err, "register maintenance")
+		}
 	}
 
 	return nil
