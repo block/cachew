@@ -148,6 +148,9 @@ type Stats struct {
 type Cache interface {
 	// String describes the Cache implementation.
 	String() string
+	// Namespace creates a namespaced view of this cache.
+	// All operations on the returned cache will use the given namespace prefix.
+	Namespace(namespace string) Cache
 	// Stat returns the headers of an existing object in the cache.
 	//
 	// Expired files MUST not be returned.
@@ -173,6 +176,8 @@ type Cache interface {
 	Delete(ctx context.Context, key Key) error
 	// Stats returns health and usage statistics for the cache.
 	Stats(ctx context.Context) (Stats, error)
+	// ListNamespaces returns all unique namespaces in the cache.
+	ListNamespaces(ctx context.Context) ([]string, error)
 	// Close the Cache.
 	Close() error
 }

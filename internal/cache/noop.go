@@ -60,3 +60,13 @@ func (n *noOpWriter) Close() error {
 
 var _ Cache = (*noOpCache)(nil)
 var _ io.WriteCloser = (*noOpWriter)(nil)
+
+// Namespace creates a namespaced view (no-op for noop cache).
+func (n *noOpCache) Namespace(_ string) Cache {
+	return n
+}
+
+// ListNamespaces returns empty list for noop cache.
+func (n *noOpCache) ListNamespaces(_ context.Context) ([]string, error) {
+	return []string{}, nil
+}

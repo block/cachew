@@ -13,10 +13,13 @@ import (
 	"github.com/alecthomas/errors"
 )
 
+const defaultNamespace = "default"
+
 // Remote implements Cache as a client for the remote cache server.
 type Remote struct {
-	baseURL string
-	client  *http.Client
+	baseURL   string
+	client    *http.Client
+	namespace string
 }
 
 var _ Cache = (*Remote)(nil)
@@ -37,7 +40,11 @@ func (c *Remote) String() string { return "remote:" + c.baseURL }
 
 // Open retrieves an object from the remote.
 func (c *Remote) Open(ctx context.Context, key Key) (io.ReadCloser, http.Header, error) {
-	url := fmt.Sprintf("%s/object/%s", c.baseURL, key.String())
+	namespace := c.namespace
+	if namespace == "" {
+		namespace = defaultNamespace
+	}
+	url := fmt.Sprintf("%s/object/%s/%s", c.baseURL, namespace, key.String())
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, nil, errors.Wrap(err, "failed to create request")
@@ -66,7 +73,11 @@ func (c *Remote) Open(ctx context.Context, key Key) (io.ReadCloser, http.Header,
 
 // Stat retrieves headers for an object from the remote.
 func (c *Remote) Stat(ctx context.Context, key Key) (http.Header, error) {
-	url := fmt.Sprintf("%s/object/%s", c.baseURL, key.String())
+	namespace := c.namespace
+	if namespace == "" {
+		namespace = defaultNamespace
+	}
+	url := fmt.Sprintf("%s/object/%s/%s", c.baseURL, namespace, key.String())
 	req, err := http.NewRequestWithContext(ctx, http.MethodHead, url, nil)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to create request")
@@ -96,7 +107,11 @@ func (c *Remote) Stat(ctx context.Context, key Key) (http.Header, error) {
 func (c *Remote) Create(ctx context.Context, key Key, headers http.Header, ttl time.Duration) (io.WriteCloser, error) {
 	pr, pw := io.Pipe()
 
-	url := fmt.Sprintf("%s/object/%s", c.baseURL, key.String())
+	namespace := c.namespace
+	if namespace == "" {
+		namespace = defaultNamespace
+	}
+	url := fmt.Sprintf("%s/object/%s/%s", c.baseURL, namespace, key.String())
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, pr)
 	if err != nil {
 		return nil, errors.Join(errors.Wrap(err, "failed to create request"), pr.Close(), pw.Close())
@@ -136,7 +151,11 @@ func (c *Remote) Create(ctx context.Context, key Key, headers http.Header, ttl t
 
 // Delete removes an object from the remote.
 func (c *Remote) Delete(ctx context.Context, key Key) error {
-	url := fmt.Sprintf("%s/object/%s", c.baseURL, key.String())
+	namespace := c.namespace
+	if namespace == "" {
+		namespace = defaultNamespace
+	}
+	url := fmt.Sprintf("%s/object/%s/%s", c.baseURL, namespace, key.String())
 	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, url, nil)
 	if err != nil {
 		return errors.Wrap(err, "failed to create request")
@@ -222,4 +241,40 @@ func (wc *writeCloser) Close() error {
 		return errors.Wrap(err, "request failed")
 	}
 	return nil
+}
+
+// Namespace creates a namespaced view of the remote cache.
+func (c *Remote) Namespace(namespace string) Cache {
+	return &Remote{
+		baseURL:   c.baseURL,
+		client:    c.client,
+		namespace: namespace,
+	}
+}
+
+// ListNamespaces requests namespace list from the remote server.
+func (c *Remote) ListNamespaces(ctx context.Context) ([]string, error) {
+	url := c.baseURL + "/namespaces"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, errors.WithStack(err)
+	}
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return nil, errors.WithStack(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body) //nolint:errcheck
+		return nil, errors.Errorf("unexpected status %d: %s", resp.StatusCode, body)
+	}
+
+	var namespaces []string
+	if err := json.NewDecoder(resp.Body).Decode(&namespaces); err != nil {
+		return nil, errors.WithStack(err)
+	}
+
+	return namespaces, nil
 }

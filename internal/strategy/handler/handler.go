@@ -97,12 +97,14 @@ func (h *Handler) TTL(f func(*http.Request) time.Duration) *Handler {
 // 4. If not cached, transform the request and fetch from upstream
 // 5. Cache the response while streaming to the client.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	logger := logging.FromContext(r.Context())
+	ctx := r.Context()
+
+	logger := logging.FromContext(ctx)
 
 	cacheKeyStr := h.cacheKeyFunc(r)
 	key := cache.NewKey(cacheKeyStr)
 
-	logger.DebugContext(r.Context(), "Processing request", slog.String("cache_key", cacheKeyStr))
+	logger.DebugContext(ctx, "Processing request", slog.String("cache_key", cacheKeyStr))
 
 	if h.serveCached(w, r, key, logger) {
 		return
