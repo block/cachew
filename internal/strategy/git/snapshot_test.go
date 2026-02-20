@@ -4,6 +4,9 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -14,6 +17,7 @@ import (
 	"github.com/block/cachew/internal/githubapp"
 	"github.com/block/cachew/internal/jobscheduler"
 	"github.com/block/cachew/internal/logging"
+	"github.com/block/cachew/internal/snapshot"
 	"github.com/block/cachew/internal/strategy/git"
 )
 
@@ -75,38 +79,89 @@ func TestSnapshotHTTPEndpoint(t *testing.T) {
 	assert.Equal(t, 404, w.Code)
 }
 
-func TestSnapshotInterval(t *testing.T) {
+// createTestMirrorRepo creates a bare mirror-style repo at mirrorPath with one commit.
+func createTestMirrorRepo(t *testing.T, mirrorPath string) {
+	t.Helper()
+	tmpWork := t.TempDir()
+
+	for _, args := range [][]string{
+		{"init", tmpWork},
+		{"-C", tmpWork, "config", "user.email", "test@test.com"},
+		{"-C", tmpWork, "config", "user.name", "Test"},
+	} {
+		cmd := exec.Command("git", args...)
+		output, err := cmd.CombinedOutput()
+		assert.NoError(t, err, string(output))
+	}
+
+	assert.NoError(t, os.WriteFile(filepath.Join(tmpWork, "hello.txt"), []byte("hello\n"), 0o644))
+
+	for _, args := range [][]string{
+		{"-C", tmpWork, "add", "."},
+		{"-C", tmpWork, "commit", "-m", "initial"},
+		{"clone", "--mirror", tmpWork, mirrorPath},
+	} {
+		cmd := exec.Command("git", args...)
+		output, err := cmd.CombinedOutput()
+		assert.NoError(t, err, string(output))
+	}
+}
+
+func TestSnapshotGenerationViaLocalClone(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not found in PATH")
+	}
+
 	_, ctx := logging.Configure(context.Background(), logging.Config{})
 	tmpDir := t.TempDir()
+	mirrorRoot := filepath.Join(tmpDir, "mirrors")
+	upstreamURL := "https://github.com/org/repo"
 
-	tests := []struct {
-		name             string
-		snapshotInterval time.Duration
-	}{
-		{
-			name:             "CustomInterval",
-			snapshotInterval: 1 * time.Hour,
-		},
-		{
-			name:             "DefaultInterval",
-			snapshotInterval: 0,
-		},
-	}
+	// Create a mirror repo at the path the clone manager would use.
+	mirrorPath := filepath.Join(mirrorRoot, "github.com", "org", "repo")
+	createTestMirrorRepo(t, mirrorPath)
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{})
-			assert.NoError(t, err)
-			mux := newTestMux()
+	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{})
+	assert.NoError(t, err)
+	mux := newTestMux()
 
-			cm := gitclone.NewManagerProvider(ctx, gitclone.Config{
-				MirrorRoot: tmpDir,
-			}, nil)
-			s, err := git.New(ctx, git.Config{
-				SnapshotInterval: tt.snapshotInterval,
-			}, jobscheduler.New(ctx, jobscheduler.Config{}), memCache, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
-			assert.NoError(t, err)
-			assert.NotZero(t, s)
-		})
-	}
+	cm := gitclone.NewManagerProvider(ctx, gitclone.Config{MirrorRoot: mirrorRoot}, nil)
+	s, err := git.New(ctx, git.Config{}, jobscheduler.New(ctx, jobscheduler.Config{}), memCache, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
+	assert.NoError(t, err)
+
+	// GetOrCreate so the strategy knows about the repo.
+	manager, err := cm()
+	assert.NoError(t, err)
+	repo, err := manager.GetOrCreate(ctx, upstreamURL)
+	assert.NoError(t, err)
+	assert.Equal(t, gitclone.StateReady, repo.State())
+
+	// Generate the snapshot.
+	err = s.GenerateAndUploadSnapshot(ctx, repo)
+	assert.NoError(t, err)
+
+	// Verify snapshot was uploaded to cache.
+	cacheKey := cache.NewKey(upstreamURL + ".snapshot")
+	_, headers, err := memCache.Open(ctx, cacheKey)
+	assert.NoError(t, err)
+	assert.Equal(t, "application/zstd", headers.Get("Content-Type"))
+
+	// Restore the snapshot and verify it is a working (non-bare) checkout.
+	restoreDir := filepath.Join(tmpDir, "restored")
+	err = snapshot.Restore(ctx, memCache, cacheKey, restoreDir)
+	assert.NoError(t, err)
+
+	// A non-bare clone has a .git directory (not a bare repo).
+	_, err = os.Stat(filepath.Join(restoreDir, ".git"))
+	assert.NoError(t, err)
+
+	// The working tree should contain the committed file.
+	data, err := os.ReadFile(filepath.Join(restoreDir, "hello.txt"))
+	assert.NoError(t, err)
+	assert.Equal(t, "hello\n", string(data))
+
+	// Snapshot working directory should have been cleaned up.
+	snapshotWorkDir := filepath.Join(mirrorRoot, ".snapshots", "github.com", "org", "repo")
+	_, err = os.Stat(snapshotWorkDir)
+	assert.True(t, os.IsNotExist(err))
 }
