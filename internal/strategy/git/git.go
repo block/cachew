@@ -77,8 +77,10 @@ func New(
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to create clone manager")
 	}
-	if err := os.RemoveAll(filepath.Join(cloneManager.Config().MirrorRoot, ".spools")); err != nil {
-		return nil, errors.Wrap(err, "clean up stale spools")
+	for _, dir := range []string{".spools", ".snapshots"} {
+		if err := os.RemoveAll(filepath.Join(cloneManager.Config().MirrorRoot, dir)); err != nil {
+			return nil, errors.Wrapf(err, "clean up stale %s", dir)
+		}
 	}
 
 	s := &Strategy{
