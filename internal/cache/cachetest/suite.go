@@ -2,6 +2,7 @@ package cachetest
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"os"
@@ -54,6 +55,18 @@ func Suite(t *testing.T, newCache func(t *testing.T) cache.Cache) {
 
 	t.Run("LastModified", func(t *testing.T) {
 		testLastModified(t, newCache(t))
+	})
+
+	t.Run("NamespaceIsolation", func(t *testing.T) {
+		testNamespaceIsolation(t, newCache(t))
+	})
+
+	t.Run("ListNamespaces", func(t *testing.T) {
+		testListNamespaces(t, newCache(t))
+	})
+
+	t.Run("NamespaceDelete", func(t *testing.T) {
+		testNamespaceDelete(t, newCache(t))
 	})
 }
 
@@ -328,4 +341,121 @@ func testLastModified(t *testing.T, c cache.Cache) {
 	defer reader2.Close()
 
 	assert.Equal(t, explicitTime.Format(http.TimeFormat), headers2.Get("Last-Modified"))
+}
+
+func testNamespaceIsolation(t *testing.T, c cache.Cache) {
+	defer c.Close()
+	ctx := t.Context()
+
+	// Create namespace views
+	gitCache := c.Namespace("git")
+	gomodCache := c.Namespace("gomod")
+
+	// Create entries in different namespaces with same key
+	key := cache.NewKey("same-key")
+
+	// Write to git namespace
+	w, err := gitCache.Create(ctx, key, nil, time.Hour)
+	assert.NoError(t, err)
+	_, err = w.Write([]byte("git data"))
+	assert.NoError(t, err)
+	assert.NoError(t, w.Close())
+
+	// Write to gomod namespace
+	w, err = gomodCache.Create(ctx, key, nil, time.Hour)
+	assert.NoError(t, err)
+	_, err = w.Write([]byte("gomod data"))
+	assert.NoError(t, err)
+	assert.NoError(t, w.Close())
+
+	// Verify isolation - each namespace returns its own data
+	r, _, err := gitCache.Open(ctx, key)
+	assert.NoError(t, err)
+	gitData, err := io.ReadAll(r)
+	assert.NoError(t, err)
+	assert.Equal(t, "git data", string(gitData))
+	assert.NoError(t, r.Close())
+
+	r, _, err = gomodCache.Open(ctx, key)
+	assert.NoError(t, err)
+	gomodData, err := io.ReadAll(r)
+	assert.NoError(t, err)
+	assert.Equal(t, "gomod data", string(gomodData))
+	assert.NoError(t, r.Close())
+}
+
+func testListNamespaces(t *testing.T, c cache.Cache) {
+	defer c.Close()
+	ctx := t.Context()
+
+	// Initially no namespaces
+	namespaces, err := c.ListNamespaces(ctx)
+	if errors.Is(err, cache.ErrStatsUnavailable) {
+		t.Skip("Cache does not support ListNamespaces")
+	}
+	assert.NoError(t, err)
+	assert.Equal(t, 0, len(namespaces))
+
+	// Create entries in different namespaces
+	gitCache := c.Namespace("git")
+	gomodCache := c.Namespace("gomod")
+	hermitCache := c.Namespace("hermit")
+
+	for i, cacheNS := range []cache.Cache{gitCache, gomodCache, hermitCache} {
+		w, err := cacheNS.Create(ctx, cache.NewKey(string(rune('a'+i))), nil, time.Hour)
+		assert.NoError(t, err)
+		_, err = w.Write([]byte("data"))
+		assert.NoError(t, err)
+		assert.NoError(t, w.Close())
+	}
+
+	// Verify all namespaces are listed
+	namespaces, err = c.ListNamespaces(ctx)
+	assert.NoError(t, err)
+	assert.Equal(t, 3, len(namespaces))
+
+	nsMap := make(map[string]bool)
+	for _, ns := range namespaces {
+		nsMap[ns] = true
+	}
+	assert.True(t, nsMap["git"])
+	assert.True(t, nsMap["gomod"])
+	assert.True(t, nsMap["hermit"])
+}
+
+func testNamespaceDelete(t *testing.T, c cache.Cache) {
+	defer c.Close()
+	ctx := t.Context()
+
+	gitCache := c.Namespace("git")
+	gomodCache := c.Namespace("gomod")
+
+	key := cache.NewKey("test-key")
+
+	// Create entry in git namespace
+	w, err := gitCache.Create(ctx, key, nil, time.Hour)
+	assert.NoError(t, err)
+	_, err = w.Write([]byte("git data"))
+	assert.NoError(t, err)
+	assert.NoError(t, w.Close())
+
+	// Create entry in gomod namespace
+	w, err = gomodCache.Create(ctx, key, nil, time.Hour)
+	assert.NoError(t, err)
+	_, err = w.Write([]byte("gomod data"))
+	assert.NoError(t, err)
+	assert.NoError(t, w.Close())
+
+	// Delete from git namespace
+	err = gitCache.Delete(ctx, key)
+	assert.NoError(t, err)
+
+	// Verify git entry is gone
+	_, _, err = gitCache.Open(ctx, key)
+	assert.IsError(t, err, os.ErrNotExist)
+
+	// Verify gomod entry still exists
+	r, _, err := gomodCache.Open(ctx, key)
+	assert.NoError(t, err)
+	assert.NoError(t, r.Close())
 }

@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"io/fs"
 	"net/http"
+	"sort"
+	"sync"
 	"time"
 
 	"github.com/alecthomas/errors"
@@ -13,14 +15,14 @@ import (
 
 //nolint:gochecknoglobals
 var (
-	ttlBucketName       = []byte("ttl")
-	headersBucketName   = []byte("headers")
-	namespaceBucketName = []byte("namespace")
+	ttlBucketName     = []byte("ttl")
+	headersBucketName = []byte("headers")
 )
 
 // diskMetaDB manages expiration times and headers for cache entries using bbolt.
 type diskMetaDB struct {
-	db *bbolt.DB
+	db              *bbolt.DB
+	namespacesCache sync.Map // map[string]bool - concurrent-safe
 }
 
 // compositeKey creates a unique database key from namespace and cache key.
@@ -49,15 +51,31 @@ func newDiskMetaDB(dbPath string) (*diskMetaDB, error) {
 		if _, err := tx.CreateBucketIfNotExists(headersBucketName); err != nil {
 			return errors.WithStack(err)
 		}
-		if _, err := tx.CreateBucketIfNotExists(namespaceBucketName); err != nil {
-			return errors.WithStack(err)
-		}
 		return nil
 	}); err != nil {
 		return nil, errors.Join(errors.Errorf("failed to create buckets: %w", err), db.Close())
 	}
 
-	return &diskMetaDB{db: db}, nil
+	// Initialize in-memory namespace cache by scanning existing entries
+	metaDB := &diskMetaDB{db: db}
+	err = db.View(func(tx *bbolt.Tx) error {
+		ttlBucket := tx.Bucket(ttlBucketName)
+		if ttlBucket == nil {
+			return nil
+		}
+		return ttlBucket.ForEach(func(k, _ []byte) error {
+			namespace, _, found := bytes.Cut(k, []byte("/"))
+			if found && len(namespace) > 0 {
+				metaDB.namespacesCache.Store(string(namespace), true)
+			}
+			return nil
+		})
+	})
+	if err != nil {
+		return nil, errors.Join(errors.Errorf("failed to initialize namespace cache: %w", err), db.Close())
+	}
+
+	return metaDB, nil
 }
 
 func (s *diskMetaDB) setTTL(namespace string, key Key, expiresAt time.Time) error {
@@ -67,10 +85,20 @@ func (s *diskMetaDB) setTTL(namespace string, key Key, expiresAt time.Time) erro
 	}
 
 	dbKey := compositeKey(namespace, key)
-	return errors.WithStack(s.db.Update(func(tx *bbolt.Tx) error {
+	err = s.db.Update(func(tx *bbolt.Tx) error {
 		ttlBucket := tx.Bucket(ttlBucketName)
 		return errors.WithStack(ttlBucket.Put(dbKey, ttlBytes))
-	}))
+	})
+	if err != nil {
+		return errors.WithStack(err)
+	}
+
+	// Add namespace to in-memory cache
+	if namespace != "" {
+		s.namespacesCache.Store(namespace, true)
+	}
+
+	return nil
 }
 
 func (s *diskMetaDB) set(key Key, namespace string, expiresAt time.Time, headers http.Header) error {
@@ -85,20 +113,25 @@ func (s *diskMetaDB) set(key Key, namespace string, expiresAt time.Time, headers
 	}
 
 	dbKey := compositeKey(namespace, key)
-	return errors.WithStack(s.db.Update(func(tx *bbolt.Tx) error {
+	err = s.db.Update(func(tx *bbolt.Tx) error {
 		ttlBucket := tx.Bucket(ttlBucketName)
 		if err := ttlBucket.Put(dbKey, ttlBytes); err != nil {
 			return errors.WithStack(err)
 		}
 
 		headersBucket := tx.Bucket(headersBucketName)
-		if err := headersBucket.Put(dbKey, headersBytes); err != nil {
-			return errors.WithStack(err)
-		}
+		return errors.WithStack(headersBucket.Put(dbKey, headersBytes))
+	})
+	if err != nil {
+		return errors.WithStack(err)
+	}
 
-		namespaceBucket := tx.Bucket(namespaceBucketName)
-		return errors.WithStack(namespaceBucket.Put(dbKey, []byte(namespace)))
-	}))
+	// Add namespace to in-memory cache
+	if namespace != "" {
+		s.namespacesCache.Store(namespace, true)
+	}
+
+	return nil
 }
 
 func (s *diskMetaDB) getTTL(namespace string, key Key) (time.Time, error) {
@@ -138,12 +171,7 @@ func (s *diskMetaDB) delete(namespace string, key Key) error {
 		}
 
 		headersBucket := tx.Bucket(headersBucketName)
-		if err := headersBucket.Delete(dbKey); err != nil {
-			return errors.WithStack(err)
-		}
-
-		namespaceBucket := tx.Bucket(namespaceBucketName)
-		return errors.WithStack(namespaceBucket.Delete(dbKey))
+		return errors.WithStack(headersBucket.Delete(dbKey))
 	}))
 }
 
@@ -154,7 +182,6 @@ func (s *diskMetaDB) deleteAll(entries []evictEntryKey) error {
 	return errors.WithStack(s.db.Update(func(tx *bbolt.Tx) error {
 		ttlBucket := tx.Bucket(ttlBucketName)
 		headersBucket := tx.Bucket(headersBucketName)
-		namespaceBucket := tx.Bucket(namespaceBucketName)
 
 		for _, entry := range entries {
 			dbKey := compositeKey(entry.namespace, entry.key)
@@ -163,9 +190,6 @@ func (s *diskMetaDB) deleteAll(entries []evictEntryKey) error {
 			}
 			if err := headersBucket.Delete(dbKey); err != nil {
 				return errors.Errorf("failed to delete headers: %w", err)
-			}
-			if err := namespaceBucket.Delete(dbKey); err != nil {
-				return errors.Errorf("failed to delete namespace: %w", err)
 			}
 		}
 		return nil
@@ -183,16 +207,15 @@ func (s *diskMetaDB) walk(fn func(key Key, namespace string, expiresAt time.Time
 			var key Key
 
 			// Check format: composite "namespace/hexkey" or raw 32-byte key
-			slashIdx := bytes.IndexByte(k, '/')
+			before, after, found := bytes.Cut(k, []byte("/"))
 			switch {
-			case slashIdx >= 0:
+			case found:
 				// Composite key: "namespace/hexkey"
-				namespace = string(k[:slashIdx])
-				hexKey := string(k[slashIdx+1:])
-				if len(hexKey) != 64 {
+				namespace = string(before)
+				if len(after) != 64 {
 					return nil
 				}
-				if err := key.UnmarshalText([]byte(hexKey)); err != nil {
+				if err := key.UnmarshalText(after); err != nil {
 					return nil //nolint:nilerr
 				}
 			case len(k) == 32:
@@ -233,26 +256,13 @@ func (s *diskMetaDB) close() error {
 }
 
 func (s *diskMetaDB) listNamespaces() ([]string, error) {
-	namespaceSet := make(map[string]bool)
-	err := s.db.View(func(tx *bbolt.Tx) error {
-		namespaceBucket := tx.Bucket(namespaceBucketName)
-		if namespaceBucket == nil {
-			return nil
+	var namespaces []string
+	s.namespacesCache.Range(func(key, _ any) bool {
+		if ns, ok := key.(string); ok {
+			namespaces = append(namespaces, ns)
 		}
-		return namespaceBucket.ForEach(func(_, v []byte) error {
-			if len(v) > 0 {
-				namespaceSet[string(v)] = true
-			}
-			return nil
-		})
+		return true
 	})
-	if err != nil {
-		return nil, errors.WithStack(err)
-	}
-
-	namespaces := make([]string, 0, len(namespaceSet))
-	for ns := range namespaceSet {
-		namespaces = append(namespaces, ns)
-	}
+	sort.Strings(namespaces)
 	return namespaces, nil
 }

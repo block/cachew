@@ -409,15 +409,7 @@ func (d *Disk) evictBySize(remainingFiles []evictFileInfo) error {
 		d.size.Add(-f.size)
 	}
 
-	if len(sizeEvictedEntries) == 0 {
-		return nil
-	}
-
-	if err := d.db.deleteAll(sizeEvictedEntries); err != nil {
-		return errors.Errorf("failed to delete size-evicted metadata: %w", err)
-	}
-
-	return nil
+	return d.deleteExpiredEntries(sizeEvictedEntries)
 }
 
 type diskWriter struct {

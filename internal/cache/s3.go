@@ -161,7 +161,6 @@ func (s *S3) keyToPath(namespace string, key Key) string {
 	hexKey := key.String()
 	prefix := ""
 
-	// Add strategy name as prefix if available
 	if namespace != "" {
 		prefix = namespace + "/"
 	}
