@@ -3,14 +3,13 @@
 #   target = "https://example.jfrog.io"
 # }
 
+state = "./state"
 url = "http://127.0.0.1:8080"
 log {
   level = "debug"
 }
 
-git-clone {
-    mirror-root = "./state/git-mirrors"
-}
+git-clone {}
 
 github-app {
   # Uncomment and add:
@@ -24,7 +23,8 @@ metrics {}
 
 git {
   #bundle-interval = "24h"
-  #snapshot-interval = "24h"
+  snapshot-interval = "1h"
+  repack-interval = "1h"
 }
 
 host "https://w3.org" {}
@@ -35,7 +35,6 @@ github-releases {
 }
 
 disk {
-  root = "./state/cache"
   limit-mb = 250000
   max-ttl = "8h"
 }

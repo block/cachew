@@ -31,6 +31,7 @@ import (
 )
 
 type GlobalConfig struct {
+	State           string              `hcl:"state" default:"./state" help:"Base directory for all state (git mirrors, cache, etc.)."`
 	Bind            string              `hcl:"bind" default:"127.0.0.1:8080" help:"Bind address for the server."`
 	URL             string              `hcl:"url" default:"http://127.0.0.1:8080/" help:"Base URL for cachewd."`
 	SchedulerConfig jobscheduler.Config `hcl:"scheduler,block"`
@@ -56,12 +57,7 @@ func main() {
 
 	globalConfigHCL, providersConfigHCL := config.Split[GlobalConfig](ast)
 
-	// Load global config.
-	var globalConfig GlobalConfig
-	globalSchema, err := hcl.Schema(&globalConfig)
-	kctx.FatalIfErrorf(err)
-	config.InjectEnvars(globalSchema, globalConfigHCL, "CACHEW", parseEnvars())
-	err = hcl.UnmarshalAST(globalConfigHCL, &globalConfig, hcl.HydratedImplicitBlocks(true))
+	globalConfig, envars, err := loadGlobalConfig(globalConfigHCL)
 	kctx.FatalIfErrorf(err)
 
 	ctx := context.Background()
@@ -84,7 +80,7 @@ func main() {
 		return
 	}
 
-	mux, err := newMux(ctx, cr, sr, providersConfigHCL)
+	mux, err := newMux(ctx, cr, sr, providersConfigHCL, envars)
 	kctx.FatalIfErrorf(err)
 
 	metricsClient, err := metrics.New(ctx, globalConfig.MetricsConfig)
@@ -137,7 +133,7 @@ func printSchema(kctx *kong.Context, cr *cache.Registry, sr *strategy.Registry) 
 	}
 }
 
-func newMux(ctx context.Context, cr *cache.Registry, sr *strategy.Registry, providersConfigHCL *hcl.AST) (*http.ServeMux, error) {
+func newMux(ctx context.Context, cr *cache.Registry, sr *strategy.Registry, providersConfigHCL *hcl.AST, vars map[string]string) (*http.ServeMux, error) {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /_liveness", func(w http.ResponseWriter, _ *http.Request) {
@@ -150,7 +146,7 @@ func newMux(ctx context.Context, cr *cache.Registry, sr *strategy.Registry, prov
 		_, _ = w.Write([]byte("OK")) //nolint:errcheck
 	})
 
-	if err := config.Load(ctx, cr, sr, providersConfigHCL, mux, parseEnvars()); err != nil {
+	if err := config.Load(ctx, cr, sr, providersConfigHCL, mux, vars); err != nil {
 		return nil, fmt.Errorf("load config: %w", err)
 	}
 
@@ -198,6 +194,45 @@ func newServer(ctx context.Context, mux *http.ServeMux, bind string, metricsConf
 			return logging.ContextWithLogger(ctx, logger.With("client", c.RemoteAddr().String()))
 		},
 	}
+}
+
+// loadGlobalConfig unmarshals the global config from HCL, using a two-pass
+// approach so that the "state" field is resolved first and then injected as
+// CACHEW_STATE for expansion in other defaults (e.g. mirror-root, disk root).
+func loadGlobalConfig(ast *hcl.AST) (GlobalConfig, map[string]string, error) {
+	var cfg GlobalConfig
+	schema, err := hcl.Schema(&cfg)
+	if err != nil {
+		return cfg, nil, fmt.Errorf("global config schema: %w", err)
+	}
+	envars := parseEnvars()
+	config.InjectEnvars(schema, ast, "CACHEW", envars)
+
+	// First pass: preserve unknown ${VAR} references so we can extract "state".
+	preserving := hcl.WithDefaultTransformer(func(s string) string {
+		return os.Expand(s, func(key string) string {
+			if v, ok := envars[key]; ok {
+				return v
+			}
+			return "${" + key + "}"
+		})
+	})
+	if err := hcl.UnmarshalAST(ast, &cfg, hcl.HydratedImplicitBlocks(true), preserving); err != nil {
+		return cfg, nil, fmt.Errorf("load global config: %w", err)
+	}
+
+	// Inject state directory as CACHEW_STATE for provider config expansion.
+	envars["CACHEW_STATE"] = cfg.State
+
+	// Second pass: re-expand now that CACHEW_STATE is available.
+	cfg = GlobalConfig{}
+	expanding := hcl.WithDefaultTransformer(func(s string) string {
+		return os.Expand(s, func(key string) string { return envars[key] })
+	})
+	if err := hcl.UnmarshalAST(ast, &cfg, hcl.HydratedImplicitBlocks(true), expanding); err != nil {
+		return cfg, nil, fmt.Errorf("load global config: %w", err)
+	}
+	return cfg, envars, nil
 }
 
 func parseEnvars() map[string]string {

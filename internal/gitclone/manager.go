@@ -53,7 +53,7 @@ func DefaultGitTuningConfig() GitTuningConfig {
 }
 
 type Config struct {
-	MirrorRoot       string        `hcl:"mirror-root" help:"Directory to store git clones."`
+	MirrorRoot       string        `hcl:"mirror-root,optional" help:"Directory to store git clones." default:"${CACHEW_STATE}/git-mirrors"`
 	FetchInterval    time.Duration `hcl:"fetch-interval,optional" help:"How often to fetch from upstream in minutes." default:"15m"`
 	RefCheckInterval time.Duration `hcl:"ref-check-interval,optional" help:"How long to cache ref checks." default:"10s"`
 	Maintenance      bool          `hcl:"maintenance,optional" help:"Enable git maintenance scheduling for mirror repos." default:"false"`

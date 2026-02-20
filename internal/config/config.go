@@ -109,7 +109,7 @@ func Load(
 	for _, node := range ast.Entries {
 		switch node := node.(type) {
 		case *hcl.Block:
-			c, err := cr.Create(ctx, node.Name, node)
+			c, err := cr.Create(ctx, node.Name, node, vars)
 			if errors.Is(err, cache.ErrNotFound) {
 				strategyCandidates = append(strategyCandidates, node)
 				continue
