@@ -324,6 +324,35 @@ func TestRepository_CloneSetsMirrorConfig(t *testing.T) {
 	}
 }
 
+func TestRepository_Repack(t *testing.T) {
+	_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelError})
+	tmpDir := t.TempDir()
+	upstreamPath := createBareRepo(t, tmpDir)
+
+	clonePath := filepath.Join(tmpDir, "mirror")
+	cmd := exec.Command("git", "clone", "--mirror", upstreamPath, clonePath)
+	assert.NoError(t, cmd.Run())
+
+	repo := &Repository{
+		state:       StateReady,
+		path:        clonePath,
+		upstreamURL: upstreamPath,
+		fetchSem:    make(chan struct{}, 1),
+	}
+	repo.fetchSem <- struct{}{}
+
+	assert.NoError(t, repo.Repack(ctx))
+
+	// Verify a pack file exists after repack.
+	packs, err := filepath.Glob(filepath.Join(clonePath, "objects", "pack", "*.pack"))
+	assert.NoError(t, err)
+	assert.True(t, len(packs) > 0, "expected at least one pack file after repack")
+
+	// Verify multi-pack-index was written.
+	_, err = os.Stat(filepath.Join(clonePath, "objects", "pack", "multi-pack-index"))
+	assert.NoError(t, err)
+}
+
 func TestRepository_HasCommit(t *testing.T) {
 	ctx := context.Background()
 	tmpDir := t.TempDir()

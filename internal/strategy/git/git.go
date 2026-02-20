@@ -35,6 +35,7 @@ func Register(r *strategy.Registry, scheduler jobscheduler.Scheduler, cloneManag
 
 type Config struct {
 	SnapshotInterval time.Duration `hcl:"snapshot-interval,optional" help:"How often to generate tar.zstd snapshots. 0 disables snapshots." default:"0"`
+	RepackInterval   time.Duration `hcl:"repack-interval,optional" help:"How often to run full repack. 0 disables." default:"0"`
 }
 
 type Strategy struct {
@@ -99,6 +100,9 @@ func New(
 	for _, repo := range existing {
 		if s.config.SnapshotInterval > 0 {
 			s.scheduleSnapshotJobs(repo)
+		}
+		if s.config.RepackInterval > 0 {
+			s.scheduleRepackJobs(repo)
 		}
 	}
 
@@ -408,6 +412,9 @@ func (s *Strategy) startClone(ctx context.Context, repo *gitclone.Repository) {
 
 	if s.config.SnapshotInterval > 0 {
 		s.scheduleSnapshotJobs(repo)
+	}
+	if s.config.RepackInterval > 0 {
+		s.scheduleRepackJobs(repo)
 	}
 }
 
