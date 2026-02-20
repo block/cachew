@@ -181,7 +181,7 @@ func (m *Manager) Get(upstreamURL string) *Repository {
 	return m.clones[upstreamURL]
 }
 
-func (m *Manager) DiscoverExisting(_ context.Context) ([]*Repository, error) {
+func (m *Manager) DiscoverExisting(ctx context.Context) ([]*Repository, error) {
 	var discovered []*Repository
 	err := filepath.Walk(m.config.MirrorRoot, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
@@ -225,6 +225,10 @@ func (m *Manager) DiscoverExisting(_ context.Context) ([]*Repository, error) {
 			credentialProvider: m.credentialProvider,
 		}
 		repo.fetchSem <- struct{}{}
+
+		if err := configureMirror(ctx, path); err != nil {
+			return errors.Wrapf(err, "configure mirror for %s", upstreamURL)
+		}
 
 		m.clonesMu.Lock()
 		m.clones[upstreamURL] = repo
@@ -314,6 +318,48 @@ func (r *Repository) Clone(ctx context.Context) error {
 	return nil
 }
 
+// mirrorConfigSettings returns git config key-value pairs applied to mirror
+// clones to optimise upload-pack serving performance.
+func mirrorConfigSettings() [][2]string {
+	return [][2]string{
+		// Protocol
+		{"protocol.version", "2"},
+		{"uploadpack.allowFilter", "true"},
+		{"uploadpack.allowReachableSHA1InWant", "true"},
+		// Bitmaps
+		{"repack.writeBitmaps", "true"},
+		{"pack.useBitmaps", "true"},
+		{"pack.useBitmapBoundaryTraversal", "true"},
+		// Commit graph
+		{"core.commitGraph", "true"},
+		{"gc.writeCommitGraph", "true"},
+		{"fetch.writeCommitGraph", "true"},
+		// Multi-pack-index
+		{"core.multiPackIndex", "true"},
+		// Keep fetched objects as packs
+		{"transfer.unpackLimit", "1"},
+		{"fetch.unpackLimit", "1"},
+		// Disable auto GC
+		{"gc.auto", "0"},
+		// Pack performance
+		{"pack.threads", "0"},
+		{"pack.deltaCacheSize", "512m"},
+		{"pack.windowMemory", "1g"},
+	}
+}
+
+func configureMirror(ctx context.Context, repoPath string) error {
+	for _, kv := range mirrorConfigSettings() {
+		// #nosec G204 - repoPath and config values are controlled by us
+		cmd := exec.CommandContext(ctx, "git", "-C", repoPath, "config", kv[0], kv[1])
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			return errors.Wrapf(err, "configure %s: %s", kv[0], string(output))
+		}
+	}
+	return nil
+}
+
 func (r *Repository) executeClone(ctx context.Context) error {
 	if err := os.MkdirAll(filepath.Dir(r.path), 0o750); err != nil {
 		return errors.Wrap(err, "create clone directory")
@@ -338,11 +384,8 @@ func (r *Repository) executeClone(ctx context.Context) error {
 		return errors.Wrapf(err, "git clone --mirror: %s", string(output))
 	}
 
-	// Enable partial clone support (e.g. --filter=blob:none) when serving via git http-backend.
-	cmd = exec.CommandContext(ctx, "git", "-C", r.path, "config", "uploadpack.allowFilter", "true") // #nosec G204
-	output, err = cmd.CombinedOutput()
-	if err != nil {
-		return errors.Wrapf(err, "configure uploadpack.allowFilter: %s", string(output))
+	if err := configureMirror(ctx, r.path); err != nil {
+		return errors.Wrap(err, "configure mirror")
 	}
 
 	return nil

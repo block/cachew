@@ -15,6 +15,32 @@ import (
 	"github.com/block/cachew/internal/logging"
 )
 
+// createBareRepo creates a bare git repository at the given path, suitable for
+// use as an upstream or as a mirror clone target.
+func createBareRepo(t *testing.T, dir string) string {
+	t.Helper()
+	workPath := filepath.Join(dir, "work")
+	barePath := filepath.Join(dir, "upstream.git")
+	assert.NoError(t, os.MkdirAll(workPath, 0o755))
+
+	for _, args := range [][]string{
+		{"git", "-C", workPath, "init"},
+		{"git", "-C", workPath, "config", "user.email", "test@example.com"},
+		{"git", "-C", workPath, "config", "user.name", "Test"},
+	} {
+		assert.NoError(t, exec.Command(args[0], args[1:]...).Run())
+	}
+	assert.NoError(t, os.WriteFile(filepath.Join(workPath, "f.txt"), []byte("x"), 0o644))
+	for _, args := range [][]string{
+		{"git", "-C", workPath, "add", "."},
+		{"git", "-C", workPath, "commit", "-m", "init"},
+		{"git", "clone", "--bare", workPath, barePath},
+	} {
+		assert.NoError(t, exec.Command(args[0], args[1:]...).Run())
+	}
+	return barePath
+}
+
 func TestNewManager(t *testing.T) {
 	_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelError})
 	tmpDir := t.TempDir()
@@ -130,15 +156,18 @@ func TestManager_DiscoverExisting(t *testing.T) {
 	manager, err := NewManager(ctx, config, nil)
 	assert.NoError(t, err)
 
-	repos := []string{
+	// Create a real bare repo as a source, then clone it into the mirror paths.
+	upstreamPath := createBareRepo(t, t.TempDir())
+
+	repoPaths := []string{
 		filepath.Join(tmpDir, "github.com", "user1", "repo1"),
 		filepath.Join(tmpDir, "github.com", "user2", "repo2"),
 		filepath.Join(tmpDir, "gitlab.com", "org", "project"),
 	}
-
-	for _, repoPath := range repos {
-		assert.NoError(t, os.MkdirAll(repoPath, 0o755))
-		assert.NoError(t, os.WriteFile(filepath.Join(repoPath, "HEAD"), []byte("ref: refs/heads/main\n"), 0o644))
+	for _, repoPath := range repoPaths {
+		assert.NoError(t, os.MkdirAll(filepath.Dir(repoPath), 0o755))
+		cmd := exec.Command("git", "clone", "--bare", upstreamPath, repoPath)
+		assert.NoError(t, cmd.Run())
 	}
 
 	discovered, err := manager.DiscoverExisting(context.Background())
@@ -156,6 +185,16 @@ func TestManager_DiscoverExisting(t *testing.T) {
 	repo3 := manager.Get("https://gitlab.com/org/project")
 	assert.NotZero(t, repo3)
 	assert.Equal(t, StateReady, repo3.State())
+
+	// Verify mirror config was applied to discovered repos.
+	for _, repoPath := range repoPaths {
+		for _, kv := range mirrorConfigSettings() {
+			cmd := exec.Command("git", "-C", repoPath, "config", "--get", kv[0])
+			output, err := cmd.Output()
+			assert.NoError(t, err, "config key %s in %s", kv[0], repoPath)
+			assert.Equal(t, kv[1], strings.TrimSpace(string(output)), "config key %s in %s", kv[0], repoPath)
+		}
+	}
 }
 
 func TestRepository_StateTransitions(t *testing.T) {
@@ -222,25 +261,7 @@ func TestState_String(t *testing.T) {
 func TestRepository_Clone_StateVisibleDuringClone(t *testing.T) {
 	ctx := context.Background()
 	tmpDir := t.TempDir()
-
-	// Create a bare upstream repo to clone from
-	upstreamPath := filepath.Join(tmpDir, "upstream.git")
-	workPath := filepath.Join(tmpDir, "work")
-	assert.NoError(t, os.MkdirAll(workPath, 0o755))
-
-	cmd := exec.Command("git", "-C", workPath, "init")
-	assert.NoError(t, cmd.Run())
-	cmd = exec.Command("git", "-C", workPath, "config", "user.email", "test@example.com")
-	assert.NoError(t, cmd.Run())
-	cmd = exec.Command("git", "-C", workPath, "config", "user.name", "Test")
-	assert.NoError(t, cmd.Run())
-	assert.NoError(t, os.WriteFile(filepath.Join(workPath, "f.txt"), []byte("x"), 0o644))
-	cmd = exec.Command("git", "-C", workPath, "add", ".")
-	assert.NoError(t, cmd.Run())
-	cmd = exec.Command("git", "-C", workPath, "commit", "-m", "init")
-	assert.NoError(t, cmd.Run())
-	cmd = exec.Command("git", "clone", "--bare", workPath, upstreamPath)
-	assert.NoError(t, cmd.Run())
+	upstreamPath := createBareRepo(t, tmpDir)
 
 	clonePath := filepath.Join(tmpDir, "clone")
 	repo := &Repository{
@@ -278,27 +299,10 @@ func TestRepository_Clone_StateVisibleDuringClone(t *testing.T) {
 	assert.Equal(t, StateReady, repo.State())
 }
 
-func TestRepository_CloneSetsAllowFilter(t *testing.T) {
+func TestRepository_CloneSetsMirrorConfig(t *testing.T) {
 	ctx := context.Background()
 	tmpDir := t.TempDir()
-
-	upstreamPath := filepath.Join(tmpDir, "upstream.git")
-	workPath := filepath.Join(tmpDir, "work")
-	assert.NoError(t, os.MkdirAll(workPath, 0o755))
-
-	cmd := exec.Command("git", "-C", workPath, "init")
-	assert.NoError(t, cmd.Run())
-	cmd = exec.Command("git", "-C", workPath, "config", "user.email", "test@example.com")
-	assert.NoError(t, cmd.Run())
-	cmd = exec.Command("git", "-C", workPath, "config", "user.name", "Test")
-	assert.NoError(t, cmd.Run())
-	assert.NoError(t, os.WriteFile(filepath.Join(workPath, "f.txt"), []byte("x"), 0o644))
-	cmd = exec.Command("git", "-C", workPath, "add", ".")
-	assert.NoError(t, cmd.Run())
-	cmd = exec.Command("git", "-C", workPath, "commit", "-m", "init")
-	assert.NoError(t, cmd.Run())
-	cmd = exec.Command("git", "clone", "--bare", workPath, upstreamPath)
-	assert.NoError(t, cmd.Run())
+	upstreamPath := createBareRepo(t, tmpDir)
 
 	clonePath := filepath.Join(tmpDir, "clone")
 	repo := &Repository{
@@ -312,10 +316,12 @@ func TestRepository_CloneSetsAllowFilter(t *testing.T) {
 	assert.NoError(t, repo.Clone(ctx))
 	assert.Equal(t, StateReady, repo.State())
 
-	cmd = exec.Command("git", "-C", clonePath, "config", "uploadpack.allowFilter")
-	output, err := cmd.Output()
-	assert.NoError(t, err)
-	assert.Equal(t, "true", strings.TrimSpace(string(output)))
+	for _, kv := range mirrorConfigSettings() {
+		cmd := exec.Command("git", "-C", clonePath, "config", "--get", kv[0])
+		output, err := cmd.Output()
+		assert.NoError(t, err, "config key %s", kv[0])
+		assert.Equal(t, kv[1], strings.TrimSpace(string(output)), "config key %s", kv[0])
+	}
 }
 
 func TestRepository_HasCommit(t *testing.T) {
