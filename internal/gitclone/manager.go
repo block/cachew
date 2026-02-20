@@ -555,6 +555,24 @@ func (r *Repository) GetUpstreamRefs(ctx context.Context) (map[string]string, er
 	return ParseGitRefs(output), nil
 }
 
+func (r *Repository) Repack(ctx context.Context) error {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	logger := logging.FromContext(ctx)
+	logger.InfoContext(ctx, "Full repack started", "upstream", r.upstreamURL)
+
+	// #nosec G204 - r.path is controlled by us
+	cmd := exec.CommandContext(ctx, "git", "-C", r.path, "repack", "-adb", "--write-midx", "--write-bitmap-index")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return errors.Wrapf(err, "git repack: %s", string(output))
+	}
+
+	logger.InfoContext(ctx, "Full repack completed", "upstream", r.upstreamURL)
+	return nil
+}
+
 func (r *Repository) HasCommit(ctx context.Context, ref string) bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
