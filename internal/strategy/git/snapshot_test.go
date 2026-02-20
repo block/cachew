@@ -55,10 +55,10 @@ func TestSnapshotHTTPEndpoint(t *testing.T) {
 	assert.NotZero(t, handler)
 
 	// Test successful snapshot request
-	req := httptest.NewRequest(http.MethodGet, "/git/github.com/org/repo/snapshot", nil)
+	req := httptest.NewRequest(http.MethodGet, "/git/github.com/org/repo/snapshot.tar.zst", nil)
 	req = req.WithContext(ctx)
 	req.SetPathValue("host", "github.com")
-	req.SetPathValue("path", "org/repo/snapshot")
+	req.SetPathValue("path", "org/repo/snapshot.tar.zst")
 	w := httptest.NewRecorder()
 
 	handler.ServeHTTP(w, req)
@@ -68,10 +68,10 @@ func TestSnapshotHTTPEndpoint(t *testing.T) {
 	assert.Equal(t, snapshotData, w.Body.Bytes())
 
 	// Test snapshot not found
-	req = httptest.NewRequest(http.MethodGet, "/git/github.com/org/nonexistent/snapshot", nil)
+	req = httptest.NewRequest(http.MethodGet, "/git/github.com/org/nonexistent/snapshot.tar.zst", nil)
 	req = req.WithContext(ctx)
 	req.SetPathValue("host", "github.com")
-	req.SetPathValue("path", "org/nonexistent/snapshot")
+	req.SetPathValue("path", "org/nonexistent/snapshot.tar.zst")
 	w = httptest.NewRecorder()
 
 	handler.ServeHTTP(w, req)
