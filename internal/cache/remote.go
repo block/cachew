@@ -232,7 +232,28 @@ func (c *Remote) Namespace(_ string) Cache {
 }
 
 // ListNamespaces requests namespace list from the remote server.
-func (c *Remote) ListNamespaces(_ context.Context) ([]string, error) {
-	// TODO: Could add an API endpoint for this
-	return nil, ErrStatsUnavailable
+func (c *Remote) ListNamespaces(ctx context.Context) ([]string, error) {
+	url := c.baseURL + "/namespaces"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, errors.WithStack(err)
+	}
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return nil, errors.WithStack(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body) //nolint:errcheck
+		return nil, errors.Errorf("unexpected status %d: %s", resp.StatusCode, body)
+	}
+
+	var namespaces []string
+	if err := json.NewDecoder(resp.Body).Decode(&namespaces); err != nil {
+		return nil, errors.WithStack(err)
+	}
+
+	return namespaces, nil
 }

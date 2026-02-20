@@ -132,9 +132,10 @@ func Load(
 
 	// Second pass, instantiate strategies and bind them to the mux.
 	for _, block := range strategyCandidates {
-		logger := logger.With("strategy", block.Name)
+		strategy := block.Name
+		logger := logger.With("strategy", strategy)
 		mlog := &loggingMux{logger: logger, mux: mux}
-		_, err := sr.Create(ctx, block.Name, block, cache, mlog, vars)
+		_, err := sr.Create(ctx, strategy, block, cache, mlog, vars)
 		if err != nil {
 			return errors.Errorf("%s: %w", block.Pos, err)
 		}

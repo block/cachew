@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/alecthomas/errors"
@@ -39,16 +40,18 @@ type memoryEntry struct {
 type Memory struct {
 	config      MemoryConfig
 	namespace   string
-	mu          sync.RWMutex
+	mu          *sync.RWMutex
 	entries     map[string]map[Key]*memoryEntry // namespace -> key -> entry
-	currentSize int64
+	currentSize *atomic.Int64
 }
 
 func NewMemory(ctx context.Context, config MemoryConfig) (*Memory, error) {
 	logging.FromContext(ctx).InfoContext(ctx, "Constructing in-memory Cache", "limit-mb", config.LimitMB, "max-ttl", config.MaxTTL)
 	return &Memory{
-		config:  config,
-		entries: make(map[string]map[Key]*memoryEntry),
+		config:      config,
+		mu:          &sync.RWMutex{},
+		entries:     make(map[string]map[Key]*memoryEntry),
+		currentSize: &atomic.Int64{},
 	}, nil
 }
 
@@ -135,7 +138,7 @@ func (m *Memory) Delete(_ context.Context, key Key) error {
 	if !exists {
 		return os.ErrNotExist
 	}
-	m.currentSize -= int64(len(entry.data))
+	m.currentSize.Add(-int64(len(entry.data)))
 	delete(nsEntries, key)
 	return nil
 }
@@ -159,7 +162,7 @@ func (m *Memory) Stats(_ context.Context) (Stats, error) {
 
 	return Stats{
 		Objects:  totalObjects,
-		Size:     m.currentSize,
+		Size:     m.currentSize.Load(),
 		Capacity: int64(m.config.LimitMB) * 1024 * 1024,
 	}, nil
 }
@@ -198,7 +201,7 @@ func (m *Memory) evictOldest(neededSpace int64) {
 		if freedSpace >= neededSpace {
 			break
 		}
-		m.currentSize -= e.size
+		m.currentSize.Add(-e.size)
 		delete(m.entries[e.namespace], e.key)
 		freedSpace += e.size
 	}
@@ -253,13 +256,13 @@ func (w *memoryWriter) Close() error {
 
 	// Evict entries if needed to make room
 	if limitBytes > 0 {
-		neededSpace := w.cache.currentSize - oldSize + newSize - limitBytes
+		neededSpace := w.cache.currentSize.Load() - oldSize + newSize - limitBytes
 		if neededSpace > 0 {
 			w.cache.evictOldest(neededSpace)
 		}
 	}
 
-	w.cache.currentSize -= oldSize
+	w.cache.currentSize.Add(-oldSize)
 	// Copy the buffer data to avoid holding a reference to the buffer's internal slice
 	data := make([]byte, w.buf.Len())
 	copy(data, w.buf.Bytes())
@@ -269,7 +272,7 @@ func (w *memoryWriter) Close() error {
 		expiresAt: w.expiresAt,
 		headers:   w.headers,
 	}
-	w.cache.currentSize += newSize
+	w.cache.currentSize.Add(newSize)
 
 	return nil
 }
