@@ -33,6 +33,14 @@ func (m *testMux) HandleFunc(pattern string, handler func(http.ResponseWriter, *
 	m.handlers[pattern] = http.HandlerFunc(handler)
 }
 
+func newTestScheduler(ctx context.Context, t *testing.T) jobscheduler.Scheduler {
+	t.Helper()
+	s, err := jobscheduler.New(ctx, jobscheduler.Config{})
+	assert.NoError(t, err)
+	t.Cleanup(func() { s.Close() })
+	return s
+}
+
 func TestNew(t *testing.T) {
 	_, ctx := logging.Configure(context.Background(), logging.Config{})
 	tmpDir := t.TempDir()
@@ -68,7 +76,7 @@ func TestNew(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			mux := newTestMux()
 			cm := gitclone.NewManagerProvider(ctx, tt.config, nil)
-			s, err := git.New(ctx, git.Config{}, jobscheduler.New(ctx, jobscheduler.Config{}), nil, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
+			s, err := git.New(ctx, git.Config{}, newTestScheduler(ctx, t), nil, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
 			if tt.wantError != "" {
 				assert.Error(t, err)
 				assert.Contains(t, err.Error(), tt.wantError)
@@ -150,7 +158,7 @@ func TestNewWithExistingCloneOnDisk(t *testing.T) {
 		MirrorRoot:    tmpDir,
 		FetchInterval: 15,
 	}, nil)
-	s, err := git.New(ctx, git.Config{}, jobscheduler.New(ctx, jobscheduler.Config{}), nil, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
+	s, err := git.New(ctx, git.Config{}, newTestScheduler(ctx, t), nil, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
 	assert.NoError(t, err)
 	assert.NotZero(t, s)
 }
@@ -174,7 +182,7 @@ func TestIntegrationWithMockUpstream(t *testing.T) {
 		MirrorRoot:    tmpDir,
 		FetchInterval: 15,
 	}, nil)
-	_, err := git.New(ctx, git.Config{}, jobscheduler.New(ctx, jobscheduler.Config{}), nil, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
+	_, err := git.New(ctx, git.Config{}, newTestScheduler(ctx, t), nil, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
 	assert.NoError(t, err)
 
 	// Verify handlers exist

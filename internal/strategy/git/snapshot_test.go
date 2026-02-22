@@ -15,7 +15,6 @@ import (
 	"github.com/block/cachew/internal/cache"
 	"github.com/block/cachew/internal/gitclone"
 	"github.com/block/cachew/internal/githubapp"
-	"github.com/block/cachew/internal/jobscheduler"
 	"github.com/block/cachew/internal/logging"
 	"github.com/block/cachew/internal/snapshot"
 	"github.com/block/cachew/internal/strategy/git"
@@ -34,7 +33,7 @@ func TestSnapshotHTTPEndpoint(t *testing.T) {
 	}, nil)
 	_, err = git.New(ctx, git.Config{
 		SnapshotInterval: 24 * time.Hour,
-	}, jobscheduler.New(ctx, jobscheduler.Config{}), memCache, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
+	}, newTestScheduler(ctx, t), memCache, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
 	assert.NoError(t, err)
 
 	// Create a fake snapshot in the cache
@@ -126,7 +125,7 @@ func TestSnapshotGenerationViaLocalClone(t *testing.T) {
 	mux := newTestMux()
 
 	cm := gitclone.NewManagerProvider(ctx, gitclone.Config{MirrorRoot: mirrorRoot}, nil)
-	s, err := git.New(ctx, git.Config{}, jobscheduler.New(ctx, jobscheduler.Config{}), memCache, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
+	s, err := git.New(ctx, git.Config{}, newTestScheduler(ctx, t), memCache, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
 	assert.NoError(t, err)
 
 	// GetOrCreate so the strategy knows about the repo.
