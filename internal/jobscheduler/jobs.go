@@ -3,7 +3,6 @@ package jobscheduler
 
 import (
 	"context"
-	"fmt"
 	"runtime"
 	"sync"
 	"time"
@@ -14,7 +13,8 @@ import (
 )
 
 type Config struct {
-	Concurrency int `hcl:"concurrency" help:"The maximum number of concurrent jobs to run (0 means number of cores)." default:"0"`
+	Concurrency int    `hcl:"concurrency" help:"The maximum number of concurrent jobs to run (0 means number of cores)." default:"0"`
+	SchedulerDB string `hcl:"scheduler-db" help:"Path to the scheduler state database." default:"${CACHEW_STATE}/scheduler.db"`
 }
 
 type queueJob struct {
@@ -23,7 +23,9 @@ type queueJob struct {
 	run   func(ctx context.Context) error
 }
 
-func (j *queueJob) String() string                { return fmt.Sprintf("job-%s-%s", j.id, j.queue) }
+func jobKey(queue, id string) string { return queue + ":" + id }
+
+func (j *queueJob) String() string                { return jobKey(j.queue, j.id) }
 func (j *queueJob) Run(ctx context.Context) error { return errors.WithStack(j.run(ctx)) }
 
 // Scheduler runs background jobs concurrently across multiple serialised queues.
@@ -73,25 +75,42 @@ type RootScheduler struct {
 	queue         []queueJob
 	active        map[string]bool
 	cancel        context.CancelFunc
+	store         ScheduleStore
 }
 
 var _ Scheduler = &RootScheduler{}
 
 // New creates a new JobScheduler.
-func New(ctx context.Context, config Config) Scheduler {
+func New(ctx context.Context, config Config) (*RootScheduler, error) {
 	if config.Concurrency == 0 {
 		config.Concurrency = runtime.NumCPU()
+	}
+	var store ScheduleStore
+	if config.SchedulerDB != "" {
+		var err error
+		store, err = NewScheduleStore(config.SchedulerDB)
+		if err != nil {
+			return nil, errors.Wrap(err, "create schedule store")
+		}
 	}
 	q := &RootScheduler{
 		workAvailable: make(chan bool, 1024),
 		active:        make(map[string]bool),
+		store:         store,
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	q.cancel = cancel
 	for id := range config.Concurrency {
 		go q.worker(ctx, id)
 	}
-	return q
+	return q, nil
+}
+
+func (q *RootScheduler) Close() error {
+	if q.store != nil {
+		return errors.WithStack(q.store.Close())
+	}
+	return nil
 }
 
 func (q *RootScheduler) WithQueuePrefix(prefix string) Scheduler {
@@ -108,15 +127,46 @@ func (q *RootScheduler) Submit(queue, id string, run func(ctx context.Context) e
 	q.workAvailable <- true
 }
 
-func (q *RootScheduler) SubmitPeriodicJob(queue, description string, interval time.Duration, run func(ctx context.Context) error) {
-	q.Submit(queue, description, func(ctx context.Context) error {
-		err := run(ctx)
-		go func() {
-			time.Sleep(interval)
-			q.SubmitPeriodicJob(queue, description, interval, run)
-		}()
-		return errors.WithStack(err)
-	})
+func (q *RootScheduler) SubmitPeriodicJob(queue, id string, interval time.Duration, run func(ctx context.Context) error) {
+	key := jobKey(queue, id)
+	delay := q.periodicDelay(key, interval)
+	submit := func() {
+		q.Submit(queue, id, func(ctx context.Context) error {
+			err := run(ctx)
+			if q.store != nil {
+				if storeErr := q.store.SetLastRun(key, time.Now()); storeErr != nil {
+					logging.FromContext(ctx).WarnContext(ctx, "Failed to record job last run", "key", key, "error", storeErr)
+				}
+			}
+			go func() {
+				time.Sleep(interval)
+				q.SubmitPeriodicJob(queue, id, interval, run)
+			}()
+			return errors.WithStack(err)
+		})
+	}
+	if delay <= 0 {
+		submit()
+		return
+	}
+	go func() {
+		time.Sleep(delay)
+		submit()
+	}()
+}
+
+func (q *RootScheduler) periodicDelay(key string, interval time.Duration) time.Duration {
+	if q.store == nil {
+		return 0
+	}
+	lastRun, ok, err := q.store.GetLastRun(key)
+	if err != nil || !ok {
+		return 0
+	}
+	if remaining := time.Until(lastRun.Add(interval)); remaining > 0 {
+		return remaining
+	}
+	return 0
 }
 
 func (q *RootScheduler) worker(ctx context.Context, id int) {

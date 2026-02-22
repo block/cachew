@@ -11,7 +11,6 @@ import (
 
 	"github.com/block/cachew/internal/gitclone"
 	"github.com/block/cachew/internal/githubapp"
-	"github.com/block/cachew/internal/jobscheduler"
 	"github.com/block/cachew/internal/logging"
 	"github.com/block/cachew/internal/strategy/git"
 )
@@ -42,7 +41,7 @@ func TestRepackInterval(t *testing.T) {
 			}, nil)
 			s, err := git.New(ctx, git.Config{
 				RepackInterval: tt.repackInterval,
-			}, jobscheduler.New(ctx, jobscheduler.Config{}), nil, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
+			}, newTestScheduler(ctx, t), nil, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
 			assert.NoError(t, err)
 			assert.NotZero(t, s)
 		})
@@ -66,7 +65,7 @@ func TestRepackScheduledForExistingRepos(t *testing.T) {
 	}, nil)
 	s, err := git.New(ctx, git.Config{
 		RepackInterval: 24 * time.Hour,
-	}, jobscheduler.New(ctx, jobscheduler.Config{}), nil, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
+	}, newTestScheduler(ctx, t), nil, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
 	assert.NoError(t, err)
 	assert.NotZero(t, s)
 }

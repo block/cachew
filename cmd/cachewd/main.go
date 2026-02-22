@@ -69,7 +69,9 @@ func main() {
 		return tokenManagerProvider()
 	})
 
-	scheduler := jobscheduler.New(ctx, globalConfig.SchedulerConfig)
+	scheduler, err := jobscheduler.New(ctx, globalConfig.SchedulerConfig)
+	kctx.FatalIfErrorf(err, "failed to create scheduler")
+	defer scheduler.Close()
 
 	cr, sr := newRegistries(scheduler, managerProvider, tokenManagerProvider)
 

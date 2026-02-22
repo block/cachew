@@ -21,7 +21,6 @@ import (
 
 	"github.com/block/cachew/internal/gitclone"
 	"github.com/block/cachew/internal/githubapp"
-	"github.com/block/cachew/internal/jobscheduler"
 	"github.com/block/cachew/internal/logging"
 	"github.com/block/cachew/internal/strategy/git"
 )
@@ -63,7 +62,7 @@ func TestIntegrationGitCloneViaProxy(t *testing.T) {
 		FetchInterval: 15,
 	}, nil)
 	mux := http.NewServeMux()
-	strategy, err := git.New(ctx, git.Config{}, jobscheduler.New(ctx, jobscheduler.Config{}), nil, mux, gc, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
+	strategy, err := git.New(ctx, git.Config{}, newTestScheduler(ctx, t), nil, mux, gc, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
 	assert.NoError(t, err)
 	assert.NotZero(t, strategy)
 
@@ -142,7 +141,7 @@ func TestIntegrationGitFetchViaProxy(t *testing.T) {
 	}, nil)
 
 	mux := http.NewServeMux()
-	_, err = git.New(ctx, git.Config{}, jobscheduler.New(ctx, jobscheduler.Config{}), nil, mux, gc, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
+	_, err = git.New(ctx, git.Config{}, newTestScheduler(ctx, t), nil, mux, gc, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
 	assert.NoError(t, err)
 
 	server := testServerWithLogging(ctx, mux)
@@ -222,7 +221,7 @@ func TestIntegrationPushForwardsToUpstream(t *testing.T) {
 		MirrorRoot:    clonesDir,
 		FetchInterval: 15,
 	}, nil)
-	_, err = git.New(ctx, git.Config{}, jobscheduler.New(ctx, jobscheduler.Config{}), nil, mux, gc, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
+	_, err = git.New(ctx, git.Config{}, newTestScheduler(ctx, t), nil, mux, gc, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
 	assert.NoError(t, err)
 
 	server := testServerWithLogging(ctx, mux)
@@ -316,7 +315,7 @@ func TestIntegrationSpoolReusesDuringClone(t *testing.T) {
 		MirrorRoot:    clonesDir,
 		FetchInterval: 15,
 	}, nil)
-	strategy, err := git.New(ctx, git.Config{}, jobscheduler.New(ctx, jobscheduler.Config{}), nil, mux, gc, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
+	strategy, err := git.New(ctx, git.Config{}, newTestScheduler(ctx, t), nil, mux, gc, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
 	assert.NoError(t, err)
 
 	strategy.SetHTTPTransport(&countingTransport{

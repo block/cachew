@@ -17,6 +17,14 @@ import (
 	"github.com/block/cachew/internal/logging"
 )
 
+func newTestScheduler(ctx context.Context, t *testing.T, config jobscheduler.Config) jobscheduler.Scheduler {
+	t.Helper()
+	s, err := jobscheduler.New(ctx, config)
+	assert.NoError(t, err)
+	t.Cleanup(func() { s.Close() })
+	return s
+}
+
 func eventually(t *testing.T, timeout time.Duration, condition func() bool, msgAndArgs ...any) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
@@ -40,7 +48,7 @@ func TestJobSchedulerBasic(t *testing.T) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	scheduler := jobscheduler.New(ctx, jobscheduler.Config{Concurrency: 2})
+	scheduler := newTestScheduler(ctx, t, jobscheduler.Config{Concurrency: 2})
 
 	var executed atomic.Bool
 	scheduler.Submit("queue1", "job1", func(_ context.Context) error {
@@ -57,7 +65,7 @@ func TestJobSchedulerConcurrency(t *testing.T) {
 	defer cancel()
 
 	concurrency := 4
-	scheduler := jobscheduler.New(ctx, jobscheduler.Config{Concurrency: concurrency})
+	scheduler := newTestScheduler(ctx, t, jobscheduler.Config{Concurrency: concurrency})
 
 	var (
 		running       atomic.Int32
@@ -103,7 +111,7 @@ func TestJobSchedulerQueueIsolation(t *testing.T) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	scheduler := jobscheduler.New(ctx, jobscheduler.Config{Concurrency: 4})
+	scheduler := newTestScheduler(ctx, t, jobscheduler.Config{Concurrency: 4})
 
 	var (
 		queue1Running       atomic.Int32
@@ -155,7 +163,7 @@ func TestJobSchedulerJobOrdering(t *testing.T) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	scheduler := jobscheduler.New(ctx, jobscheduler.Config{Concurrency: 4})
+	scheduler := newTestScheduler(ctx, t, jobscheduler.Config{Concurrency: 4})
 
 	var (
 		mu    sync.Mutex
@@ -193,7 +201,7 @@ func TestJobSchedulerErrorHandling(t *testing.T) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	scheduler := jobscheduler.New(ctx, jobscheduler.Config{Concurrency: 2})
+	scheduler := newTestScheduler(ctx, t, jobscheduler.Config{Concurrency: 2})
 
 	var (
 		failingJobExecuted atomic.Bool
@@ -219,7 +227,7 @@ func TestJobSchedulerContextCancellation(t *testing.T) {
 	_, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelError})
 	ctx, cancel := context.WithCancel(ctx)
 
-	scheduler := jobscheduler.New(ctx, jobscheduler.Config{Concurrency: 2})
+	scheduler := newTestScheduler(ctx, t, jobscheduler.Config{Concurrency: 2})
 
 	var jobStarted atomic.Bool
 
@@ -241,7 +249,7 @@ func TestJobSchedulerPeriodicJob(t *testing.T) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	scheduler := jobscheduler.New(ctx, jobscheduler.Config{Concurrency: 2})
+	scheduler := newTestScheduler(ctx, t, jobscheduler.Config{Concurrency: 2})
 
 	var executionCount atomic.Int32
 
@@ -260,7 +268,7 @@ func TestJobSchedulerPeriodicJobWithError(t *testing.T) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	scheduler := jobscheduler.New(ctx, jobscheduler.Config{Concurrency: 2})
+	scheduler := newTestScheduler(ctx, t, jobscheduler.Config{Concurrency: 2})
 
 	var executionCount atomic.Int32
 
@@ -279,7 +287,7 @@ func TestJobSchedulerMultipleQueues(t *testing.T) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	scheduler := jobscheduler.New(ctx, jobscheduler.Config{Concurrency: 3})
+	scheduler := newTestScheduler(ctx, t, jobscheduler.Config{Concurrency: 3})
 
 	queues := []string{"queue1", "queue2", "queue3", "queue4", "queue5"}
 	totalJobs := len(queues)
@@ -319,7 +327,7 @@ func TestJobSchedulerHighConcurrency(t *testing.T) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	scheduler := jobscheduler.New(ctx, jobscheduler.Config{Concurrency: 50})
+	scheduler := newTestScheduler(ctx, t, jobscheduler.Config{Concurrency: 50})
 
 	jobCount := 100
 	var completed atomic.Int32
@@ -371,7 +379,7 @@ func FuzzJobScheduler(f *testing.F) {
 		ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		defer cancel()
 
-		scheduler := jobscheduler.New(ctx, jobscheduler.Config{Concurrency: int(concurrency)})
+		scheduler := newTestScheduler(ctx, t, jobscheduler.Config{Concurrency: int(concurrency)})
 
 		var (
 			completed     atomic.Int32
