@@ -90,7 +90,7 @@ func TestPeriodicJobDelaysWhenRecentlyRun(t *testing.T) {
 	// Seed the store with a recent run time, then close it so the scheduler can open it.
 	store, err := jobscheduler.NewScheduleStore(dbPath)
 	assert.NoError(t, err)
-	assert.NoError(t, store.SetLastRun("queue1:periodic", time.Now()))
+	assert.NoError(t, store.SetLastRun("periodic:queue1", time.Now()))
 	assert.NoError(t, store.Close())
 
 	scheduler, err := jobscheduler.New(ctx, jobscheduler.Config{Concurrency: 2, SchedulerDB: dbPath})
@@ -137,7 +137,7 @@ func TestPeriodicJobRunsImmediatelyWhenIntervalElapsed(t *testing.T) {
 	// Seed the store with a run time long ago, then close it.
 	store, err := jobscheduler.NewScheduleStore(dbPath)
 	assert.NoError(t, err)
-	assert.NoError(t, store.SetLastRun("queue1:periodic", time.Now().Add(-10*time.Second)))
+	assert.NoError(t, store.SetLastRun("periodic:queue1", time.Now().Add(-10*time.Second)))
 	assert.NoError(t, store.Close())
 
 	scheduler, err := jobscheduler.New(ctx, jobscheduler.Config{Concurrency: 2, SchedulerDB: dbPath})
@@ -181,7 +181,7 @@ func TestPeriodicJobRecordsLastRun(t *testing.T) {
 	assert.NoError(t, err)
 	defer store.Close()
 
-	lastRun, found, err := store.GetLastRun("queue1:periodic")
+	lastRun, found, err := store.GetLastRun("periodic:queue1")
 	assert.NoError(t, err)
 	assert.True(t, found, "last run should be recorded")
 	assert.True(t, !lastRun.Before(before), "last run should be at or after test start")
