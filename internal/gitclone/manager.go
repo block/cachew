@@ -160,7 +160,10 @@ func (m *Manager) GetOrCreate(_ context.Context, upstreamURL string) (*Repositor
 		return repo, nil
 	}
 
-	clonePath := m.clonePathForURL(upstreamURL)
+	clonePath, err := m.clonePathForURL(upstreamURL)
+	if err != nil {
+		return nil, err
+	}
 
 	repo = &Repository{
 		state:              StateEmpty,
@@ -259,14 +262,22 @@ func (m *Manager) DiscoverExisting(ctx context.Context) ([]*Repository, error) {
 	return discovered, nil
 }
 
-func (m *Manager) clonePathForURL(upstreamURL string) string {
+// RepoPathFromURL extracts a normalised "host/path" from an upstream Git URL,
+// stripping any ".git" suffix.
+func RepoPathFromURL(upstreamURL string) (string, error) {
 	parsed, err := url.Parse(upstreamURL)
 	if err != nil {
-		return filepath.Join(m.config.MirrorRoot, "unknown")
+		return "", errors.Wrap(err, "parse upstream URL")
 	}
+	return filepath.Join(parsed.Host, strings.TrimSuffix(parsed.Path, ".git")), nil
+}
 
-	repoPath := strings.TrimSuffix(parsed.Path, ".git")
-	return filepath.Join(m.config.MirrorRoot, parsed.Host, repoPath)
+func (m *Manager) clonePathForURL(upstreamURL string) (string, error) {
+	repoPath, err := RepoPathFromURL(upstreamURL)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(m.config.MirrorRoot, repoPath), nil
 }
 
 func (r *Repository) State() State {

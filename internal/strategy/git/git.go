@@ -10,7 +10,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httputil"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -241,25 +240,28 @@ func SpoolKeyForRequest(pathValue string, r *http.Request) (string, error) {
 	return "upload-pack-" + hex.EncodeToString(h[:8]), nil
 }
 
-func spoolDirForURL(mirrorRoot, upstreamURL string) string {
-	parsed, err := url.Parse(upstreamURL)
+func spoolDirForURL(mirrorRoot, upstreamURL string) (string, error) {
+	repoPath, err := gitclone.RepoPathFromURL(upstreamURL)
 	if err != nil {
-		return filepath.Join(mirrorRoot, ".spools", "unknown")
+		return "", errors.Wrap(err, "resolve spool directory")
 	}
-	repoPath := strings.TrimSuffix(parsed.Path, ".git")
-	return filepath.Join(mirrorRoot, ".spools", parsed.Host, repoPath)
+	return filepath.Join(mirrorRoot, ".spools", repoPath), nil
 }
 
-func (s *Strategy) getOrCreateRepoSpools(upstreamURL string) *RepoSpools {
+func (s *Strategy) getOrCreateRepoSpools(upstreamURL string) (*RepoSpools, error) {
 	s.spoolsMu.Lock()
 	defer s.spoolsMu.Unlock()
 	rp, exists := s.spools[upstreamURL]
-	if !exists {
-		dir := spoolDirForURL(s.cloneManager.Config().MirrorRoot, upstreamURL)
-		rp = NewRepoSpools(dir)
-		s.spools[upstreamURL] = rp
+	if exists {
+		return rp, nil
 	}
-	return rp
+	dir, err := spoolDirForURL(s.cloneManager.Config().MirrorRoot, upstreamURL)
+	if err != nil {
+		return nil, err
+	}
+	rp = NewRepoSpools(dir)
+	s.spools[upstreamURL] = rp
+	return rp, nil
 }
 
 func (s *Strategy) cleanupSpools(upstreamURL string) {
@@ -294,7 +296,13 @@ func (s *Strategy) serveWithSpool(w http.ResponseWriter, r *http.Request, host, 
 		return
 	}
 
-	rp := s.getOrCreateRepoSpools(upstreamURL)
+	rp, err := s.getOrCreateRepoSpools(upstreamURL)
+	if err != nil {
+		logger.WarnContext(ctx, "Failed to resolve spool directory, forwarding to upstream",
+			slog.String("error", err.Error()))
+		s.forwardToUpstream(w, r, host, pathValue)
+		return
+	}
 	spool, isWriter, err := rp.GetOrCreate(key)
 	if err != nil {
 		logger.WarnContext(ctx, "Failed to create spool, forwarding to upstream",
