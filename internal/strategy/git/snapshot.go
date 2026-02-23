@@ -4,11 +4,9 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/alecthomas/errors"
@@ -19,13 +17,12 @@ import (
 	"github.com/block/cachew/internal/snapshot"
 )
 
-func snapshotDirForURL(mirrorRoot, upstreamURL string) string {
-	parsed, err := url.Parse(upstreamURL)
+func snapshotDirForURL(mirrorRoot, upstreamURL string) (string, error) {
+	repoPath, err := gitclone.RepoPathFromURL(upstreamURL)
 	if err != nil {
-		return filepath.Join(mirrorRoot, ".snapshots", "unknown")
+		return "", errors.Wrap(err, "resolve snapshot directory")
 	}
-	repoPath := strings.TrimSuffix(parsed.Path, ".git")
-	return filepath.Join(mirrorRoot, ".snapshots", parsed.Host, repoPath)
+	return filepath.Join(mirrorRoot, ".snapshots", repoPath), nil
 }
 
 func (s *Strategy) generateAndUploadSnapshot(ctx context.Context, repo *gitclone.Repository) error {
@@ -35,7 +32,10 @@ func (s *Strategy) generateAndUploadSnapshot(ctx context.Context, repo *gitclone
 	logger.InfoContext(ctx, "Snapshot generation started", slog.String("upstream", upstream))
 
 	mirrorRoot := s.cloneManager.Config().MirrorRoot
-	snapshotDir := snapshotDirForURL(mirrorRoot, upstream)
+	snapshotDir, err := snapshotDirForURL(mirrorRoot, upstream)
+	if err != nil {
+		return err
+	}
 
 	// Clean any previous snapshot working directory.
 	if err := os.RemoveAll(snapshotDir); err != nil {
@@ -57,7 +57,7 @@ func (s *Strategy) generateAndUploadSnapshot(ctx context.Context, repo *gitclone
 	ttl := 7 * 24 * time.Hour
 	excludePatterns := []string{"*.lock"}
 
-	err := snapshot.Create(ctx, s.cache, cacheKey, snapshotDir, ttl, excludePatterns)
+	err = snapshot.Create(ctx, s.cache, cacheKey, snapshotDir, ttl, excludePatterns)
 
 	// Always clean up the snapshot working directory.
 	if rmErr := os.RemoveAll(snapshotDir); rmErr != nil {
