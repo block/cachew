@@ -40,7 +40,7 @@ func newTestScheduler(ctx context.Context, t *testing.T) jobscheduler.Provider {
 }
 
 func TestNew(t *testing.T) {
-	_, ctx := logging.Configure(context.Background(), logging.Config{})
+	_, _, ctx := logging.Configure(context.Background(), logging.Config{})
 	tmpDir := t.TempDir()
 
 	tests := []struct {
@@ -138,7 +138,7 @@ func TestExtractRepoPath(t *testing.T) {
 }
 
 func TestNewWithExistingCloneOnDisk(t *testing.T) {
-	_, ctx := logging.Configure(context.Background(), logging.Config{})
+	_, _, ctx := logging.Configure(context.Background(), logging.Config{})
 	tmpDir := t.TempDir()
 
 	// Create a fake bare clone directory on disk before initializing strategy
@@ -162,7 +162,7 @@ func TestNewWithExistingCloneOnDisk(t *testing.T) {
 }
 
 func TestIntegrationWithMockUpstream(t *testing.T) {
-	_, ctx := logging.Configure(context.Background(), logging.Config{})
+	_, _, ctx := logging.Configure(context.Background(), logging.Config{})
 
 	// Create a mock upstream server
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -200,7 +200,7 @@ func TestNewMissingGitBinary(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("PATH manipulation for binary checks not supported on Windows")
 	}
-	_, ctx := logging.Configure(context.Background(), logging.Config{})
+	_, _, ctx := logging.Configure(context.Background(), logging.Config{})
 	tmpDir := t.TempDir()
 	t.Setenv("PATH", t.TempDir())
 
@@ -220,7 +220,7 @@ func TestNewMissingSnapshotBinaries(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("PATH manipulation for binary checks not supported on Windows")
 	}
-	_, ctx := logging.Configure(context.Background(), logging.Config{})
+	_, _, ctx := logging.Configure(context.Background(), logging.Config{})
 	tmpDir := t.TempDir()
 
 	t.Run("MissingTar", func(t *testing.T) {
@@ -256,7 +256,7 @@ func TestNewMissingSnapshotBinaries(t *testing.T) {
 }
 
 func TestParseGitRefs(t *testing.T) {
-	_, ctx := logging.Configure(context.Background(), logging.Config{})
+	_, _, ctx := logging.Configure(context.Background(), logging.Config{})
 	_ = ctx
 
 	tests := []struct {

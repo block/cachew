@@ -17,10 +17,15 @@ type Config struct {
 
 type logKey struct{}
 
-func Configure(ctx context.Context, config Config) (*slog.Logger, context.Context) {
+// Configure sets up logging with the given config and returns a logger, a LevelVar
+// that can be used to dynamically change the log level at runtime, and the updated context.
+func Configure(ctx context.Context, config Config) (*slog.Logger, *slog.LevelVar, context.Context) {
+	levelVar := &slog.LevelVar{}
+	levelVar.Set(config.Level)
+
 	var handler slog.Handler
 	if config.JSON {
-		options := &slog.HandlerOptions{Level: config.Level}
+		options := &slog.HandlerOptions{Level: levelVar}
 		if len(config.Remap) > 0 {
 			options.ReplaceAttr = func(groups []string, a slog.Attr) slog.Attr {
 				if len(groups) > 0 {
@@ -35,7 +40,7 @@ func Configure(ctx context.Context, config Config) (*slog.Logger, context.Contex
 		handler = &messageHandler{inner: slog.NewJSONHandler(os.Stdout, options)}
 	} else {
 		handler = tint.NewHandler(os.Stderr, &tint.Options{
-			Level: config.Level,
+			Level: levelVar,
 			ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
 				if a.Key == slog.TimeKey && len(groups) == 0 {
 					return slog.Attr{}
@@ -45,7 +50,7 @@ func Configure(ctx context.Context, config Config) (*slog.Logger, context.Contex
 		})
 	}
 	logger := slog.New(handler)
-	return logger, context.WithValue(ctx, logKey{}, logger)
+	return logger, levelVar, context.WithValue(ctx, logKey{}, logger)
 }
 
 func FromContext(ctx context.Context) *slog.Logger {

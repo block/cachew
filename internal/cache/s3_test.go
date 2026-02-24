@@ -125,7 +125,7 @@ func TestS3Cache(t *testing.T) {
 	startMinio(t)
 
 	cachetest.Suite(t, func(t *testing.T) cache.Cache {
-		_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelDebug})
+		_, _, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelDebug})
 
 		// Clean bucket to ensure test isolation
 		cleanBucket(t)
@@ -154,7 +154,7 @@ func TestS3CacheSoak(t *testing.T) {
 
 	startMinio(t)
 
-	_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelError})
+	_, _, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelError})
 
 	// Clean bucket to ensure test isolation
 	cleanBucket(t)

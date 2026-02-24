@@ -24,7 +24,7 @@ var httpTransportMutexHermit sync.Mutex //nolint:gochecknoglobals
 func setupHermitTest(t *testing.T) (*http.ServeMux, context.Context, cache.Cache) {
 	t.Helper()
 
-	_, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelError})
+	_, _, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelError})
 	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: time.Hour})
 	assert.NoError(t, err)
 	t.Cleanup(func() { memCache.Close() })

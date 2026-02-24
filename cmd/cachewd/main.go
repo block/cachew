@@ -63,7 +63,7 @@ func main() {
 	kctx.FatalIfErrorf(err)
 
 	ctx := context.Background()
-	logger, ctx := logging.Configure(ctx, globalConfig.LoggingConfig)
+	logger, levelVar, ctx := logging.Configure(ctx, globalConfig.LoggingConfig)
 
 	reaper.Start(ctx)
 
@@ -84,7 +84,7 @@ func main() {
 		return
 	}
 
-	mux, err := newMux(ctx, cr, sr, providersConfigHCL, envars)
+	mux, err := newMux(ctx, cr, sr, providersConfigHCL, envars, levelVar)
 	kctx.FatalIfErrorf(err)
 
 	metricsClient, err := metrics.New(ctx, globalConfig.MetricsConfig)
@@ -137,7 +137,7 @@ func printSchema(kctx *kong.Context, cr *cache.Registry, sr *strategy.Registry) 
 	}
 }
 
-func newMux(ctx context.Context, cr *cache.Registry, sr *strategy.Registry, providersConfigHCL *hcl.AST, vars map[string]string) (*http.ServeMux, error) {
+func newMux(ctx context.Context, cr *cache.Registry, sr *strategy.Registry, providersConfigHCL *hcl.AST, vars map[string]string, levelVar *slog.LevelVar) (*http.ServeMux, error) {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /_liveness", func(w http.ResponseWriter, _ *http.Request) {
@@ -148,6 +148,21 @@ func newMux(ctx context.Context, cr *cache.Registry, sr *strategy.Registry, prov
 	mux.HandleFunc("GET /_readiness", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("OK")) //nolint:errcheck
+	})
+
+	mux.HandleFunc("GET /admin/log/level", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprintln(w, levelVar.Level().String())
+	})
+
+	mux.HandleFunc("PUT /admin/log/level", func(w http.ResponseWriter, r *http.Request) {
+		var level slog.Level
+		if err := level.UnmarshalText([]byte(strings.TrimSpace(r.FormValue("level")))); err != nil {
+			http.Error(w, fmt.Sprintf("invalid level: %s", err), http.StatusBadRequest)
+			return
+		}
+		levelVar.Set(level)
+		logging.FromContext(r.Context()).Info("Log level changed", "level", level)
+		_, _ = fmt.Fprintln(w, levelVar.Level().String())
 	})
 
 	if err := config.Load(ctx, cr, sr, providersConfigHCL, mux, vars); err != nil {

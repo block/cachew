@@ -296,7 +296,7 @@ func TestHandlerMethodChaining(t *testing.T) {
 }
 
 func mustNewMemoryCache() cache.Cache {
-	_, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelError})
+	_, _, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelError})
 	c, err := cache.NewMemory(ctx, cache.MemoryConfig{
 		MaxTTL: time.Hour,
 	})

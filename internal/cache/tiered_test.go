@@ -15,7 +15,7 @@ import (
 
 func TestTieredCache(t *testing.T) {
 	cachetest.Suite(t, func(t *testing.T) cache.Cache {
-		_, ctx := logging.Configure(t.Context(), logging.Config{})
+		_, _, ctx := logging.Configure(t.Context(), logging.Config{})
 		memory, err := cache.NewMemory(ctx, cache.MemoryConfig{LimitMB: 1024, MaxTTL: time.Hour})
 		assert.NoError(t, err)
 		disk, err := cache.NewDisk(ctx, cache.DiskConfig{Root: t.TempDir(), LimitMB: 1024, MaxTTL: time.Hour})
@@ -29,7 +29,7 @@ func TestTieredCacheSoak(t *testing.T) {
 		t.Skip("Skipping soak test; set SOAK_TEST=1 to run")
 	}
 
-	_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelError})
+	_, _, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelError})
 	memory, err := cache.NewMemory(ctx, cache.MemoryConfig{
 		LimitMB: 25,
 		MaxTTL:  10 * time.Minute,

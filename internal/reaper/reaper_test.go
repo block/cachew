@@ -18,7 +18,7 @@ import (
 
 func testContext(t *testing.T) context.Context {
 	t.Helper()
-	_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelDebug})
+	_, _, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelDebug})
 	return ctx
 }
 

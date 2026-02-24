@@ -25,7 +25,7 @@ func TestHostCaching(t *testing.T) {
 	}))
 	defer backend.Close()
 
-	_, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelError})
+	_, _, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelError})
 	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: time.Hour})
 	assert.NoError(t, err)
 	defer memCache.Close()
@@ -62,7 +62,7 @@ func TestHostNonOKStatus(t *testing.T) {
 	}))
 	defer backend.Close()
 
-	_, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelError})
+	_, _, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelError})
 	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: time.Hour})
 	assert.NoError(t, err)
 	defer memCache.Close()
@@ -88,7 +88,7 @@ func TestHostNonOKStatus(t *testing.T) {
 }
 
 func TestHostInvalidTargetURL(t *testing.T) {
-	_, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelError})
+	_, _, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelError})
 	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: time.Hour})
 	assert.NoError(t, err)
 	defer memCache.Close()
@@ -99,7 +99,7 @@ func TestHostInvalidTargetURL(t *testing.T) {
 }
 
 func TestHostString(t *testing.T) {
-	_, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelError})
+	_, _, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelError})
 	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: time.Hour})
 	assert.NoError(t, err)
 	defer memCache.Close()

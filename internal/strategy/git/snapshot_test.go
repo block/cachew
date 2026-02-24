@@ -21,7 +21,7 @@ import (
 )
 
 func TestSnapshotHTTPEndpoint(t *testing.T) {
-	_, ctx := logging.Configure(context.Background(), logging.Config{})
+	_, _, ctx := logging.Configure(context.Background(), logging.Config{})
 	tmpDir := t.TempDir()
 
 	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{})
@@ -111,7 +111,7 @@ func TestSnapshotGenerationViaLocalClone(t *testing.T) {
 		t.Skip("git not found in PATH")
 	}
 
-	_, ctx := logging.Configure(context.Background(), logging.Config{})
+	_, _, ctx := logging.Configure(context.Background(), logging.Config{})
 	tmpDir := t.TempDir()
 	mirrorRoot := filepath.Join(tmpDir, "mirrors")
 	upstreamURL := "https://github.com/org/repo"

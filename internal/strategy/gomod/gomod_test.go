@@ -170,7 +170,7 @@ func setupGoModTest(t *testing.T) (*mockGoModServer, *http.ServeMux, context.Con
 	mock := newMockGoModServer(t)
 	t.Cleanup(mock.close)
 
-	_, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelError})
+	_, _, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelError})
 
 	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: 24 * time.Hour})
 	assert.NoError(t, err)
@@ -378,7 +378,7 @@ func TestNewMissingGitBinaryForPrivatePaths(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("PATH manipulation for binary checks not supported on Windows")
 	}
-	_, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelError})
+	_, _, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelError})
 
 	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: 24 * time.Hour})
 	assert.NoError(t, err)

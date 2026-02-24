@@ -15,7 +15,7 @@ import (
 
 func TestMetricsClient(t *testing.T) {
 	ctx := context.Background()
-	logger, ctx := logging.Configure(ctx, logging.Config{})
+	logger, _, ctx := logging.Configure(ctx, logging.Config{})
 	_ = logger
 
 	client, err := metrics.New(ctx, metrics.Config{
@@ -39,7 +39,7 @@ func TestMetricsDedicatedServer(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	logger, ctx := logging.Configure(ctx, logging.Config{})
+	logger, _, ctx := logging.Configure(ctx, logging.Config{})
 	_ = logger
 
 	client, err := metrics.New(ctx, metrics.Config{
@@ -58,7 +58,7 @@ func TestMetricsDedicatedServer(t *testing.T) {
 
 func TestMetricsOTLPOnly(t *testing.T) {
 	ctx := context.Background()
-	logger, ctx := logging.Configure(ctx, logging.Config{})
+	logger, _, ctx := logging.Configure(ctx, logging.Config{})
 	_ = logger
 
 	// OTLP-only configuration
@@ -79,7 +79,7 @@ func TestMetricsOTLPOnly(t *testing.T) {
 
 func TestMetricsBothExporters(t *testing.T) {
 	ctx := context.Background()
-	logger, ctx := logging.Configure(ctx, logging.Config{})
+	logger, _, ctx := logging.Configure(ctx, logging.Config{})
 	_ = logger
 
 	// Both exporters enabled
@@ -103,7 +103,7 @@ func TestMetricsBothExporters(t *testing.T) {
 
 func TestMetricsNoExportersError(t *testing.T) {
 	ctx := context.Background()
-	logger, ctx := logging.Configure(ctx, logging.Config{})
+	logger, _, ctx := logging.Configure(ctx, logging.Config{})
 	_ = logger
 
 	// Should error when no exporters are enabled

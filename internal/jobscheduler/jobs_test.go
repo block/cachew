@@ -44,7 +44,7 @@ func eventually(t *testing.T, timeout time.Duration, condition func() bool, msgA
 }
 
 func TestJobSchedulerBasic(t *testing.T) {
-	_, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelError})
+	_, _, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelError})
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -60,7 +60,7 @@ func TestJobSchedulerBasic(t *testing.T) {
 }
 
 func TestJobSchedulerConcurrency(t *testing.T) {
-	_, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelError})
+	_, _, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelError})
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -107,7 +107,7 @@ func TestJobSchedulerConcurrency(t *testing.T) {
 }
 
 func TestJobSchedulerQueueIsolation(t *testing.T) {
-	_, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelError})
+	_, _, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelError})
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -159,7 +159,7 @@ func TestJobSchedulerQueueIsolation(t *testing.T) {
 }
 
 func TestJobSchedulerJobOrdering(t *testing.T) {
-	_, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelError})
+	_, _, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelError})
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -197,7 +197,7 @@ func TestJobSchedulerJobOrdering(t *testing.T) {
 }
 
 func TestJobSchedulerErrorHandling(t *testing.T) {
-	_, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelError})
+	_, _, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelError})
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -224,7 +224,7 @@ func TestJobSchedulerErrorHandling(t *testing.T) {
 }
 
 func TestJobSchedulerContextCancellation(t *testing.T) {
-	_, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelError})
+	_, _, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelError})
 	ctx, cancel := context.WithCancel(ctx)
 
 	scheduler := newTestScheduler(ctx, t, jobscheduler.Config{Concurrency: 2})
@@ -245,7 +245,7 @@ func TestJobSchedulerContextCancellation(t *testing.T) {
 }
 
 func TestJobSchedulerPeriodicJob(t *testing.T) {
-	_, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelError})
+	_, _, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelError})
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -264,7 +264,7 @@ func TestJobSchedulerPeriodicJob(t *testing.T) {
 }
 
 func TestJobSchedulerPeriodicJobWithError(t *testing.T) {
-	_, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelError})
+	_, _, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelError})
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -283,7 +283,7 @@ func TestJobSchedulerPeriodicJobWithError(t *testing.T) {
 }
 
 func TestJobSchedulerMultipleQueues(t *testing.T) {
-	_, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelError})
+	_, _, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelError})
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -323,7 +323,7 @@ func TestJobSchedulerMultipleQueues(t *testing.T) {
 }
 
 func TestJobSchedulerHighConcurrency(t *testing.T) {
-	_, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelError})
+	_, _, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelError})
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -375,7 +375,7 @@ func FuzzJobScheduler(f *testing.F) {
 			queueCount = 50
 		}
 
-		_, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelError})
+		_, _, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelError})
 		ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		defer cancel()
 
