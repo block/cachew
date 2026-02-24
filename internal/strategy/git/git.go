@@ -27,7 +27,7 @@ import (
 	"github.com/block/cachew/internal/strategy"
 )
 
-func Register(r *strategy.Registry, scheduler jobscheduler.Scheduler, cloneManagerProvider gitclone.ManagerProvider, tokenManagerProvider githubapp.TokenManagerProvider) {
+func Register(r *strategy.Registry, scheduler jobscheduler.Provider, cloneManagerProvider gitclone.ManagerProvider, tokenManagerProvider githubapp.TokenManagerProvider) {
 	strategy.Register(r, "git", "Caches Git repositories, including tarball snapshots.", func(ctx context.Context, config Config, cache cache.Cache, mux strategy.Mux) (*Strategy, error) {
 		return New(ctx, config, scheduler, cache, mux, cloneManagerProvider, tokenManagerProvider)
 	})
@@ -54,7 +54,7 @@ type Strategy struct {
 func New(
 	ctx context.Context,
 	config Config,
-	scheduler jobscheduler.Scheduler,
+	schedulerProvider jobscheduler.Provider,
 	cache cache.Cache,
 	mux strategy.Mux,
 	cloneManagerProvider gitclone.ManagerProvider,
@@ -92,6 +92,11 @@ func New(
 		if err := os.RemoveAll(filepath.Join(cloneManager.Config().MirrorRoot, dir)); err != nil {
 			return nil, errors.Wrapf(err, "clean up stale %s", dir)
 		}
+	}
+
+	scheduler, err := schedulerProvider()
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to create scheduler")
 	}
 
 	s := &Strategy{
