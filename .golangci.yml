@@ -1,3 +1,5 @@
+# yaml-language-server: $schema=https://golangci-lint.run/jsonschema/golangci.v2.jsonschema.json
+#
 # This file is licensed under the terms of the MIT license https://opensource.org/license/mit
 # Copyright (c) 2021-2025 Marat Reimers
 
@@ -217,6 +219,12 @@ linters:
           deny:
             - pkg: log$
               desc: Use log/slog instead, see https://go.dev/blog/slog
+        "errors":
+          deny:
+            - pkg: ^errors$
+              desc: Use github.com/alecthomas/errors instead
+            - pkg: ^github.com/pkg/errors$
+              desc: Use github.com/alecthomas/errors instead
 
     embeddedstructfieldcheck:
       # Checks that sync.Mutex and sync.RWMutex are not used as embedded fields.
@@ -433,6 +441,16 @@ linters:
     wrapcheck:
       ignore-package-globs:
         - "github.com/alecthomas/errors"
+
+    forbidigo:
+      exclude-godoc-examples: true
+      analyze-types: true
+      forbid:
+        - pkg: ^fmt$
+          pattern: ^fmt\.Errorf$
+          msg: "Use github.com/alecthomas/errors.Errorf instead"
+        - pkg: "^errors$"
+          msg: "Use github.com/alecthomas/errors instead"
 
   exclusions:
     # Predefined exclusion rules.

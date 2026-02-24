@@ -2,10 +2,11 @@ package strategy
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"net/url"
+
+	"github.com/alecthomas/errors"
 
 	"github.com/block/cachew/internal/cache"
 	"github.com/block/cachew/internal/logging"
@@ -43,7 +44,7 @@ var _ Strategy = (*Host)(nil)
 func NewHost(ctx context.Context, config HostConfig, cache cache.Cache, mux Mux) (*Host, error) {
 	u, err := url.Parse(config.Target)
 	if err != nil {
-		return nil, fmt.Errorf("invalid target URL: %w", err)
+		return nil, errors.Errorf("invalid target URL: %w", err)
 	}
 	prefix := "/" + u.Host + u.EscapedPath()
 	h := &Host{

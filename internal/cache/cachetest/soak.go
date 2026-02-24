@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
-	"errors"
 	"fmt"
 	"io"
 	mrand "math/rand/v2"
@@ -17,6 +16,7 @@ import (
 	"time"
 
 	"github.com/alecthomas/assert/v2"
+	"github.com/alecthomas/errors"
 
 	"github.com/block/cachew/internal/cache"
 )
