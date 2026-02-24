@@ -6,9 +6,9 @@ ARG TARGETARCH
 SHELL ["/bin/sh", "-o", "pipefail", "-c"]
 
 # Install runtime dependencies for git operations and TLS
-RUN apk add --no-cache ca-certificates git git-daemon tzdata && \
-  addgroup -g 1000 cachew && \
-  adduser -D -u 1000 -G cachew cachew
+RUN apk add --no-cache ca-certificates git git-daemon tzdata zstd && \
+    addgroup -g 1000 cachew && \
+    adduser -D -u 1000 -G cachew cachew
 
 # Set working directory (config uses relative paths like ./state/cache)
 WORKDIR /app
@@ -21,7 +21,7 @@ COPY cachew.hcl /app/cachew.hcl
 
 # Create state directory with proper permissions
 RUN mkdir -p /app/state/cache && \
-  chown -R cachew:cachew /app
+    chown -R cachew:cachew /app
 
 # Switch to non-root user
 USER cachew
