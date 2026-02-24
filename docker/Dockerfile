@@ -6,7 +6,7 @@ ARG TARGETARCH
 SHELL ["/bin/sh", "-o", "pipefail", "-c"]
 
 # Install runtime dependencies for git operations and TLS
-RUN apk add --no-cache ca-certificates git git-daemon tzdata zstd && \
+RUN apk add --no-cache ca-certificates curl git git-daemon tzdata zstd && \
     addgroup -g 1000 cachew && \
     adduser -D -u 1000 -G cachew cachew
 
