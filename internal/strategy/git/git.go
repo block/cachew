@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -59,6 +60,17 @@ func New(
 	cloneManagerProvider gitclone.ManagerProvider,
 	tokenManagerProvider githubapp.TokenManagerProvider,
 ) (*Strategy, error) {
+	if _, err := exec.LookPath("git"); err != nil {
+		return nil, errors.New("git is required but not found in PATH")
+	}
+	if config.SnapshotInterval > 0 {
+		for _, bin := range []string{"tar", "zstd"} {
+			if _, err := exec.LookPath(bin); err != nil {
+				return nil, errors.Errorf("%s is required for snapshots (snapshot-interval > 0) but not found in PATH", bin)
+			}
+		}
+	}
+
 	logger := logging.FromContext(ctx)
 
 	// Get GitHub App token manager if configured

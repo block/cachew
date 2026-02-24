@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -369,6 +370,45 @@ func TestGoModListNotCached(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w2.Code)
 	assert.Equal(t, w1.Body.String(), w2.Body.String())
 	assert.Equal(t, 2, mock.getRequestCount(upstreamPath), "/@v/list endpoint should not be cached")
+}
+
+// TestNewMissingGitBinaryForPrivatePaths verifies that New returns an error when git is not
+// in PATH and private-paths are configured, but succeeds when no private paths are set.
+func TestNewMissingGitBinaryForPrivatePaths(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("PATH manipulation for binary checks not supported on Windows")
+	}
+	_, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelError})
+
+	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: 24 * time.Hour})
+	assert.NoError(t, err)
+	t.Cleanup(func() { _ = memCache.Close() })
+
+	cm := gitclone.NewManagerProvider(ctx, gitclone.Config{MirrorRoot: t.TempDir()}, nil)
+
+	t.Run("PrivatePathsRequireGit", func(t *testing.T) {
+		t.Setenv("PATH", t.TempDir())
+
+		mux := http.NewServeMux()
+		_, err := gomod.New(ctx, gomod.Config{
+			Proxy:        "https://proxy.golang.org",
+			PrivatePaths: []string{"github.com/myorg"},
+		}, memCache, mux, cm)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "git")
+	})
+
+	t.Run("NoPrivatePathsDoNotRequireGit", func(t *testing.T) {
+		mock := newMockGoModServer(t)
+		t.Cleanup(mock.close)
+		t.Setenv("PATH", t.TempDir())
+
+		mux := http.NewServeMux()
+		_, err := gomod.New(ctx, gomod.Config{
+			Proxy: mock.server.URL,
+		}, memCache, mux, cm)
+		assert.NoError(t, err)
+	})
 }
 
 func TestGoModLatestNotCached(t *testing.T) {

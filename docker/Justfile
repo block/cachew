@@ -1,6 +1,9 @@
 set positional-arguments := true
 set shell := ["bash", "-c"]
 
+_help:
+    @just -l
+
 # Configuration
 
 ROOT := `git rev-parse --show-toplevel 2>/dev/null || echo "."`
@@ -39,8 +42,7 @@ build-multi:
     @echo "✓ Built multi-arch image (in cache)"
 
 # Run in Docker (usage: just docker run [log_level])
-run log_level="info":
-    @just build
+run log_level="info": build
     @echo "→ Starting cachew at http://localhost:8080 (log-level={{ log_level }})"
     @docker run --rm -it -p 8080:8080 -e CACHEW_LOG_LEVEL={{ log_level }} -v {{ ROOT }}/state:/app/state --name cachew cachew:local
 

@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/alecthomas/assert/v2"
@@ -188,6 +189,73 @@ func TestIntegrationWithMockUpstream(t *testing.T) {
 	// Verify handlers exist
 	assert.NotZero(t, mux.handlers["GET /git/{host}/{path...}"])
 	assert.NotZero(t, mux.handlers["POST /git/{host}/{path...}"])
+}
+
+// fakeBin creates a minimal executable file in dir with the given name.
+func fakeBin(t *testing.T, dir, name string) {
+	t.Helper()
+	err := os.WriteFile(filepath.Join(dir, name), []byte("#!/bin/sh\n"), 0o755)
+	assert.NoError(t, err)
+}
+
+// TestNewMissingGitBinary verifies that New returns an error when git is not in PATH.
+func TestNewMissingGitBinary(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("PATH manipulation for binary checks not supported on Windows")
+	}
+	_, ctx := logging.Configure(context.Background(), logging.Config{})
+	tmpDir := t.TempDir()
+	t.Setenv("PATH", t.TempDir())
+
+	mux := newTestMux()
+	cm := gitclone.NewManagerProvider(ctx, gitclone.Config{
+		MirrorRoot:    filepath.Join(tmpDir, "clones"),
+		FetchInterval: 15,
+	}, nil)
+	_, err := git.New(ctx, git.Config{}, newTestScheduler(ctx, t), nil, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "git")
+}
+
+// TestNewMissingSnapshotBinaries verifies that New returns an error when tar or zstd are
+// not in PATH and snapshot-interval > 0.
+func TestNewMissingSnapshotBinaries(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("PATH manipulation for binary checks not supported on Windows")
+	}
+	_, ctx := logging.Configure(context.Background(), logging.Config{})
+	tmpDir := t.TempDir()
+
+	t.Run("MissingTar", func(t *testing.T) {
+		binDir := t.TempDir()
+		fakeBin(t, binDir, "git")
+		t.Setenv("PATH", binDir)
+
+		mux := newTestMux()
+		cm := gitclone.NewManagerProvider(ctx, gitclone.Config{
+			MirrorRoot:    filepath.Join(tmpDir, "clones-missing-tar"),
+			FetchInterval: 15,
+		}, nil)
+		_, err := git.New(ctx, git.Config{SnapshotInterval: 1}, newTestScheduler(ctx, t), nil, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "tar")
+	})
+
+	t.Run("MissingZstd", func(t *testing.T) {
+		binDir := t.TempDir()
+		fakeBin(t, binDir, "git")
+		fakeBin(t, binDir, "tar")
+		t.Setenv("PATH", binDir)
+
+		mux := newTestMux()
+		cm := gitclone.NewManagerProvider(ctx, gitclone.Config{
+			MirrorRoot:    filepath.Join(tmpDir, "clones-missing-zstd"),
+			FetchInterval: 15,
+		}, nil)
+		_, err := git.New(ctx, git.Config{SnapshotInterval: 1}, newTestScheduler(ctx, t), nil, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "zstd")
+	})
 }
 
 func TestParseGitRefs(t *testing.T) {

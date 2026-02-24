@@ -2,10 +2,12 @@ package gomod
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"net/url"
+	"os/exec"
 
 	"github.com/goproxy/goproxy"
 
@@ -38,6 +40,12 @@ type Strategy struct {
 var _ strategy.Strategy = (*Strategy)(nil)
 
 func New(ctx context.Context, config Config, cache cache.Cache, mux strategy.Mux, cloneManagerProvider gitclone.ManagerProvider) (*Strategy, error) {
+	if len(config.PrivatePaths) > 0 {
+		if _, err := exec.LookPath("git"); err != nil {
+			return nil, errors.New("git is required for private module support but not found in PATH")
+		}
+	}
+
 	parsedURL, err := url.Parse(config.Proxy)
 	if err != nil {
 		return nil, fmt.Errorf("invalid proxy URL: %w", err)
