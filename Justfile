@@ -39,13 +39,17 @@ fmt:
 # Build for current platform
 build GOOS=(GOOS) GOARCH=(GOARCH):
     #!/usr/bin/env bash
+    set -euo pipefail
     mkdir -p {{ RELEASE }}
-    CGO_ENABLED=0 GOOS={{ GOOS }} GOARCH={{ GOARCH }} \
-        go build -trimpath -o {{ RELEASE }}/cachewd-{{ GOOS }}-{{ GOARCH }} \
-        -ldflags "-s -w -X main.version={{ VERSION }} -X main.gitCommit={{ GIT_COMMIT }}" \
-        ./cmd/cachewd
-    test "{{ GOOS }}-{{ GOARCH }}" = "$(go env GOOS)-$(go env GOARCH)" && (cd {{ RELEASE }} && ln -sf cachewd-{{ GOOS }}-{{ GOARCH }} cachewd)
-    echo "✓ Built {{ RELEASE }}/cachewd-{{ GOOS }}-{{ GOARCH }}"
+    for binary in cachew cachewd; do
+      echo "⏲ Building dist/$binary-{{ GOOS }}-{{ GOARCH }}"
+      CGO_ENABLED=0 GOOS={{ GOOS }} GOARCH={{ GOARCH }} \
+          go build -trimpath -o {{ RELEASE }}/${binary}-{{ GOOS }}-{{ GOARCH }} \
+          -ldflags "-s -w -X main.version={{ VERSION }} -X main.gitCommit={{ GIT_COMMIT }}" \
+          ./cmd/${binary}
+      test "{{ GOOS }}-{{ GOARCH }}" = "$(go env GOOS)-$(go env GOARCH)" && (cd {{ RELEASE }} && ln -sf ${binary}-{{ GOOS }}-{{ GOARCH }} ${binary})
+      echo "✓ Done"
+    done
 
 # Build all platforms
 build-all:
