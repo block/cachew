@@ -176,7 +176,7 @@ type Cache interface {
 	Delete(ctx context.Context, key Key) error
 	// Stats returns health and usage statistics for the cache.
 	Stats(ctx context.Context) (Stats, error)
-	// ListNamespaces returns all unique namespaces in the cache.
+	// ListNamespaces returns all unique namespaces in the cache in order.
 	ListNamespaces(ctx context.Context) ([]string, error)
 	// Close the Cache.
 	Close() error

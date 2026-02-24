@@ -26,13 +26,12 @@ type diskMetaDB struct {
 }
 
 // compositeKey creates a unique database key from namespace and cache key.
+// Format: "namespace/hexkey" when namespace is set, or just "hexkey" when empty.
 func compositeKey(namespace string, key Key) []byte {
 	if namespace == "" {
-		return key[:]
+		return []byte(key.String())
 	}
-	// Format: "namespace/hexkey"
-	hexKey := key.String()
-	return []byte(namespace + "/" + hexKey)
+	return []byte(namespace + "/" + key.String())
 }
 
 // newDiskMetaDB creates a new bbolt-backed metadata storage for the disk cache.
@@ -206,23 +205,17 @@ func (s *diskMetaDB) walk(fn func(key Key, namespace string, expiresAt time.Time
 			var namespace string
 			var key Key
 
-			// Check format: composite "namespace/hexkey" or raw 32-byte key
-			before, after, found := bytes.Cut(k, []byte("/"))
-			switch {
-			case found:
-				// Composite key: "namespace/hexkey"
+			before, hexKey, found := bytes.Cut(k, []byte("/"))
+			if found {
 				namespace = string(before)
-				if len(after) != 64 {
-					return nil
-				}
-				if err := key.UnmarshalText(after); err != nil {
-					return nil //nolint:nilerr
-				}
-			case len(k) == 32:
-				// Raw key (empty namespace)
-				copy(key[:], k)
-			default:
+			} else {
+				hexKey = k
+			}
+			if len(hexKey) != 64 {
 				return nil
+			}
+			if err := key.UnmarshalText(hexKey); err != nil {
+				return nil //nolint:nilerr
 			}
 
 			var expiresAt time.Time

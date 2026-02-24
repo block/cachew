@@ -13,7 +13,7 @@ import (
 	"github.com/alecthomas/errors"
 )
 
-const defaultNamespace = "default"
+const defaultNamespace = "-"
 
 // Remote implements Cache as a client for the remote cache server.
 type Remote struct {
