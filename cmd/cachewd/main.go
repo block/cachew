@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/alecthomas/chroma/v2/quick"
+	"github.com/alecthomas/errors"
 	"github.com/alecthomas/hcl/v2"
 	"github.com/alecthomas/kong"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
@@ -149,7 +150,7 @@ func newMux(ctx context.Context, cr *cache.Registry, sr *strategy.Registry, prov
 	})
 
 	if err := config.Load(ctx, cr, sr, providersConfigHCL, mux, vars); err != nil {
-		return nil, fmt.Errorf("load config: %w", err)
+		return nil, errors.Errorf("load config: %w", err)
 	}
 
 	return mux, nil
@@ -205,7 +206,7 @@ func loadGlobalConfig(ast *hcl.AST) (GlobalConfig, map[string]string, error) {
 	var cfg GlobalConfig
 	schema, err := hcl.Schema(&cfg)
 	if err != nil {
-		return cfg, nil, fmt.Errorf("global config schema: %w", err)
+		return cfg, nil, errors.Errorf("global config schema: %w", err)
 	}
 	envars := parseEnvars()
 	config.InjectEnvars(schema, ast, "CACHEW", envars)
@@ -220,7 +221,7 @@ func loadGlobalConfig(ast *hcl.AST) (GlobalConfig, map[string]string, error) {
 		})
 	})
 	if err := hcl.UnmarshalAST(ast, &cfg, hcl.HydratedImplicitBlocks(true), preserving); err != nil {
-		return cfg, nil, fmt.Errorf("load global config: %w", err)
+		return cfg, nil, errors.Errorf("load global config: %w", err)
 	}
 
 	// Inject state directory as CACHEW_STATE for provider config expansion.
@@ -232,7 +233,7 @@ func loadGlobalConfig(ast *hcl.AST) (GlobalConfig, map[string]string, error) {
 		return os.Expand(s, func(key string) string { return envars[key] })
 	})
 	if err := hcl.UnmarshalAST(ast, &cfg, hcl.HydratedImplicitBlocks(true), expanding); err != nil {
-		return cfg, nil, fmt.Errorf("load global config: %w", err)
+		return cfg, nil, errors.Errorf("load global config: %w", err)
 	}
 	return cfg, envars, nil
 }

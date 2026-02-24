@@ -3,13 +3,14 @@ package strategy
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"io"
 	"log/slog"
 	"maps"
 	"net/http"
 	"os"
 	"time"
+
+	"github.com/alecthomas/errors"
 
 	"github.com/block/cachew/internal/cache"
 	"github.com/block/cachew/internal/logging"

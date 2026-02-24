@@ -2,10 +2,11 @@ package gomod
 
 import (
 	"context"
-	"fmt"
 	"io"
 	"io/fs"
 	"strings"
+
+	"github.com/alecthomas/errors"
 
 	"github.com/block/cachew/internal/cache"
 )
@@ -34,20 +35,20 @@ func (g *goproxyCacher) Put(ctx context.Context, name string, content io.ReadSee
 
 	wc, err := g.cache.Create(ctx, key, nil, 0)
 	if err != nil {
-		return fmt.Errorf("create cache entry: %w", err)
+		return errors.Errorf("create cache entry: %w", err)
 	}
 	defer wc.Close()
 
 	if _, err := content.Seek(0, io.SeekStart); err != nil {
-		return fmt.Errorf("seek to start: %w", err)
+		return errors.Errorf("seek to start: %w", err)
 	}
 
 	if _, err := io.Copy(wc, content); err != nil {
-		return fmt.Errorf("write to cache: %w", err)
+		return errors.Errorf("write to cache: %w", err)
 	}
 
 	if err := wc.Close(); err != nil {
-		return fmt.Errorf("close cache entry: %w", err)
+		return errors.Errorf("close cache entry: %w", err)
 	}
 
 	return nil

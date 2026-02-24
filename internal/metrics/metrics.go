@@ -2,11 +2,11 @@ package metrics
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"net/http"
 	"time"
 
+	"github.com/alecthomas/errors"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.opentelemetry.io/otel"
@@ -61,7 +61,7 @@ func New(ctx context.Context, cfg Config) (*Client, error) {
 		resource.WithHost(),
 	)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create resource: %w", err)
+		return nil, errors.Errorf("failed to create resource: %w", err)
 	}
 
 	var readers []sdkmetric.Reader
@@ -74,7 +74,7 @@ func New(ctx context.Context, cfg Config) (*Client, error) {
 		registry = prometheus.NewRegistry()
 		prometheusExporter, err = prometheusexporter.New(prometheusexporter.WithRegisterer(registry))
 		if err != nil {
-			return nil, fmt.Errorf("failed to create Prometheus exporter: %w", err)
+			return nil, errors.Errorf("failed to create Prometheus exporter: %w", err)
 		}
 		readers = append(readers, prometheusExporter)
 		exporters = append(exporters, "prometheus")
@@ -91,7 +91,7 @@ func New(ctx context.Context, cfg Config) (*Client, error) {
 
 		otlpExporter, err := otlpmetrichttp.New(ctx, opts...)
 		if err != nil {
-			return nil, fmt.Errorf("failed to create OTLP exporter: %w", err)
+			return nil, errors.Errorf("failed to create OTLP exporter: %w", err)
 		}
 
 		// Create periodic reader for OTLP
@@ -140,7 +140,7 @@ func (c *Client) Close() error {
 	}
 	if provider, ok := c.provider.(*sdkmetric.MeterProvider); ok {
 		if err := provider.Shutdown(context.Background()); err != nil {
-			return fmt.Errorf("failed to shutdown meter provider: %w", err)
+			return errors.Errorf("failed to shutdown meter provider: %w", err)
 		}
 	}
 	return nil

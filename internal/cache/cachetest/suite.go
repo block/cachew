@@ -2,7 +2,6 @@ package cachetest
 
 import (
 	"context"
-	"errors"
 	"io"
 	"net/http"
 	"os"
@@ -10,6 +9,7 @@ import (
 	"time"
 
 	"github.com/alecthomas/assert/v2"
+	"github.com/alecthomas/errors"
 
 	"github.com/block/cachew/internal/cache"
 )

@@ -2,13 +2,12 @@ package gomod
 
 import (
 	"context"
-	"errors"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"net/url"
 	"os/exec"
 
+	"github.com/alecthomas/errors"
 	"github.com/goproxy/goproxy"
 
 	"github.com/block/cachew/internal/cache"
@@ -48,12 +47,12 @@ func New(ctx context.Context, config Config, cache cache.Cache, mux strategy.Mux
 
 	parsedURL, err := url.Parse(config.Proxy)
 	if err != nil {
-		return nil, fmt.Errorf("invalid proxy URL: %w", err)
+		return nil, errors.Errorf("invalid proxy URL: %w", err)
 	}
 
 	cloneManager, err := cloneManagerProvider()
 	if err != nil {
-		return nil, fmt.Errorf("failed to create clone manager: %w", err)
+		return nil, errors.Errorf("failed to create clone manager: %w", err)
 	}
 
 	s := &Strategy{

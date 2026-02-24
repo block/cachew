@@ -2,12 +2,13 @@ package strategy
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"net/url"
 	"slices"
 	"strings"
+
+	"github.com/alecthomas/errors"
 
 	"github.com/block/cachew/internal/cache"
 	"github.com/block/cachew/internal/logging"
@@ -55,7 +56,7 @@ var _ Strategy = (*Artifactory)(nil)
 func NewArtifactory(ctx context.Context, config ArtifactoryConfig, cache cache.Cache, mux Mux) (*Artifactory, error) {
 	u, err := url.Parse(config.Target)
 	if err != nil {
-		return nil, fmt.Errorf("invalid target URL: %w", err)
+		return nil, errors.Errorf("invalid target URL: %w", err)
 	}
 
 	a := &Artifactory{
@@ -117,7 +118,7 @@ func (a *Artifactory) transformRequest(r *http.Request) (*http.Request, error) {
 
 	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, targetURL.String(), nil)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
+		return nil, errors.Errorf("failed to create request: %w", err)
 	}
 
 	// Pass through authentication headers
