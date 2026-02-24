@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -178,4 +179,35 @@ func (t tieredWriter) Write(p []byte) (n int, err error) {
 		}
 	}
 	return
+}
+
+// Namespace creates a namespaced view of the tiered cache.
+// All underlying caches are also namespaced.
+func (t Tiered) Namespace(namespace string) Cache {
+	namespaced := make([]Cache, len(t.caches))
+	for i, c := range t.caches {
+		namespaced[i] = c.Namespace(namespace)
+	}
+	return Tiered{caches: namespaced}
+}
+
+// ListNamespaces returns unique namespaces from all underlying caches.
+func (t Tiered) ListNamespaces(ctx context.Context) ([]string, error) {
+	namespaceSet := make(map[string]bool)
+	for _, c := range t.caches {
+		namespaces, err := c.ListNamespaces(ctx)
+		if err != nil && !errors.Is(err, ErrStatsUnavailable) {
+			return nil, errors.WithStack(err)
+		}
+		for _, ns := range namespaces {
+			namespaceSet[ns] = true
+		}
+	}
+
+	namespaces := make([]string, 0, len(namespaceSet))
+	for ns := range namespaceSet {
+		namespaces = append(namespaces, ns)
+	}
+	sort.Strings(namespaces)
+	return namespaces, nil
 }

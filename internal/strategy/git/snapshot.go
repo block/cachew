@@ -63,7 +63,6 @@ func (s *Strategy) generateAndUploadSnapshot(ctx context.Context, repo *gitclone
 	if rmErr := os.RemoveAll(snapshotDir); rmErr != nil {
 		logger.WarnContext(ctx, "Failed to clean up snapshot dir", slog.String("error", rmErr.Error()))
 	}
-
 	if err != nil {
 		logger.ErrorContext(ctx, "Snapshot generation failed", slog.String("upstream", upstream), slog.String("error", err.Error()))
 		return errors.Wrap(err, "create snapshot")
