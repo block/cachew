@@ -296,18 +296,11 @@ func (p *privateFetcher) generateZip(ctx context.Context, repo *gitclone.Reposit
 
 	cloneDir := filepath.Join(tmpDir, "repo")
 
-	// Local clone from the mirror — git hardlinks objects by default.
-	// #nosec G204 - repo.Path() and cloneDir are controlled by us
-	cmd := exec.CommandContext(ctx, "git", "clone", repo.Path(), cloneDir)
+	// Local clone from the mirror at the requested version — git hardlinks objects by default.
+	// #nosec G204 - repo.Path(), version, and cloneDir are controlled by us
+	cmd := exec.CommandContext(ctx, "git", "clone", "--branch", version, repo.Path(), cloneDir)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return nil, errors.Wrapf(err, "git clone: %s", string(output))
-	}
-
-	// Checkout the requested version in the local clone.
-	// #nosec G204 - cloneDir and version are controlled by us
-	cmd = exec.CommandContext(ctx, "git", "-C", cloneDir, "checkout", version)
-	if output, err := cmd.CombinedOutput(); err != nil {
-		return nil, errors.Wrapf(err, "git checkout: %s", string(output))
 	}
 
 	var buf bytes.Buffer
