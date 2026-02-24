@@ -19,7 +19,7 @@ import (
 func TestRemoteCache(t *testing.T) {
 	cachetest.Suite(t, func(t *testing.T) cache.Cache {
 		ctx := t.Context()
-		_, _, ctx = logging.Configure(ctx, logging.Config{Level: slog.LevelError})
+		_, ctx = logging.Configure(ctx, logging.Config{Level: slog.LevelError})
 		memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{
 			MaxTTL: 100 * time.Millisecond,
 		})
@@ -43,7 +43,7 @@ func TestRemoteCacheSoak(t *testing.T) {
 	}
 
 	ctx := t.Context()
-	_, _, ctx = logging.Configure(ctx, logging.Config{Level: slog.LevelError})
+	_, ctx = logging.Configure(ctx, logging.Config{Level: slog.LevelError})
 	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{
 		LimitMB: 50,
 		MaxTTL:  10 * time.Minute,

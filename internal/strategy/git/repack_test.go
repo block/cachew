@@ -16,7 +16,7 @@ import (
 )
 
 func TestRepackInterval(t *testing.T) {
-	_, _, ctx := logging.Configure(context.Background(), logging.Config{})
+	_, ctx := logging.Configure(context.Background(), logging.Config{})
 	tmpDir := t.TempDir()
 
 	tests := []struct {
@@ -49,7 +49,7 @@ func TestRepackInterval(t *testing.T) {
 }
 
 func TestRepackScheduledForExistingRepos(t *testing.T) {
-	_, _, ctx := logging.Configure(context.Background(), logging.Config{})
+	_, ctx := logging.Configure(context.Background(), logging.Config{})
 	tmpDir := t.TempDir()
 
 	// Create a fake bare clone directory on disk before initializing strategy.

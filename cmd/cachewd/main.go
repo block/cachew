@@ -63,7 +63,7 @@ func main() {
 	kctx.FatalIfErrorf(err)
 
 	ctx := context.Background()
-	logger, levelVar, ctx := logging.Configure(ctx, globalConfig.LoggingConfig)
+	logger, ctx := logging.Configure(ctx, globalConfig.LoggingConfig)
 
 	reaper.Start(ctx)
 
@@ -84,7 +84,7 @@ func main() {
 		return
 	}
 
-	mux, err := newMux(ctx, cr, sr, providersConfigHCL, envars, levelVar)
+	mux, err := newMux(ctx, cr, sr, providersConfigHCL, envars)
 	kctx.FatalIfErrorf(err)
 
 	metricsClient, err := metrics.New(ctx, globalConfig.MetricsConfig)
@@ -137,7 +137,7 @@ func printSchema(kctx *kong.Context, cr *cache.Registry, sr *strategy.Registry) 
 	}
 }
 
-func newMux(ctx context.Context, cr *cache.Registry, sr *strategy.Registry, providersConfigHCL *hcl.AST, vars map[string]string, levelVar *slog.LevelVar) (*http.ServeMux, error) {
+func newMux(ctx context.Context, cr *cache.Registry, sr *strategy.Registry, providersConfigHCL *hcl.AST, vars map[string]string) (*http.ServeMux, error) {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /_liveness", func(w http.ResponseWriter, _ *http.Request) {
@@ -151,7 +151,7 @@ func newMux(ctx context.Context, cr *cache.Registry, sr *strategy.Registry, prov
 	})
 
 	mux.HandleFunc("GET /admin/log/level", func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = fmt.Fprintln(w, levelVar.Level().String())
+		_, _ = fmt.Fprintln(w, logging.GetLevel().String())
 	})
 
 	mux.HandleFunc("PUT /admin/log/level", func(w http.ResponseWriter, r *http.Request) {
@@ -160,9 +160,9 @@ func newMux(ctx context.Context, cr *cache.Registry, sr *strategy.Registry, prov
 			http.Error(w, fmt.Sprintf("invalid level: %s", err), http.StatusBadRequest)
 			return
 		}
-		levelVar.Set(level)
+		logging.SetLevel(level)
 		logging.FromContext(r.Context()).Info("Log level changed", "level", level)
-		_, _ = fmt.Fprintln(w, levelVar.Level().String())
+		_, _ = fmt.Fprintln(w, logging.GetLevel().String())
 	})
 
 	if err := config.Load(ctx, cr, sr, providersConfigHCL, mux, vars); err != nil {

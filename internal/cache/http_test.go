@@ -16,7 +16,7 @@ import (
 )
 
 func TestCachedFetch(t *testing.T) {
-	_, _, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelError})
+	_, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelError})
 	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: time.Hour})
 	assert.NoError(t, err)
 	defer memCache.Close()
@@ -60,7 +60,7 @@ func TestCachedFetch(t *testing.T) {
 }
 
 func TestCachedFetchNonOKStatus(t *testing.T) {
-	_, _, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelError})
+	_, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelError})
 	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: time.Hour})
 	assert.NoError(t, err)
 	defer memCache.Close()

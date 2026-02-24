@@ -15,12 +15,18 @@ type Config struct {
 	Remap map[string]string `hcl:"remap,optional" help:"Remap field names from old to new (e.g., msg=message, time=timestamp)."`
 }
 
+var levelVar = &slog.LevelVar{} //nolint:gochecknoglobals
+
 type logKey struct{}
 
-// Configure sets up logging with the given config and returns a logger, a LevelVar
-// that can be used to dynamically change the log level at runtime, and the updated context.
-func Configure(ctx context.Context, config Config) (*slog.Logger, *slog.LevelVar, context.Context) {
-	levelVar := &slog.LevelVar{}
+// SetLevel sets the global log level at runtime.
+func SetLevel(level slog.Level) { levelVar.Set(level) }
+
+// GetLevel returns the current global log level.
+func GetLevel() slog.Level { return levelVar.Level() }
+
+// Configure sets up logging with the given config and returns the logger and updated context.
+func Configure(ctx context.Context, config Config) (*slog.Logger, context.Context) {
 	levelVar.Set(config.Level)
 
 	var handler slog.Handler
@@ -50,7 +56,7 @@ func Configure(ctx context.Context, config Config) (*slog.Logger, *slog.LevelVar
 		})
 	}
 	logger := slog.New(handler)
-	return logger, levelVar, context.WithValue(ctx, logKey{}, logger)
+	return logger, context.WithValue(ctx, logKey{}, logger)
 }
 
 func FromContext(ctx context.Context) *slog.Logger {

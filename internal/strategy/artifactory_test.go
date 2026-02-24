@@ -57,7 +57,7 @@ func setupArtifactoryTest(t *testing.T, config strategy.ArtifactoryConfig) (*moc
 	// Point config to mock server
 	config.Target = mock.server.URL
 
-	_, _, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelError})
+	_, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelError})
 	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: 24 * time.Hour})
 	assert.NoError(t, err)
 	t.Cleanup(func() { memCache.Close() })
@@ -204,7 +204,7 @@ func TestArtifactoryNonOKResponse(t *testing.T) {
 }
 
 func TestArtifactoryString(t *testing.T) {
-	_, _, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelError})
+	_, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelError})
 	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: time.Hour})
 	assert.NoError(t, err)
 	defer memCache.Close()
@@ -219,7 +219,7 @@ func TestArtifactoryString(t *testing.T) {
 }
 
 func TestArtifactoryInvalidTargetURL(t *testing.T) {
-	_, _, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelError})
+	_, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelError})
 	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: time.Hour})
 	assert.NoError(t, err)
 	defer memCache.Close()

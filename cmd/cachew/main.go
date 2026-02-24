@@ -40,7 +40,7 @@ func main() {
 	cli := CLI{}
 	kctx := kong.Parse(&cli, kong.UsageOnError(), kong.HelpOptions{Compact: true}, kong.DefaultEnvars("CACHEW"), kong.Bind(&cli))
 	ctx := context.Background()
-	_, _, ctx = logging.Configure(ctx, cli.LoggingConfig)
+	_, ctx = logging.Configure(ctx, cli.LoggingConfig)
 
 	remote := cache.NewRemote(cli.URL)
 	defer remote.Close()

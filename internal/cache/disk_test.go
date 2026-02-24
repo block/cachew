@@ -16,7 +16,7 @@ import (
 func TestDiskCache(t *testing.T) {
 	cachetest.Suite(t, func(t *testing.T) cache.Cache {
 		dir := t.TempDir()
-		_, _, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelDebug})
+		_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelDebug})
 		c, err := cache.NewDisk(ctx, cache.DiskConfig{
 			Root:   dir,
 			MaxTTL: 100 * time.Millisecond,
@@ -32,7 +32,7 @@ func TestDiskCacheSoak(t *testing.T) {
 	}
 
 	dir := t.TempDir()
-	_, _, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelError})
+	_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelError})
 	c, err := cache.NewDisk(ctx, cache.DiskConfig{
 		Root:          dir,
 		LimitMB:       50,

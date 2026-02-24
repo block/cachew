@@ -13,7 +13,7 @@ import (
 
 func TestDiskEvictionBySize(t *testing.T) {
 	dir := t.TempDir()
-	_, _, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelDebug})
+	_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelDebug})
 
 	// Create cache with 1MB limit and fast eviction
 	c, err := cache.NewDisk(ctx, cache.DiskConfig{
@@ -61,7 +61,7 @@ func TestDiskEvictionBySize(t *testing.T) {
 
 func TestDiskEvictionAcrossNamespaces(t *testing.T) {
 	dir := t.TempDir()
-	_, _, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelDebug})
+	_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelDebug})
 
 	// Create cache with 1MB limit
 	baseCache, err := cache.NewDisk(ctx, cache.DiskConfig{
