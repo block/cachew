@@ -150,6 +150,21 @@ func newMux(ctx context.Context, cr *cache.Registry, sr *strategy.Registry, prov
 		_, _ = w.Write([]byte("OK")) //nolint:errcheck
 	})
 
+	mux.HandleFunc("GET /admin/log/level", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprintln(w, logging.GetLevel().String())
+	})
+
+	mux.HandleFunc("PUT /admin/log/level", func(w http.ResponseWriter, r *http.Request) {
+		var level slog.Level
+		if err := level.UnmarshalText([]byte(strings.TrimSpace(r.FormValue("level")))); err != nil {
+			http.Error(w, fmt.Sprintf("invalid level: %s", err), http.StatusBadRequest)
+			return
+		}
+		logging.SetLevel(level)
+		logging.FromContext(r.Context()).Info("Log level changed", "level", level)
+		_, _ = fmt.Fprintln(w, logging.GetLevel().String())
+	})
+
 	if err := config.Load(ctx, cr, sr, providersConfigHCL, mux, vars); err != nil {
 		return nil, errors.Errorf("load config: %w", err)
 	}
