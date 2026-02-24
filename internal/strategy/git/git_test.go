@@ -34,12 +34,9 @@ func (m *testMux) HandleFunc(pattern string, handler func(http.ResponseWriter, *
 	m.handlers[pattern] = http.HandlerFunc(handler)
 }
 
-func newTestScheduler(ctx context.Context, t *testing.T) jobscheduler.Scheduler {
+func newTestScheduler(ctx context.Context, t *testing.T) jobscheduler.Provider {
 	t.Helper()
-	s, err := jobscheduler.New(ctx, jobscheduler.Config{})
-	assert.NoError(t, err)
-	t.Cleanup(func() { s.Close() })
-	return s
+	return jobscheduler.NewProvider(ctx, jobscheduler.Config{})
 }
 
 func TestNew(t *testing.T) {

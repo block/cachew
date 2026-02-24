@@ -80,6 +80,15 @@ type RootScheduler struct {
 
 var _ Scheduler = &RootScheduler{}
 
+type Provider func() (*RootScheduler, error)
+
+// NewProvider returns a scheduler singleton provider function.
+func NewProvider(ctx context.Context, config Config) Provider {
+	return sync.OnceValues(func() (*RootScheduler, error) {
+		return New(ctx, config)
+	})
+}
+
 // New creates a new JobScheduler.
 func New(ctx context.Context, config Config) (*RootScheduler, error) {
 	if config.Concurrency == 0 {

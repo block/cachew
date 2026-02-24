@@ -70,11 +70,9 @@ func main() {
 		return tokenManagerProvider()
 	})
 
-	scheduler, err := jobscheduler.New(ctx, globalConfig.SchedulerConfig)
-	kctx.FatalIfErrorf(err, "failed to create scheduler")
-	defer scheduler.Close()
+	schedulerProvider := jobscheduler.NewProvider(ctx, globalConfig.SchedulerConfig)
 
-	cr, sr := newRegistries(scheduler, managerProvider, tokenManagerProvider)
+	cr, sr := newRegistries(schedulerProvider, managerProvider, tokenManagerProvider)
 
 	// Commands
 	switch { //nolint:gocritic
@@ -105,7 +103,7 @@ func main() {
 	kctx.FatalIfErrorf(err)
 }
 
-func newRegistries(scheduler jobscheduler.Scheduler, cloneManagerProvider gitclone.ManagerProvider, tokenManagerProvider githubapp.TokenManagerProvider) (*cache.Registry, *strategy.Registry) {
+func newRegistries(scheduler jobscheduler.Provider, cloneManagerProvider gitclone.ManagerProvider, tokenManagerProvider githubapp.TokenManagerProvider) (*cache.Registry, *strategy.Registry) {
 	cr := cache.NewRegistry()
 	cache.RegisterMemory(cr)
 	cache.RegisterDisk(cr)
