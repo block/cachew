@@ -26,6 +26,7 @@ import (
 	"github.com/block/cachew/internal/jobscheduler"
 	"github.com/block/cachew/internal/logging"
 	"github.com/block/cachew/internal/metrics"
+	"github.com/block/cachew/internal/reaper"
 	"github.com/block/cachew/internal/strategy"
 	"github.com/block/cachew/internal/strategy/git"
 	"github.com/block/cachew/internal/strategy/gomod"
@@ -63,6 +64,8 @@ func main() {
 
 	ctx := context.Background()
 	logger, ctx := logging.Configure(ctx, globalConfig.LoggingConfig)
+
+	reaper.Start(ctx)
 
 	// Start initialising
 	tokenManagerProvider := githubapp.NewTokenManagerProvider(globalConfig.GithubAppConfig, logger)
