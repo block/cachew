@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/alecthomas/errors"
@@ -46,6 +47,10 @@ func (s *Strategy) generateAndUploadSnapshot(ctx context.Context, repo *gitclone
 	upstream := repo.UpstreamURL()
 
 	logger.InfoContext(ctx, "Snapshot generation started", slog.String("upstream", upstream))
+
+	mu := s.snapshotMutexFor(upstream)
+	mu.Lock()
+	defer mu.Unlock()
 
 	mirrorRoot := s.cloneManager.Config().MirrorRoot
 	snapshotDir, err := snapshotDirForURL(mirrorRoot, upstream)
@@ -104,6 +109,11 @@ func (s *Strategy) scheduleSnapshotJobs(repo *gitclone.Repository) {
 	s.scheduler.SubmitPeriodicJob(repo.UpstreamURL(), "snapshot-periodic", s.config.SnapshotInterval, func(ctx context.Context) error {
 		return s.generateAndUploadSnapshot(ctx, repo)
 	})
+}
+
+func (s *Strategy) snapshotMutexFor(upstreamURL string) *sync.Mutex {
+	mu, _ := s.snapshotMu.LoadOrStore(upstreamURL, &sync.Mutex{})
+	return mu.(*sync.Mutex)
 }
 
 func (s *Strategy) handleSnapshotRequest(w http.ResponseWriter, r *http.Request, host, pathValue string) {
