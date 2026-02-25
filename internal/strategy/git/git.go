@@ -221,11 +221,7 @@ func (s *Strategy) handleRequest(w http.ResponseWriter, r *http.Request) {
 
 	switch state {
 	case gitclone.StateReady:
-		if isInfoRefs {
-			s.ensureRefsUpToDate(ctx, repo)
-		}
-		s.maybeBackgroundFetch(repo)
-		s.serveFromBackend(w, r, repo)
+		s.serveReadyRepo(w, r, repo, host, pathValue, isInfoRefs)
 
 	case gitclone.StateCloning, gitclone.StateEmpty:
 		if state == gitclone.StateEmpty {
@@ -236,6 +232,47 @@ func (s *Strategy) handleRequest(w http.ResponseWriter, r *http.Request) {
 			})
 		}
 		s.serveWithSpool(w, r, host, pathValue, upstreamURL)
+	}
+}
+
+func (s *Strategy) serveReadyRepo(w http.ResponseWriter, r *http.Request, repo *gitclone.Repository, host, pathValue string, isInfoRefs bool) {
+	ctx := r.Context()
+	logger := logging.FromContext(ctx)
+
+	if isInfoRefs {
+		s.ensureRefsUpToDate(ctx, repo)
+	}
+	s.maybeBackgroundFetch(repo)
+
+	// Buffer the request body so it can be replayed if serveFromBackend
+	// signals a fallback to upstream (e.g. on "not our ref").
+	var bodyBytes []byte
+	if r.Body != nil && r.Body != http.NoBody {
+		var readErr error
+		bodyBytes, readErr = io.ReadAll(r.Body)
+		if readErr != nil {
+			logger.ErrorContext(ctx, "Failed to read request body",
+				slog.String("error", readErr.Error()))
+			http.Error(w, "Internal server error", http.StatusInternalServerError)
+			return
+		}
+		r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+		r.ContentLength = int64(len(bodyBytes))
+		r.TransferEncoding = nil
+	}
+
+	if s.serveFromBackend(w, r, repo) {
+		// The mirror is missing the requested object — most likely a commit
+		// that was advertised before a concurrent force-push fetch orphaned
+		// it. Fall back to upstream so the client is not left with an error.
+		logger.InfoContext(ctx, "Falling back to upstream due to 'not our ref'",
+			slog.String("path", pathValue))
+		if bodyBytes != nil {
+			r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+			r.ContentLength = int64(len(bodyBytes))
+			r.TransferEncoding = nil
+		}
+		s.forwardToUpstream(w, r, host, pathValue)
 	}
 }
 
