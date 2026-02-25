@@ -159,8 +159,55 @@ func TestSnapshotGenerationViaLocalClone(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, "hello\n", string(data))
 
+	// The remote URL must point to the upstream, not the local mirror path.
+	cmd := exec.Command("git", "-C", restoreDir, "remote", "get-url", "origin")
+	output, err := cmd.CombinedOutput()
+	assert.NoError(t, err, string(output))
+	assert.Equal(t, upstreamURL+"\n", string(output))
+
 	// Snapshot working directory should have been cleaned up.
 	snapshotWorkDir := filepath.Join(mirrorRoot, ".snapshots", "github.com", "org", "repo")
 	_, err = os.Stat(snapshotWorkDir)
 	assert.True(t, os.IsNotExist(err))
+}
+
+func TestSnapshotRemoteURLUsesServerURL(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not found in PATH")
+	}
+
+	_, ctx := logging.Configure(context.Background(), logging.Config{})
+	tmpDir := t.TempDir()
+	mirrorRoot := filepath.Join(tmpDir, "mirrors")
+	upstreamURL := "https://github.com/org/repo"
+	serverURL := "http://cachew.example.com"
+
+	mirrorPath := filepath.Join(mirrorRoot, "github.com", "org", "repo")
+	createTestMirrorRepo(t, mirrorPath)
+
+	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{})
+	assert.NoError(t, err)
+	mux := newTestMux()
+
+	cm := gitclone.NewManagerProvider(ctx, gitclone.Config{MirrorRoot: mirrorRoot}, nil)
+	s, err := git.New(ctx, git.Config{ServerURL: serverURL}, newTestScheduler(ctx, t), memCache, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
+	assert.NoError(t, err)
+
+	manager, err := cm()
+	assert.NoError(t, err)
+	repo, err := manager.GetOrCreate(ctx, upstreamURL)
+	assert.NoError(t, err)
+
+	err = s.GenerateAndUploadSnapshot(ctx, repo)
+	assert.NoError(t, err)
+
+	cacheKey := cache.NewKey(upstreamURL + ".snapshot")
+	restoreDir := filepath.Join(tmpDir, "restored")
+	err = snapshot.Restore(ctx, memCache, cacheKey, restoreDir)
+	assert.NoError(t, err)
+
+	cmd := exec.Command("git", "-C", restoreDir, "remote", "get-url", "origin")
+	output, err := cmd.CombinedOutput()
+	assert.NoError(t, err, string(output))
+	assert.Equal(t, serverURL+"/git/github.com/org/repo\n", string(output))
 }
