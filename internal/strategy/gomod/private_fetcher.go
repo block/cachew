@@ -8,13 +8,17 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/alecthomas/errors"
+	"golang.org/x/mod/module"
 	"golang.org/x/mod/semver"
+	modzip "golang.org/x/mod/zip"
 
 	"github.com/block/cachew/internal/gitclone"
 )
@@ -284,21 +288,28 @@ func (p *privateFetcher) generateMod(ctx context.Context, repo *gitclone.Reposit
 }
 
 func (p *privateFetcher) generateZip(ctx context.Context, repo *gitclone.Repository, modulePath, version string) (io.ReadSeekCloser, error) {
-	prefix := fmt.Sprintf("%s@%s/", modulePath, version)
-	output, err := gitclone.WithReadLockReturn(repo, func() ([]byte, error) {
-		// #nosec G204 - version and repo.Path() are controlled by this package, not user input
-		cmd := exec.CommandContext(ctx, "git", "-C", repo.Path(), "archive",
-			"--format=zip",
-			fmt.Sprintf("--prefix=%s", prefix),
-			version)
-		return cmd.CombinedOutput()
-	})
-
+	tmpDir, err := os.MkdirTemp("", "gomod-zip-*")
 	if err != nil {
-		return nil, errors.Wrapf(err, "git archive failed: %s", string(output))
+		return nil, errors.Wrap(err, "create temp dir")
+	}
+	defer os.RemoveAll(tmpDir) //nolint:errcheck
+
+	cloneDir := filepath.Join(tmpDir, "repo")
+
+	// Local clone from the mirror at the requested version — git hardlinks objects by default.
+	// #nosec G204 - repo.Path(), version, and cloneDir are controlled by us
+	cmd := exec.CommandContext(ctx, "git", "clone", "--branch", version, repo.Path(), cloneDir)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return nil, errors.Wrapf(err, "git clone: %s", string(output))
 	}
 
-	return newReadSeekCloser(bytes.NewReader(output)), nil
+	var buf bytes.Buffer
+	m := module.Version{Path: modulePath, Version: version}
+	if err := modzip.CreateFromDir(&buf, m, cloneDir); err != nil {
+		return nil, errors.Wrap(err, "create module zip")
+	}
+
+	return newReadSeekCloser(bytes.NewReader(buf.Bytes())), nil
 }
 
 type readSeekCloser struct {
