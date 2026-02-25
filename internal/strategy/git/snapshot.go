@@ -2,11 +2,13 @@ package git
 
 import (
 	"context"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/alecthomas/errors"
@@ -105,5 +107,61 @@ func (s *Strategy) scheduleSnapshotJobs(repo *gitclone.Repository) {
 }
 
 func (s *Strategy) handleSnapshotRequest(w http.ResponseWriter, r *http.Request, host, pathValue string) {
-	s.serveCachedArtifact(w, r, host, pathValue, "snapshot.tar.zst", "snapshot")
+	ctx := r.Context()
+	logger := logging.FromContext(ctx)
+
+	repoPath := ExtractRepoPath(strings.TrimSuffix(pathValue, "/snapshot.tar.zst"))
+	upstreamURL := "https://" + host + "/" + repoPath
+	cacheKey := cache.NewKey(upstreamURL + ".snapshot")
+
+	reader, headers, err := s.cache.Open(ctx, cacheKey)
+	if errors.Is(err, os.ErrNotExist) {
+		repo, repoErr := s.cloneManager.GetOrCreate(ctx, upstreamURL)
+		if repoErr != nil {
+			logger.ErrorContext(ctx, "Failed to get or create clone",
+				slog.String("upstream", upstreamURL),
+				slog.String("error", repoErr.Error()))
+			http.Error(w, "Internal server error", http.StatusInternalServerError)
+			return
+		}
+		if cloneErr := s.ensureCloneReady(ctx, repo); cloneErr != nil {
+			logger.ErrorContext(ctx, "Clone unavailable for snapshot",
+				slog.String("upstream", upstreamURL),
+				slog.String("error", cloneErr.Error()))
+			http.Error(w, "Repository unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		if genErr := s.generateAndUploadSnapshot(ctx, repo); genErr != nil {
+			logger.ErrorContext(ctx, "On-demand snapshot generation failed",
+				slog.String("upstream", upstreamURL),
+				slog.String("error", genErr.Error()))
+			http.Error(w, "Internal server error", http.StatusInternalServerError)
+			return
+		}
+		reader, headers, err = s.cache.Open(ctx, cacheKey)
+	}
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			logger.DebugContext(ctx, "snapshot not found in cache", slog.String("upstream", upstreamURL))
+			http.NotFound(w, r)
+			return
+		}
+		logger.ErrorContext(ctx, "Failed to open snapshot from cache",
+			slog.String("upstream", upstreamURL),
+			slog.String("error", err.Error()))
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+	defer reader.Close()
+
+	for key, values := range headers {
+		for _, value := range values {
+			w.Header().Add(key, value)
+		}
+	}
+	if _, err = io.Copy(w, reader); err != nil {
+		logger.ErrorContext(ctx, "Failed to stream snapshot",
+			slog.String("upstream", upstreamURL),
+			slog.String("error", err.Error()))
+	}
 }
