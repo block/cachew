@@ -25,6 +25,20 @@ func snapshotDirForURL(mirrorRoot, upstreamURL string) (string, error) {
 	return filepath.Join(mirrorRoot, ".snapshots", repoPath), nil
 }
 
+// remoteURLForSnapshot returns the URL to embed as remote.origin.url in snapshots.
+// When a server URL is configured, it returns the cachew URL for the repo so that
+// git pull goes through cachew. Otherwise it falls back to the upstream URL.
+func (s *Strategy) remoteURLForSnapshot(upstream string) string {
+	if s.config.ServerURL == "" {
+		return upstream
+	}
+	repoPath, err := gitclone.RepoPathFromURL(upstream)
+	if err != nil {
+		return upstream
+	}
+	return s.config.ServerURL + "/git/" + repoPath
+}
+
 func (s *Strategy) generateAndUploadSnapshot(ctx context.Context, repo *gitclone.Repository) error {
 	logger := logging.FromContext(ctx)
 	upstream := repo.UpstreamURL()
@@ -45,12 +59,24 @@ func (s *Strategy) generateAndUploadSnapshot(ctx context.Context, repo *gitclone
 		return errors.Wrap(err, "create snapshot parent dir")
 	}
 
-	// Local clone from the mirror — git hardlinks objects by default.
-	// #nosec G204 - repo.Path() and snapshotDir are controlled by us
-	cmd := exec.CommandContext(ctx, "git", "clone", repo.Path(), snapshotDir)
-	if output, err := cmd.CombinedOutput(); err != nil {
+	// Hold a read lock to exclude concurrent fetches while cloning.
+	if err := repo.WithReadLock(func() error {
+		// #nosec G204 - repo.Path() and snapshotDir are controlled by us
+		cmd := exec.CommandContext(ctx, "git", "clone", repo.Path(), snapshotDir)
+		if output, err := cmd.CombinedOutput(); err != nil {
+			return errors.Wrapf(err, "git clone for snapshot: %s", string(output))
+		}
+
+		// git clone from a local path sets remote.origin.url to that path; restore it.
+		// #nosec G204 - remoteURL is derived from controlled inputs
+		cmd = exec.CommandContext(ctx, "git", "-C", snapshotDir, "remote", "set-url", "origin", s.remoteURLForSnapshot(upstream))
+		if output, err := cmd.CombinedOutput(); err != nil {
+			return errors.Wrapf(err, "fix snapshot remote URL: %s", string(output))
+		}
+		return nil
+	}); err != nil {
 		_ = os.RemoveAll(snapshotDir)
-		return errors.Wrapf(err, "git clone for snapshot: %s", string(output))
+		return errors.WithStack(err)
 	}
 
 	cacheKey := cache.NewKey(upstream + ".snapshot")

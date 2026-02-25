@@ -242,6 +242,10 @@ func loadGlobalConfig(ast *hcl.AST) (GlobalConfig, map[string]string, error) {
 
 	// Inject state directory as CACHEW_STATE for provider config expansion.
 	envars["CACHEW_STATE"] = cfg.State
+	// Also inject CACHEW_URL
+	if envars["CACHEW_URL"] == "" {
+		envars["CACHEW_URL"] = cfg.URL
+	}
 
 	// Second pass: re-expand now that CACHEW_STATE is available.
 	cfg = GlobalConfig{}
@@ -251,6 +255,7 @@ func loadGlobalConfig(ast *hcl.AST) (GlobalConfig, map[string]string, error) {
 	if err := hcl.UnmarshalAST(ast, &cfg, hcl.HydratedImplicitBlocks(true), expanding); err != nil {
 		return cfg, nil, errors.Errorf("load global config: %w", err)
 	}
+
 	return cfg, envars, nil
 }
 
