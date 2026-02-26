@@ -34,14 +34,14 @@ import (
 )
 
 type GlobalConfig struct {
-	State           string              `hcl:"state" default:"./state" help:"Base directory for all state (git mirrors, cache, etc.)."`
-	Bind            string              `hcl:"bind" default:"127.0.0.1:8080" help:"Bind address for the server."`
-	URL             string              `hcl:"url" default:"http://127.0.0.1:8080/" help:"Base URL for cachewd."`
-	SchedulerConfig jobscheduler.Config `hcl:"scheduler,block"`
-	LoggingConfig   logging.Config      `hcl:"log,block"`
-	MetricsConfig   metrics.Config      `hcl:"metrics,block"`
-	GitCloneConfig  gitclone.Config     `hcl:"git-clone,block"`
-	GithubAppConfig githubapp.Config    `embed:"" hcl:"github-app,block,optional" prefix:"github-app-"`
+	State            string              `hcl:"state" default:"./state" help:"Base directory for all state (git mirrors, cache, etc.)."`
+	Bind             string              `hcl:"bind" default:"127.0.0.1:8080" help:"Bind address for the server."`
+	URL              string              `hcl:"url" default:"http://127.0.0.1:8080/" help:"Base URL for cachewd."`
+	SchedulerConfig  jobscheduler.Config `hcl:"scheduler,block"`
+	LoggingConfig    logging.Config      `hcl:"log,block"`
+	MetricsConfig    metrics.Config      `hcl:"metrics,block"`
+	GitCloneConfig   gitclone.Config     `hcl:"git-clone,block"`
+	GithubAppConfigs []githubapp.Config  `hcl:"github-app,block,optional"`
 }
 
 type CLI struct {
@@ -69,7 +69,7 @@ func main() {
 	reaper.Start(ctx)
 
 	// Start initialising
-	tokenManagerProvider := githubapp.NewTokenManagerProvider(globalConfig.GithubAppConfig, logger)
+	tokenManagerProvider := githubapp.NewTokenManagerProvider(globalConfig.GithubAppConfigs, logger)
 	managerProvider := gitclone.NewManagerProvider(ctx, globalConfig.GitCloneConfig, func() (gitclone.CredentialProvider, error) {
 		return tokenManagerProvider()
 	})

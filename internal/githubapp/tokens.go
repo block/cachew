@@ -18,27 +18,21 @@ import (
 // TokenManagerProvider is a function that lazily creates a singleton TokenManager.
 type TokenManagerProvider func() (*TokenManager, error)
 
-// NewTokenManagerProvider creates a provider that lazily initializes a TokenManager.
-func NewTokenManagerProvider(config Config, logger *slog.Logger) TokenManagerProvider {
+// NewTokenManagerProvider creates a provider that lazily initializes a TokenManager
+// from one or more GitHub App configurations.
+func NewTokenManagerProvider(configs []Config, logger *slog.Logger) TokenManagerProvider {
 	return sync.OnceValues(func() (*TokenManager, error) {
-		if config.AppID == "" || config.PrivateKeyPath == "" || len(config.Installations) == 0 {
-			return nil, nil // Not configured, return nil without error
-		}
-
-		installations, err := NewInstallations(config, logger)
-		if err != nil {
-			return nil, errors.Wrap(err, "create installations")
-		}
-
-		return NewTokenManager(installations, DefaultTokenCacheConfig())
+		return newTokenManager(configs, logger)
 	})
 }
 
-type TokenManager struct {
-	installations *Installations
-	cacheConfig   TokenCacheConfig
-	jwtGenerator  *JWTGenerator
-	httpClient    *http.Client
+// appState holds token management state for a single GitHub App.
+type appState struct {
+	name         string
+	jwtGenerator *JWTGenerator
+	cacheConfig  TokenCacheConfig
+	httpClient   *http.Client
+	orgs         map[string]string // org -> installation ID
 
 	mu     sync.RWMutex
 	tokens map[string]*cachedToken
@@ -49,66 +43,69 @@ type cachedToken struct {
 	expiresAt time.Time
 }
 
-func NewTokenManager(installations *Installations, cacheConfig TokenCacheConfig) (*TokenManager, error) {
-	if !installations.IsConfigured() {
-		return nil, errors.New("GitHub App not configured")
-	}
-
-	jwtGenerator, err := NewJWTGenerator(installations.AppID(), installations.PrivateKeyPath(), cacheConfig.JWTExpiration)
-	if err != nil {
-		return nil, errors.Wrap(err, "create JWT generator")
-	}
-
-	return &TokenManager{
-		installations: installations,
-		cacheConfig:   cacheConfig,
-		jwtGenerator:  jwtGenerator,
-		httpClient:    http.DefaultClient,
-		tokens:        make(map[string]*cachedToken),
-	}, nil
+// TokenManager manages GitHub App installation tokens across one or more apps.
+type TokenManager struct {
+	orgToApp map[string]*appState
 }
 
+func newTokenManager(configs []Config, logger *slog.Logger) (*TokenManager, error) {
+	orgToApp := map[string]*appState{}
+
+	for _, config := range configs {
+		if config.AppID == "" || config.PrivateKeyPath == "" || len(config.Installations) == 0 {
+			continue
+		}
+
+		cacheConfig := DefaultTokenCacheConfig()
+		jwtGen, err := NewJWTGenerator(config.AppID, config.PrivateKeyPath, cacheConfig.JWTExpiration)
+		if err != nil {
+			return nil, errors.Wrapf(err, "github app %q", config.Name)
+		}
+
+		app := &appState{
+			name:         config.Name,
+			jwtGenerator: jwtGen,
+			cacheConfig:  cacheConfig,
+			httpClient:   http.DefaultClient,
+			orgs:         config.Installations,
+			tokens:       make(map[string]*cachedToken),
+		}
+
+		for org := range config.Installations {
+			if existing, exists := orgToApp[org]; exists {
+				return nil, errors.Errorf("org %q is configured in both github-app %q and %q", org, existing.name, config.Name)
+			}
+			orgToApp[org] = app
+		}
+
+		logger.Info("GitHub App configured",
+			"name", config.Name,
+			"app_id", config.AppID,
+			"orgs", len(config.Installations))
+	}
+
+	if len(orgToApp) == 0 {
+		return nil, nil //nolint:nilnil
+	}
+
+	return &TokenManager{orgToApp: orgToApp}, nil
+}
+
+// GetTokenForOrg returns an installation token for the given GitHub organization.
 func (tm *TokenManager) GetTokenForOrg(ctx context.Context, org string) (string, error) {
 	if tm == nil {
 		return "", errors.New("token manager not initialized")
 	}
-	logger := logging.FromContext(ctx).With(slog.String("org", org))
 
-	installationID := tm.installations.GetInstallationID(org)
-	if installationID == "" {
-		return "", errors.Errorf("no GitHub App installation configured for org: %s", org)
+	app, ok := tm.orgToApp[org]
+	if !ok {
+		return "", errors.Errorf("no GitHub App configured for org: %s", org)
 	}
 
-	tm.mu.RLock()
-	cached, exists := tm.tokens[org]
-	tm.mu.RUnlock()
-
-	if exists && time.Now().Add(tm.cacheConfig.RefreshBuffer).Before(cached.expiresAt) {
-		logger.DebugContext(ctx, "Using cached GitHub App token")
-		return cached.token, nil
-	}
-
-	logger.DebugContext(ctx, "Fetching new GitHub App installation token",
-		slog.String("installation_id", installationID))
-
-	token, expiresAt, err := tm.fetchInstallationToken(ctx, installationID)
-	if err != nil {
-		return "", errors.Wrap(err, "fetch installation token")
-	}
-
-	tm.mu.Lock()
-	tm.tokens[org] = &cachedToken{
-		token:     token,
-		expiresAt: expiresAt,
-	}
-	tm.mu.Unlock()
-
-	logger.InfoContext(ctx, "GitHub App token refreshed",
-		slog.Time("expires_at", expiresAt))
-
-	return token, nil
+	return app.getToken(ctx, org)
 }
 
+// GetTokenForURL extracts the org from a GitHub URL and returns an installation token.
 func (tm *TokenManager) GetTokenForURL(ctx context.Context, url string) (string, error) {
 	if tm == nil {
 		return "", errors.New("token manager not initialized")
@@ -121,8 +118,46 @@ func (tm *TokenManager) GetTokenForURL(ctx context.Context, url string) (string,
 	return tm.GetTokenForOrg(ctx, org)
 }
 
-func (tm *TokenManager) fetchInstallationToken(ctx context.Context, installationID string) (string, time.Time, error) {
-	jwt, err := tm.jwtGenerator.GenerateJWT()
+func (a *appState) getToken(ctx context.Context, org string) (string, error) {
+	logger := logging.FromContext(ctx).With(slog.String("org", org), slog.String("app", a.name))
+
+	installationID := a.orgs[org]
+	if installationID == "" {
+		return "", errors.Errorf("no installation ID for org: %s", org)
+	}
+
+	a.mu.RLock()
+	cached, exists := a.tokens[org]
+	a.mu.RUnlock()
+
+	if exists && time.Now().Add(a.cacheConfig.RefreshBuffer).Before(cached.expiresAt) {
+		logger.DebugContext(ctx, "Using cached GitHub App token")
+		return cached.token, nil
+	}
+
+	logger.DebugContext(ctx, "Fetching new GitHub App installation token",
+		slog.String("installation_id", installationID))
+
+	token, expiresAt, err := a.fetchInstallationToken(ctx, installationID)
+	if err != nil {
+		return "", errors.Wrap(err, "fetch installation token")
+	}
+
+	a.mu.Lock()
+	a.tokens[org] = &cachedToken{
+		token:     token,
+		expiresAt: expiresAt,
+	}
+	a.mu.Unlock()
+
+	logger.InfoContext(ctx, "GitHub App token refreshed",
+		slog.Time("expires_at", expiresAt))
+
+	return token, nil
+}
+
+func (a *appState) fetchInstallationToken(ctx context.Context, installationID string) (string, time.Time, error) {
+	jwt, err := a.jwtGenerator.GenerateJWT()
 	if err != nil {
 		return "", time.Time{}, errors.Wrap(err, "generate JWT")
 	}
@@ -137,7 +172,7 @@ func (tm *TokenManager) fetchInstallationToken(ctx context.Context, installation
 	req.Header.Set("Authorization", "Bearer "+jwt)
 	req.Header.Set("X-Github-Api-Version", "2022-11-28")
 
-	resp, err := tm.httpClient.Do(req)
+	resp, err := a.httpClient.Do(req)
 	if err != nil {
 		return "", time.Time{}, errors.Wrap(err, "execute request")
 	}
