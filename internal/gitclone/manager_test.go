@@ -188,7 +188,7 @@ func TestManager_DiscoverExisting(t *testing.T) {
 
 	// Verify mirror config was applied to discovered repos.
 	for _, repoPath := range repoPaths {
-		for _, kv := range mirrorConfigSettings() {
+		for _, kv := range mirrorConfigSettings(manager.Config().PackThreads) {
 			cmd := exec.Command("git", "-C", repoPath, "config", "--get", kv[0])
 			output, err := cmd.Output()
 			assert.NoError(t, err, "config key %s in %s", kv[0], repoPath)
@@ -307,6 +307,7 @@ func TestRepository_CloneSetsMirrorConfig(t *testing.T) {
 	clonePath := filepath.Join(tmpDir, "clone")
 	repo := &Repository{
 		state:       StateEmpty,
+		config:      Config{PackThreads: 4},
 		path:        clonePath,
 		upstreamURL: upstreamPath,
 		fetchSem:    make(chan struct{}, 1),
@@ -316,7 +317,7 @@ func TestRepository_CloneSetsMirrorConfig(t *testing.T) {
 	assert.NoError(t, repo.Clone(ctx))
 	assert.Equal(t, StateReady, repo.State())
 
-	for _, kv := range mirrorConfigSettings() {
+	for _, kv := range mirrorConfigSettings(4) {
 		cmd := exec.Command("git", "-C", clonePath, "config", "--get", kv[0])
 		output, err := cmd.Output()
 		assert.NoError(t, err, "config key %s", kv[0])

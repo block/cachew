@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -57,6 +58,7 @@ type Config struct {
 	FetchInterval    time.Duration `hcl:"fetch-interval,optional" help:"How often to fetch from upstream in minutes." default:"15m"`
 	RefCheckInterval time.Duration `hcl:"ref-check-interval,optional" help:"How long to cache ref checks." default:"10s"`
 	Maintenance      bool          `hcl:"maintenance,optional" help:"Enable git maintenance scheduling for mirror repos." default:"false"`
+	PackThreads      int           `hcl:"pack-threads,optional" help:"Threads for git pack operations (0 = all CPU cores)." default:"0"`
 }
 
 // CredentialProvider provides credentials for git operations.
@@ -115,6 +117,10 @@ func NewManager(ctx context.Context, config Config, credentialProvider Credentia
 
 	if config.RefCheckInterval == 0 {
 		config.RefCheckInterval = 10 * time.Second
+	}
+
+	if config.PackThreads <= 0 {
+		config.PackThreads = runtime.NumCPU()
 	}
 
 	if err := os.MkdirAll(config.MirrorRoot, 0o750); err != nil {
@@ -233,7 +239,7 @@ func (m *Manager) DiscoverExisting(ctx context.Context) ([]*Repository, error) {
 		}
 		repo.fetchSem <- struct{}{}
 
-		if err := configureMirror(ctx, path); err != nil {
+		if err := configureMirror(ctx, path, m.config.PackThreads); err != nil {
 			return errors.Wrapf(err, "configure mirror for %s", upstreamURL)
 		}
 
@@ -341,7 +347,7 @@ func (r *Repository) Clone(ctx context.Context) error {
 
 // mirrorConfigSettings returns git config key-value pairs applied to mirror
 // clones to optimise upload-pack serving performance.
-func mirrorConfigSettings() [][2]string {
+func mirrorConfigSettings(packThreads int) [][2]string {
 	return [][2]string{
 		// Protocol
 		{"protocol.version", "2"},
@@ -363,7 +369,7 @@ func mirrorConfigSettings() [][2]string {
 		// Disable auto GC
 		{"gc.auto", "0"},
 		// Pack performance
-		{"pack.threads", "4"},
+		{"pack.threads", strconv.Itoa(packThreads)},
 		{"pack.deltaCacheSize", "512m"},
 		{"pack.windowMemory", "1g"},
 	}
@@ -391,8 +397,8 @@ func startMaintenance(ctx context.Context) error {
 	return nil
 }
 
-func configureMirror(ctx context.Context, repoPath string) error {
-	for _, kv := range mirrorConfigSettings() {
+func configureMirror(ctx context.Context, repoPath string, packThreads int) error {
+	for _, kv := range mirrorConfigSettings(packThreads) {
 		// #nosec G204 - repoPath and config values are controlled by us
 		cmd := exec.CommandContext(ctx, "git", "-C", repoPath, "config", kv[0], kv[1])
 		output, err := cmd.CombinedOutput()
@@ -427,7 +433,7 @@ func (r *Repository) executeClone(ctx context.Context) error {
 		return errors.Wrapf(err, "git clone --mirror: %s", string(output))
 	}
 
-	if err := configureMirror(ctx, r.path); err != nil {
+	if err := configureMirror(ctx, r.path, r.config.PackThreads); err != nil {
 		return errors.Wrap(err, "configure mirror")
 	}
 

@@ -90,7 +90,7 @@ func (s *Strategy) generateAndUploadSnapshot(ctx context.Context, repo *gitclone
 	ttl := 7 * 24 * time.Hour
 	excludePatterns := []string{"*.lock"}
 
-	err = snapshot.Create(ctx, s.cache, cacheKey, snapshotDir, ttl, excludePatterns)
+	err = snapshot.Create(ctx, s.cache, cacheKey, snapshotDir, ttl, excludePatterns, s.config.ZstdThreads)
 
 	// Always clean up the snapshot working directory.
 	if rmErr := os.RemoveAll(snapshotDir); rmErr != nil {
