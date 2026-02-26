@@ -366,7 +366,7 @@ func mirrorConfigSettings() [][2]string {
 		// Disable auto GC
 		{"gc.auto", "0"},
 		// Pack performance
-		{"pack.threads", "0"},
+		{"pack.threads", "4"},
 		{"pack.deltaCacheSize", "512m"},
 		{"pack.windowMemory", "1g"},
 	}

@@ -45,7 +45,7 @@ func Create(ctx context.Context, remote cache.Cache, key cache.Key, directory st
 	tarArgs = append(tarArgs, ".")
 
 	tarCmd := exec.CommandContext(ctx, "tar", tarArgs...)
-	zstdCmd := exec.CommandContext(ctx, "zstd", "-c", "-T0")
+	zstdCmd := exec.CommandContext(ctx, "zstd", "-c", "-T4")
 
 	tarStdout, err := tarCmd.StdoutPipe()
 	if err != nil {
@@ -102,7 +102,7 @@ func Restore(ctx context.Context, remote cache.Cache, key cache.Key, directory s
 		return errors.Wrap(err, "failed to create target directory")
 	}
 
-	zstdCmd := exec.CommandContext(ctx, "zstd", "-dc", "-T0")
+	zstdCmd := exec.CommandContext(ctx, "zstd", "-dc", "-T4")
 	tarCmd := exec.CommandContext(ctx, "tar", "-xpf", "-", "-C", directory)
 
 	zstdCmd.Stdin = rc
