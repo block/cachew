@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	_ "net/http/pprof" //nolint:gosec
 	"os"
 	"strings"
 	"time"
@@ -164,6 +165,11 @@ func newMux(ctx context.Context, cr *cache.Registry, sr *strategy.Registry, prov
 		logging.FromContext(r.Context()).Info("Log level changed", "level", level)
 		_, _ = fmt.Fprintln(w, logging.GetLevel().String())
 	})
+
+	mux.Handle("/admin/pprof/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.URL.Path = "/debug/pprof/" + r.URL.Path[len("/admin/pprof/"):]
+		http.DefaultServeMux.ServeHTTP(w, r)
+	}))
 
 	if err := config.Load(ctx, cr, sr, providersConfigHCL, mux, vars); err != nil {
 		return nil, errors.Errorf("load config: %w", err)
