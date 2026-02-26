@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	_ "net/http/pprof" //nolint:gosec
 	"os"
 	"strings"
 	"time"
@@ -36,6 +37,7 @@ type GlobalConfig struct {
 	State           string              `hcl:"state" default:"./state" help:"Base directory for all state (git mirrors, cache, etc.)."`
 	Bind            string              `hcl:"bind" default:"127.0.0.1:8080" help:"Bind address for the server."`
 	URL             string              `hcl:"url" default:"http://127.0.0.1:8080/" help:"Base URL for cachewd."`
+	PprofBind       string              `hcl:"pprof-bind" default:":6060" help:"Bind address for the pprof debug server (CPU/memory profiling). Empty string to disable."`
 	SchedulerConfig jobscheduler.Config `hcl:"scheduler,block"`
 	LoggingConfig   logging.Config      `hcl:"log,block"`
 	MetricsConfig   metrics.Config      `hcl:"metrics,block"`
@@ -98,6 +100,8 @@ func main() {
 	if err := metricsClient.ServeMetrics(ctx); err != nil {
 		kctx.FatalIfErrorf(err, "failed to start metrics server")
 	}
+
+	servePprof(ctx, globalConfig.PprofBind)
 
 	logger.InfoContext(ctx, "Starting cachewd", slog.String("bind", globalConfig.Bind))
 
@@ -170,6 +174,33 @@ func newMux(ctx context.Context, cr *cache.Registry, sr *strategy.Registry, prov
 	}
 
 	return mux, nil
+}
+
+func servePprof(ctx context.Context, bind string) {
+	if bind == "" {
+		return
+	}
+	logger := logging.FromContext(ctx)
+	server := &http.Server{
+		Addr:              bind,
+		Handler:           http.DefaultServeMux,
+		ReadTimeout:       2 * time.Minute,
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+	go func() {
+		logger.InfoContext(ctx, "Starting pprof server", slog.String("bind", bind))
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			logger.ErrorContext(ctx, "pprof server error", "error", err)
+		}
+	}()
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := server.Shutdown(shutdownCtx); err != nil {
+			logger.ErrorContext(shutdownCtx, "pprof server shutdown error", "error", err)
+		}
+	}()
 }
 
 // extractPathPrefix extracts the strategy name, path prefix from a request path.
