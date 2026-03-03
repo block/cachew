@@ -484,11 +484,19 @@ func (r *Repository) Fetch(ctx context.Context) error {
 	return nil
 }
 
-func (r *Repository) EnsureRefsUpToDate(ctx context.Context) error {
+// lsRemoteTimeout bounds `git ls-remote` so a slow or unresponsive upstream
+// cannot block the request path indefinitely.
+const lsRemoteTimeout = 60 * time.Second
+
+// EnsureRefsUpToDate checks whether the local mirror's refs match upstream.
+// If refs are stale it returns NeedsFetch=true so the caller can schedule a
+// background fetch via the job scheduler, rather than fetching synchronously
+// on the request path (which would acquire a write lock and block all serving).
+func (r *Repository) EnsureRefsUpToDate(ctx context.Context) (needsFetch bool, err error) {
 	r.mu.Lock()
 	if r.refCheckValid && time.Since(r.lastRefCheck) < r.config.RefCheckInterval {
 		r.mu.Unlock()
-		return nil
+		return false, nil
 	}
 	r.lastRefCheck = time.Now()
 	r.refCheckValid = true
@@ -496,15 +504,20 @@ func (r *Repository) EnsureRefsUpToDate(ctx context.Context) error {
 
 	localRefs, err := r.GetLocalRefs(ctx)
 	if err != nil {
-		return errors.Wrap(err, "get local refs")
+		return false, errors.Wrap(err, "get local refs")
 	}
 
-	upstreamRefs, err := r.GetUpstreamRefs(ctx)
+	lsCtx, cancel := context.WithTimeout(ctx, lsRemoteTimeout)
+	defer cancel()
+
+	upstreamRefs, err := r.GetUpstreamRefs(lsCtx)
 	if err != nil {
-		return errors.Wrap(err, "get upstream refs")
+		r.mu.Lock()
+		r.refCheckValid = false
+		r.mu.Unlock()
+		return false, errors.Wrap(err, "get upstream refs")
 	}
 
-	needsFetch := false
 	for ref, upstreamSHA := range upstreamRefs {
 		if strings.HasSuffix(ref, "^{}") {
 			continue
@@ -514,25 +527,14 @@ func (r *Repository) EnsureRefsUpToDate(ctx context.Context) error {
 		}
 		localSHA, exists := localRefs[ref]
 		if !exists || localSHA != upstreamSHA {
-			needsFetch = true
-			break
+			r.mu.Lock()
+			r.refCheckValid = false
+			r.mu.Unlock()
+			return true, nil
 		}
 	}
 
-	if !needsFetch {
-		r.mu.Lock()
-		r.refCheckValid = true
-		r.mu.Unlock()
-		return nil
-	}
-
-	err = r.Fetch(ctx)
-	if err != nil {
-		r.mu.Lock()
-		r.refCheckValid = false
-		r.mu.Unlock()
-	}
-	return err
+	return false, nil
 }
 
 func (r *Repository) GetLocalRefs(ctx context.Context) (map[string]string, error) {

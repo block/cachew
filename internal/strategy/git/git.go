@@ -220,10 +220,7 @@ func (s *Strategy) handleRequest(w http.ResponseWriter, r *http.Request) {
 	switch state {
 	case gitclone.StateReady:
 		if isInfoRefs {
-			if err := s.ensureRefsUpToDate(ctx, repo); err != nil {
-				logger.WarnContext(ctx, "Failed to ensure refs up to date",
-					slog.String("error", err.Error()))
-			}
+			s.ensureRefsUpToDate(ctx, repo)
 		}
 		s.maybeBackgroundFetch(repo)
 		s.serveFromBackend(w, r, repo)
