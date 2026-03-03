@@ -42,22 +42,32 @@ func TestNewTokenManagerProvider(t *testing.T) {
 		assert.Zero(t, tm)
 	})
 
-	t.Run("SkipsIncompleteConfigs", func(t *testing.T) {
+	t.Run("SkipsEmptyConfigs", func(t *testing.T) {
 		provider := githubapp.NewTokenManagerProvider([]githubapp.Config{
-			{Name: "missing-key", AppID: "123", Installations: map[string]string{"org": "inst"}},
-			{Name: "missing-id", PrivateKeyPath: "/tmp/key.pem", Installations: map[string]string{"org": "inst"}},
-			{Name: "missing-installations", AppID: "123", PrivateKeyPath: "/tmp/key.pem"},
+			{},
 		}, logger)
 		tm, err := provider()
 		assert.NoError(t, err)
 		assert.Zero(t, tm)
 	})
 
+	t.Run("ErrorsOnIncompleteConfigs", func(t *testing.T) {
+		for _, config := range []githubapp.Config{
+			{AppID: "123", Installations: map[string]string{"org": "inst"}},
+			{PrivateKeyPath: "/tmp/key.pem", Installations: map[string]string{"org": "inst"}},
+			{AppID: "123", PrivateKeyPath: "/tmp/key.pem"},
+		} {
+			provider := githubapp.NewTokenManagerProvider([]githubapp.Config{config}, logger)
+			_, err := provider()
+			assert.Error(t, err)
+			assert.Contains(t, err.Error(), "incomplete configuration")
+		}
+	})
+
 	t.Run("SingleApp", func(t *testing.T) {
 		keyPath := generateTestKey(t)
 		provider := githubapp.NewTokenManagerProvider([]githubapp.Config{
 			{
-				Name:           "app1",
 				AppID:          "111",
 				PrivateKeyPath: keyPath,
 				Installations:  map[string]string{"orgA": "inst-a", "orgB": "inst-b"},
@@ -73,13 +83,11 @@ func TestNewTokenManagerProvider(t *testing.T) {
 		keyPath2 := generateTestKey(t)
 		provider := githubapp.NewTokenManagerProvider([]githubapp.Config{
 			{
-				Name:           "app1",
 				AppID:          "111",
 				PrivateKeyPath: keyPath1,
 				Installations:  map[string]string{"orgA": "inst-a"},
 			},
 			{
-				Name:           "app2",
 				AppID:          "222",
 				PrivateKeyPath: keyPath2,
 				Installations:  map[string]string{"orgB": "inst-b"},
@@ -95,13 +103,11 @@ func TestNewTokenManagerProvider(t *testing.T) {
 		keyPath2 := generateTestKey(t)
 		provider := githubapp.NewTokenManagerProvider([]githubapp.Config{
 			{
-				Name:           "app1",
 				AppID:          "111",
 				PrivateKeyPath: keyPath1,
 				Installations:  map[string]string{"orgA": "inst-a"},
 			},
 			{
-				Name:           "app2",
 				AppID:          "222",
 				PrivateKeyPath: keyPath2,
 				Installations:  map[string]string{"orgA": "inst-a2"},
@@ -120,13 +126,11 @@ func TestGetTokenForOrgRouting(t *testing.T) {
 
 	provider := githubapp.NewTokenManagerProvider([]githubapp.Config{
 		{
-			Name:           "app1",
 			AppID:          "111",
 			PrivateKeyPath: keyPath1,
 			Installations:  map[string]string{"orgA": "inst-a"},
 		},
 		{
-			Name:           "app2",
 			AppID:          "222",
 			PrivateKeyPath: keyPath2,
 			Installations:  map[string]string{"orgB": "inst-b"},

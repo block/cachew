@@ -11,7 +11,7 @@ log {
 
 git-clone {}
 
-# github-app "my-app" {
+# github-app {
 #   app-id = "app-id-value"
 #   private-key-path = "private-key-path-value"
 #   installations = { "myorg" : "installation-id" }

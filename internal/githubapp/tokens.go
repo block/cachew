@@ -28,7 +28,7 @@ func NewTokenManagerProvider(configs []Config, logger *slog.Logger) TokenManager
 
 // appState holds token management state for a single GitHub App.
 type appState struct {
-	name         string
+	appID        string
 	jwtGenerator *JWTGenerator
 	cacheConfig  TokenCacheConfig
 	httpClient   *http.Client
@@ -52,18 +52,24 @@ func newTokenManager(configs []Config, logger *slog.Logger) (*TokenManager, erro
 	orgToApp := map[string]*appState{}
 
 	for _, config := range configs {
-		if config.AppID == "" || config.PrivateKeyPath == "" || len(config.Installations) == 0 {
+		hasAny := config.AppID != "" || config.PrivateKeyPath != "" || len(config.Installations) > 0
+		hasAll := config.AppID != "" && config.PrivateKeyPath != "" && len(config.Installations) > 0
+		if !hasAny {
 			continue
+		}
+		if !hasAll {
+			return nil, errors.Errorf("github-app: incomplete configuration (app-id=%q, private-key-path=%q, installations=%d)",
+				config.AppID, config.PrivateKeyPath, len(config.Installations))
 		}
 
 		cacheConfig := DefaultTokenCacheConfig()
 		jwtGen, err := NewJWTGenerator(config.AppID, config.PrivateKeyPath, cacheConfig.JWTExpiration)
 		if err != nil {
-			return nil, errors.Wrapf(err, "github app %q", config.Name)
+			return nil, errors.Wrapf(err, "github app %q", config.AppID)
 		}
 
 		app := &appState{
-			name:         config.Name,
+			appID:        config.AppID,
 			jwtGenerator: jwtGen,
 			cacheConfig:  cacheConfig,
 			httpClient:   http.DefaultClient,
@@ -73,13 +79,12 @@ func newTokenManager(configs []Config, logger *slog.Logger) (*TokenManager, erro
 
 		for org := range config.Installations {
 			if existing, exists := orgToApp[org]; exists {
-				return nil, errors.Errorf("org %q is configured in both github-app %q and %q", org, existing.name, config.Name)
+				return nil, errors.Errorf("org %q is configured in both github-app %q and %q", org, existing.appID, config.AppID)
 			}
 			orgToApp[org] = app
 		}
 
 		logger.Info("GitHub App configured",
-			"name", config.Name,
 			"app_id", config.AppID,
 			"orgs", len(config.Installations))
 	}
@@ -119,7 +124,7 @@ func (tm *TokenManager) GetTokenForURL(ctx context.Context, url string) (string,
 }
 
 func (a *appState) getToken(ctx context.Context, org string) (string, error) {
-	logger := logging.FromContext(ctx).With(slog.String("org", org), slog.String("app", a.name))
+	logger := logging.FromContext(ctx).With(slog.String("org", org), slog.String("app_id", a.appID))
 
 	installationID := a.orgs[org]
 	if installationID == "" {
