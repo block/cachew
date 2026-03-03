@@ -476,6 +476,17 @@ linters:
         linters: ["govet"]
       - text: 'shadow: declaration of "logger" shadows declaration'
         linters: ["govet"]
+      # G703/G704 taint analysis rules flag path traversal and SSRF, but these
+      # components intentionally forward URLs and construct paths from config.
+      - text: "G703:"
+        linters: [gosec]
+        path: "(internal/cache/disk\\.go|internal/strategy/git/spool\\.go)"
+      - text: "G704:"
+        linters: [gosec]
+        path: "(internal/cache/(http|remote)\\.go|internal/githubapp/tokens\\.go|internal/strategy/(git/proxy|github_releases|handler/handler)\\.go)"
+      - text: "avoid package names that conflict with Go standard library"
+        linters: [revive]
+        path: "(internal/httputil/|internal/metrics/)"
       - path: '_test\.go'
         linters:
           - bodyclose
