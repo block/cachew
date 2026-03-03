@@ -25,6 +25,58 @@ import (
 	"github.com/block/cachew/internal/strategy/git"
 )
 
+// runGit runs a git command, failing the test on error.
+func runGit(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	if dir != "" {
+		cmd.Dir = dir
+	}
+	cmd.Env = append(os.Environ(),
+		"GIT_AUTHOR_NAME=Test",
+		"GIT_AUTHOR_EMAIL=test@test.com",
+		"GIT_COMMITTER_NAME=Test",
+		"GIT_COMMITTER_EMAIL=test@test.com",
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+}
+
+// gitRevParse returns the full SHA for the given ref in dir.
+func gitRevParse(t *testing.T, dir, ref string) string {
+	t.Helper()
+	cmd := exec.Command("git", "-C", dir, "rev-parse", ref)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git rev-parse %s: %v\n%s", ref, err, out)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// pktLine encodes s as a git pkt-line.
+func pktLine(s string) string {
+	return fmt.Sprintf("%04x%s", len(s)+4, s)
+}
+
+// upstreamRedirectTransport rewrites all outbound requests to targetBaseURL,
+// preserving the path and query, and counts each rewrite.
+type upstreamRedirectTransport struct {
+	targetBaseURL string
+	inner         http.RoundTripper
+	hits          *atomic.Int32
+}
+
+func (t *upstreamRedirectTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	t.hits.Add(1)
+	req = req.Clone(req.Context())
+	req.URL.Scheme = "http"
+	req.URL.Host = strings.TrimPrefix(t.targetBaseURL, "http://")
+	req.Host = req.URL.Host
+	return t.inner.RoundTrip(req)
+}
+
 // testServerWithLogging creates an httptest.Server that injects a logger into the request context.
 func testServerWithLogging(ctx context.Context, handler http.Handler) *httptest.Server {
 	wrapper := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -372,4 +424,125 @@ func TestIntegrationSpoolReusesDuringClone(t *testing.T) {
 	totalCount := upstreamUploadPackRequests.Load()
 	t.Logf("Total upstream upload-pack requests: %d (first clone: %d)", totalCount, firstCloneCount)
 	assert.Equal(t, firstCloneCount, totalCount, "second clone should not have made additional upstream upload-pack requests")
+}
+
+// TestIntegrationNotOurRefFallsBackToUpstream reproduces the force-push race
+// condition that causes "not our ref" errors and verifies that cachew falls back
+// to upstream rather than returning the git protocol error to the client.
+//
+// The race is:
+//  1. Client receives /info/refs showing commit A as the tip of a branch.
+//  2. A concurrent background fetch runs, incorporating a force-push that makes
+//     commit A unreachable from all refs in the local mirror.
+//  3. Client sends POST /git-upload-pack requesting commit A.
+//  4. git upload-pack rejects the request: "not our ref <A>".
+//
+// After the fix, cachew detects the stderr error before any bytes reach the
+// client and transparently forwards the request to upstream.
+//
+// Run with: go test -v -run TestIntegrationNotOurRefFallsBackToUpstream -tags integration -timeout 30s
+func TestIntegrationNotOurRefFallsBackToUpstream(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not found in PATH")
+	}
+
+	_, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelDebug})
+	tmpDir := t.TempDir()
+
+	upstreamDir := filepath.Join(tmpDir, "upstream.git")
+	workDir := filepath.Join(tmpDir, "work")
+	clonesDir := filepath.Join(tmpDir, "clones")
+
+	// --- Build the upstream repo with an initial commit ---
+	runGit(t, "", "init", "--bare", upstreamDir)
+	runGit(t, "", "clone", upstreamDir, workDir)
+	err := os.WriteFile(filepath.Join(workDir, "file.txt"), []byte("initial"), 0o644)
+	assert.NoError(t, err)
+	runGit(t, workDir, "add", ".")
+	runGit(t, workDir, "commit", "-m", "initial commit")
+	runGit(t, workDir, "push", "origin", "HEAD:main")
+
+	orphanedSHA := gitRevParse(t, workDir, "HEAD")
+	t.Logf("Orphaned SHA will be: %s", orphanedSHA)
+
+	// --- Clone upstream as the cachew mirror ---
+	// The path must match what cachew derives from the URL /git/local/repo:
+	//   host="local", repoPath="repo" → clonesDir/local/repo
+	mirrorPath := filepath.Join(clonesDir, "local", "repo")
+	runGit(t, "", "clone", "--mirror", upstreamDir, mirrorPath)
+
+	// --- Force-push a completely new history to upstream ---
+	// An orphan branch has no ancestors in common with the current history,
+	// so after fetching the mirror, orphanedSHA becomes unreachable from all refs.
+	runGit(t, workDir, "checkout", "--orphan", "replacement")
+	err = os.WriteFile(filepath.Join(workDir, "file2.txt"), []byte("replacement"), 0o644)
+	assert.NoError(t, err)
+	runGit(t, workDir, "add", ".")
+	runGit(t, workDir, "commit", "-m", "replacement commit")
+	runGit(t, workDir, "push", "--force", "origin", "replacement:main")
+
+	// Fetch the mirror so it picks up the force-push.
+	// After this, orphanedSHA is in the ODB but unreachable from any ref.
+	runGit(t, mirrorPath, "fetch", "--prune")
+
+	// Sanity-check: orphanedSHA is still in the ODB ...
+	catFile := exec.Command("git", "-C", mirrorPath, "cat-file", "-e", orphanedSHA)
+	assert.NoError(t, catFile.Run(), "orphaned SHA should still exist in the mirror ODB")
+
+	// ... but is not reachable from any branch.
+	branchContains := exec.Command("git", "-C", mirrorPath, "branch", "--contains", orphanedSHA)
+	out, _ := branchContains.CombinedOutput()
+	assert.Equal(t, "", strings.TrimSpace(string(out)), "orphaned SHA should not be reachable from any branch")
+
+	// --- Mock upstream: records requests, returns a minimal git flush response ---
+	var upstreamHits atomic.Int32
+	mockUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamHits.Add(1)
+		t.Logf("Mock upstream received: %s %s", r.Method, r.URL.Path)
+		w.Header().Set("Content-Type", "application/x-git-upload-pack-result")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("0008NAK\n")) // minimal NAK response
+	}))
+	defer mockUpstream.Close()
+
+	// --- Set up cachew pointing at clonesDir ---
+	mux := http.NewServeMux()
+	gc := gitclone.NewManagerProvider(ctx, gitclone.Config{
+		MirrorRoot:    clonesDir,
+		FetchInterval: 24 * time.Hour, // prevent auto-fetch during the test
+	}, nil)
+	strategy, err := git.New(ctx, git.Config{}, newTestScheduler(ctx, t), nil, mux, gc,
+		func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
+	assert.NoError(t, err)
+
+	// Redirect all upstream proxy requests to the mock server.
+	var redirectHits atomic.Int32
+	strategy.SetHTTPTransport(&upstreamRedirectTransport{
+		targetBaseURL: mockUpstream.URL,
+		inner:         http.DefaultTransport,
+		hits:          &redirectHits,
+	})
+
+	cachewServer := testServerWithLogging(ctx, mux)
+	defer cachewServer.Close()
+
+	// --- Send a raw upload-pack POST requesting the orphaned SHA ---
+	// This mirrors what a git client does after receiving /info/refs that
+	// advertised orphanedSHA (before the force-push fetch updated the mirror).
+	body := pktLine("want "+orphanedSHA+"\n") + "0000" + pktLine("done\n")
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		cachewServer.URL+"/git/local/repo/git-upload-pack",
+		strings.NewReader(body))
+	assert.NoError(t, err)
+	req.Header.Set("Content-Type", "application/x-git-upload-pack-request")
+
+	resp, err := http.DefaultClient.Do(req)
+	assert.NoError(t, err)
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body)
+
+	// After the fix: the request must have been forwarded to upstream.
+	// Before the fix: upstreamHits == 0 and this assertion fails.
+	assert.True(t, upstreamHits.Load() > 0,
+		"cachew should fall back to upstream when git upload-pack returns 'not our ref'")
 }
