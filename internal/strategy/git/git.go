@@ -51,6 +51,7 @@ type Strategy struct {
 	spoolsMu     sync.Mutex
 	spools       map[string]*RepoSpools
 	tokenManager *githubapp.TokenManager
+	snapshotMu   sync.Map // keyed by upstream URL, values are *sync.Mutex
 }
 
 func New(
@@ -370,47 +371,27 @@ func ExtractRepoPath(pathValue string) string {
 	return repoPath
 }
 
-func (s *Strategy) serveCachedArtifact(w http.ResponseWriter, r *http.Request, host, pathValue, urlSuffix, artifact string) {
-	ctx := r.Context()
-	logger := logging.FromContext(ctx)
-
-	logger.DebugContext(ctx, artifact+" request",
-		slog.String("host", host),
-		slog.String("path", pathValue))
-
-	pathValue = strings.TrimSuffix(pathValue, "/"+urlSuffix)
-	repoPath := ExtractRepoPath(pathValue)
-	upstreamURL := "https://" + host + "/" + repoPath
-	cacheKey := cache.NewKey(upstreamURL + "." + artifact)
-
-	reader, headers, err := s.cache.Open(ctx, cacheKey)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			logger.DebugContext(ctx, artifact+" not found in cache",
-				slog.String("upstream", upstreamURL))
-			http.NotFound(w, r)
-			return
-		}
-		logger.ErrorContext(ctx, "Failed to open "+artifact+" from cache",
-			slog.String("upstream", upstreamURL),
-			slog.String("error", err.Error()))
-		http.Error(w, "Internal server error", http.StatusInternalServerError)
-		return
+// ensureCloneReady blocks until the repository mirror is ready. If the mirror
+// does not exist yet (StateEmpty), it triggers a clone synchronously. If another
+// goroutine is already cloning (StateCloning), it polls until completion or the
+// context is cancelled. Returns an error if the clone fails or the context is done.
+func (s *Strategy) ensureCloneReady(ctx context.Context, repo *gitclone.Repository) error {
+	if repo.State() == gitclone.StateEmpty {
+		s.startClone(ctx, repo)
 	}
-	defer reader.Close()
-
-	for key, values := range headers {
-		for _, value := range values {
-			w.Header().Add(key, value)
+	for repo.State() == gitclone.StateCloning {
+		t := time.NewTimer(500 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			t.Stop()
+			return errors.Wrap(ctx.Err(), "cancelled waiting for clone")
+		case <-t.C:
 		}
 	}
-
-	_, err = io.Copy(w, reader)
-	if err != nil {
-		logger.ErrorContext(ctx, "Failed to stream "+artifact,
-			slog.String("upstream", upstreamURL),
-			slog.String("error", err.Error()))
+	if repo.State() != gitclone.StateReady {
+		return errors.New("repository unavailable after clone attempt")
 	}
+	return nil
 }
 
 func (s *Strategy) startClone(ctx context.Context, repo *gitclone.Repository) {

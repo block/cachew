@@ -66,16 +66,54 @@ func TestSnapshotHTTPEndpoint(t *testing.T) {
 	assert.Equal(t, "application/zstd", w.Header().Get("Content-Type"))
 	assert.Equal(t, snapshotData, w.Body.Bytes())
 
-	// Test snapshot not found
+	// Test snapshot not found - repo has no mirror, so clone is attempted but
+	// fails immediately because the context is cancelled.
+	cancelCtx, cancel := context.WithCancel(ctx)
+	cancel()
 	req = httptest.NewRequest(http.MethodGet, "/git/github.com/org/nonexistent/snapshot.tar.zst", nil)
-	req = req.WithContext(ctx)
+	req = req.WithContext(cancelCtx)
 	req.SetPathValue("host", "github.com")
 	req.SetPathValue("path", "org/nonexistent/snapshot.tar.zst")
 	w = httptest.NewRecorder()
 
 	handler.ServeHTTP(w, req)
 
-	assert.Equal(t, 404, w.Code)
+	assert.Equal(t, 503, w.Code)
+}
+
+func TestSnapshotOnDemandGenerationViaHTTP(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not found in PATH")
+	}
+
+	_, ctx := logging.Configure(context.Background(), logging.Config{})
+	tmpDir := t.TempDir()
+	mirrorRoot := filepath.Join(tmpDir, "mirrors")
+	mirrorPath := filepath.Join(mirrorRoot, "github.com", "org", "repo")
+	createTestMirrorRepo(t, mirrorPath)
+
+	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{})
+	assert.NoError(t, err)
+	mux := newTestMux()
+
+	cm := gitclone.NewManagerProvider(ctx, gitclone.Config{MirrorRoot: mirrorRoot}, nil)
+	_, err = git.New(ctx, git.Config{}, newTestScheduler(ctx, t), memCache, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
+	assert.NoError(t, err)
+
+	handler := mux.handlers["GET /git/{host}/{path...}"]
+	assert.NotZero(t, handler)
+
+	req := httptest.NewRequest(http.MethodGet, "/git/github.com/org/repo/snapshot.tar.zst", nil)
+	req = req.WithContext(ctx)
+	req.SetPathValue("host", "github.com")
+	req.SetPathValue("path", "org/repo/snapshot.tar.zst")
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	assert.Equal(t, 200, w.Code)
+	assert.Equal(t, "application/zstd", w.Header().Get("Content-Type"))
+	assert.NotZero(t, w.Body.Len())
 }
 
 // createTestMirrorRepo creates a bare mirror-style repo at mirrorPath with one commit.
