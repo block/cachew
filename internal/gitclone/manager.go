@@ -217,13 +217,10 @@ func (m *Manager) DiscoverExisting(ctx context.Context) ([]*Repository, error) {
 
 		urlPath := filepath.ToSlash(relPath)
 
-		idx := strings.Index(urlPath, "/")
-		if idx == -1 {
+		host, repoPath, found := strings.Cut(urlPath, "/")
+		if !found {
 			return nil
 		}
-
-		host := urlPath[:idx]
-		repoPath := urlPath[idx+1:]
 		upstreamURL := "https://" + host + "/" + repoPath
 
 		repo := &Repository{
