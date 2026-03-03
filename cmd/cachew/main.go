@@ -160,17 +160,18 @@ func (c *NamespacesCmd) Run(ctx context.Context, cache cache.Cache) error {
 }
 
 type SnapshotCmd struct {
-	Namespace string        `arg:"" help:"Namespace for organizing cache objects."`
-	Key       PlatformKey   `arg:"" help:"Object key (hex or string)."`
-	Directory string        `arg:"" help:"Directory to archive." type:"path"`
-	TTL       time.Duration `help:"Time to live for the object."`
-	Exclude   []string      `help:"Patterns to exclude (tar --exclude syntax)."`
+	Namespace   string        `arg:"" help:"Namespace for organizing cache objects."`
+	Key         PlatformKey   `arg:"" help:"Object key (hex or string)."`
+	Directory   string        `arg:"" help:"Directory to archive." type:"path"`
+	TTL         time.Duration `help:"Time to live for the object."`
+	Exclude     []string      `help:"Patterns to exclude (tar --exclude syntax)."`
+	ZstdThreads int           `help:"Threads for zstd compression (0 = all CPU cores)." default:"0"`
 }
 
 func (c *SnapshotCmd) Run(ctx context.Context, cache cache.Cache) error {
 	fmt.Fprintf(os.Stderr, "Archiving %s...\n", c.Directory) //nolint:forbidigo
 	namespacedCache := cache.Namespace(c.Namespace)
-	if err := snapshot.Create(ctx, namespacedCache, c.Key.Key(), c.Directory, c.TTL, c.Exclude); err != nil {
+	if err := snapshot.Create(ctx, namespacedCache, c.Key.Key(), c.Directory, c.TTL, c.Exclude, c.ZstdThreads); err != nil {
 		return errors.Wrap(err, "failed to create snapshot")
 	}
 
@@ -179,15 +180,16 @@ func (c *SnapshotCmd) Run(ctx context.Context, cache cache.Cache) error {
 }
 
 type RestoreCmd struct {
-	Namespace string      `arg:"" help:"Namespace for organizing cache objects."`
-	Key       PlatformKey `arg:"" help:"Object key (hex or string)."`
-	Directory string      `arg:"" help:"Target directory for extraction." type:"path"`
+	Namespace   string      `arg:"" help:"Namespace for organizing cache objects."`
+	Key         PlatformKey `arg:"" help:"Object key (hex or string)."`
+	Directory   string      `arg:"" help:"Target directory for extraction." type:"path"`
+	ZstdThreads int         `help:"Threads for zstd decompression (0 = all CPU cores)." default:"0"`
 }
 
 func (c *RestoreCmd) Run(ctx context.Context, cache cache.Cache) error {
 	fmt.Fprintf(os.Stderr, "Restoring to %s...\n", c.Directory) //nolint:forbidigo
 	namespacedCache := cache.Namespace(c.Namespace)
-	if err := snapshot.Restore(ctx, namespacedCache, c.Key.Key(), c.Directory); err != nil {
+	if err := snapshot.Restore(ctx, namespacedCache, c.Key.Key(), c.Directory, c.ZstdThreads); err != nil {
 		return errors.Wrap(err, "failed to restore snapshot")
 	}
 

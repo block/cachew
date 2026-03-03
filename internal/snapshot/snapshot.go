@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"time"
 
 	"github.com/alecthomas/errors"
@@ -21,7 +22,12 @@ import (
 // The archive preserves all file permissions, ownership, and symlinks.
 // The operation is fully streaming - no temporary files are created.
 // Exclude patterns use tar's --exclude syntax.
-func Create(ctx context.Context, remote cache.Cache, key cache.Key, directory string, ttl time.Duration, excludePatterns []string) error {
+// threads controls zstd parallelism; 0 uses all available CPU cores.
+func Create(ctx context.Context, remote cache.Cache, key cache.Key, directory string, ttl time.Duration, excludePatterns []string, threads int) error {
+	if threads <= 0 {
+		threads = runtime.NumCPU()
+	}
+
 	// Verify directory exists
 	if info, err := os.Stat(directory); err != nil {
 		return errors.Wrap(err, "failed to stat directory")
@@ -45,7 +51,7 @@ func Create(ctx context.Context, remote cache.Cache, key cache.Key, directory st
 	tarArgs = append(tarArgs, ".")
 
 	tarCmd := exec.CommandContext(ctx, "tar", tarArgs...)
-	zstdCmd := exec.CommandContext(ctx, "zstd", "-c", "-T4")
+	zstdCmd := exec.CommandContext(ctx, "zstd", "-c", fmt.Sprintf("-T%d", threads)) //nolint:gosec // threads is a validated integer, not user input
 
 	tarStdout, err := tarCmd.StdoutPipe()
 	if err != nil {
@@ -90,7 +96,12 @@ func Create(ctx context.Context, remote cache.Cache, key cache.Key, directory st
 // The archive is decompressed with zstd and extracted with tar, preserving
 // all file permissions, ownership, and symlinks.
 // The operation is fully streaming - no temporary files are created.
-func Restore(ctx context.Context, remote cache.Cache, key cache.Key, directory string) error {
+// threads controls zstd parallelism; 0 uses all available CPU cores.
+func Restore(ctx context.Context, remote cache.Cache, key cache.Key, directory string, threads int) error {
+	if threads <= 0 {
+		threads = runtime.NumCPU()
+	}
+
 	rc, _, err := remote.Open(ctx, key)
 	if err != nil {
 		return errors.Wrap(err, "failed to open object")
@@ -102,7 +113,7 @@ func Restore(ctx context.Context, remote cache.Cache, key cache.Key, directory s
 		return errors.Wrap(err, "failed to create target directory")
 	}
 
-	zstdCmd := exec.CommandContext(ctx, "zstd", "-dc", "-T4")
+	zstdCmd := exec.CommandContext(ctx, "zstd", "-dc", fmt.Sprintf("-T%d", threads)) //nolint:gosec // threads is a validated integer, not user input
 	tarCmd := exec.CommandContext(ctx, "tar", "-xpf", "-", "-C", directory)
 
 	zstdCmd.Stdin = rc

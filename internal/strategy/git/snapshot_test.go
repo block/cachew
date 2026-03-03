@@ -185,7 +185,7 @@ func TestSnapshotGenerationViaLocalClone(t *testing.T) {
 
 	// Restore the snapshot and verify it is a working (non-bare) checkout.
 	restoreDir := filepath.Join(tmpDir, "restored")
-	err = snapshot.Restore(ctx, memCache, cacheKey, restoreDir)
+	err = snapshot.Restore(ctx, memCache, cacheKey, restoreDir, 0)
 	assert.NoError(t, err)
 
 	// A non-bare clone has a .git directory (not a bare repo).
@@ -241,7 +241,7 @@ func TestSnapshotRemoteURLUsesServerURL(t *testing.T) {
 
 	cacheKey := cache.NewKey(upstreamURL + ".snapshot")
 	restoreDir := filepath.Join(tmpDir, "restored")
-	err = snapshot.Restore(ctx, memCache, cacheKey, restoreDir)
+	err = snapshot.Restore(ctx, memCache, cacheKey, restoreDir, 0)
 	assert.NoError(t, err)
 
 	cmd := exec.Command("git", "-C", restoreDir, "remote", "get-url", "origin")
