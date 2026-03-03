@@ -57,10 +57,11 @@ func (b *bufferedResponseWriter) Write(p []byte) (int, error) {
 	if b.committed {
 		return b.w.Write(p) //nolint:wrapcheck
 	}
-	n, _ := b.buf.Write(p) // bytes.Buffer.Write never returns an error
-	if b.buf.Len() >= b.threshold {
+	if b.buf.Len()+len(p) >= b.threshold {
 		b.commit()
+		return b.w.Write(p) //nolint:wrapcheck
 	}
+	n, _ := b.buf.Write(p) // bytes.Buffer.Write never returns an error
 	return n, nil
 }
 
