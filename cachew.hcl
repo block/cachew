@@ -11,12 +11,11 @@ log {
 
 git-clone {}
 
-github-app {
-  # Uncomment and add:
-  # app-id = "app-id-value" (Can also be passed via setting envar CACHEW_GITHUB_APP_APP_ID)
-  # private-key-path = "private-key-path-value" (Can also be passed via envar CACHEW_GITHUB_APP_PRIVATE_KEY_PATH)
-  # installations = { "myorg" : "installation-id" }
-}
+# github-app {
+#   app-id = "app-id-value"
+#   private-key-path = "private-key-path-value"
+#   installations = { "myorg" : "installation-id" }
+# }
 
 metrics {}
 
