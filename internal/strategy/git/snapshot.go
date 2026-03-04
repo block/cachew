@@ -2,12 +2,14 @@ package git
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -20,12 +22,24 @@ import (
 	"github.com/block/cachew/internal/snapshot"
 )
 
-func snapshotDirForURL(mirrorRoot, upstreamURL string) (string, error) {
+func snapshotDirForURL(mirrorRoot, upstreamURL string, depth int) (string, error) {
 	repoPath, err := gitclone.RepoPathFromURL(upstreamURL)
 	if err != nil {
 		return "", errors.Wrap(err, "resolve snapshot directory")
 	}
-	return filepath.Join(mirrorRoot, ".snapshots", repoPath), nil
+	dir := filepath.Join(mirrorRoot, ".snapshots", repoPath)
+	if depth > 0 {
+		dir += fmt.Sprintf("-depth-%d", depth)
+	}
+	return dir, nil
+}
+
+func snapshotCacheKey(upstreamURL string, depth int) cache.Key {
+	suffix := ".snapshot"
+	if depth > 0 {
+		suffix = fmt.Sprintf(".snapshot-depth-%d", depth)
+	}
+	return cache.NewKey(upstreamURL + suffix)
 }
 
 // remoteURLForSnapshot returns the URL to embed as remote.origin.url in snapshots.
@@ -42,18 +56,20 @@ func (s *Strategy) remoteURLForSnapshot(upstream string) string {
 	return s.config.ServerURL + "/git/" + repoPath
 }
 
-func (s *Strategy) generateAndUploadSnapshot(ctx context.Context, repo *gitclone.Repository) error {
+func (s *Strategy) generateAndUploadSnapshot(ctx context.Context, repo *gitclone.Repository, depth int) error {
 	logger := logging.FromContext(ctx)
 	upstream := repo.UpstreamURL()
 
-	logger.InfoContext(ctx, "Snapshot generation started", slog.String("upstream", upstream))
+	logger.InfoContext(ctx, "Snapshot generation started",
+		slog.String("upstream", upstream),
+		slog.Int("depth", depth))
 
-	mu := s.snapshotMutexFor(upstream)
+	mu := s.snapshotMutexFor(upstream, depth)
 	mu.Lock()
 	defer mu.Unlock()
 
 	mirrorRoot := s.cloneManager.Config().MirrorRoot
-	snapshotDir, err := snapshotDirForURL(mirrorRoot, upstream)
+	snapshotDir, err := snapshotDirForURL(mirrorRoot, upstream, depth)
 	if err != nil {
 		return err
 	}
@@ -68,8 +84,13 @@ func (s *Strategy) generateAndUploadSnapshot(ctx context.Context, repo *gitclone
 
 	// Hold a read lock to exclude concurrent fetches while cloning.
 	if err := repo.WithReadLock(func() error {
-		// #nosec G204 - repo.Path() and snapshotDir are controlled by us
-		cmd := exec.CommandContext(ctx, "git", "clone", repo.Path(), snapshotDir)
+		// #nosec G204 - repo.Path(), snapshotDir, and depth are controlled by us
+		args := []string{"clone"}
+		if depth > 0 {
+			args = append(args, "--depth", strconv.Itoa(depth))
+		}
+		args = append(args, repo.Path(), snapshotDir)
+		cmd := exec.CommandContext(ctx, "git", args...)
 		if output, err := cmd.CombinedOutput(); err != nil {
 			return errors.Wrapf(err, "git clone for snapshot: %s", string(output))
 		}
@@ -86,7 +107,7 @@ func (s *Strategy) generateAndUploadSnapshot(ctx context.Context, repo *gitclone
 		return errors.WithStack(err)
 	}
 
-	cacheKey := cache.NewKey(upstream + ".snapshot")
+	cacheKey := snapshotCacheKey(upstream, depth)
 	ttl := 7 * 24 * time.Hour
 	excludePatterns := []string{"*.lock"}
 
@@ -97,22 +118,39 @@ func (s *Strategy) generateAndUploadSnapshot(ctx context.Context, repo *gitclone
 		logger.WarnContext(ctx, "Failed to clean up snapshot dir", slog.String("error", rmErr.Error()))
 	}
 	if err != nil {
-		logger.ErrorContext(ctx, "Snapshot generation failed", slog.String("upstream", upstream), slog.String("error", err.Error()))
+		logger.ErrorContext(ctx, "Snapshot generation failed",
+			slog.String("upstream", upstream),
+			slog.Int("depth", depth),
+			slog.String("error", err.Error()))
 		return errors.Wrap(err, "create snapshot")
 	}
 
-	logger.InfoContext(ctx, "Snapshot generation completed", slog.String("upstream", upstream))
+	logger.InfoContext(ctx, "Snapshot generation completed",
+		slog.String("upstream", upstream),
+		slog.Int("depth", depth))
 	return nil
 }
 
 func (s *Strategy) scheduleSnapshotJobs(repo *gitclone.Repository) {
-	s.scheduler.SubmitPeriodicJob(repo.UpstreamURL(), "snapshot-periodic", s.config.SnapshotInterval, func(ctx context.Context) error {
-		return s.generateAndUploadSnapshot(ctx, repo)
+	s.scheduleSnapshotJobsWithDepth(repo, 0)
+}
+
+func (s *Strategy) scheduleSnapshotJobsWithDepth(repo *gitclone.Repository, depth int) {
+	jobID := "snapshot-periodic"
+	if depth > 0 {
+		jobID = fmt.Sprintf("snapshot-depth-%d-periodic", depth)
+	}
+	s.scheduler.SubmitPeriodicJob(repo.UpstreamURL(), jobID, s.config.SnapshotInterval, func(ctx context.Context) error {
+		return s.generateAndUploadSnapshot(ctx, repo, depth)
 	})
 }
 
-func (s *Strategy) snapshotMutexFor(upstreamURL string) *sync.Mutex {
-	mu, _ := s.snapshotMu.LoadOrStore(upstreamURL, &sync.Mutex{})
+func (s *Strategy) snapshotMutexFor(upstreamURL string, depth int) *sync.Mutex {
+	key := upstreamURL
+	if depth > 0 {
+		key = fmt.Sprintf("%s-depth-%d", upstreamURL, depth)
+	}
+	mu, _ := s.snapshotMu.LoadOrStore(key, &sync.Mutex{})
 	return mu.(*sync.Mutex)
 }
 
@@ -122,7 +160,18 @@ func (s *Strategy) handleSnapshotRequest(w http.ResponseWriter, r *http.Request,
 
 	repoPath := ExtractRepoPath(strings.TrimSuffix(pathValue, "/snapshot.tar.zst"))
 	upstreamURL := "https://" + host + "/" + repoPath
-	cacheKey := cache.NewKey(upstreamURL + ".snapshot")
+
+	var depth int
+	if d := r.URL.Query().Get("depth"); d != "" {
+		var err error
+		depth, err = strconv.Atoi(d)
+		if err != nil || depth < 0 {
+			http.Error(w, "invalid depth parameter", http.StatusBadRequest)
+			return
+		}
+	}
+
+	cacheKey := snapshotCacheKey(upstreamURL, depth)
 
 	reader, headers, err := s.cache.Open(ctx, cacheKey)
 	if errors.Is(err, os.ErrNotExist) {
@@ -141,18 +190,24 @@ func (s *Strategy) handleSnapshotRequest(w http.ResponseWriter, r *http.Request,
 			http.Error(w, "Repository unavailable", http.StatusServiceUnavailable)
 			return
 		}
-		if genErr := s.generateAndUploadSnapshot(ctx, repo); genErr != nil {
+		if genErr := s.generateAndUploadSnapshot(ctx, repo, depth); genErr != nil {
 			logger.ErrorContext(ctx, "On-demand snapshot generation failed",
 				slog.String("upstream", upstreamURL),
 				slog.String("error", genErr.Error()))
 			http.Error(w, "Internal server error", http.StatusInternalServerError)
 			return
 		}
+		// Schedule periodic refresh for this depth so it stays fresh.
+		if s.config.SnapshotInterval > 0 {
+			s.scheduleSnapshotJobsWithDepth(repo, depth)
+		}
 		reader, headers, err = s.cache.Open(ctx, cacheKey)
 	}
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			logger.DebugContext(ctx, "snapshot not found in cache", slog.String("upstream", upstreamURL))
+			logger.DebugContext(ctx, "Snapshot not found in cache",
+				slog.String("upstream", upstreamURL),
+				slog.Int("depth", depth))
 			http.NotFound(w, r)
 			return
 		}
