@@ -42,17 +42,18 @@ type Config struct {
 }
 
 type Strategy struct {
-	config       Config
-	cache        cache.Cache
-	cloneManager *gitclone.Manager
-	httpClient   *http.Client
-	proxy        *httputil.ReverseProxy
-	ctx          context.Context
-	scheduler    jobscheduler.Scheduler
-	spoolsMu     sync.Mutex
-	spools       map[string]*RepoSpools
-	tokenManager *githubapp.TokenManager
-	snapshotMu   sync.Map // keyed by upstream URL, values are *sync.Mutex
+	config             Config
+	cache              cache.Cache
+	cloneManager       *gitclone.Manager
+	httpClient         *http.Client
+	proxy              *httputil.ReverseProxy
+	ctx                context.Context
+	scheduler          jobscheduler.Scheduler
+	spoolsMu           sync.Mutex
+	spools             map[string]*RepoSpools
+	tokenManager       *githubapp.TokenManager
+	snapshotMu         sync.Map // keyed by upstream URL, values are *sync.Mutex
+	scheduledSnapshots sync.Map // tracks scheduled snapshot job keys to avoid duplicates
 }
 
 func New(

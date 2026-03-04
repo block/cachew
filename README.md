@@ -14,6 +14,10 @@ Git causes a number of problems for us, but the most obvious are:
 To solve this we apply two different strategies on the server:
 
 1. Periodic full `.tar.zst` snapshots of the repository. These snapshots restore 4-5x faster than `git clone`.
+   Shallow snapshots are also supported via `?depth=N` (e.g., `/git/{host}/{repo}/snapshot.tar.zst?depth=100`),
+   which produces much smaller snapshots for large repositories. Shallow snapshots are generated on-demand
+   on first request and then refreshed periodically. Note: shallow snapshots do not include the working tree
+   (`--no-checkout`), so clients must run `git checkout` after extracting.
 2. Passthrough caching of the packs returned by `POST /repo.git/git-upload-pack` to support incremental pulls.
 
 On the client we redirect git to the proxy:
