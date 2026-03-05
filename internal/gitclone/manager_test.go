@@ -2,6 +2,7 @@ package gitclone //nolint:testpackage // white-box testing required for unexport
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -392,4 +393,72 @@ func TestRepository_HasCommit(t *testing.T) {
 
 	assert.False(t, repo.HasCommit(ctx, "nonexistent"))
 	assert.False(t, repo.HasCommit(ctx, "v9.9.9"))
+}
+
+// TestMirrorConfigAllowsUnreachableSHA verifies that the mirror config lets
+// git upload-pack serve objects that are present in the ODB but unreachable
+// from any ref (e.g. after a force-push orphans a commit).
+func TestMirrorConfigAllowsUnreachableSHA(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not found in PATH")
+	}
+
+	tmpDir := t.TempDir()
+	workDir := filepath.Join(tmpDir, "work")
+	upstreamDir := filepath.Join(tmpDir, "upstream.git")
+	mirrorDir := filepath.Join(tmpDir, "mirror.git")
+
+	// Create upstream repo with an initial commit.
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=Test", "GIT_AUTHOR_EMAIL=test@test.com",
+			"GIT_COMMITTER_NAME=Test", "GIT_COMMITTER_EMAIL=test@test.com",
+		)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("%v: %v\n%s", args, err, out)
+		}
+	}
+
+	run("git", "init", "--bare", upstreamDir)
+	run("git", "clone", upstreamDir, workDir)
+	assert.NoError(t, os.WriteFile(filepath.Join(workDir, "f.txt"), []byte("v1"), 0o644))
+	run("git", "-C", workDir, "add", ".")
+	run("git", "-C", workDir, "commit", "-m", "initial")
+	run("git", "-C", workDir, "push", "origin", "HEAD:main")
+
+	// Record the SHA that will become orphaned.
+	out, err := exec.Command("git", "-C", workDir, "rev-parse", "HEAD").CombinedOutput()
+	assert.NoError(t, err)
+	orphanedSHA := strings.TrimSpace(string(out))
+
+	// Mirror-clone and apply the cachew mirror config.
+	run("git", "clone", "--mirror", upstreamDir, mirrorDir)
+	assert.NoError(t, configureMirror(context.Background(), mirrorDir, 1))
+
+	// Force-push a new root commit to upstream, then fetch into mirror.
+	run("git", "-C", workDir, "checkout", "--orphan", "newroot")
+	assert.NoError(t, os.WriteFile(filepath.Join(workDir, "f.txt"), []byte("v2"), 0o644))
+	run("git", "-C", workDir, "add", ".")
+	run("git", "-C", workDir, "commit", "-m", "replacement")
+	run("git", "-C", workDir, "push", "--force", "origin", "newroot:main")
+	run("git", "-C", mirrorDir, "fetch", "--prune")
+
+	// Sanity: orphaned SHA exists in ODB but is unreachable.
+	assert.NoError(t, exec.Command("git", "-C", mirrorDir, "cat-file", "-e", orphanedSHA).Run())
+	branchOut, _ := exec.Command("git", "-C", mirrorDir, "branch", "--contains", orphanedSHA).CombinedOutput()
+	assert.Equal(t, "", strings.TrimSpace(string(branchOut)))
+
+	// The key assertion: upload-pack should accept the unreachable SHA.
+	// With allowReachableSHA1InWant this fails; with allowAnySHA1InWant it passes.
+	cmd := exec.Command("git", "-C", mirrorDir, "upload-pack", "--strict", ".")
+	cmd.Stdin = strings.NewReader(
+		fmt.Sprintf("0032want %s\n00000009done\n", orphanedSHA),
+	)
+	uploadOut, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("upload-pack rejected unreachable SHA (mirror config should allow it):\n%s", uploadOut)
+	}
 }
