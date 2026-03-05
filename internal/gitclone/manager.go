@@ -352,7 +352,7 @@ func mirrorConfigSettings(packThreads int) [][2]string {
 		// Protocol
 		{"protocol.version", "2"},
 		{"uploadpack.allowFilter", "true"},
-		{"uploadpack.allowReachableSHA1InWant", "true"},
+		{"uploadpack.allowAnySHA1InWant", "true"},
 		// Bitmaps
 		{"repack.writeBitmaps", "true"},
 		{"pack.useBitmaps", "true"},
