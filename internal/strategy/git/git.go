@@ -43,17 +43,18 @@ type Config struct {
 }
 
 type Strategy struct {
-	config       Config
-	cache        cache.Cache
-	cloneManager *gitclone.Manager
-	httpClient   *http.Client
-	proxy        *httputil.ReverseProxy
-	ctx          context.Context
-	scheduler    jobscheduler.Scheduler
-	spoolsMu     sync.Mutex
-	spools       map[string]*RepoSpools
-	tokenManager *githubapp.TokenManager
-	snapshotMu   sync.Map // keyed by upstream URL, values are *sync.Mutex
+	config         Config
+	cache          cache.Cache
+	cloneManager   *gitclone.Manager
+	httpClient     *http.Client
+	proxy          *httputil.ReverseProxy
+	ctx            context.Context
+	scheduler      jobscheduler.Scheduler
+	spoolsMu       sync.Mutex
+	spools         map[string]*RepoSpools
+	tokenManager   *githubapp.TokenManager
+	snapshotMu     sync.Map // keyed by upstream URL, values are *sync.Mutex
+	snapshotSpools sync.Map // keyed by upstream URL, values are *snapshotSpoolEntry
 }
 
 func New(
@@ -93,7 +94,7 @@ func New(
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to create clone manager")
 	}
-	for _, dir := range []string{".spools", ".snapshots"} {
+	for _, dir := range []string{".spools", ".snapshots", ".snapshot-spools"} {
 		if err := os.RemoveAll(filepath.Join(cloneManager.Config().MirrorRoot, dir)); err != nil {
 			return nil, errors.Wrapf(err, "clean up stale %s", dir)
 		}

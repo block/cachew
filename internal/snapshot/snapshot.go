@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -86,6 +87,64 @@ func Create(ctx context.Context, remote cache.Cache, key cache.Key, directory st
 	}
 	if closeErr != nil {
 		errs = append(errs, errors.Wrap(closeErr, "failed to close writer"))
+	}
+
+	return errors.Join(errs...)
+}
+
+// StreamTo archives a directory using tar with zstd compression and streams the
+// output directly to w. Unlike Create, it does not upload to any cache backend.
+// This is used on cache miss to serve the client immediately while a background
+// job populates the cache.
+func StreamTo(ctx context.Context, w io.Writer, directory string, excludePatterns []string, threads int) error {
+	if threads <= 0 {
+		threads = runtime.NumCPU()
+	}
+
+	if info, err := os.Stat(directory); err != nil {
+		return errors.Wrap(err, "failed to stat directory")
+	} else if !info.IsDir() {
+		return errors.Errorf("not a directory: %s", directory)
+	}
+
+	tarArgs := []string{"-cpf", "-", "-C", directory}
+	for _, pattern := range excludePatterns {
+		tarArgs = append(tarArgs, "--exclude", pattern)
+	}
+	tarArgs = append(tarArgs, ".")
+
+	tarCmd := exec.CommandContext(ctx, "tar", tarArgs...)
+	zstdCmd := exec.CommandContext(ctx, "zstd", "-c", fmt.Sprintf("-T%d", threads)) //nolint:gosec // threads is a validated integer, not user input
+
+	tarStdout, err := tarCmd.StdoutPipe()
+	if err != nil {
+		return errors.Wrap(err, "failed to create tar stdout pipe")
+	}
+
+	var tarStderr, zstdStderr bytes.Buffer
+	tarCmd.Stderr = &tarStderr
+
+	zstdCmd.Stdin = tarStdout
+	zstdCmd.Stdout = w
+	zstdCmd.Stderr = &zstdStderr
+
+	if err := tarCmd.Start(); err != nil {
+		return errors.Wrap(err, "failed to start tar")
+	}
+
+	if err := zstdCmd.Start(); err != nil {
+		return errors.Join(errors.Wrap(err, "failed to start zstd"), tarCmd.Wait())
+	}
+
+	tarErr := tarCmd.Wait()
+	zstdErr := zstdCmd.Wait()
+
+	var errs []error
+	if tarErr != nil {
+		errs = append(errs, errors.Errorf("tar failed: %w: %s", tarErr, tarStderr.String()))
+	}
+	if zstdErr != nil {
+		errs = append(errs, errors.Errorf("zstd failed: %w: %s", zstdErr, zstdStderr.String()))
 	}
 
 	return errors.Join(errs...)
