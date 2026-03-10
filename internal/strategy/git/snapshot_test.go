@@ -114,6 +114,10 @@ func TestSnapshotOnDemandGenerationViaHTTP(t *testing.T) {
 	assert.Equal(t, 200, w.Code)
 	assert.Equal(t, "application/zstd", w.Header().Get("Content-Type"))
 	assert.NotZero(t, w.Body.Len())
+
+	// Allow background goroutines (spool cleanup, cache backfill) to finish
+	// before TempDir cleanup runs.
+	time.Sleep(2 * time.Second)
 }
 
 // createTestMirrorRepo creates a bare mirror-style repo at mirrorPath with one commit.
