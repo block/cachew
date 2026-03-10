@@ -19,6 +19,7 @@ import (
 
 	"github.com/alecthomas/assert/v2"
 
+	"github.com/block/cachew/internal/cache"
 	"github.com/block/cachew/internal/gitclone"
 	"github.com/block/cachew/internal/githubapp"
 	"github.com/block/cachew/internal/logging"
@@ -114,7 +115,9 @@ func TestIntegrationGitCloneViaProxy(t *testing.T) {
 		FetchInterval: 15,
 	}, nil)
 	mux := http.NewServeMux()
-	strategy, err := git.New(ctx, git.Config{}, newTestScheduler(ctx, t), nil, mux, gc, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
+	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{})
+	assert.NoError(t, err)
+	strategy, err := git.New(ctx, git.Config{}, newTestScheduler(ctx, t), memCache, mux, gc, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
 	assert.NoError(t, err)
 	assert.NotZero(t, strategy)
 
@@ -193,7 +196,9 @@ func TestIntegrationGitFetchViaProxy(t *testing.T) {
 	}, nil)
 
 	mux := http.NewServeMux()
-	_, err = git.New(ctx, git.Config{}, newTestScheduler(ctx, t), nil, mux, gc, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
+	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{})
+	assert.NoError(t, err)
+	_, err = git.New(ctx, git.Config{}, newTestScheduler(ctx, t), memCache, mux, gc, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
 	assert.NoError(t, err)
 
 	server := testServerWithLogging(ctx, mux)
@@ -273,7 +278,9 @@ func TestIntegrationPushForwardsToUpstream(t *testing.T) {
 		MirrorRoot:    clonesDir,
 		FetchInterval: 15,
 	}, nil)
-	_, err = git.New(ctx, git.Config{}, newTestScheduler(ctx, t), nil, mux, gc, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
+	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{})
+	assert.NoError(t, err)
+	_, err = git.New(ctx, git.Config{}, newTestScheduler(ctx, t), memCache, mux, gc, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
 	assert.NoError(t, err)
 
 	server := testServerWithLogging(ctx, mux)
@@ -367,7 +374,9 @@ func TestIntegrationSpoolReusesDuringClone(t *testing.T) {
 		MirrorRoot:    clonesDir,
 		FetchInterval: 15,
 	}, nil)
-	strategy, err := git.New(ctx, git.Config{}, newTestScheduler(ctx, t), nil, mux, gc, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
+	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{})
+	assert.NoError(t, err)
+	strategy, err := git.New(ctx, git.Config{}, newTestScheduler(ctx, t), memCache, mux, gc, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
 	assert.NoError(t, err)
 
 	strategy.SetHTTPTransport(&countingTransport{
@@ -511,7 +520,9 @@ func TestIntegrationNotOurRefFallsBackToUpstream(t *testing.T) {
 		MirrorRoot:    clonesDir,
 		FetchInterval: 24 * time.Hour, // prevent auto-fetch during the test
 	}, nil)
-	strategy, err := git.New(ctx, git.Config{}, newTestScheduler(ctx, t), nil, mux, gc,
+	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{})
+	assert.NoError(t, err)
+	strategy, err := git.New(ctx, git.Config{}, newTestScheduler(ctx, t), memCache, mux, gc,
 		func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
 	assert.NoError(t, err)
 

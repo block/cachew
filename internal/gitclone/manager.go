@@ -321,6 +321,36 @@ func WithReadLockReturn[T any](repo *Repository, fn func() (T, error)) (T, error
 	return fn()
 }
 
+// MarkRestored transitions a repository from StateEmpty to StateReady after an
+// external restore (e.g. from an S3 snapshot). It applies the same mirror
+// configuration that Clone would, so the repo is ready to serve upload-pack.
+func (r *Repository) MarkRestored(ctx context.Context) error {
+	r.mu.Lock()
+	if r.state != StateEmpty {
+		r.mu.Unlock()
+		return nil
+	}
+	r.state = StateCloning
+	r.mu.Unlock()
+
+	err := configureMirror(ctx, r.path, r.config.PackThreads)
+	if err == nil && r.config.Maintenance {
+		err = registerMaintenance(ctx, r.path)
+	}
+
+	r.mu.Lock()
+	if err != nil {
+		r.state = StateEmpty
+		r.mu.Unlock()
+		return errors.Wrap(err, "configure mirror after restore")
+	}
+
+	r.state = StateReady
+	r.lastFetch = time.Now()
+	r.mu.Unlock()
+	return nil
+}
+
 func (r *Repository) Clone(ctx context.Context) error {
 	r.mu.Lock()
 	if r.state != StateEmpty {
