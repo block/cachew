@@ -28,6 +28,10 @@ func snapshotDirForURL(mirrorRoot, upstreamURL string) (string, error) {
 	return filepath.Join(mirrorRoot, ".snapshots", repoPath), nil
 }
 
+func snapshotCacheKey(upstreamURL string) cache.Key {
+	return cache.NewKey(upstreamURL + ".snapshot")
+}
+
 // remoteURLForSnapshot returns the URL to embed as remote.origin.url in snapshots.
 // When a server URL is configured, it returns the cachew URL for the repo so that
 // git pull goes through cachew. Otherwise it falls back to the upstream URL.
@@ -46,7 +50,8 @@ func (s *Strategy) generateAndUploadSnapshot(ctx context.Context, repo *gitclone
 	logger := logging.FromContext(ctx)
 	upstream := repo.UpstreamURL()
 
-	logger.InfoContext(ctx, "Snapshot generation started", slog.String("upstream", upstream))
+	logger.InfoContext(ctx, "Snapshot generation started",
+		slog.String("upstream", upstream))
 
 	mu := s.snapshotMutexFor(upstream)
 	mu.Lock()
@@ -59,10 +64,10 @@ func (s *Strategy) generateAndUploadSnapshot(ctx context.Context, repo *gitclone
 	}
 
 	// Clean any previous snapshot working directory.
-	if err := os.RemoveAll(snapshotDir); err != nil {
+	if err := os.RemoveAll(snapshotDir); err != nil { //nolint:gosec // snapshotDir is derived from controlled mirrorRoot + upstream URL
 		return errors.Wrap(err, "remove previous snapshot dir")
 	}
-	if err := os.MkdirAll(filepath.Dir(snapshotDir), 0o750); err != nil {
+	if err := os.MkdirAll(filepath.Dir(snapshotDir), 0o750); err != nil { //nolint:gosec // snapshotDir is derived from controlled mirrorRoot + upstream URL
 		return errors.Wrap(err, "create snapshot parent dir")
 	}
 
@@ -82,26 +87,29 @@ func (s *Strategy) generateAndUploadSnapshot(ctx context.Context, repo *gitclone
 		}
 		return nil
 	}); err != nil {
-		_ = os.RemoveAll(snapshotDir)
+		_ = os.RemoveAll(snapshotDir) //nolint:gosec // snapshotDir is derived from controlled mirrorRoot + upstream URL
 		return errors.WithStack(err)
 	}
 
-	cacheKey := cache.NewKey(upstream + ".snapshot")
+	cacheKey := snapshotCacheKey(upstream)
 	ttl := 7 * 24 * time.Hour
 	excludePatterns := []string{"*.lock"}
 
 	err = snapshot.Create(ctx, s.cache, cacheKey, snapshotDir, ttl, excludePatterns, s.config.ZstdThreads)
 
 	// Always clean up the snapshot working directory.
-	if rmErr := os.RemoveAll(snapshotDir); rmErr != nil {
+	if rmErr := os.RemoveAll(snapshotDir); rmErr != nil { //nolint:gosec // snapshotDir is derived from controlled mirrorRoot + upstream URL
 		logger.WarnContext(ctx, "Failed to clean up snapshot dir", slog.String("error", rmErr.Error()))
 	}
 	if err != nil {
-		logger.ErrorContext(ctx, "Snapshot generation failed", slog.String("upstream", upstream), slog.String("error", err.Error()))
+		logger.ErrorContext(ctx, "Snapshot generation failed",
+			slog.String("upstream", upstream),
+			slog.String("error", err.Error()))
 		return errors.Wrap(err, "create snapshot")
 	}
 
-	logger.InfoContext(ctx, "Snapshot generation completed", slog.String("upstream", upstream))
+	logger.InfoContext(ctx, "Snapshot generation completed",
+		slog.String("upstream", upstream))
 	return nil
 }
 
@@ -122,7 +130,8 @@ func (s *Strategy) handleSnapshotRequest(w http.ResponseWriter, r *http.Request,
 
 	repoPath := ExtractRepoPath(strings.TrimSuffix(pathValue, "/snapshot.tar.zst"))
 	upstreamURL := "https://" + host + "/" + repoPath
-	cacheKey := cache.NewKey(upstreamURL + ".snapshot")
+
+	cacheKey := snapshotCacheKey(upstreamURL)
 
 	reader, headers, err := s.cache.Open(ctx, cacheKey)
 	if errors.Is(err, os.ErrNotExist) {
@@ -148,11 +157,15 @@ func (s *Strategy) handleSnapshotRequest(w http.ResponseWriter, r *http.Request,
 			http.Error(w, "Internal server error", http.StatusInternalServerError)
 			return
 		}
+		if s.config.SnapshotInterval > 0 {
+			s.scheduleSnapshotJobs(repo)
+		}
 		reader, headers, err = s.cache.Open(ctx, cacheKey)
 	}
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			logger.DebugContext(ctx, "snapshot not found in cache", slog.String("upstream", upstreamURL))
+			logger.DebugContext(ctx, "Snapshot not found in cache",
+				slog.String("upstream", upstreamURL))
 			http.NotFound(w, r)
 			return
 		}

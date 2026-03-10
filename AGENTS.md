@@ -19,3 +19,6 @@ The codebase uses Hermit to manage toolchains. It is written in Go, and uses Jus
 Only add comments for relatively large blocks of code, 20+ lines or more, and ONLY if it is not obvious what the code is
 doing. ALWAYS add Go-style documentation comments for public variables/types/functions. If you do add comments, the
 comments should explain WHY something is happening, not WHAT is happening.
+
+Functions should return errors, not log them internally. Logging belongs at the call site so callers retain control over
+how failures are reported and handled.

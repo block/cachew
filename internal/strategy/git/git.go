@@ -24,6 +24,7 @@ import (
 	"github.com/block/cachew/internal/githubapp"
 	"github.com/block/cachew/internal/jobscheduler"
 	"github.com/block/cachew/internal/logging"
+	"github.com/block/cachew/internal/snapshot"
 	"github.com/block/cachew/internal/strategy"
 )
 
@@ -434,26 +435,51 @@ func (s *Strategy) ensureCloneReady(ctx context.Context, repo *gitclone.Reposito
 
 func (s *Strategy) startClone(ctx context.Context, repo *gitclone.Repository) {
 	logger := logging.FromContext(ctx)
+	upstream := repo.UpstreamURL()
+
+	if err := s.tryRestoreSnapshot(ctx, repo); err != nil {
+		logger.InfoContext(ctx, "Snapshot restore failed, falling back to clone",
+			slog.String("upstream", upstream),
+			slog.String("error", err.Error()))
+	} else {
+		s.cleanupSpools(upstream)
+
+		logger.InfoContext(ctx, "Snapshot restore completed, scheduling catch-up fetch",
+			slog.String("upstream", upstream))
+
+		s.scheduler.Submit(upstream, "fetch", func(ctx context.Context) error {
+			s.backgroundFetch(ctx, repo)
+			return nil
+		})
+
+		if s.config.SnapshotInterval > 0 {
+			s.scheduleSnapshotJobs(repo)
+		}
+		if s.config.RepackInterval > 0 {
+			s.scheduleRepackJobs(repo)
+		}
+		return
+	}
 
 	logger.InfoContext(ctx, "Starting clone",
-		slog.String("upstream", repo.UpstreamURL()),
+		slog.String("upstream", upstream),
 		slog.String("path", repo.Path()))
 
 	err := repo.Clone(ctx)
 
 	// Clean up spools regardless of clone success or failure, so that subsequent
 	// requests either serve from the local backend or go directly to upstream.
-	s.cleanupSpools(repo.UpstreamURL())
+	s.cleanupSpools(upstream)
 
 	if err != nil {
 		logger.ErrorContext(ctx, "Clone failed",
-			slog.String("upstream", repo.UpstreamURL()),
+			slog.String("upstream", upstream),
 			slog.String("error", err.Error()))
 		return
 	}
 
 	logger.InfoContext(ctx, "Clone completed",
-		slog.String("upstream", repo.UpstreamURL()),
+		slog.String("upstream", upstream),
 		slog.String("path", repo.Path()))
 
 	if s.config.SnapshotInterval > 0 {
@@ -462,6 +488,28 @@ func (s *Strategy) startClone(ctx context.Context, repo *gitclone.Repository) {
 	if s.config.RepackInterval > 0 {
 		s.scheduleRepackJobs(repo)
 	}
+}
+
+// tryRestoreSnapshot attempts to restore a mirror from an S3 snapshot.
+// On failure the repo path is cleaned up so the caller can fall back to clone.
+func (s *Strategy) tryRestoreSnapshot(ctx context.Context, repo *gitclone.Repository) error {
+	cacheKey := snapshotCacheKey(repo.UpstreamURL())
+
+	if err := os.MkdirAll(filepath.Dir(repo.Path()), 0o750); err != nil {
+		return errors.Wrap(err, "create parent directory for restore")
+	}
+
+	if err := snapshot.Restore(ctx, s.cache, cacheKey, repo.Path(), s.config.ZstdThreads); err != nil {
+		_ = os.RemoveAll(repo.Path())
+		return errors.Wrap(err, "restore snapshot")
+	}
+
+	if err := repo.MarkRestored(ctx); err != nil {
+		_ = os.RemoveAll(repo.Path())
+		return errors.Wrap(err, "mark restored")
+	}
+
+	return nil
 }
 
 func (s *Strategy) maybeBackgroundFetch(repo *gitclone.Repository) {
