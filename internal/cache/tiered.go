@@ -108,6 +108,9 @@ func (t Tiered) Stat(ctx context.Context, key Key) (http.Header, error) {
 }
 
 // Open returns a reader from the first cache that succeeds.
+// When a higher tier hits but lower tiers missed, the returned reader
+// transparently backfills the lowest tier as the caller reads, so that
+// subsequent Opens are served locally.
 //
 // If all caches fail, all errors are returned.
 func (t Tiered) Open(ctx context.Context, key Key) (io.ReadCloser, http.Header, error) {
@@ -120,9 +123,71 @@ func (t Tiered) Open(ctx context.Context, key Key) (io.ReadCloser, http.Header, 
 		} else if err != nil {
 			return nil, nil, errors.WithStack(err)
 		}
+		if i > 0 {
+			r = t.backfillReader(ctx, key, r, headers, t.caches[0])
+		}
 		return r, headers, nil
 	}
 	return nil, nil, errors.Join(errs...)
+}
+
+// backfillReader wraps src so that every byte read is also written to dst.
+// On successful close the dst entry becomes available for future reads.
+// On error or partial read the dst entry is discarded per the Cache contract
+// (the context is cancelled, causing the writer to discard on Close).
+func (t Tiered) backfillReader(ctx context.Context, key Key, src io.ReadCloser, headers http.Header, dst Cache) io.ReadCloser {
+	logger := logging.FromContext(ctx)
+	// Use a cancellable context so we can abort the write on failure.
+	// The Cache contract guarantees that cancelled-context writes are discarded.
+	writeCtx, cancel := context.WithCancel(ctx)
+	w, err := dst.Create(writeCtx, key, headers, 0) // 0 → use the cache's max TTL
+	if err != nil {
+		cancel()
+		logger.WarnContext(ctx, "Tier backfill: failed to create writer, skipping",
+			"error", err.Error())
+		return src
+	}
+	return &backfillReadCloser{src: src, dst: w, ctx: ctx, cancel: cancel}
+}
+
+// backfillReadCloser tees reads from src into dst. If the full stream is
+// consumed and Close completes without error, dst is closed normally
+// (committing the cached entry). On any write failure the backfill is
+// abandoned but reads continue unaffected.
+type backfillReadCloser struct {
+	src    io.ReadCloser
+	dst    io.WriteCloser
+	ctx    context.Context
+	cancel context.CancelFunc
+	failed bool
+}
+
+func (b *backfillReadCloser) Read(p []byte) (int, error) {
+	n, err := b.src.Read(p)
+	if n > 0 && !b.failed {
+		if _, wErr := b.dst.Write(p[:n]); wErr != nil {
+			logging.FromContext(b.ctx).WarnContext(b.ctx, "Tier backfill: write failed, abandoning",
+				"error", wErr.Error())
+			b.failed = true
+			b.cancel()
+		}
+	}
+	return n, err
+}
+
+func (b *backfillReadCloser) Close() error {
+	srcErr := b.src.Close()
+	if b.failed || srcErr != nil {
+		b.cancel()
+		_ = b.dst.Close()
+		return errors.WithStack(srcErr)
+	}
+	if err := b.dst.Close(); err != nil {
+		logging.FromContext(b.ctx).WarnContext(b.ctx, "Tier backfill: close failed",
+			"error", err.Error())
+	}
+	b.cancel()
+	return nil
 }
 
 func (t Tiered) String() string {
