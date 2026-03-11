@@ -172,7 +172,7 @@ func (b *backfillReadCloser) Read(p []byte) (int, error) {
 			b.cancel()
 		}
 	}
-	return n, err
+	return n, err //nolint:wrapcheck // must return unwrapped io.EOF per io.Reader contract
 }
 
 func (b *backfillReadCloser) Close() error {
