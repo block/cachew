@@ -7,6 +7,7 @@ on:
       - completed
     branches:
       - main
+  pull_request:
   push:
     tags:
       - "v*.*.*"
@@ -24,6 +25,7 @@ jobs:
     if: |
       github.event_name == 'workflow_dispatch' ||
       github.event_name == 'push' ||
+      github.event_name == 'pull_request' ||
       (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
     steps:
       - name: Checkout code
@@ -70,7 +72,7 @@ jobs:
             ghcr.io/${{ github.repository_owner }}/cachew
             squareup/cachew
           tags: |
-            type=raw,value={{branch}}-{{sha}}
+            type=raw,value={{branch}}-{{sha}},enable=${{ github.event_name != 'pull_request' }}
             type=raw,value=latest,enable={{is_default_branch}}
             # For tags: v1.2.3 -> 1.2.3, 1.2, 1
             type=semver,pattern={{version}}
@@ -78,6 +80,8 @@ jobs:
             type=semver,pattern={{major}}
             # For pre-release tags: keep the full version
             type=raw,value={{tag}},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            # For PRs: pr-<number>-<sha>
+            type=raw,value=pr-${{ github.event.pull_request.number }}-${{ github.sha }},enable=${{ github.event_name == 'pull_request' }}
 
       - uses: cashapp/activate-hermit@e49f5cb4dd64ff0b0b659d1d8df499595451155a # v1
       - run: |
