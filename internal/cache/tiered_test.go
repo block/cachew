@@ -1,6 +1,7 @@
 package cache_test
 
 import (
+	"io"
 	"log/slog"
 	"os"
 	"testing"
@@ -22,6 +23,46 @@ func TestTieredCache(t *testing.T) {
 		assert.NoError(t, err)
 		return cache.MaybeNewTiered(ctx, []cache.Cache{memory, disk})
 	})
+}
+
+func TestTieredBackfill(t *testing.T) {
+	_, ctx := logging.Configure(t.Context(), logging.Config{})
+
+	memory, err := cache.NewMemory(ctx, cache.MemoryConfig{LimitMB: 1024, MaxTTL: time.Hour})
+	assert.NoError(t, err)
+	disk, err := cache.NewDisk(ctx, cache.DiskConfig{Root: t.TempDir(), LimitMB: 1024, MaxTTL: time.Hour})
+	assert.NoError(t, err)
+	tiered := cache.MaybeNewTiered(ctx, []cache.Cache{memory, disk})
+
+	key := cache.NewKey("backfill-test")
+	content := []byte("hello backfill")
+
+	// Write only to disk (tier 1), simulating S3 having data but memory/disk-L1 not.
+	w, err := disk.Create(ctx, key, nil, time.Hour)
+	assert.NoError(t, err)
+	_, err = w.Write(content)
+	assert.NoError(t, err)
+	assert.NoError(t, w.Close())
+
+	// Verify memory (tier 0) does not have it yet.
+	_, _, err = memory.Open(ctx, key)
+	assert.IsError(t, err, os.ErrNotExist)
+
+	// Open through tiered — should hit disk and backfill memory.
+	r, _, err := tiered.Open(ctx, key)
+	assert.NoError(t, err)
+	data, err := io.ReadAll(r)
+	assert.NoError(t, err)
+	assert.NoError(t, r.Close())
+	assert.Equal(t, content, data)
+
+	// Now memory (tier 0) should have the entry.
+	r2, _, err := memory.Open(ctx, key)
+	assert.NoError(t, err)
+	data2, err := io.ReadAll(r2)
+	assert.NoError(t, err)
+	assert.NoError(t, r2.Close())
+	assert.Equal(t, content, data2)
 }
 
 func TestTieredCacheSoak(t *testing.T) {
