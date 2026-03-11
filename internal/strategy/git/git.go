@@ -493,6 +493,11 @@ func (s *Strategy) startClone(ctx context.Context, repo *gitclone.Repository) {
 
 // tryRestoreSnapshot attempts to restore a mirror from an S3 snapshot.
 // On failure the repo path is cleaned up so the caller can fall back to clone.
+//
+// Snapshots are non-bare clones with remote.origin.url pointing to the cachew
+// server (so end-user git pulls go through the proxy). When restoring into the
+// mirror path we must fix the remote URL back to the real upstream and convert
+// the repo to bare, otherwise backgroundFetch would loop back to cachew itself.
 func (s *Strategy) tryRestoreSnapshot(ctx context.Context, repo *gitclone.Repository) error {
 	cacheKey := snapshotCacheKey(repo.UpstreamURL())
 
@@ -505,12 +510,79 @@ func (s *Strategy) tryRestoreSnapshot(ctx context.Context, repo *gitclone.Reposi
 		return errors.Wrap(err, "restore snapshot")
 	}
 
+	if err := convertSnapshotToMirror(ctx, repo.Path(), repo.UpstreamURL()); err != nil {
+		_ = os.RemoveAll(repo.Path())
+		return errors.Wrap(err, "convert snapshot to mirror")
+	}
+
 	if err := repo.MarkRestored(ctx); err != nil {
 		_ = os.RemoveAll(repo.Path())
 		return errors.Wrap(err, "mark restored")
 	}
 
 	return nil
+}
+
+// convertSnapshotToMirror converts a restored non-bare snapshot into a bare
+// mirror suitable for serving upload-pack. It resets remote.origin.url to the
+// real upstream and sets core.bare = true.
+func convertSnapshotToMirror(ctx context.Context, repoPath, upstreamURL string) error {
+	// The snapshot is a non-bare clone (.git subdir). Detect this by checking
+	// for the .git directory and, if present, relocate it to a bare layout.
+	dotGit := filepath.Join(repoPath, ".git")
+	if info, err := os.Stat(dotGit); err == nil && info.IsDir() {
+		if err := convertToBare(repoPath, dotGit); err != nil {
+			return err
+		}
+	}
+
+	// Reset the remote URL to the actual upstream.
+	// #nosec G204 - repoPath and upstreamURL are controlled by us
+	cmd := exec.CommandContext(ctx, "git", "-C", repoPath, "remote", "set-url", "origin", upstreamURL)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return errors.Wrapf(err, "set remote URL: %s", string(output))
+	}
+
+	// Mark the repo as bare so git treats it as a mirror.
+	// #nosec G204 - repoPath is controlled by us
+	cmd = exec.CommandContext(ctx, "git", "-C", repoPath, "config", "core.bare", "true")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return errors.Wrapf(err, "set core.bare: %s", string(output))
+	}
+
+	return nil
+}
+
+// convertToBare moves the contents of .git/ up into repoPath, removing the
+// working tree, so the directory becomes a bare repository.
+func convertToBare(repoPath, dotGit string) error {
+	entries, err := os.ReadDir(dotGit)
+	if err != nil {
+		return errors.Wrap(err, "read .git directory")
+	}
+
+	// Remove working tree files (everything except .git).
+	topEntries, err := os.ReadDir(repoPath)
+	if err != nil {
+		return errors.Wrap(err, "read repo directory")
+	}
+	for _, e := range topEntries {
+		if e.Name() == ".git" {
+			continue
+		}
+		_ = os.RemoveAll(filepath.Join(repoPath, e.Name()))
+	}
+
+	// Move .git/* contents up to repoPath.
+	for _, e := range entries {
+		src := filepath.Join(dotGit, e.Name())
+		dst := filepath.Join(repoPath, e.Name())
+		if err := os.Rename(src, dst); err != nil {
+			return errors.Wrapf(err, "move %s", e.Name())
+		}
+	}
+
+	return errors.Wrap(os.Remove(dotGit), "remove .git directory")
 }
 
 func (s *Strategy) maybeBackgroundFetch(repo *gitclone.Repository) {
