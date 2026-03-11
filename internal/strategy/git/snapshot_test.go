@@ -213,6 +213,77 @@ func TestSnapshotGenerationViaLocalClone(t *testing.T) {
 	assert.True(t, os.IsNotExist(err))
 }
 
+func TestSnapshotRestoreConvertsMirror(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not found in PATH")
+	}
+
+	_, ctx := logging.Configure(context.Background(), logging.Config{})
+	tmpDir := t.TempDir()
+	mirrorRoot := filepath.Join(tmpDir, "mirrors")
+	upstreamURL := "https://github.com/org/repo"
+	serverURL := "http://cachew.example.com"
+
+	// Create a mirror repo and generate a snapshot with the cachew server URL.
+	mirrorPath := filepath.Join(mirrorRoot, "github.com", "org", "repo")
+	createTestMirrorRepo(t, mirrorPath)
+
+	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{})
+	assert.NoError(t, err)
+	mux := newTestMux()
+
+	cm := gitclone.NewManagerProvider(ctx, gitclone.Config{MirrorRoot: mirrorRoot}, nil)
+	s, err := git.New(ctx, git.Config{ServerURL: serverURL}, newTestScheduler(ctx, t), memCache, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
+	assert.NoError(t, err)
+
+	manager, err := cm()
+	assert.NoError(t, err)
+	repo, err := manager.GetOrCreate(ctx, upstreamURL)
+	assert.NoError(t, err)
+
+	err = s.GenerateAndUploadSnapshot(ctx, repo)
+	assert.NoError(t, err)
+
+	// Restore the snapshot into a new directory (simulating mirror restore).
+	restoreDir := filepath.Join(tmpDir, "restored-mirror")
+	cacheKey := cache.NewKey(upstreamURL + ".snapshot")
+	err = snapshot.Restore(ctx, memCache, cacheKey, restoreDir, 0)
+	assert.NoError(t, err)
+
+	// Before conversion: should be non-bare with cachew remote URL.
+	cmd := exec.Command("git", "-C", restoreDir, "remote", "get-url", "origin")
+	output, err := cmd.CombinedOutput()
+	assert.NoError(t, err, string(output))
+	assert.Equal(t, serverURL+"/git/github.com/org/repo\n", string(output))
+
+	_, err = os.Stat(filepath.Join(restoreDir, ".git"))
+	assert.NoError(t, err, "should have .git directory before conversion")
+
+	// Convert snapshot to mirror.
+	err = git.ConvertSnapshotToMirror(ctx, restoreDir, upstreamURL)
+	assert.NoError(t, err)
+
+	// After conversion: remote should point to upstream.
+	cmd = exec.Command("git", "-C", restoreDir, "remote", "get-url", "origin")
+	output, err = cmd.CombinedOutput()
+	assert.NoError(t, err, string(output))
+	assert.Equal(t, upstreamURL+"\n", string(output))
+
+	// After conversion: should be bare (no .git subdir, config at top level).
+	_, err = os.Stat(filepath.Join(restoreDir, ".git"))
+	assert.True(t, os.IsNotExist(err), "should not have .git directory after conversion")
+
+	cmd = exec.Command("git", "-C", restoreDir, "config", "core.bare")
+	output, err = cmd.CombinedOutput()
+	assert.NoError(t, err, string(output))
+	assert.Equal(t, "true\n", string(output))
+
+	// Verify the repo is functional: git branch should work.
+	cmd = exec.Command("git", "-C", restoreDir, "branch")
+	output, err = cmd.CombinedOutput()
+	assert.NoError(t, err, string(output))
+}
+
 func TestSnapshotRemoteURLUsesServerURL(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not found in PATH")
