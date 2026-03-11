@@ -88,6 +88,9 @@ func Split[GlobalConfig any](ast *hcl.AST) (global, providers *hcl.AST) {
 }
 
 // Load HCL configuration and use that to construct the cache backend, and proxy strategies.
+// It returns an http.Handler that wraps mux — any loaded strategies that implement
+// strategy.Interceptor are applied as middleware before ServeMux route matching, so
+// that they can inspect r.RequestURI rather than the path-only r.URL.Path.
 func Load(
 	ctx context.Context,
 	cr *cache.Registry,
@@ -95,7 +98,7 @@ func Load(
 	ast *hcl.AST,
 	mux *http.ServeMux,
 	vars map[string]string,
-) error {
+) (http.Handler, error) {
 	logger := logging.FromContext(ctx)
 	expandVars(ast, vars)
 
@@ -114,16 +117,16 @@ func Load(
 				strategyCandidates = append(strategyCandidates, node)
 				continue
 			} else if err != nil {
-				return errors.Errorf("%s: %w", node.Pos, err)
+				return nil, errors.Errorf("%s: %w", node.Pos, err)
 			}
 			caches = append(caches, c)
 
 		case *hcl.Attribute:
-			return errors.Errorf("%s: attributes are not allowed", node.Pos)
+			return nil, errors.Errorf("%s: attributes are not allowed", node.Pos)
 		}
 	}
 	if len(caches) == 0 {
-		return errors.Errorf("%s: expected at least one cache backend", ast.Pos)
+		return nil, errors.Errorf("%s: expected at least one cache backend", ast.Pos)
 	}
 
 	cache := cache.MaybeNewTiered(ctx, caches)
@@ -131,16 +134,29 @@ func Load(
 	logger.DebugContext(ctx, "Cache backend", "cache", cache)
 
 	// Second pass, instantiate strategies and bind them to the mux.
+	// Collect strategies that implement Interceptor separately — they need
+	// to run before ServeMux route matching, not as mux routes.
+	var interceptors []strategy.Interceptor
 	for _, block := range strategyCandidates {
-		strategy := block.Name
-		logger := logger.With("strategy", strategy)
-		mlog := &loggingMux{logger: logger, mux: mux}
-		_, err := sr.Create(ctx, strategy, block, cache, mlog, vars)
+		name := block.Name
+		slogger := logger.With("strategy", name)
+		mlog := &loggingMux{logger: slogger, mux: mux}
+		s, err := sr.Create(ctx, name, block, cache, mlog, vars)
 		if err != nil {
-			return errors.Errorf("%s: %w", block.Pos, err)
+			return nil, errors.Errorf("%s: %w", block.Pos, err)
+		}
+		if interceptor, ok := s.(strategy.Interceptor); ok {
+			interceptors = append(interceptors, interceptor)
 		}
 	}
-	return nil
+
+	// Wrap the mux with interceptors. The last-registered interceptor runs
+	// outermost so that registration order matches interception order.
+	var h http.Handler = mux
+	for i := len(interceptors) - 1; i >= 0; i-- {
+		h = interceptors[i].Intercept(h)
+	}
+	return h, nil
 }
 
 // ExpandVars expands environment variable references in HCL strings and heredocs.
