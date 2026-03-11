@@ -45,7 +45,9 @@ type cachedToken struct {
 
 // TokenManager manages GitHub App installation tokens across one or more apps.
 type TokenManager struct {
-	orgToApp map[string]*appState
+	orgToApp    map[string]*appState
+	fallbackApp *appState
+	fallbackOrg string
 }
 
 func newTokenManager(configs []Config, logger *slog.Logger) (*TokenManager, error) {
@@ -93,10 +95,29 @@ func newTokenManager(configs []Config, logger *slog.Logger) (*TokenManager, erro
 		return nil, nil //nolint:nilnil
 	}
 
-	return &TokenManager{orgToApp: orgToApp}, nil
+	tm := &TokenManager{orgToApp: orgToApp}
+
+	for _, config := range configs {
+		if config.FallbackOrg != "" {
+			app, ok := orgToApp[config.FallbackOrg]
+			if !ok {
+				return nil, errors.Errorf("fallback-org %q is not in the installations map for app %q", config.FallbackOrg, config.AppID)
+			}
+			tm.fallbackApp = app
+			tm.fallbackOrg = config.FallbackOrg
+			logger.Info("GitHub App fallback configured",
+				"fallback_org", config.FallbackOrg,
+				"app_id", config.AppID)
+			break
+		}
+	}
+
+	return tm, nil
 }
 
 // GetTokenForOrg returns an installation token for the given GitHub organization.
+// If no installation is configured for the org, it falls back to the fallback org's
+// token to ensure authenticated rate limits.
 func (tm *TokenManager) GetTokenForOrg(ctx context.Context, org string) (string, error) {
 	if tm == nil {
 		return "", errors.New("token manager not initialized")
@@ -104,7 +125,13 @@ func (tm *TokenManager) GetTokenForOrg(ctx context.Context, org string) (string,
 
 	app, ok := tm.orgToApp[org]
 	if !ok {
-		return "", errors.Errorf("no GitHub App configured for org: %s", org)
+		if tm.fallbackApp == nil {
+			return "", errors.Errorf("no GitHub App configured for org: %s", org)
+		}
+		logging.FromContext(ctx).InfoContext(ctx, "Using fallback org token",
+			slog.String("requested_org", org),
+			slog.String("fallback_org", tm.fallbackOrg))
+		return tm.fallbackApp.getToken(ctx, tm.fallbackOrg)
 	}
 
 	return app.getToken(ctx, org)

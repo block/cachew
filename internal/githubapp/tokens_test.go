@@ -13,6 +13,7 @@ import (
 	"github.com/alecthomas/assert/v2"
 
 	"github.com/block/cachew/internal/githubapp"
+	"github.com/block/cachew/internal/logging"
 )
 
 func generateTestKey(t *testing.T) string {
@@ -142,6 +143,63 @@ func TestGetTokenForOrgRouting(t *testing.T) {
 	_, err = tm.GetTokenForOrg(t.Context(), "unknown-org")
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "no GitHub App configured for org")
+}
+
+func TestGetTokenForOrgFallback(t *testing.T) {
+	keyPath := generateTestKey(t)
+	logger := slog.Default()
+
+	t.Run("FallbackUsedForUnknownOrg", func(t *testing.T) {
+		provider := githubapp.NewTokenManagerProvider([]githubapp.Config{
+			{
+				AppID:          "111",
+				PrivateKeyPath: keyPath,
+				Installations:  map[string]string{"squareup": "inst-sq"},
+				FallbackOrg:    "squareup",
+			},
+		}, logger)
+		tm, err := provider()
+		assert.NoError(t, err)
+
+		ctx := logging.ContextWithLogger(t.Context(), slog.Default())
+		// Unknown org should not error when fallback is configured
+		// (will fail at the HTTP level but not at the routing level)
+		_, err = tm.GetTokenForOrg(ctx, "cashapp")
+		// Error is expected here because we don't have a real GitHub API,
+		// but it should NOT be "no GitHub App configured for org"
+		assert.Error(t, err)
+		assert.NotContains(t, err.Error(), "no GitHub App configured for org")
+	})
+
+	t.Run("FallbackOrgNotInInstallations", func(t *testing.T) {
+		provider := githubapp.NewTokenManagerProvider([]githubapp.Config{
+			{
+				AppID:          "111",
+				PrivateKeyPath: keyPath,
+				Installations:  map[string]string{"squareup": "inst-sq"},
+				FallbackOrg:    "nonexistent",
+			},
+		}, logger)
+		_, err := provider()
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "fallback-org \"nonexistent\" is not in the installations map")
+	})
+
+	t.Run("NoFallbackStillErrorsForUnknownOrg", func(t *testing.T) {
+		provider := githubapp.NewTokenManagerProvider([]githubapp.Config{
+			{
+				AppID:          "111",
+				PrivateKeyPath: keyPath,
+				Installations:  map[string]string{"squareup": "inst-sq"},
+			},
+		}, logger)
+		tm, err := provider()
+		assert.NoError(t, err)
+
+		_, err = tm.GetTokenForOrg(t.Context(), "unknown-org")
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "no GitHub App configured for org")
+	})
 }
 
 func TestGetTokenForOrgNilManager(t *testing.T) {
