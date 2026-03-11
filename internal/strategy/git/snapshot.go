@@ -343,6 +343,8 @@ func (s *Strategy) writeSnapshotSpool(w http.ResponseWriter, r *http.Request, re
 	go func() {
 		mu := s.snapshotMutexFor(upstreamURL)
 		if !mu.TryLock() {
+			logger.InfoContext(ctx, "Skipping background cache upload, snapshot generation already in progress",
+				slog.String("upstream", upstreamURL))
 			return
 		}
 		mu.Unlock()
