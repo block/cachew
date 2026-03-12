@@ -1,0 +1,28 @@
+# Development image — builds cachewd from source.
+# Used by the blox local dev stack (docker-compose --profile cachew).
+# Unlike the production Dockerfile, this does not require pre-built binaries.
+FROM golang:1.25-alpine AS builder
+
+RUN apk add --no-cache git
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -o /cachewd ./cmd/cachewd
+
+FROM alpine:3.21
+
+SHELL ["/bin/sh", "-o", "pipefail", "-c"]
+
+RUN apk add --no-cache ca-certificates git tzdata wget && \
+    addgroup -g 1000 cachew && \
+    adduser -D -u 1000 -G cachew cachew
+
+WORKDIR /app
+COPY --from=builder /cachewd /usr/local/bin/cachewd
+RUN mkdir -p /app/state/cache && \
+    chown -R cachew:cachew /app
+
+USER cachew
+
+ENTRYPOINT ["/usr/local/bin/cachewd", "--config", "/app/cachew.hcl"]
