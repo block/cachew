@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httputil"
@@ -553,7 +554,8 @@ func (s *Strategy) tryRestoreSnapshot(ctx context.Context, repo *gitclone.Reposi
 
 // convertSnapshotToMirror converts a restored non-bare snapshot into a bare
 // mirror suitable for serving upload-pack. It resets remote.origin.url to the
-// real upstream and sets core.bare = true.
+// real upstream, sets core.bare = true, remaps refs/remotes/origin/* to
+// refs/heads/*, and configures mirror-style fetch refspecs.
 func convertSnapshotToMirror(ctx context.Context, repoPath, upstreamURL string) error {
 	// The snapshot is a non-bare clone (.git subdir). Detect this by checking
 	// for the .git directory and, if present, relocate it to a bare layout.
@@ -564,19 +566,120 @@ func convertSnapshotToMirror(ctx context.Context, repoPath, upstreamURL string) 
 		}
 	}
 
+	// Mark the repo as bare so git treats it as a mirror.
+	// #nosec G204 - repoPath is controlled by us
+	cmd := exec.CommandContext(ctx, "git", "-C", repoPath, "config", "core.bare", "true")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return errors.Wrapf(err, "set core.bare: %s", string(output))
+	}
+
+	// Remap refs/remotes/origin/* → refs/heads/* so branches are served
+	// correctly by upload-pack. Snapshots are created with a regular
+	// `git clone` (not --mirror), so branches live under refs/remotes/origin/.
+	if err := RemapRemoteRefs(ctx, repoPath); err != nil {
+		return errors.Wrap(err, "remap remote refs")
+	}
+
 	// Reset the remote URL to the actual upstream.
 	// #nosec G204 - repoPath and upstreamURL are controlled by us
-	cmd := exec.CommandContext(ctx, "git", "-C", repoPath, "remote", "set-url", "origin", upstreamURL)
+	cmd = exec.CommandContext(ctx, "git", "-C", repoPath, "remote", "set-url", "origin", upstreamURL)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return errors.Wrapf(err, "set remote URL: %s", string(output))
 	}
 
-	// Mark the repo as bare so git treats it as a mirror.
+	// Set mirror-style fetch refspec so subsequent fetches map refs 1:1
+	// instead of putting them under refs/remotes/origin/.
 	// #nosec G204 - repoPath is controlled by us
-	cmd = exec.CommandContext(ctx, "git", "-C", repoPath, "config", "core.bare", "true")
+	cmd = exec.CommandContext(ctx, "git", "-C", repoPath, "config", "remote.origin.fetch", "+refs/*:refs/*")
 	if output, err := cmd.CombinedOutput(); err != nil {
-		return errors.Wrapf(err, "set core.bare: %s", string(output))
+		return errors.Wrapf(err, "set mirror fetch refspec: %s", string(output))
 	}
+
+	// Mark remote as mirror so git treats it equivalently to --mirror clone.
+	// #nosec G204 - repoPath is controlled by us
+	cmd = exec.CommandContext(ctx, "git", "-C", repoPath, "config", "remote.origin.mirror", "true")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return errors.Wrapf(err, "set remote.origin.mirror: %s", string(output))
+	}
+
+	return nil
+}
+
+// RemapRemoteRefs moves refs/remotes/origin/* to refs/heads/* in a bare repo
+// using git update-ref for correctness (handles both loose and packed refs,
+// maintains sorted packed-refs, and is atomic).
+// This is needed because snapshots are created with `git clone` (not --mirror),
+// which stores branches as remote tracking refs rather than local heads.
+func RemapRemoteRefs(ctx context.Context, repoPath string) error {
+	// List remote tracking refs and existing head refs to know which ones to skip.
+	// #nosec G204 - repoPath is controlled by us
+	listCmd := exec.CommandContext(ctx, "git", "-C", repoPath, "for-each-ref",
+		"--format=%(refname) %(objectname)", "refs/remotes/origin/", "refs/heads/")
+	listOutput, err := listCmd.CombinedOutput()
+	if err != nil {
+		return errors.Wrapf(err, "list refs: %s", string(listOutput))
+	}
+
+	if len(bytes.TrimSpace(listOutput)) == 0 {
+		return nil // nothing to remap
+	}
+
+	// Collect existing refs/heads/* so we don't overwrite them.
+	existingHeads := map[string]bool{}
+	for line := range strings.SplitSeq(string(listOutput), "\n") {
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, " ", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		if strings.HasPrefix(parts[0], "refs/heads/") {
+			existingHeads[parts[0]] = true
+		}
+	}
+
+	// Build update-ref transaction: create refs/heads/<branch> and delete
+	// refs/remotes/origin/<branch> for each remote tracking ref.
+	var txn bytes.Buffer
+	for line := range strings.SplitSeq(string(listOutput), "\n") {
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, " ", 2)
+		if len(parts) != 2 {
+			continue
+		}
+
+		ref, sha := parts[0], parts[1]
+		branchName, ok := strings.CutPrefix(ref, "refs/remotes/origin/")
+		if !ok || branchName == "HEAD" {
+			continue
+		}
+
+		newRef := "refs/heads/" + branchName
+		// Skip if refs/heads/<branch> already exists (e.g. main).
+		if existingHeads[newRef] {
+			fmt.Fprintf(&txn, "delete %s %s\n", ref, sha)
+			continue
+		}
+		fmt.Fprintf(&txn, "create %s %s\n", newRef, sha)
+		fmt.Fprintf(&txn, "delete %s %s\n", ref, sha)
+	}
+
+	if txn.Len() == 0 {
+		return nil
+	}
+
+	// #nosec G204 - repoPath is controlled by us
+	updateCmd := exec.CommandContext(ctx, "git", "-C", repoPath, "update-ref", "--stdin")
+	updateCmd.Stdin = &txn
+	if output, err := updateCmd.CombinedOutput(); err != nil {
+		return errors.Wrapf(err, "update-ref: %s", string(output))
+	}
+
+	// Clean up leftover empty refs/remotes directory.
+	_ = os.RemoveAll(filepath.Join(repoPath, "refs", "remotes"))
 
 	return nil
 }
