@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -280,6 +281,136 @@ func TestSnapshotRestoreConvertsMirror(t *testing.T) {
 
 	// Verify the repo is functional: git branch should work.
 	cmd = exec.Command("git", "-C", restoreDir, "branch")
+	output, err = cmd.CombinedOutput()
+	assert.NoError(t, err, string(output))
+
+	// Verify fetch refspec is mirror-style.
+	cmd = exec.Command("git", "-C", restoreDir, "config", "remote.origin.fetch")
+	output, err = cmd.CombinedOutput()
+	assert.NoError(t, err, string(output))
+	assert.Equal(t, "+refs/*:refs/*\n", string(output))
+
+	// Verify remote.origin.mirror is set.
+	cmd = exec.Command("git", "-C", restoreDir, "config", "remote.origin.mirror")
+	output, err = cmd.CombinedOutput()
+	assert.NoError(t, err, string(output))
+	assert.Equal(t, "true\n", string(output))
+
+	// Verify no refs/remotes remain.
+	_, err = os.Stat(filepath.Join(restoreDir, "refs", "remotes"))
+	assert.True(t, os.IsNotExist(err), "refs/remotes should be removed after conversion")
+}
+
+func TestRemapRemoteRefsWithMultipleBranches(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not found in PATH")
+	}
+
+	_, ctx := logging.Configure(context.Background(), logging.Config{})
+	tmpDir := t.TempDir()
+	mirrorRoot := filepath.Join(tmpDir, "mirrors")
+	upstreamURL := "https://github.com/org/repo"
+
+	// Create a multi-branch mirror repo.
+	mirrorPath := filepath.Join(mirrorRoot, "github.com", "org", "repo")
+	createTestMirrorRepoWithBranches(t, mirrorPath, []string{"feature/branch-a", "fix/branch-b"})
+
+	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{})
+	assert.NoError(t, err)
+	mux := newTestMux()
+
+	cm := gitclone.NewManagerProvider(ctx, gitclone.Config{MirrorRoot: mirrorRoot}, nil)
+	s, err := git.New(ctx, git.Config{}, newTestScheduler(ctx, t), memCache, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
+	assert.NoError(t, err)
+
+	manager, err := cm()
+	assert.NoError(t, err)
+	repo, err := manager.GetOrCreate(ctx, upstreamURL)
+	assert.NoError(t, err)
+
+	// Generate snapshot (creates a non-bare clone from the mirror).
+	err = s.GenerateAndUploadSnapshot(ctx, repo)
+	assert.NoError(t, err)
+
+	// Restore the snapshot.
+	restoreDir := filepath.Join(tmpDir, "restored-mirror")
+	cacheKey := cache.NewKey(upstreamURL + ".snapshot")
+	err = snapshot.Restore(ctx, memCache, cacheKey, restoreDir, 0)
+	assert.NoError(t, err)
+
+	// Convert snapshot to mirror.
+	err = git.ConvertSnapshotToMirror(ctx, restoreDir, upstreamURL)
+	assert.NoError(t, err)
+
+	// All branches should be listed as refs/heads/*.
+	cmd := exec.Command("git", "-C", restoreDir, "show-ref", "--heads")
+	output, err := cmd.CombinedOutput()
+	assert.NoError(t, err, string(output))
+	refs := string(output)
+	assert.Contains(t, refs, "refs/heads/feature/branch-a")
+	assert.Contains(t, refs, "refs/heads/fix/branch-b")
+	// At least 3 branches (default + 2 feature branches).
+	assert.True(t, strings.Count(refs, "refs/heads/") >= 3, "expected at least 3 branches, got: %s", refs)
+
+	// Verify no refs/remotes remain.
+	_, err = os.Stat(filepath.Join(restoreDir, "refs", "remotes"))
+	assert.True(t, os.IsNotExist(err), "refs/remotes should be removed after conversion")
+
+	// Verify git show-ref only shows refs/heads/ and refs/tags/.
+	cmd = exec.Command("git", "-C", restoreDir, "show-ref")
+	output, err = cmd.CombinedOutput()
+	assert.NoError(t, err, string(output))
+	for line := range strings.SplitSeq(string(output), "\n") {
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, " ", 2)
+		if len(parts) == 2 {
+			ref := parts[1]
+			assert.False(t, strings.HasPrefix(ref, "refs/remotes/"), "unexpected remote ref: %s", ref)
+		}
+	}
+}
+
+// createTestMirrorRepoWithBranches creates a bare mirror-style repo at
+// mirrorPath with one commit on main and additional branches.
+func createTestMirrorRepoWithBranches(t *testing.T, mirrorPath string, branches []string) {
+	t.Helper()
+	tmpWork := t.TempDir()
+
+	for _, args := range [][]string{
+		{"init", tmpWork},
+		{"-C", tmpWork, "config", "user.email", "test@test.com"},
+		{"-C", tmpWork, "config", "user.name", "Test"},
+	} {
+		cmd := exec.Command("git", args...)
+		output, err := cmd.CombinedOutput()
+		assert.NoError(t, err, string(output))
+	}
+
+	assert.NoError(t, os.WriteFile(filepath.Join(tmpWork, "hello.txt"), []byte("hello\n"), 0o644))
+
+	for _, args := range [][]string{
+		{"-C", tmpWork, "add", "."},
+		{"-C", tmpWork, "commit", "-m", "initial"},
+	} {
+		cmd := exec.Command("git", args...)
+		output, err := cmd.CombinedOutput()
+		assert.NoError(t, err, string(output))
+	}
+
+	for _, branch := range branches {
+		cmd := exec.Command("git", "-C", tmpWork, "branch", branch)
+		output, err := cmd.CombinedOutput()
+		assert.NoError(t, err, string(output))
+	}
+
+	cmd := exec.Command("git", "clone", "--mirror", tmpWork, mirrorPath)
+	output, err := cmd.CombinedOutput()
+	assert.NoError(t, err, string(output))
+
+	// Pack all refs so the snapshot exercises the packed-refs code path.
+	cmd = exec.Command("git", "-C", mirrorPath, "pack-refs", "--all")
 	output, err = cmd.CombinedOutput()
 	assert.NoError(t, err, string(output))
 }
