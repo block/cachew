@@ -244,6 +244,21 @@ func (s *S3) Open(ctx context.Context, key Key) (io.ReadCloser, http.Header, err
 		headers.Set("Last-Modified", objInfo.LastModified.UTC().Format(http.TimeFormat))
 	}
 
+	// Reset expiration time to implement LRU (same as disk cache).
+	// Only refresh when remaining TTL is below 50% of max to avoid a
+	// server-side copy on every read.
+	now := time.Now()
+	if expiresAtStr != "" {
+		var expiresAt time.Time
+		if err := expiresAt.UnmarshalText([]byte(expiresAtStr)); err == nil {
+			remaining := expiresAt.Sub(now)
+			if remaining < s.config.MaxTTL/2 {
+				newExpiresAt := now.Add(s.config.MaxTTL)
+				go s.refreshExpiration(context.WithoutCancel(ctx), objectName, objInfo, newExpiresAt)
+			}
+		}
+	}
+
 	// Get object
 	obj, err := s.client.GetObject(ctx, s.config.Bucket, objectName, minio.GetObjectOptions{})
 	if err != nil {
@@ -251,6 +266,37 @@ func (s *S3) Open(ctx context.Context, key Key) (io.ReadCloser, http.Header, err
 	}
 
 	return &s3Reader{obj: obj}, headers, nil
+}
+
+// refreshExpiration updates the Expires-At metadata on an S3 object using
+// server-side copy-to-self with metadata replacement. This avoids re-uploading
+// the object data. Errors are logged but not returned since this is best-effort.
+func (s *S3) refreshExpiration(ctx context.Context, objectName string, objInfo minio.ObjectInfo, newExpiresAt time.Time) {
+	newExpiresAtBytes, err := newExpiresAt.MarshalText()
+	if err != nil {
+		return
+	}
+
+	// Rebuild user metadata with updated expiration
+	newMetadata := make(map[string]string)
+	maps.Copy(newMetadata, objInfo.UserMetadata)
+	newMetadata["Expires-At"] = string(newExpiresAtBytes)
+
+	src := minio.CopySrcOptions{
+		Bucket: s.config.Bucket,
+		Object: objectName,
+	}
+	dst := minio.CopyDestOptions{
+		Bucket:          s.config.Bucket,
+		Object:          objectName,
+		UserMetadata:    newMetadata,
+		ReplaceMetadata: true,
+	}
+	if _, err := s.client.CopyObject(ctx, dst, src); err != nil {
+		s.logger.WarnContext(ctx, "Failed to refresh S3 expiration",
+			"object", objectName,
+			"error", err.Error())
+	}
 }
 
 const s3ErrNoSuchKey = "NoSuchKey"
