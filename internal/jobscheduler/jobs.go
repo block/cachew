@@ -191,7 +191,7 @@ func (q *RootScheduler) worker(ctx context.Context, id int) {
 			if !ok {
 				continue
 			}
-			jlogger := logger.With("job", job.String())
+			jlogger := logger.With("job", job)
 			jlogger.InfoContext(ctx, "Running job")
 			if err := job.run(ctx); err != nil {
 				jlogger.ErrorContext(ctx, "Job failed", "error", err)

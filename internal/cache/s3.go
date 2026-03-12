@@ -72,14 +72,9 @@ func NewS3(ctx context.Context, config S3Config) (*S3, error) {
 		return nil, errors.New("upload-part-size-mb must be at least 5MB (S3 minimum part size)")
 	}
 
-	logging.FromContext(ctx).InfoContext(ctx, "Constructing S3 cache",
-		"endpoint", config.Endpoint,
-		"bucket", config.Bucket,
-		"region", config.Region,
-		"use-ssl", config.UseSSL,
-		"max-ttl", config.MaxTTL,
-		"upload-concurrency", config.UploadConcurrency,
-		"upload-part-size-mb", config.UploadPartSizeMB)
+	logging.FromContext(ctx).InfoContext(ctx, "Constructing S3 cache", "endpoint", config.Endpoint, "bucket", config.Bucket,
+		"region", config.Region, "use-ssl", config.UseSSL, "max-ttl", config.MaxTTL,
+		"upload-concurrency", config.UploadConcurrency, "upload-part-size-mb", config.UploadPartSizeMB)
 
 	// Create default transport for credential chain
 	defaultTransport, err := minio.DefaultTransport(config.UseSSL)

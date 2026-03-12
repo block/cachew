@@ -104,7 +104,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	cacheKeyStr := h.cacheKeyFunc(r)
 	key := cache.NewKey(cacheKeyStr)
 
-	logger.DebugContext(ctx, "Processing request", slog.String("cache_key", cacheKeyStr))
+	logger.DebugContext(ctx, "Processing request", "cache_key", cacheKeyStr)
 
 	if h.serveCached(w, r, key, logger) {
 		return
@@ -127,8 +127,8 @@ func (h *Handler) serveCached(w http.ResponseWriter, r *http.Request, key cache.
 	defer cr.Close()
 	maps.Copy(w.Header(), headers)
 	if _, err := io.Copy(w, cr); err != nil {
-		logger.ErrorContext(r.Context(), "Failed to stream from cache", slog.String("error", err.Error()))
-		httputil.ErrorResponse(w, r, http.StatusInternalServerError, "Failed to stream from cache", "error", err.Error())
+		logger.ErrorContext(r.Context(), "Failed to stream from cache", "error", err)
+		httputil.ErrorResponse(w, r, http.StatusInternalServerError, "Failed to stream from cache", "error", err)
 	}
 	return true
 }
@@ -149,7 +149,7 @@ func (h *Handler) fetchAndCache(w http.ResponseWriter, r *http.Request, key cach
 	}
 	defer func() {
 		if closeErr := resp.Body.Close(); closeErr != nil {
-			logger.ErrorContext(r.Context(), "Failed to close response body", slog.String("error", closeErr.Error()))
+			logger.ErrorContext(r.Context(), "Failed to close response body", "error", closeErr)
 		}
 	}()
 
@@ -164,7 +164,7 @@ func (h *Handler) fetchAndCache(w http.ResponseWriter, r *http.Request, key cach
 func (h *Handler) streamNonOKResponse(w http.ResponseWriter, resp *http.Response, logger *slog.Logger) {
 	w.WriteHeader(resp.StatusCode)
 	if _, err := io.Copy(w, resp.Body); err != nil {
-		logger.ErrorContext(resp.Request.Context(), "Failed to stream error response", slog.String("error", err.Error()))
+		logger.ErrorContext(resp.Request.Context(), "Failed to stream error response", "error", err)
 	}
 }
 
@@ -187,10 +187,10 @@ func (h *Handler) streamAndCache(w http.ResponseWriter, r *http.Request, key cac
 
 	maps.Copy(w.Header(), resp.Header)
 	if _, err := io.Copy(w, pr); err != nil {
-		logger.ErrorContext(r.Context(), "Failed to stream response", slog.String("error", err.Error()))
+		logger.ErrorContext(r.Context(), "Failed to stream response", "error", err)
 	}
 	if closeErr := pr.Close(); closeErr != nil {
-		logger.ErrorContext(r.Context(), "Failed to close pipe", slog.String("error", closeErr.Error()))
+		logger.ErrorContext(r.Context(), "Failed to close pipe", "error", closeErr)
 	}
 }
 

@@ -86,9 +86,7 @@ func newTokenManager(configs []Config, logger *slog.Logger) (*TokenManager, erro
 			orgToApp[org] = app
 		}
 
-		logger.Info("GitHub App configured",
-			"app_id", config.AppID,
-			"orgs", len(config.Installations))
+		logger.Info("GitHub App configured", "app_id", config.AppID, "orgs", len(config.Installations))
 	}
 
 	if len(orgToApp) == 0 {
@@ -105,9 +103,7 @@ func newTokenManager(configs []Config, logger *slog.Logger) (*TokenManager, erro
 			}
 			tm.fallbackApp = app
 			tm.fallbackOrg = config.FallbackOrg
-			logger.Info("GitHub App fallback configured",
-				"fallback_org", config.FallbackOrg,
-				"app_id", config.AppID)
+			logger.Info("GitHub App fallback configured", "fallback_org", config.FallbackOrg, "app_id", config.AppID)
 			break
 		}
 	}
@@ -128,9 +124,8 @@ func (tm *TokenManager) GetTokenForOrg(ctx context.Context, org string) (string,
 		if tm.fallbackApp == nil {
 			return "", errors.Errorf("no GitHub App configured for org: %s", org)
 		}
-		logging.FromContext(ctx).InfoContext(ctx, "Using fallback org token",
-			slog.String("requested_org", org),
-			slog.String("fallback_org", tm.fallbackOrg))
+		logging.FromContext(ctx).InfoContext(ctx, "Using fallback org token", "requested_org", org,
+			"fallback_org", tm.fallbackOrg)
 		return tm.fallbackApp.getToken(ctx, tm.fallbackOrg)
 	}
 
@@ -151,7 +146,7 @@ func (tm *TokenManager) GetTokenForURL(ctx context.Context, url string) (string,
 }
 
 func (a *appState) getToken(ctx context.Context, org string) (string, error) {
-	logger := logging.FromContext(ctx).With(slog.String("org", org), slog.String("app_id", a.appID))
+	logger := logging.FromContext(ctx).With("org", org, "app_id", a.appID)
 
 	installationID := a.orgs[org]
 	if installationID == "" {
@@ -167,8 +162,7 @@ func (a *appState) getToken(ctx context.Context, org string) (string, error) {
 		return cached.token, nil
 	}
 
-	logger.DebugContext(ctx, "Fetching new GitHub App installation token",
-		slog.String("installation_id", installationID))
+	logger.DebugContext(ctx, "Fetching new GitHub App installation token", "installation_id", installationID)
 
 	token, expiresAt, err := a.fetchInstallationToken(ctx, installationID)
 	if err != nil {
@@ -182,8 +176,7 @@ func (a *appState) getToken(ctx context.Context, org string) (string, error) {
 	}
 	a.mu.Unlock()
 
-	logger.InfoContext(ctx, "GitHub App token refreshed",
-		slog.Time("expires_at", expiresAt))
+	logger.InfoContext(ctx, "GitHub App token refreshed", "expires_at", expiresAt)
 
 	return token, nil
 }

@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"log/slog"
 	"net/http"
 	"os"
 	"os/exec"
@@ -74,8 +73,7 @@ func (s *Strategy) generateAndUploadSnapshot(ctx context.Context, repo *gitclone
 	logger := logging.FromContext(ctx)
 	upstream := repo.UpstreamURL()
 
-	logger.InfoContext(ctx, "Snapshot generation started",
-		slog.String("upstream", upstream))
+	logger.InfoContext(ctx, "Snapshot generation started", "upstream", upstream)
 
 	mu := s.snapshotMutexFor(upstream)
 	mu.Lock()
@@ -108,14 +106,13 @@ func (s *Strategy) generateAndUploadSnapshot(ctx context.Context, repo *gitclone
 
 	// Always clean up the snapshot working directory.
 	if rmErr := os.RemoveAll(snapshotDir); rmErr != nil { //nolint:gosec // snapshotDir is derived from controlled mirrorRoot + upstream URL
-		logger.WarnContext(ctx, "Failed to clean up snapshot dir", slog.String("error", rmErr.Error()))
+		logger.WarnContext(ctx, "Failed to clean up snapshot dir", "error", rmErr)
 	}
 	if err != nil {
 		return errors.Wrap(err, "create snapshot")
 	}
 
-	logger.InfoContext(ctx, "Snapshot generation completed",
-		slog.String("upstream", upstream))
+	logger.InfoContext(ctx, "Snapshot generation completed", "upstream", upstream)
 	return nil
 }
 
@@ -143,16 +140,12 @@ func (s *Strategy) handleSnapshotRequest(w http.ResponseWriter, r *http.Request,
 	if errors.Is(err, os.ErrNotExist) {
 		repo, repoErr := s.cloneManager.GetOrCreate(ctx, upstreamURL)
 		if repoErr != nil {
-			logger.ErrorContext(ctx, "Failed to get or create clone",
-				slog.String("upstream", upstreamURL),
-				slog.String("error", repoErr.Error()))
+			logger.ErrorContext(ctx, "Failed to get or create clone", "upstream", upstreamURL, "error", repoErr)
 			http.Error(w, "Internal server error", http.StatusInternalServerError)
 			return
 		}
 		if cloneErr := s.ensureCloneReady(ctx, repo); cloneErr != nil {
-			logger.ErrorContext(ctx, "Clone unavailable for snapshot",
-				slog.String("upstream", upstreamURL),
-				slog.String("error", cloneErr.Error()))
+			logger.ErrorContext(ctx, "Clone unavailable for snapshot", "upstream", upstreamURL, "error", cloneErr)
 			http.Error(w, "Repository unavailable", http.StatusServiceUnavailable)
 			return
 		}
@@ -160,9 +153,7 @@ func (s *Strategy) handleSnapshotRequest(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	if err != nil {
-		logger.ErrorContext(ctx, "Failed to open snapshot from cache",
-			slog.String("upstream", upstreamURL),
-			slog.String("error", err.Error()))
+		logger.ErrorContext(ctx, "Failed to open snapshot from cache", "upstream", upstreamURL, "error", err)
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
@@ -174,9 +165,7 @@ func (s *Strategy) handleSnapshotRequest(w http.ResponseWriter, r *http.Request,
 		}
 	}
 	if _, err = io.Copy(w, reader); err != nil {
-		logger.ErrorContext(ctx, "Failed to stream snapshot",
-			slog.String("upstream", upstreamURL),
-			slog.String("error", err.Error()))
+		logger.ErrorContext(ctx, "Failed to stream snapshot", "upstream", upstreamURL, "error", err)
 	}
 }
 
@@ -198,18 +187,14 @@ func (s *Strategy) serveSnapshotWithSpool(w http.ResponseWriter, r *http.Request
 		winner := existing.(*snapshotSpoolEntry)
 		<-winner.ready
 		if spool := winner.spool; spool != nil && !spool.Failed() {
-			logger.DebugContext(ctx, "Serving snapshot from spool",
-				slog.String("upstream", upstreamURL))
+			logger.DebugContext(ctx, "Serving snapshot from spool", "upstream", upstreamURL)
 			if err := spool.ServeTo(w); err != nil {
 				if errors.Is(err, ErrSpoolFailed) {
-					logger.DebugContext(ctx, "Snapshot spool failed before headers, falling back to direct stream",
-						slog.String("upstream", upstreamURL))
+					logger.DebugContext(ctx, "Snapshot spool failed before headers, falling back to direct stream", "upstream", upstreamURL)
 					s.streamSnapshotDirect(w, r, repo, upstreamURL)
 					return
 				}
-				logger.WarnContext(ctx, "Snapshot spool read error",
-					slog.String("upstream", upstreamURL),
-					slog.String("error", err.Error()))
+				logger.WarnContext(ctx, "Snapshot spool read error", "upstream", upstreamURL, "error", err)
 			}
 			return
 		}
@@ -230,9 +215,7 @@ func (s *Strategy) streamSnapshotDirect(w http.ResponseWriter, r *http.Request, 
 
 	snapshotDir, err := os.MkdirTemp(mirrorRoot, ".snapshot-stream-*")
 	if err != nil {
-		logger.ErrorContext(ctx, "Failed to create temp snapshot dir",
-			slog.String("upstream", upstreamURL),
-			slog.String("error", err.Error()))
+		logger.ErrorContext(ctx, "Failed to create temp snapshot dir", "upstream", upstreamURL, "error", err)
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
@@ -240,9 +223,7 @@ func (s *Strategy) streamSnapshotDirect(w http.ResponseWriter, r *http.Request, 
 
 	repoDir := filepath.Join(snapshotDir, "repo")
 	if err := s.cloneForSnapshot(ctx, repo, repoDir); err != nil {
-		logger.ErrorContext(ctx, "Failed to clone for snapshot streaming",
-			slog.String("upstream", upstreamURL),
-			slog.String("error", err.Error()))
+		logger.ErrorContext(ctx, "Failed to clone for snapshot streaming", "upstream", upstreamURL, "error", err)
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
@@ -252,9 +233,7 @@ func (s *Strategy) streamSnapshotDirect(w http.ResponseWriter, r *http.Request, 
 
 	excludePatterns := []string{"*.lock"}
 	if err := snapshot.StreamTo(ctx, w, repoDir, excludePatterns, s.config.ZstdThreads); err != nil {
-		logger.ErrorContext(ctx, "Failed to stream snapshot to client",
-			slog.String("upstream", upstreamURL),
-			slog.String("error", err.Error()))
+		logger.ErrorContext(ctx, "Failed to stream snapshot to client", "upstream", upstreamURL, "error", err)
 	}
 }
 
@@ -308,9 +287,7 @@ func (s *Strategy) writeSnapshotSpool(w http.ResponseWriter, r *http.Request, re
 
 	spool, spoolDir, repoDir, err := s.prepareSnapshotSpool(ctx, repo, upstreamURL, entry)
 	if err != nil {
-		logger.ErrorContext(ctx, "Failed to prepare snapshot spool",
-			slog.String("upstream", upstreamURL),
-			slog.String("error", err.Error()))
+		logger.ErrorContext(ctx, "Failed to prepare snapshot spool", "upstream", upstreamURL, "error", err)
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
@@ -322,9 +299,7 @@ func (s *Strategy) writeSnapshotSpool(w http.ResponseWriter, r *http.Request, re
 	tw := NewSpoolTeeWriter(w, spool)
 	excludePatterns := []string{"*.lock"}
 	if err := snapshot.StreamTo(ctx, tw, repoDir, excludePatterns, s.config.ZstdThreads); err != nil {
-		logger.ErrorContext(ctx, "Failed to stream snapshot to client",
-			slog.String("upstream", upstreamURL),
-			slog.String("error", err.Error()))
+		logger.ErrorContext(ctx, "Failed to stream snapshot to client", "upstream", upstreamURL, "error", err)
 		spool.MarkError(err)
 	} else {
 		spool.MarkComplete()
@@ -341,15 +316,13 @@ func (s *Strategy) writeSnapshotSpool(w http.ResponseWriter, r *http.Request, re
 		mu := s.snapshotMutexFor(upstreamURL)
 		if !mu.TryLock() {
 			logger.InfoContext(ctx, "Skipping background cache upload, snapshot generation already in progress",
-				slog.String("upstream", upstreamURL))
+				"upstream", upstreamURL)
 			return
 		}
 		mu.Unlock()
 		bgCtx := context.WithoutCancel(ctx)
 		if err := s.generateAndUploadSnapshot(bgCtx, repo); err != nil {
-			logger.ErrorContext(bgCtx, "Background cache upload failed",
-				slog.String("upstream", upstreamURL),
-				slog.String("error", err.Error()))
+			logger.ErrorContext(bgCtx, "Background cache upload failed", "upstream", upstreamURL, "error", err)
 		}
 	}()
 

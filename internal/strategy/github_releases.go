@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"net/http"
 	"slices"
 
@@ -94,9 +93,8 @@ func (g *GitHubReleases) newGitHubRequest(ctx context.Context, url, accept, org 
 	if g.tokenManager != nil && org != "" {
 		token, err := g.tokenManager.GetTokenForOrg(ctx, org)
 		if err != nil {
-			logging.FromContext(ctx).WarnContext(ctx, "Failed to get GitHub App token, falling back to static token",
-				slog.String("org", org),
-				slog.String("error", err.Error()))
+			logging.FromContext(ctx).WarnContext(ctx, "Failed to get GitHub App token, falling back to static token", "org", org,
+				"error", err)
 		} else if token != "" {
 			req.Header.Set("Authorization", "Bearer "+token)
 		}
@@ -117,10 +115,10 @@ func (g *GitHubReleases) downloadRelease(ctx context.Context, org, repo, release
 	isPrivate := slices.Contains(g.config.PrivateOrgs, org)
 
 	logger := logging.FromContext(ctx).With(
-		slog.String("org", org),
-		slog.String("repo", repo),
-		slog.String("release", release),
-		slog.String("file", file))
+		"org", org,
+		"repo", repo,
+		"release", release,
+		"file", file)
 
 	realURL := fmt.Sprintf("https://github.com/%s/%s/releases/download/%s/%s", org, repo, release, file)
 	if !isPrivate {
@@ -170,11 +168,11 @@ func (g *GitHubReleases) downloadRelease(ctx context.Context, org, repo, release
 		}
 	}
 	if assetURL == "" {
-		logger.ErrorContext(ctx, "Asset not found in release", slog.Int("assets_count", len(releaseInfo.Assets)))
+		logger.ErrorContext(ctx, "Asset not found in release", "assets_count", len(releaseInfo.Assets))
 		return nil, httputil.Errorf(http.StatusNotFound, "asset %s not found in release %s", file, release)
 	}
 
-	logger.DebugContext(ctx, "Found asset in release", slog.String("asset_url", assetURL))
+	logger.DebugContext(ctx, "Found asset in release", "asset_url", assetURL)
 
 	// Create request for the asset download
 	req, err = g.newGitHubRequest(ctx, assetURL, "application/octet-stream", org)

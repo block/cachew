@@ -143,8 +143,7 @@ func (t Tiered) backfillReader(ctx context.Context, key Key, src io.ReadCloser, 
 	w, err := dst.Create(writeCtx, key, headers, 0) // 0 → use the cache's max TTL
 	if err != nil {
 		cancel()
-		logger.WarnContext(ctx, "Tier backfill: failed to create writer, skipping",
-			"error", err.Error())
+		logger.WarnContext(ctx, "Tier backfill: failed to create writer, skipping", "error", err)
 		return src
 	}
 	return &backfillReadCloser{src: src, dst: w, ctx: ctx, cancel: cancel}
@@ -166,8 +165,7 @@ func (b *backfillReadCloser) Read(p []byte) (int, error) {
 	n, err := b.src.Read(p)
 	if n > 0 && !b.failed {
 		if _, wErr := b.dst.Write(p[:n]); wErr != nil {
-			logging.FromContext(b.ctx).WarnContext(b.ctx, "Tier backfill: write failed, abandoning",
-				"error", wErr.Error())
+			logging.FromContext(b.ctx).WarnContext(b.ctx, "Tier backfill: write failed, abandoning", "error", wErr)
 			b.failed = true
 			b.cancel()
 		}

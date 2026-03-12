@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"io"
-	"log/slog"
 	"net/http"
 	"net/http/cgi" //nolint:gosec // CVE-2016-5386 only affects Go < 1.6.3
 	"os"
@@ -120,10 +119,8 @@ func (s *Strategy) serveFromBackend(w http.ResponseWriter, r *http.Request, repo
 	repoPath := strings.TrimSuffix(repoPathWithSuffix, ".git")
 	backendPath := "/" + host + "/" + repoPath + gitOperation
 
-	logger.DebugContext(r.Context(), "Serving with git http-backend",
-		slog.String("original_path", r.URL.Path),
-		slog.String("backend_path", backendPath),
-		slog.String("clone_path", repo.Path()))
+	logger.DebugContext(r.Context(), "Serving with git http-backend", "original_path", r.URL.Path,
+		"backend_path", backendPath, "clone_path", repo.Path())
 
 	// No read lock needed: git http-backend (upload-pack) handles concurrent
 	// access safely via git's own file-level locking. Holding a read lock here
@@ -173,9 +170,7 @@ func (s *Strategy) serveFromBackend(w http.ResponseWriter, r *http.Request, repo
 
 	if stderrBuf.Len() > 0 {
 		stderr := stderrBuf.String()
-		logger.ErrorContext(r.Context(), "git http-backend error",
-			slog.String("stderr", stderr),
-			slog.String("path", backendPath))
+		logger.ErrorContext(r.Context(), "git http-backend error", "stderr", stderr, "path", backendPath)
 		if !bw.committed && strings.Contains(stderr, "not our ref") {
 			return true
 		}
@@ -191,8 +186,7 @@ func (s *Strategy) ensureRefsUpToDate(ctx context.Context, repo *gitclone.Reposi
 		return errors.Wrap(err, "check upstream refs")
 	}
 	if needsFetch {
-		logging.FromContext(ctx).DebugContext(ctx, "Refs stale, scheduling background fetch",
-			slog.String("upstream", repo.UpstreamURL()))
+		logging.FromContext(ctx).DebugContext(ctx, "Refs stale, scheduling background fetch", "upstream", repo.UpstreamURL())
 		s.scheduler.Submit(repo.UpstreamURL(), "fetch", func(ctx context.Context) error {
 			return s.backgroundFetch(ctx, repo)
 		})

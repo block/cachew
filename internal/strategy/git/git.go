@@ -7,7 +7,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"io"
-	"log/slog"
 	"net/http"
 	"net/http/httputil"
 	"os"
@@ -119,45 +118,34 @@ func New(
 
 	existing, err := s.cloneManager.DiscoverExisting(ctx)
 	if err != nil {
-		logger.WarnContext(ctx, "Failed to discover existing clones",
-			slog.String("error", err.Error()))
+		logger.WarnContext(ctx, "Failed to discover existing clones", "error", err)
 	}
 	for _, repo := range existing {
-		logger.InfoContext(ctx, "Running startup fetch for existing repo",
-			slog.String("upstream", repo.UpstreamURL()))
+		logger.InfoContext(ctx, "Running startup fetch for existing repo", "upstream", repo.UpstreamURL())
 
 		preRefs, err := repo.GetLocalRefs(ctx)
 		if err != nil {
-			logger.WarnContext(ctx, "Failed to get pre-fetch refs for existing repo",
-				slog.String("upstream", repo.UpstreamURL()),
-				slog.String("error", err.Error()))
+			logger.WarnContext(ctx, "Failed to get pre-fetch refs for existing repo", "upstream", repo.UpstreamURL(),
+				"error", err)
 		} else {
-			logger.InfoContext(ctx, "Pre-fetch refs for existing repo",
-				slog.String("upstream", repo.UpstreamURL()),
-				slog.Any("refs", preRefs))
+			logger.InfoContext(ctx, "Pre-fetch refs for existing repo", "upstream", repo.UpstreamURL(), "refs", preRefs)
 		}
 
 		start := time.Now()
 		if err := repo.Fetch(ctx); err != nil {
-			logger.ErrorContext(ctx, "Startup fetch failed for existing repo",
-				slog.String("upstream", repo.UpstreamURL()),
-				slog.String("error", err.Error()),
-				slog.Duration("duration", time.Since(start)))
+			logger.ErrorContext(ctx, "Startup fetch failed for existing repo", "upstream", repo.UpstreamURL(), "error", err,
+				"duration", time.Since(start))
 		} else {
-			logger.InfoContext(ctx, "Startup fetch completed for existing repo",
-				slog.String("upstream", repo.UpstreamURL()),
-				slog.Duration("duration", time.Since(start)))
+			logger.InfoContext(ctx, "Startup fetch completed for existing repo", "upstream", repo.UpstreamURL(),
+				"duration", time.Since(start))
 		}
 
 		postRefs, err := repo.GetLocalRefs(ctx)
 		if err != nil {
-			logger.WarnContext(ctx, "Failed to get post-fetch refs for existing repo",
-				slog.String("upstream", repo.UpstreamURL()),
-				slog.String("error", err.Error()))
+			logger.WarnContext(ctx, "Failed to get post-fetch refs for existing repo", "upstream", repo.UpstreamURL(),
+				"error", err)
 		} else {
-			logger.InfoContext(ctx, "Post-fetch refs for existing repo",
-				slog.String("upstream", repo.UpstreamURL()),
-				slog.Any("refs", postRefs))
+			logger.InfoContext(ctx, "Post-fetch refs for existing repo", "upstream", repo.UpstreamURL(), "refs", postRefs)
 		}
 
 		if s.config.SnapshotInterval > 0 {
@@ -185,15 +173,14 @@ func New(
 					if err == nil && token != "" {
 						// Inject token as Basic auth with "x-access-token" username
 						req.SetBasicAuth("x-access-token", token)
-						logger.DebugContext(req.Context(), "Injecting GitHub App auth into upstream request",
-							slog.String("org", org))
+						logger.DebugContext(req.Context(), "Injecting GitHub App auth into upstream request", "org", org)
 					}
 				}
 			}
 		},
 		Transport: s.httpClient.Transport,
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
-			logging.FromContext(r.Context()).ErrorContext(r.Context(), "Upstream request failed", slog.String("error", err.Error()))
+			logging.FromContext(r.Context()).ErrorContext(r.Context(), "Upstream request failed", "error", err)
 			w.WriteHeader(http.StatusBadGateway)
 		},
 	}
@@ -201,8 +188,7 @@ func New(
 	mux.Handle("GET /git/{host}/{path...}", http.HandlerFunc(s.handleRequest))
 	mux.Handle("POST /git/{host}/{path...}", http.HandlerFunc(s.handleRequest))
 
-	logger.InfoContext(ctx, "Git strategy initialized",
-		"snapshot_interval", config.SnapshotInterval)
+	logger.InfoContext(ctx, "Git strategy initialized", "snapshot_interval", config.SnapshotInterval)
 
 	return s, nil
 }
@@ -225,10 +211,7 @@ func (s *Strategy) handleRequest(w http.ResponseWriter, r *http.Request) {
 	host := r.PathValue("host")
 	pathValue := r.PathValue("path")
 
-	logger.DebugContext(ctx, "Git request",
-		slog.String("method", r.Method),
-		slog.String("host", host),
-		slog.String("path", pathValue))
+	logger.DebugContext(ctx, "Git request", "method", r.Method, "host", host, "path", pathValue)
 
 	if strings.HasSuffix(pathValue, "/snapshot.tar.zst") {
 		s.handleSnapshotRequest(w, r, host, pathValue)
@@ -249,8 +232,7 @@ func (s *Strategy) handleRequest(w http.ResponseWriter, r *http.Request) {
 
 	repo, err := s.cloneManager.GetOrCreate(ctx, upstreamURL)
 	if err != nil {
-		logger.ErrorContext(ctx, "Failed to get or create clone",
-			slog.String("error", err.Error()))
+		logger.ErrorContext(ctx, "Failed to get or create clone", "error", err)
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
@@ -280,8 +262,7 @@ func (s *Strategy) serveReadyRepo(w http.ResponseWriter, r *http.Request, repo *
 
 	if isInfoRefs {
 		if err := s.ensureRefsUpToDate(ctx, repo); err != nil {
-			logger.WarnContext(ctx, "Failed to check upstream refs",
-				slog.String("error", err.Error()))
+			logger.WarnContext(ctx, "Failed to check upstream refs", "error", err)
 		}
 	}
 	s.maybeBackgroundFetch(repo)
@@ -293,8 +274,7 @@ func (s *Strategy) serveReadyRepo(w http.ResponseWriter, r *http.Request, repo *
 		var readErr error
 		bodyBytes, readErr = io.ReadAll(r.Body)
 		if readErr != nil {
-			logger.ErrorContext(ctx, "Failed to read request body",
-				slog.String("error", readErr.Error()))
+			logger.ErrorContext(ctx, "Failed to read request body", "error", readErr)
 			http.Error(w, "Internal server error", http.StatusInternalServerError)
 			return
 		}
@@ -307,8 +287,7 @@ func (s *Strategy) serveReadyRepo(w http.ResponseWriter, r *http.Request, repo *
 		// The mirror is missing the requested object — most likely a commit
 		// that was advertised before a concurrent force-push fetch orphaned
 		// it. Fall back to upstream so the client is not left with an error.
-		logger.InfoContext(ctx, "Falling back to upstream due to 'not our ref'",
-			slog.String("path", pathValue))
+		logger.InfoContext(ctx, "Falling back to upstream due to 'not our ref'", "path", pathValue)
 		if bodyBytes != nil {
 			r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 			r.ContentLength = int64(len(bodyBytes))
@@ -383,8 +362,7 @@ func (s *Strategy) serveWithSpool(w http.ResponseWriter, r *http.Request, host, 
 
 	key, err := SpoolKeyForRequest(pathValue, r)
 	if err != nil {
-		logger.WarnContext(ctx, "Failed to compute spool key, forwarding to upstream",
-			slog.String("error", err.Error()))
+		logger.WarnContext(ctx, "Failed to compute spool key, forwarding to upstream", "error", err)
 		s.forwardToUpstream(w, r, host, pathValue)
 		return
 	}
@@ -395,23 +373,19 @@ func (s *Strategy) serveWithSpool(w http.ResponseWriter, r *http.Request, host, 
 
 	rp, err := s.getOrCreateRepoSpools(upstreamURL)
 	if err != nil {
-		logger.WarnContext(ctx, "Failed to resolve spool directory, forwarding to upstream",
-			slog.String("error", err.Error()))
+		logger.WarnContext(ctx, "Failed to resolve spool directory, forwarding to upstream", "error", err)
 		s.forwardToUpstream(w, r, host, pathValue)
 		return
 	}
 	spool, isWriter, err := rp.GetOrCreate(key)
 	if err != nil {
-		logger.WarnContext(ctx, "Failed to create spool, forwarding to upstream",
-			slog.String("error", err.Error()))
+		logger.WarnContext(ctx, "Failed to create spool, forwarding to upstream", "error", err)
 		s.forwardToUpstream(w, r, host, pathValue)
 		return
 	}
 
 	if isWriter {
-		logger.DebugContext(ctx, "Spooling upstream response",
-			slog.String("key", key),
-			slog.String("upstream", upstreamURL))
+		logger.DebugContext(ctx, "Spooling upstream response", "key", key, "upstream", upstreamURL)
 		tw := NewSpoolTeeWriter(w, spool)
 		s.forwardToUpstream(tw, r, host, pathValue)
 		spool.MarkComplete()
@@ -419,25 +393,19 @@ func (s *Strategy) serveWithSpool(w http.ResponseWriter, r *http.Request, host, 
 	}
 
 	if spool.Failed() {
-		logger.DebugContext(ctx, "Spool failed, forwarding to upstream",
-			slog.String("key", key))
+		logger.DebugContext(ctx, "Spool failed, forwarding to upstream", "key", key)
 		s.forwardToUpstream(w, r, host, pathValue)
 		return
 	}
 
-	logger.DebugContext(ctx, "Serving from spool",
-		slog.String("key", key),
-		slog.String("upstream", upstreamURL))
+	logger.DebugContext(ctx, "Serving from spool", "key", key, "upstream", upstreamURL)
 	if err := spool.ServeTo(w); err != nil {
 		if errors.Is(err, ErrSpoolFailed) {
-			logger.DebugContext(ctx, "Spool failed before response started, forwarding to upstream",
-				slog.String("key", key))
+			logger.DebugContext(ctx, "Spool failed before response started, forwarding to upstream", "key", key)
 			s.forwardToUpstream(w, r, host, pathValue)
 			return
 		}
-		logger.WarnContext(ctx, "Spool read failed mid-stream",
-			slog.String("key", key),
-			slog.String("error", err.Error()))
+		logger.WarnContext(ctx, "Spool read failed mid-stream", "key", key, "error", err)
 	}
 }
 
@@ -477,56 +445,39 @@ func (s *Strategy) startClone(ctx context.Context, repo *gitclone.Repository) {
 	logger := logging.FromContext(ctx)
 	upstream := repo.UpstreamURL()
 
-	logger.InfoContext(ctx, "Attempting snapshot restore",
-		slog.String("upstream", upstream))
+	logger.InfoContext(ctx, "Attempting snapshot restore", "upstream", upstream)
 
 	if err := s.tryRestoreSnapshot(ctx, repo); err != nil {
-		logger.InfoContext(ctx, "Snapshot restore failed, falling back to clone",
-			slog.String("upstream", upstream),
-			slog.String("error", err.Error()))
+		logger.InfoContext(ctx, "Snapshot restore failed, falling back to clone", "upstream", upstream, "error", err)
 	} else {
 		if err := s.cleanupSpools(upstream); err != nil {
-			logger.WarnContext(ctx, "Failed to clean up spools",
-				slog.String("upstream", upstream),
-				slog.String("error", err.Error()))
+			logger.WarnContext(ctx, "Failed to clean up spools", "upstream", upstream, "error", err)
 		}
 
-		logger.InfoContext(ctx, "Snapshot restored, running synchronous catch-up fetch",
-			slog.String("upstream", upstream),
-			slog.String("state", repo.State().String()))
+		logger.InfoContext(ctx, "Snapshot restored, running synchronous catch-up fetch", "upstream", upstream,
+			"state", repo.State())
 
 		preRefs, err := repo.GetLocalRefs(ctx)
 		if err != nil {
-			logger.WarnContext(ctx, "Failed to get pre-fetch refs",
-				slog.String("upstream", upstream),
-				slog.String("error", err.Error()))
+			logger.WarnContext(ctx, "Failed to get pre-fetch refs", "upstream", upstream, "error", err)
 		} else {
-			logger.DebugContext(ctx, "Pre-fetch refs",
-				slog.String("upstream", upstream),
-				slog.Any("refs", preRefs))
+			logger.DebugContext(ctx, "Pre-fetch refs", "upstream", upstream, "refs", preRefs)
 		}
 
 		start := time.Now()
 		if err := repo.Fetch(ctx); err != nil {
-			logger.ErrorContext(ctx, "Catch-up fetch after snapshot restore failed",
-				slog.String("upstream", upstream),
-				slog.String("error", err.Error()),
-				slog.Duration("duration", time.Since(start)))
+			logger.ErrorContext(ctx, "Catch-up fetch after snapshot restore failed", "upstream", upstream, "error", err,
+				"duration", time.Since(start))
 		} else {
-			logger.DebugContext(ctx, "Catch-up fetch after snapshot restore completed",
-				slog.String("upstream", upstream),
-				slog.Duration("duration", time.Since(start)))
+			logger.DebugContext(ctx, "Catch-up fetch after snapshot restore completed", "upstream", upstream,
+				"duration", time.Since(start))
 		}
 
 		postRefs, err := repo.GetLocalRefs(ctx)
 		if err != nil {
-			logger.WarnContext(ctx, "Failed to get post-fetch refs",
-				slog.String("upstream", upstream),
-				slog.String("error", err.Error()))
+			logger.WarnContext(ctx, "Failed to get post-fetch refs", "upstream", upstream, "error", err)
 		} else {
-			logger.DebugContext(ctx, "Post-fetch refs",
-				slog.String("upstream", upstream),
-				slog.Any("refs", postRefs))
+			logger.DebugContext(ctx, "Post-fetch refs", "upstream", upstream, "refs", postRefs)
 		}
 
 		if s.config.SnapshotInterval > 0 {
@@ -538,30 +489,22 @@ func (s *Strategy) startClone(ctx context.Context, repo *gitclone.Repository) {
 		return
 	}
 
-	logger.InfoContext(ctx, "Starting clone",
-		slog.String("upstream", upstream),
-		slog.String("path", repo.Path()))
+	logger.InfoContext(ctx, "Starting clone", "upstream", upstream, "path", repo.Path())
 
 	err := repo.Clone(ctx)
 
 	// Clean up spools regardless of clone success or failure, so that subsequent
 	// requests either serve from the local backend or go directly to upstream.
 	if cleanupErr := s.cleanupSpools(upstream); cleanupErr != nil {
-		logger.WarnContext(ctx, "Failed to clean up spools",
-			slog.String("upstream", upstream),
-			slog.String("error", cleanupErr.Error()))
+		logger.WarnContext(ctx, "Failed to clean up spools", "upstream", upstream, "error", cleanupErr)
 	}
 
 	if err != nil {
-		logger.ErrorContext(ctx, "Clone failed",
-			slog.String("upstream", upstream),
-			slog.String("error", err.Error()))
+		logger.ErrorContext(ctx, "Clone failed", "upstream", upstream, "error", err)
 		return
 	}
 
-	logger.InfoContext(ctx, "Clone completed",
-		slog.String("upstream", upstream),
-		slog.String("path", repo.Path()))
+	logger.InfoContext(ctx, "Clone completed", "upstream", upstream, "path", repo.Path())
 
 	if s.config.SnapshotInterval > 0 {
 		s.scheduleSnapshotJobs(repo)
@@ -591,24 +534,19 @@ func (s *Strategy) tryRestoreSnapshot(ctx context.Context, repo *gitclone.Reposi
 		_ = os.RemoveAll(repo.Path())
 		return errors.Wrap(err, "restore snapshot")
 	}
-	logger.InfoContext(ctx, "Snapshot archive extracted",
-		slog.String("upstream", repo.UpstreamURL()),
-		slog.String("path", repo.Path()))
+	logger.InfoContext(ctx, "Snapshot archive extracted", "upstream", repo.UpstreamURL(), "path", repo.Path())
 
 	if err := convertSnapshotToMirror(ctx, repo.Path(), repo.UpstreamURL()); err != nil {
 		_ = os.RemoveAll(repo.Path())
 		return errors.Wrap(err, "convert snapshot to mirror")
 	}
-	logger.InfoContext(ctx, "Snapshot converted to bare mirror",
-		slog.String("upstream", repo.UpstreamURL()))
+	logger.InfoContext(ctx, "Snapshot converted to bare mirror", "upstream", repo.UpstreamURL())
 
 	if err := repo.MarkRestored(ctx); err != nil {
 		_ = os.RemoveAll(repo.Path())
 		return errors.Wrap(err, "mark restored")
 	}
-	logger.InfoContext(ctx, "Repository marked as restored",
-		slog.String("upstream", repo.UpstreamURL()),
-		slog.String("state", repo.State().String()))
+	logger.InfoContext(ctx, "Repository marked as restored", "upstream", repo.UpstreamURL(), "state", repo.State())
 
 	return nil
 }
@@ -691,16 +629,12 @@ func (s *Strategy) backgroundFetch(ctx context.Context, repo *gitclone.Repositor
 	}
 
 	logger := logging.FromContext(ctx)
-	logger.InfoContext(ctx, "Fetching updates",
-		slog.String("upstream", repo.UpstreamURL()),
-		slog.String("path", repo.Path()))
+	logger.InfoContext(ctx, "Fetching updates", "upstream", repo.UpstreamURL(), "path", repo.Path())
 
 	start := time.Now()
 	if err := repo.Fetch(ctx); err != nil {
 		return errors.Errorf("fetch failed in %s: %w", time.Since(start), err)
 	}
-	logger.InfoContext(ctx, "Fetch completed",
-		slog.String("upstream", repo.UpstreamURL()),
-		slog.Duration("duration", time.Since(start)))
+	logger.InfoContext(ctx, "Fetch completed", "upstream", repo.UpstreamURL(), "duration", time.Since(start))
 	return nil
 }
