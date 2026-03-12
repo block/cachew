@@ -133,10 +133,8 @@ func NewManager(ctx context.Context, config Config, credentialProvider Credentia
 		}
 	}
 
-	logging.FromContext(ctx).InfoContext(ctx, "Git clone manager initialised",
-		"mirror_root", config.MirrorRoot,
-		"fetch_interval", config.FetchInterval,
-		"ref_check_interval", config.RefCheckInterval)
+	logging.FromContext(ctx).InfoContext(ctx, "Git clone manager initialised", "mirror_root", config.MirrorRoot,
+		"fetch_interval", config.FetchInterval, "ref_check_interval", config.RefCheckInterval)
 
 	return &Manager{
 		config:             config,

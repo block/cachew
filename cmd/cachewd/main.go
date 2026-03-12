@@ -100,7 +100,7 @@ func main() {
 		kctx.FatalIfErrorf(err, "failed to start metrics server")
 	}
 
-	logger.InfoContext(ctx, "Starting cachewd", slog.String("bind", globalConfig.Bind))
+	logger.InfoContext(ctx, "Starting cachewd", "bind", globalConfig.Bind)
 
 	server := newServer(ctx, mux, globalConfig.Bind, globalConfig.MetricsConfig)
 	err = server.ListenAndServe()

@@ -8,7 +8,6 @@ package reaper
 
 import (
 	"context"
-	"log/slog"
 	"os"
 	"syscall"
 	"time"
@@ -43,7 +42,7 @@ func Reap(ctx context.Context) {
 		if pid <= 0 || err != nil {
 			return
 		}
-		logger.DebugContext(ctx, "Reaped zombie process", slog.Int("pid", pid), slog.Int("status", status.ExitStatus()))
+		logger.DebugContext(ctx, "Reaped zombie process", "pid", pid, "status", status.ExitStatus())
 	}
 }
 

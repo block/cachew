@@ -91,9 +91,7 @@ func (a *Artifactory) registerPathBased(ctx context.Context, target *url.URL, hd
 
 	pattern := "GET " + a.prefix + "/"
 	mux.Handle(pattern, hdlr)
-	a.logger.InfoContext(ctx, "Registered Artifactory path-based route",
-		slog.String("prefix", a.prefix),
-		slog.String("target", target.String()))
+	a.logger.InfoContext(ctx, "Registered Artifactory path-based route", "prefix", a.prefix, "target", target)
 }
 
 // registerHostBased registers host-based routing patterns for the configured hosts.
@@ -104,9 +102,7 @@ func (a *Artifactory) registerHostBased(ctx context.Context, hosts []string, hdl
 	for _, host := range hosts {
 		pattern := "GET " + host + "/"
 		mux.Handle(pattern, hdlr)
-		a.logger.InfoContext(ctx, "Registered Artifactory host-based route",
-			slog.String("pattern", pattern),
-			slog.String("target", a.target.String()))
+		a.logger.InfoContext(ctx, "Registered Artifactory host-based route", "pattern", pattern, "target", a.target)
 	}
 }
 
@@ -162,18 +158,14 @@ func (a *Artifactory) buildTargetURL(r *http.Request) *url.URL {
 		}
 	}
 
-	a.logger.Debug("buildTargetURL",
-		"host_based", isHostBased,
-		"request_host", r.Host,
-		"request_path", r.URL.Path,
+	a.logger.Debug("buildTargetURL", "host_based", isHostBased, "request_host", r.Host, "request_path", r.URL.Path,
 		"stripped_path", path)
 
 	targetURL := *a.target
 	targetURL.Path = a.target.Path + path
 	targetURL.RawQuery = r.URL.RawQuery
 
-	a.logger.Debug("buildTargetURL result",
-		"url", targetURL.String())
+	a.logger.Debug("buildTargetURL result", "url", targetURL)
 
 	return &targetURL
 }

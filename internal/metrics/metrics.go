@@ -123,12 +123,8 @@ func New(ctx context.Context, cfg Config) (*Client, error) {
 		port:              cfg.Port,
 	}
 
-	logger.InfoContext(ctx, "OpenTelemetry metrics initialized",
-		"service", cfg.ServiceName,
-		"exporters", exporters,
-		"prometheus_port", cfg.Port,
-		"otlp_endpoint", cfg.OTLPEndpoint,
-	)
+	logger.InfoContext(ctx, "OpenTelemetry metrics initialized", "service", cfg.ServiceName, "exporters", exporters,
+		"prometheus_port", cfg.Port, "otlp_endpoint", cfg.OTLPEndpoint)
 
 	return client, nil
 }

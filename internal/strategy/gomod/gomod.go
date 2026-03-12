@@ -77,8 +77,7 @@ func New(ctx context.Context, config Config, cache cache.Cache, mux strategy.Mux
 		privateFetcher := newPrivateFetcher(s.logger, cloneManager)
 		fetcher = NewCompositeFetcher(publicFetcher, privateFetcher, config.PrivatePaths)
 
-		s.logger.InfoContext(ctx, "Configured private module support",
-			slog.Any("private-paths", config.PrivatePaths))
+		s.logger.InfoContext(ctx, "Configured private module support", "private-paths", config.PrivatePaths)
 	}
 
 	s.goproxy = &goproxy.Goproxy{
@@ -92,8 +91,7 @@ func New(ctx context.Context, config Config, cache cache.Cache, mux strategy.Mux
 		},
 	}
 
-	s.logger.InfoContext(ctx, "Initialized Go module proxy strategy",
-		slog.String("proxy", s.proxy.String()))
+	s.logger.InfoContext(ctx, "Initialized Go module proxy strategy", "proxy", s.proxy)
 
 	mux.Handle("GET /gomod/{path...}", http.StripPrefix("/gomod", s.goproxy))
 
