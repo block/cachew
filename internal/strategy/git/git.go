@@ -123,6 +123,43 @@ func New(
 			slog.String("error", err.Error()))
 	}
 	for _, repo := range existing {
+		logger.InfoContext(ctx, "Running startup fetch for existing repo",
+			slog.String("upstream", repo.UpstreamURL()))
+
+		preRefs, err := repo.GetLocalRefs(ctx)
+		if err != nil {
+			logger.WarnContext(ctx, "Failed to get pre-fetch refs for existing repo",
+				slog.String("upstream", repo.UpstreamURL()),
+				slog.String("error", err.Error()))
+		} else {
+			logger.InfoContext(ctx, "Pre-fetch refs for existing repo",
+				slog.String("upstream", repo.UpstreamURL()),
+				slog.Any("refs", preRefs))
+		}
+
+		start := time.Now()
+		if err := repo.Fetch(ctx); err != nil {
+			logger.ErrorContext(ctx, "Startup fetch failed for existing repo",
+				slog.String("upstream", repo.UpstreamURL()),
+				slog.String("error", err.Error()),
+				slog.Duration("duration", time.Since(start)))
+		} else {
+			logger.InfoContext(ctx, "Startup fetch completed for existing repo",
+				slog.String("upstream", repo.UpstreamURL()),
+				slog.Duration("duration", time.Since(start)))
+		}
+
+		postRefs, err := repo.GetLocalRefs(ctx)
+		if err != nil {
+			logger.WarnContext(ctx, "Failed to get post-fetch refs for existing repo",
+				slog.String("upstream", repo.UpstreamURL()),
+				slog.String("error", err.Error()))
+		} else {
+			logger.InfoContext(ctx, "Post-fetch refs for existing repo",
+				slog.String("upstream", repo.UpstreamURL()),
+				slog.Any("refs", postRefs))
+		}
+
 		if s.config.SnapshotInterval > 0 {
 			s.scheduleSnapshotJobs(repo)
 		}
@@ -438,6 +475,9 @@ func (s *Strategy) startClone(ctx context.Context, repo *gitclone.Repository) {
 	logger := logging.FromContext(ctx)
 	upstream := repo.UpstreamURL()
 
+	logger.InfoContext(ctx, "Attempting snapshot restore",
+		slog.String("upstream", upstream))
+
 	if err := s.tryRestoreSnapshot(ctx, repo); err != nil {
 		logger.InfoContext(ctx, "Snapshot restore failed, falling back to clone",
 			slog.String("upstream", upstream),
@@ -445,13 +485,43 @@ func (s *Strategy) startClone(ctx context.Context, repo *gitclone.Repository) {
 	} else {
 		s.cleanupSpools(upstream)
 
-		logger.InfoContext(ctx, "Snapshot restore completed, scheduling catch-up fetch",
-			slog.String("upstream", upstream))
+		logger.InfoContext(ctx, "Snapshot restored, running synchronous catch-up fetch",
+			slog.String("upstream", upstream),
+			slog.String("state", repo.State().String()))
 
-		s.scheduler.Submit(upstream, "fetch", func(ctx context.Context) error {
-			s.backgroundFetch(ctx, repo)
-			return nil
-		})
+		preRefs, err := repo.GetLocalRefs(ctx)
+		if err != nil {
+			logger.WarnContext(ctx, "Failed to get pre-fetch refs",
+				slog.String("upstream", upstream),
+				slog.String("error", err.Error()))
+		} else {
+			logger.InfoContext(ctx, "Pre-fetch refs",
+				slog.String("upstream", upstream),
+				slog.Any("refs", preRefs))
+		}
+
+		start := time.Now()
+		if err := repo.Fetch(ctx); err != nil {
+			logger.ErrorContext(ctx, "Catch-up fetch after snapshot restore failed",
+				slog.String("upstream", upstream),
+				slog.String("error", err.Error()),
+				slog.Duration("duration", time.Since(start)))
+		} else {
+			logger.InfoContext(ctx, "Catch-up fetch after snapshot restore completed",
+				slog.String("upstream", upstream),
+				slog.Duration("duration", time.Since(start)))
+		}
+
+		postRefs, err := repo.GetLocalRefs(ctx)
+		if err != nil {
+			logger.WarnContext(ctx, "Failed to get post-fetch refs",
+				slog.String("upstream", upstream),
+				slog.String("error", err.Error()))
+		} else {
+			logger.InfoContext(ctx, "Post-fetch refs",
+				slog.String("upstream", upstream),
+				slog.Any("refs", postRefs))
+		}
 
 		if s.config.SnapshotInterval > 0 {
 			s.scheduleSnapshotJobs(repo)
@@ -505,20 +575,30 @@ func (s *Strategy) tryRestoreSnapshot(ctx context.Context, repo *gitclone.Reposi
 		return errors.Wrap(err, "create parent directory for restore")
 	}
 
+	logger := logging.FromContext(ctx)
+
 	if err := snapshot.Restore(ctx, s.cache, cacheKey, repo.Path(), s.config.ZstdThreads); err != nil {
 		_ = os.RemoveAll(repo.Path())
 		return errors.Wrap(err, "restore snapshot")
 	}
+	logger.InfoContext(ctx, "Snapshot archive extracted",
+		slog.String("upstream", repo.UpstreamURL()),
+		slog.String("path", repo.Path()))
 
 	if err := convertSnapshotToMirror(ctx, repo.Path(), repo.UpstreamURL()); err != nil {
 		_ = os.RemoveAll(repo.Path())
 		return errors.Wrap(err, "convert snapshot to mirror")
 	}
+	logger.InfoContext(ctx, "Snapshot converted to bare mirror",
+		slog.String("upstream", repo.UpstreamURL()))
 
 	if err := repo.MarkRestored(ctx); err != nil {
 		_ = os.RemoveAll(repo.Path())
 		return errors.Wrap(err, "mark restored")
 	}
+	logger.InfoContext(ctx, "Repository marked as restored",
+		slog.String("upstream", repo.UpstreamURL()),
+		slog.String("state", repo.State().String()))
 
 	return nil
 }
@@ -603,13 +683,19 @@ func (s *Strategy) backgroundFetch(ctx context.Context, repo *gitclone.Repositor
 		return
 	}
 
-	logger.DebugContext(ctx, "Fetching updates",
+	logger.InfoContext(ctx, "Fetching updates",
 		slog.String("upstream", repo.UpstreamURL()),
 		slog.String("path", repo.Path()))
 
+	start := time.Now()
 	if err := repo.Fetch(ctx); err != nil {
 		logger.ErrorContext(ctx, "Fetch failed",
 			slog.String("upstream", repo.UpstreamURL()),
-			slog.String("error", err.Error()))
+			slog.String("error", err.Error()),
+			slog.Duration("duration", time.Since(start)))
+		return
 	}
+	logger.InfoContext(ctx, "Fetch completed",
+		slog.String("upstream", repo.UpstreamURL()),
+		slog.Duration("duration", time.Since(start)))
 }
