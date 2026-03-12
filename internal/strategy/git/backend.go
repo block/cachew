@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/alecthomas/errors"
+
 	"github.com/block/cachew/internal/gitclone"
 	"github.com/block/cachew/internal/httputil"
 	"github.com/block/cachew/internal/logging"
@@ -183,21 +185,17 @@ func (s *Strategy) serveFromBackend(w http.ResponseWriter, r *http.Request, repo
 	return false
 }
 
-func (s *Strategy) ensureRefsUpToDate(ctx context.Context, repo *gitclone.Repository) {
-	logger := logging.FromContext(ctx)
-
+func (s *Strategy) ensureRefsUpToDate(ctx context.Context, repo *gitclone.Repository) error {
 	needsFetch, err := repo.EnsureRefsUpToDate(ctx)
 	if err != nil {
-		logger.WarnContext(ctx, "Failed to check upstream refs",
-			slog.String("error", err.Error()))
-		return
+		return errors.Wrap(err, "check upstream refs")
 	}
 	if needsFetch {
-		logger.DebugContext(ctx, "Refs stale, scheduling background fetch",
+		logging.FromContext(ctx).DebugContext(ctx, "Refs stale, scheduling background fetch",
 			slog.String("upstream", repo.UpstreamURL()))
 		s.scheduler.Submit(repo.UpstreamURL(), "fetch", func(ctx context.Context) error {
-			s.backgroundFetch(ctx, repo)
-			return nil
+			return s.backgroundFetch(ctx, repo)
 		})
 	}
+	return nil
 }

@@ -182,12 +182,9 @@ func (b *backfillReadCloser) Close() error {
 		_ = b.dst.Close()
 		return errors.WithStack(srcErr)
 	}
-	if err := b.dst.Close(); err != nil {
-		logging.FromContext(b.ctx).WarnContext(b.ctx, "Tier backfill: close failed",
-			"error", err.Error())
-	}
+	dstErr := b.dst.Close()
 	b.cancel()
-	return nil
+	return errors.WithStack(dstErr)
 }
 
 func (t Tiered) String() string {

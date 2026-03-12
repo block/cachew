@@ -279,7 +279,10 @@ func (s *Strategy) serveReadyRepo(w http.ResponseWriter, r *http.Request, repo *
 	logger := logging.FromContext(ctx)
 
 	if isInfoRefs {
-		s.ensureRefsUpToDate(ctx, repo)
+		if err := s.ensureRefsUpToDate(ctx, repo); err != nil {
+			logger.WarnContext(ctx, "Failed to check upstream refs",
+				slog.String("error", err.Error()))
+		}
 	}
 	s.maybeBackgroundFetch(repo)
 
@@ -359,7 +362,7 @@ func (s *Strategy) getOrCreateRepoSpools(upstreamURL string) (*RepoSpools, error
 	return rp, nil
 }
 
-func (s *Strategy) cleanupSpools(upstreamURL string) {
+func (s *Strategy) cleanupSpools(upstreamURL string) error {
 	s.spoolsMu.Lock()
 	rp, exists := s.spools[upstreamURL]
 	if exists {
@@ -368,11 +371,10 @@ func (s *Strategy) cleanupSpools(upstreamURL string) {
 	s.spoolsMu.Unlock()
 	if rp != nil {
 		if err := rp.Close(); err != nil {
-			logging.FromContext(s.ctx).WarnContext(s.ctx, "Failed to clean up spools",
-				slog.String("upstream", upstreamURL),
-				slog.String("error", err.Error()))
+			return errors.Wrap(err, "clean up spools")
 		}
 	}
+	return nil
 }
 
 func (s *Strategy) serveWithSpool(w http.ResponseWriter, r *http.Request, host, pathValue, upstreamURL string) {
@@ -483,7 +485,11 @@ func (s *Strategy) startClone(ctx context.Context, repo *gitclone.Repository) {
 			slog.String("upstream", upstream),
 			slog.String("error", err.Error()))
 	} else {
-		s.cleanupSpools(upstream)
+		if err := s.cleanupSpools(upstream); err != nil {
+			logger.WarnContext(ctx, "Failed to clean up spools",
+				slog.String("upstream", upstream),
+				slog.String("error", err.Error()))
+		}
 
 		logger.InfoContext(ctx, "Snapshot restored, running synchronous catch-up fetch",
 			slog.String("upstream", upstream),
@@ -495,7 +501,7 @@ func (s *Strategy) startClone(ctx context.Context, repo *gitclone.Repository) {
 				slog.String("upstream", upstream),
 				slog.String("error", err.Error()))
 		} else {
-			logger.InfoContext(ctx, "Pre-fetch refs",
+			logger.DebugContext(ctx, "Pre-fetch refs",
 				slog.String("upstream", upstream),
 				slog.Any("refs", preRefs))
 		}
@@ -507,7 +513,7 @@ func (s *Strategy) startClone(ctx context.Context, repo *gitclone.Repository) {
 				slog.String("error", err.Error()),
 				slog.Duration("duration", time.Since(start)))
 		} else {
-			logger.InfoContext(ctx, "Catch-up fetch after snapshot restore completed",
+			logger.DebugContext(ctx, "Catch-up fetch after snapshot restore completed",
 				slog.String("upstream", upstream),
 				slog.Duration("duration", time.Since(start)))
 		}
@@ -518,7 +524,7 @@ func (s *Strategy) startClone(ctx context.Context, repo *gitclone.Repository) {
 				slog.String("upstream", upstream),
 				slog.String("error", err.Error()))
 		} else {
-			logger.InfoContext(ctx, "Post-fetch refs",
+			logger.DebugContext(ctx, "Post-fetch refs",
 				slog.String("upstream", upstream),
 				slog.Any("refs", postRefs))
 		}
@@ -540,7 +546,11 @@ func (s *Strategy) startClone(ctx context.Context, repo *gitclone.Repository) {
 
 	// Clean up spools regardless of clone success or failure, so that subsequent
 	// requests either serve from the local backend or go directly to upstream.
-	s.cleanupSpools(upstream)
+	if cleanupErr := s.cleanupSpools(upstream); cleanupErr != nil {
+		logger.WarnContext(ctx, "Failed to clean up spools",
+			slog.String("upstream", upstream),
+			slog.String("error", cleanupErr.Error()))
+	}
 
 	if err != nil {
 		logger.ErrorContext(ctx, "Clone failed",
@@ -671,31 +681,26 @@ func (s *Strategy) maybeBackgroundFetch(repo *gitclone.Repository) {
 	}
 
 	s.scheduler.Submit(repo.UpstreamURL(), "fetch", func(ctx context.Context) error {
-		s.backgroundFetch(ctx, repo)
-		return nil
+		return s.backgroundFetch(ctx, repo)
 	})
 }
 
-func (s *Strategy) backgroundFetch(ctx context.Context, repo *gitclone.Repository) {
-	logger := logging.FromContext(ctx)
-
+func (s *Strategy) backgroundFetch(ctx context.Context, repo *gitclone.Repository) error {
 	if !repo.NeedsFetch(s.cloneManager.Config().FetchInterval) {
-		return
+		return nil
 	}
 
+	logger := logging.FromContext(ctx)
 	logger.InfoContext(ctx, "Fetching updates",
 		slog.String("upstream", repo.UpstreamURL()),
 		slog.String("path", repo.Path()))
 
 	start := time.Now()
 	if err := repo.Fetch(ctx); err != nil {
-		logger.ErrorContext(ctx, "Fetch failed",
-			slog.String("upstream", repo.UpstreamURL()),
-			slog.String("error", err.Error()),
-			slog.Duration("duration", time.Since(start)))
-		return
+		return errors.Errorf("fetch failed in %s: %w", time.Since(start), err)
 	}
 	logger.InfoContext(ctx, "Fetch completed",
 		slog.String("upstream", repo.UpstreamURL()),
 		slog.Duration("duration", time.Since(start)))
+	return nil
 }
