@@ -49,7 +49,7 @@ func DefaultGitTuningConfig() GitTuningConfig {
 	return GitTuningConfig{
 		PostBuffer:    524288000, // 500MB buffer
 		LowSpeedLimit: 1000,      // 1KB/s minimum speed
-		LowSpeedTime:  10 * time.Minute,
+		LowSpeedTime:  60 * time.Second,
 	}
 }
 
@@ -492,13 +492,13 @@ func (r *Repository) Fetch(ctx context.Context) error {
 		}
 	}
 
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	fetchCtx, cancel := context.WithTimeout(ctx, fetchTimeout)
+	defer cancel()
 
 	config := DefaultGitTuningConfig()
 
 	// #nosec G204 - r.path is controlled by us
-	cmd, err := r.gitCommand(ctx, "-C", r.path,
+	cmd, err := r.gitCommand(fetchCtx, "-C", r.path,
 		"-c", "http.postBuffer="+strconv.Itoa(config.PostBuffer),
 		"-c", "http.lowSpeedLimit="+strconv.Itoa(config.LowSpeedLimit),
 		"-c", "http.lowSpeedTime="+strconv.Itoa(int(config.LowSpeedTime.Seconds())),
@@ -511,9 +511,15 @@ func (r *Repository) Fetch(ctx context.Context) error {
 		return errors.Wrapf(err, "git fetch: %s", string(output))
 	}
 
+	r.mu.Lock()
 	r.lastFetch = time.Now()
+	r.mu.Unlock()
 	return nil
 }
+
+// fetchTimeout bounds `git fetch` so a slow or unresponsive upstream
+// cannot block the fetch path indefinitely.
+const fetchTimeout = 5 * time.Minute
 
 // lsRemoteTimeout bounds `git ls-remote` so a slow or unresponsive upstream
 // cannot block the request path indefinitely.
