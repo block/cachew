@@ -97,3 +97,15 @@ func (r *Registry) Create(
 type Strategy interface {
 	String() string
 }
+
+// Interceptor is an optional interface a Strategy may implement to intercept
+// incoming HTTP requests before ServeMux route matching. This is necessary for
+// strategies like the HTTP proxy that need to inspect r.RequestURI rather than
+// r.URL.Path — registering a "/"  catch-all on the mux is insufficient because
+// more-specific routes (e.g. /api/v1/) still win for overlapping paths.
+type Interceptor interface {
+	Strategy
+	// Intercept wraps next, returning a handler that intercepts matching
+	// requests and delegates all others to next.
+	Intercept(next http.Handler) http.Handler
+}

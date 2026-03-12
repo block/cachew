@@ -119,6 +119,7 @@ func newRegistries(scheduler jobscheduler.Provider, cloneManagerProvider gitclon
 	strategy.RegisterGitHubReleases(sr, tokenManagerProvider)
 	strategy.RegisterHermit(sr)
 	strategy.RegisterHost(sr)
+	strategy.RegisterHTTPProxy(sr)
 	git.Register(sr, scheduler, cloneManagerProvider, tokenManagerProvider)
 	gomod.Register(sr, cloneManagerProvider)
 
@@ -138,7 +139,7 @@ func printSchema(kctx *kong.Context, cr *cache.Registry, sr *strategy.Registry) 
 	}
 }
 
-func newMux(ctx context.Context, cr *cache.Registry, sr *strategy.Registry, providersConfigHCL *hcl.AST, vars map[string]string) (*http.ServeMux, error) {
+func newMux(ctx context.Context, cr *cache.Registry, sr *strategy.Registry, providersConfigHCL *hcl.AST, vars map[string]string) (http.Handler, error) {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /_liveness", func(w http.ResponseWriter, _ *http.Request) {
@@ -171,11 +172,12 @@ func newMux(ctx context.Context, cr *cache.Registry, sr *strategy.Registry, prov
 		http.DefaultServeMux.ServeHTTP(w, r)
 	}))
 
-	if err := config.Load(ctx, cr, sr, providersConfigHCL, mux, vars); err != nil {
+	handler, err := config.Load(ctx, cr, sr, providersConfigHCL, mux, vars)
+	if err != nil {
 		return nil, errors.Errorf("load config: %w", err)
 	}
 
-	return mux, nil
+	return handler, nil
 }
 
 // extractPathPrefix extracts the strategy name, path prefix from a request path.
@@ -189,13 +191,13 @@ func extractPathPrefix(path string) string {
 	return prefix
 }
 
-func newServer(ctx context.Context, mux *http.ServeMux, bind string, metricsConfig metrics.Config) *http.Server {
+func newServer(ctx context.Context, muxHandler http.Handler, bind string, metricsConfig metrics.Config) *http.Server {
 	logger := logging.FromContext(ctx)
 
 	var handler http.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		labeler, _ := otelhttp.LabelerFromContext(r.Context())
 		labeler.Add(attribute.String("cachew.http.path.prefix", extractPathPrefix(r.URL.Path)))
-		mux.ServeHTTP(w, r)
+		muxHandler.ServeHTTP(w, r)
 	})
 
 	// Add standard otelhttp middleware

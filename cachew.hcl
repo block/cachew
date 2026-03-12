@@ -43,3 +43,5 @@ gomod {
 }
 
 hermit { }
+
+proxy { }
