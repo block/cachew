@@ -254,7 +254,7 @@ func (s *S3) Open(ctx context.Context, key Key) (io.ReadCloser, http.Header, err
 			remaining := expiresAt.Sub(now)
 			if remaining < s.config.MaxTTL/2 {
 				newExpiresAt := now.Add(s.config.MaxTTL)
-				s.refreshExpiration(ctx, objectName, objInfo, newExpiresAt)
+				go s.refreshExpiration(context.WithoutCancel(ctx), objectName, objInfo, newExpiresAt)
 			}
 		}
 	}
