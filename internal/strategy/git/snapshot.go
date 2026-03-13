@@ -134,27 +134,48 @@ func (s *Strategy) handleSnapshotRequest(w http.ResponseWriter, r *http.Request,
 	repoPath := ExtractRepoPath(strings.TrimSuffix(pathValue, "/snapshot.tar.zst"))
 	upstreamURL := "https://" + host + "/" + repoPath
 
+	// Ensure the local mirror is ready and up to date before considering any
+	// cached snapshot, so we never serve stale data to workstations.
+	repo, repoErr := s.cloneManager.GetOrCreate(ctx, upstreamURL)
+	if repoErr != nil {
+		logger.ErrorContext(ctx, "Failed to get or create clone", "upstream", upstreamURL, "error", repoErr)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+	if cloneErr := s.ensureCloneReady(ctx, repo); cloneErr != nil {
+		logger.ErrorContext(ctx, "Clone unavailable for snapshot", "upstream", upstreamURL, "error", cloneErr)
+		http.Error(w, "Repository unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	s.maybeBackgroundFetch(repo)
+
 	cacheKey := snapshotCacheKey(upstreamURL)
 
 	reader, headers, err := s.cache.Open(ctx, cacheKey)
-	if errors.Is(err, os.ErrNotExist) {
-		repo, repoErr := s.cloneManager.GetOrCreate(ctx, upstreamURL)
-		if repoErr != nil {
-			logger.ErrorContext(ctx, "Failed to get or create clone", "upstream", upstreamURL, "error", repoErr)
-			http.Error(w, "Internal server error", http.StatusInternalServerError)
-			return
-		}
-		if cloneErr := s.ensureCloneReady(ctx, repo); cloneErr != nil {
-			logger.ErrorContext(ctx, "Clone unavailable for snapshot", "upstream", upstreamURL, "error", cloneErr)
-			http.Error(w, "Repository unavailable", http.StatusServiceUnavailable)
-			return
-		}
-		s.serveSnapshotWithSpool(w, r, repo, upstreamURL)
-		return
-	}
-	if err != nil {
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		logger.ErrorContext(ctx, "Failed to open snapshot from cache", "upstream", upstreamURL, "error", err)
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	// Only serve the cached snapshot if it was generated after the mirror's
+	// last successful fetch. Otherwise regenerate from the fresh mirror.
+	if reader != nil {
+		stale := true
+		if lastMod := headers.Get("Last-Modified"); lastMod != "" {
+			if t, parseErr := time.Parse(http.TimeFormat, lastMod); parseErr == nil {
+				stale = repo.LastFetch().After(t)
+			}
+		}
+		if stale {
+			logger.InfoContext(ctx, "Cached snapshot predates last fetch, regenerating", "upstream", upstreamURL)
+			_ = reader.Close()
+			reader = nil
+		}
+	}
+
+	if reader == nil {
+		s.serveSnapshotWithSpool(w, r, repo, upstreamURL)
 		return
 	}
 	defer reader.Close()

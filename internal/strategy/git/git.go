@@ -458,36 +458,37 @@ func (s *Strategy) startClone(ctx context.Context, repo *gitclone.Repository) {
 		logger.InfoContext(ctx, "Snapshot restored, running synchronous catch-up fetch", "upstream", upstream,
 			"state", repo.State())
 
-		preRefs, err := repo.GetLocalRefs(ctx)
-		if err != nil {
-			logger.WarnContext(ctx, "Failed to get pre-fetch refs", "upstream", upstream, "error", err)
-		} else {
-			logger.DebugContext(ctx, "Pre-fetch refs", "upstream", upstream, "refs", preRefs)
-		}
-
 		start := time.Now()
-		if err := repo.Fetch(ctx); err != nil {
-			logger.ErrorContext(ctx, "Catch-up fetch after snapshot restore failed", "upstream", upstream, "error", err,
-				"duration", time.Since(start))
-		} else {
-			logger.DebugContext(ctx, "Catch-up fetch after snapshot restore completed", "upstream", upstream,
-				"duration", time.Since(start))
-		}
+		if err := repo.FetchWithTimeout(ctx, gitclone.CatchUpFetchTimeout); err != nil {
+			logger.ErrorContext(ctx, "Catch-up fetch failed, nuking stale mirror and falling through to fresh clone",
+				"upstream", upstream, "error", err, "duration", time.Since(start))
 
-		postRefs, err := repo.GetLocalRefs(ctx)
-		if err != nil {
-			logger.WarnContext(ctx, "Failed to get post-fetch refs", "upstream", upstream, "error", err)
-		} else {
-			logger.DebugContext(ctx, "Post-fetch refs", "upstream", upstream, "refs", postRefs)
-		}
+			// Delete the stale snapshot from cache so future restarts don't
+			// restore the same stale snapshot in an infinite loop.
+			cacheKey := snapshotCacheKey(upstream)
+			if delErr := s.cache.Delete(ctx, cacheKey); delErr != nil {
+				logger.WarnContext(ctx, "Failed to delete stale snapshot from cache", "upstream", upstream, "error", delErr)
+			}
 
-		if s.config.SnapshotInterval > 0 {
-			s.scheduleSnapshotJobs(repo)
+			// Reset the repo to StateEmpty and remove the stale mirror from disk,
+			// then fall through to the fresh clone path below.
+			if resetErr := repo.Reset(); resetErr != nil {
+				logger.ErrorContext(ctx, "Failed to reset stale mirror", "upstream", upstream, "error", resetErr)
+				return
+			}
+		} else {
+			repo.MarkReady()
+			logger.InfoContext(ctx, "Catch-up fetch after snapshot restore completed", "upstream", upstream,
+				"duration", time.Since(start))
+
+			if s.config.SnapshotInterval > 0 {
+				s.scheduleSnapshotJobs(repo)
+			}
+			if s.config.RepackInterval > 0 {
+				s.scheduleRepackJobs(repo)
+			}
+			return
 		}
-		if s.config.RepackInterval > 0 {
-			s.scheduleRepackJobs(repo)
-		}
-		return
 	}
 
 	logger.InfoContext(ctx, "Starting clone", "upstream", upstream, "path", repo.Path())

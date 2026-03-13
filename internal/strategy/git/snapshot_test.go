@@ -22,28 +22,37 @@ import (
 )
 
 func TestSnapshotHTTPEndpoint(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not found in PATH")
+	}
+
 	_, ctx := logging.Configure(context.Background(), logging.Config{})
 	tmpDir := t.TempDir()
+	mirrorRoot := filepath.Join(tmpDir, "mirrors")
+	mirrorPath := filepath.Join(mirrorRoot, "github.com", "org", "repo")
+	createTestMirrorRepo(t, mirrorPath)
 
 	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{})
 	assert.NoError(t, err)
 	mux := newTestMux()
 
 	cm := gitclone.NewManagerProvider(ctx, gitclone.Config{
-		MirrorRoot: tmpDir,
+		MirrorRoot: mirrorRoot,
 	}, nil)
 	_, err = git.New(ctx, git.Config{
 		SnapshotInterval: 24 * time.Hour,
 	}, newTestScheduler(ctx, t), memCache, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
 	assert.NoError(t, err)
 
-	// Create a fake snapshot in the cache
+	// Create a fake snapshot in the cache with a Last-Modified after the
+	// mirror's last fetch so the endpoint considers it fresh.
 	upstreamURL := "https://github.com/org/repo"
 	cacheKey := cache.NewKey(upstreamURL + ".snapshot")
 	snapshotData := []byte("fake snapshot data")
 
 	headers := make(map[string][]string)
 	headers["Content-Type"] = []string{"application/zstd"}
+	headers["Last-Modified"] = []string{time.Now().Add(time.Hour).UTC().Format(http.TimeFormat)}
 	writer, err := memCache.Create(ctx, cacheKey, headers, 24*time.Hour)
 	assert.NoError(t, err)
 	_, err = writer.Write(snapshotData)
@@ -54,7 +63,8 @@ func TestSnapshotHTTPEndpoint(t *testing.T) {
 	handler := mux.handlers["GET /git/{host}/{path...}"]
 	assert.NotZero(t, handler)
 
-	// Test successful snapshot request
+	// Test successful snapshot request — cached snapshot is fresh (Last-Modified
+	// is after the mirror's last fetch), so it's served directly.
 	req := httptest.NewRequest(http.MethodGet, "/git/github.com/org/repo/snapshot.tar.zst", nil)
 	req = req.WithContext(ctx)
 	req.SetPathValue("host", "github.com")

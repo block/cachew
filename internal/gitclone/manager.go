@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/alecthomas/errors"
@@ -319,9 +320,24 @@ func WithReadLockReturn[T any](repo *Repository, fn func() (T, error)) (T, error
 	return fn()
 }
 
-// MarkRestored transitions a repository from StateEmpty to StateReady after an
-// external restore (e.g. from an S3 snapshot). It applies the same mirror
-// configuration that Clone would, so the repo is ready to serve upload-pack.
+// Reset transitions the repository back to StateEmpty and removes its on-disk
+// data. This is used when a restored snapshot is too stale for a catch-up fetch
+// to succeed, allowing the caller to fall through to a fresh clone.
+func (r *Repository) Reset() error {
+	r.mu.Lock()
+	r.state = StateEmpty
+	r.lastFetch = time.Time{}
+	r.refCheckValid = false
+	r.mu.Unlock()
+
+	return errors.Wrap(os.RemoveAll(r.path), "remove stale mirror")
+}
+
+// MarkRestored configures a restored snapshot (e.g. from S3) as a mirror and
+// leaves the repository in StateCloning. The caller must call MarkReady after
+// a successful catch-up fetch to transition to StateReady. While in
+// StateCloning, requests are proxied to upstream instead of served from the
+// potentially-stale local mirror.
 func (r *Repository) MarkRestored(ctx context.Context) error {
 	r.mu.Lock()
 	if r.state != StateEmpty {
@@ -342,11 +358,17 @@ func (r *Repository) MarkRestored(ctx context.Context) error {
 		r.mu.Unlock()
 		return errors.Wrap(err, "configure mirror after restore")
 	}
+	r.mu.Unlock()
+	return nil
+}
 
+// MarkReady transitions the repository to StateReady, indicating it is
+// up-to-date and can serve requests from the local mirror.
+func (r *Repository) MarkReady() {
+	r.mu.Lock()
 	r.state = StateReady
 	r.lastFetch = time.Now()
 	r.mu.Unlock()
-	return nil
 }
 
 func (r *Repository) Clone(ctx context.Context) error {
@@ -475,6 +497,13 @@ func (r *Repository) executeClone(ctx context.Context) error {
 }
 
 func (r *Repository) Fetch(ctx context.Context) error {
+	return r.FetchWithTimeout(ctx, fetchTimeout)
+}
+
+// FetchWithTimeout fetches from upstream with a configurable timeout. Use this
+// for catch-up fetches after snapshot restore where the delta may be large and
+// the default fetchTimeout is too short.
+func (r *Repository) FetchWithTimeout(ctx context.Context, timeout time.Duration) error {
 	select {
 	case <-r.fetchSem:
 		defer func() {
@@ -492,7 +521,7 @@ func (r *Repository) Fetch(ctx context.Context) error {
 		}
 	}
 
-	fetchCtx, cancel := context.WithTimeout(ctx, fetchTimeout)
+	fetchCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	config := DefaultGitTuningConfig()
@@ -505,6 +534,13 @@ func (r *Repository) Fetch(ctx context.Context) error {
 		"fetch", "--prune", "--prune-tags")
 	if err != nil {
 		return errors.Wrap(err, "create git command")
+	}
+	// Start the process in its own process group so we can kill the entire
+	// tree (git spawns child processes like git-remote-https that inherit
+	// stdout/stderr pipes and prevent CombinedOutput from returning).
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 	}
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -520,6 +556,10 @@ func (r *Repository) Fetch(ctx context.Context) error {
 // fetchTimeout bounds `git fetch` so a slow or unresponsive upstream
 // cannot block the fetch path indefinitely.
 const fetchTimeout = 5 * time.Minute
+
+// CatchUpFetchTimeout is used for catch-up fetches after snapshot restore,
+// where the delta may be significantly larger than a regular periodic fetch.
+const CatchUpFetchTimeout = 30 * time.Minute
 
 // lsRemoteTimeout bounds `git ls-remote` so a slow or unresponsive upstream
 // cannot block the request path indefinitely.
