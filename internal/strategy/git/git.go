@@ -34,8 +34,9 @@ func Register(r *strategy.Registry, scheduler jobscheduler.Provider, cloneManage
 }
 
 type Config struct {
-	SnapshotInterval time.Duration `hcl:"snapshot-interval,optional" help:"How often to generate tar.zstd snapshots. 0 disables snapshots." default:"0"`
-	RepackInterval   time.Duration `hcl:"repack-interval,optional" help:"How often to run full repack. 0 disables." default:"0"`
+	SnapshotInterval       time.Duration `hcl:"snapshot-interval,optional" help:"How often to generate tar.zstd workstation snapshots. 0 disables snapshots." default:"0"`
+	MirrorSnapshotInterval time.Duration `hcl:"mirror-snapshot-interval,optional" help:"How often to generate mirror snapshots for pod bootstrap. 0 uses snapshot-interval. Defaults to 6h." default:"6h"`
+	RepackInterval         time.Duration `hcl:"repack-interval,optional" help:"How often to run full repack. 0 disables." default:"0"`
 	// ServerURL is embedded as remote.origin.url in snapshots so git pull goes through cachew.
 	ServerURL   string `hcl:"server-url,optional" help:"Base URL of this cachew instance, embedded in snapshot remote URLs." default:"${CACHEW_URL}"`
 	ZstdThreads int    `hcl:"zstd-threads,optional" help:"Threads for zstd compression/decompression (0 = all CPU cores)." default:"0"`

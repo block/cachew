@@ -32,7 +32,7 @@ func TestSnapshotHTTPEndpoint(t *testing.T) {
 	mirrorPath := filepath.Join(mirrorRoot, "github.com", "org", "repo")
 	createTestMirrorRepo(t, mirrorPath)
 
-	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{})
+	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: time.Hour})
 	assert.NoError(t, err)
 	mux := newTestMux()
 
@@ -103,7 +103,7 @@ func TestSnapshotOnDemandGenerationViaHTTP(t *testing.T) {
 	mirrorPath := filepath.Join(mirrorRoot, "github.com", "org", "repo")
 	createTestMirrorRepo(t, mirrorPath)
 
-	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{})
+	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: time.Hour})
 	assert.NoError(t, err)
 	mux := newTestMux()
 
@@ -173,7 +173,7 @@ func TestSnapshotGenerationViaLocalClone(t *testing.T) {
 	mirrorPath := filepath.Join(mirrorRoot, "github.com", "org", "repo")
 	createTestMirrorRepo(t, mirrorPath)
 
-	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{})
+	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: time.Hour})
 	assert.NoError(t, err)
 	mux := newTestMux()
 
@@ -238,7 +238,7 @@ func TestMirrorSnapshotRestoreDirectly(t *testing.T) {
 	mirrorPath := filepath.Join(mirrorRoot, "github.com", "org", "repo")
 	createTestMirrorRepo(t, mirrorPath)
 
-	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{})
+	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: time.Hour})
 	assert.NoError(t, err)
 	mux := newTestMux()
 
@@ -313,7 +313,7 @@ func TestMirrorSnapshotWithMultipleBranches(t *testing.T) {
 	mirrorPath := filepath.Join(mirrorRoot, "github.com", "org", "repo")
 	createTestMirrorRepoWithBranches(t, mirrorPath, []string{"feature/branch-a", "fix/branch-b"})
 
-	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{})
+	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: time.Hour})
 	assert.NoError(t, err)
 	mux := newTestMux()
 
@@ -405,7 +405,7 @@ func TestSnapshotRemoteURLUsesServerURL(t *testing.T) {
 	mirrorPath := filepath.Join(mirrorRoot, "github.com", "org", "repo")
 	createTestMirrorRepo(t, mirrorPath)
 
-	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{})
+	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: time.Hour})
 	assert.NoError(t, err)
 	mux := newTestMux()
 

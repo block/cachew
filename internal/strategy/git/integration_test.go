@@ -115,7 +115,7 @@ func TestIntegrationGitCloneViaProxy(t *testing.T) {
 		FetchInterval: 15,
 	}, nil)
 	mux := http.NewServeMux()
-	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{})
+	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: time.Hour})
 	assert.NoError(t, err)
 	strategy, err := git.New(ctx, git.Config{}, newTestScheduler(ctx, t), memCache, mux, gc, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
 	assert.NoError(t, err)
@@ -196,7 +196,7 @@ func TestIntegrationGitFetchViaProxy(t *testing.T) {
 	}, nil)
 
 	mux := http.NewServeMux()
-	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{})
+	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: time.Hour})
 	assert.NoError(t, err)
 	_, err = git.New(ctx, git.Config{}, newTestScheduler(ctx, t), memCache, mux, gc, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
 	assert.NoError(t, err)
@@ -278,7 +278,7 @@ func TestIntegrationPushForwardsToUpstream(t *testing.T) {
 		MirrorRoot:    clonesDir,
 		FetchInterval: 15,
 	}, nil)
-	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{})
+	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: time.Hour})
 	assert.NoError(t, err)
 	_, err = git.New(ctx, git.Config{}, newTestScheduler(ctx, t), memCache, mux, gc, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
 	assert.NoError(t, err)
@@ -374,7 +374,7 @@ func TestIntegrationSpoolReusesDuringClone(t *testing.T) {
 		MirrorRoot:    clonesDir,
 		FetchInterval: 15,
 	}, nil)
-	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{})
+	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: time.Hour})
 	assert.NoError(t, err)
 	strategy, err := git.New(ctx, git.Config{}, newTestScheduler(ctx, t), memCache, mux, gc, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
 	assert.NoError(t, err)
@@ -520,7 +520,7 @@ func TestIntegrationNotOurRefFallsBackToUpstream(t *testing.T) {
 		MirrorRoot:    clonesDir,
 		FetchInterval: 24 * time.Hour, // prevent auto-fetch during the test
 	}, nil)
-	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{})
+	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: time.Hour})
 	assert.NoError(t, err)
 	strategy, err := git.New(ctx, git.Config{}, newTestScheduler(ctx, t), memCache, mux, gc,
 		func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil

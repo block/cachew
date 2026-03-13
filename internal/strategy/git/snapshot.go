@@ -103,10 +103,9 @@ func (s *Strategy) generateAndUploadSnapshot(ctx context.Context, repo *gitclone
 	}
 
 	cacheKey := snapshotCacheKey(upstream)
-	ttl := 7 * 24 * time.Hour
 	excludePatterns := []string{"*.lock"}
 
-	err = snapshot.Create(ctx, s.cache, cacheKey, snapshotDir, ttl, excludePatterns, s.config.ZstdThreads)
+	err = snapshot.Create(ctx, s.cache, cacheKey, snapshotDir, 0, excludePatterns, s.config.ZstdThreads)
 
 	// Always clean up the snapshot working directory.
 	if rmErr := os.RemoveAll(snapshotDir); rmErr != nil { //nolint:gosec // snapshotDir is derived from controlled mirrorRoot + upstream URL
@@ -136,11 +135,10 @@ func (s *Strategy) generateAndUploadMirrorSnapshot(ctx context.Context, repo *gi
 	defer mu.Unlock()
 
 	cacheKey := mirrorSnapshotCacheKey(upstream)
-	ttl := 7 * 24 * time.Hour
 	excludePatterns := []string{"*.lock"}
 
 	if err := repo.WithReadLock(func() error {
-		return snapshot.Create(ctx, s.cache, cacheKey, repo.Path(), ttl, excludePatterns, s.config.ZstdThreads)
+		return snapshot.Create(ctx, s.cache, cacheKey, repo.Path(), 0, excludePatterns, s.config.ZstdThreads)
 	}); err != nil {
 		return errors.Wrap(err, "create mirror snapshot")
 	}
@@ -153,7 +151,11 @@ func (s *Strategy) scheduleSnapshotJobs(repo *gitclone.Repository) {
 	s.scheduler.SubmitPeriodicJob(repo.UpstreamURL(), "snapshot-periodic", s.config.SnapshotInterval, func(ctx context.Context) error {
 		return s.generateAndUploadSnapshot(ctx, repo)
 	})
-	s.scheduler.SubmitPeriodicJob(repo.UpstreamURL(), "mirror-snapshot-periodic", s.config.SnapshotInterval, func(ctx context.Context) error {
+	mirrorInterval := s.config.MirrorSnapshotInterval
+	if mirrorInterval == 0 {
+		mirrorInterval = s.config.SnapshotInterval
+	}
+	s.scheduler.SubmitPeriodicJob(repo.UpstreamURL(), "mirror-snapshot-periodic", mirrorInterval, func(ctx context.Context) error {
 		return s.generateAndUploadMirrorSnapshot(ctx, repo)
 	})
 }
