@@ -137,8 +137,13 @@ func (s *Strategy) generateAndUploadMirrorSnapshot(ctx context.Context, repo *gi
 	cacheKey := mirrorSnapshotCacheKey(upstream)
 	excludePatterns := []string{"*.lock"}
 
-	if err := repo.WithReadLock(func() error {
-		return snapshot.Create(ctx, s.cache, cacheKey, repo.Path(), 0, excludePatterns, s.config.ZstdThreads)
+	// Hold the fetch semaphore while tar-ing the bare mirror directory.
+	// Without this, a concurrent git fetch can replace packed-refs mid-read,
+	// causing tar to capture a truncated file.
+	if err := repo.WithFetchExclusion(ctx, func() error {
+		return repo.WithReadLock(func() error {
+			return snapshot.Create(ctx, s.cache, cacheKey, repo.Path(), 0, excludePatterns, s.config.ZstdThreads)
+		})
 	}); err != nil {
 		return errors.Wrap(err, "create mirror snapshot")
 	}
