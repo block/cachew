@@ -463,8 +463,9 @@ func (s *Strategy) startClone(ctx context.Context, repo *gitclone.Repository) {
 
 		// Fetch synchronously so the mirror is fresh before we serve from it.
 		// Mirror snapshots can be hours old; serving stale data defeats the
-		// purpose of the cache.
-		if err := s.backgroundFetch(ctx, repo); err != nil {
+		// purpose of the cache. Call repo.Fetch directly instead of
+		// backgroundFetch, which would skip because MarkReady sets lastFetch.
+		if err := repo.Fetch(ctx); err != nil {
 			logger.WarnContext(ctx, "Post-restore fetch failed, serving from snapshot", "upstream", upstream, "error", err)
 		}
 
