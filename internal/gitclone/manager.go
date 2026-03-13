@@ -320,19 +320,6 @@ func WithReadLockReturn[T any](repo *Repository, fn func() (T, error)) (T, error
 	return fn()
 }
 
-// Reset transitions the repository back to StateEmpty and removes its on-disk
-// data. This is used when a restored snapshot is too stale for a catch-up fetch
-// to succeed, allowing the caller to fall through to a fresh clone.
-func (r *Repository) Reset() error {
-	r.mu.Lock()
-	r.state = StateEmpty
-	r.lastFetch = time.Time{}
-	r.refCheckValid = false
-	r.mu.Unlock()
-
-	return errors.Wrap(os.RemoveAll(r.path), "remove stale mirror")
-}
-
 // MarkRestored configures a restored snapshot (e.g. from S3) as a mirror and
 // leaves the repository in StateCloning. The caller must call MarkReady after
 // a successful catch-up fetch to transition to StateReady. While in
