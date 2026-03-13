@@ -133,13 +133,13 @@ func New(
 		}
 
 		start := time.Now()
-		if err := repo.Fetch(ctx); err != nil {
+		if err := repo.FetchLenient(ctx, gitclone.CloneTimeout); err != nil {
 			logger.ErrorContext(ctx, "Startup fetch failed for existing repo", "upstream", repo.UpstreamURL(), "error", err,
 				"duration", time.Since(start))
-		} else {
-			logger.InfoContext(ctx, "Startup fetch completed for existing repo", "upstream", repo.UpstreamURL(),
-				"duration", time.Since(start))
+			continue
 		}
+		logger.InfoContext(ctx, "Startup fetch completed for existing repo", "upstream", repo.UpstreamURL(),
+			"duration", time.Since(start))
 
 		postRefs, err := repo.GetLocalRefs(ctx)
 		if err != nil {
@@ -459,31 +459,42 @@ func (s *Strategy) startClone(ctx context.Context, repo *gitclone.Repository) {
 	if err := s.tryRestoreSnapshot(ctx, repo); err != nil {
 		logger.InfoContext(ctx, "Mirror snapshot restore failed, falling back to clone", "upstream", upstream, "error", err)
 	} else {
-		// Mirror snapshot restored successfully. The bare mirror is immediately
-		// servable — mark ready and let background fetch handle freshening.
-		repo.MarkReady()
+		logger.InfoContext(ctx, "Mirror snapshot restored, fetching to freshen", "upstream", upstream)
 
-		if err := s.cleanupSpools(upstream); err != nil {
-			logger.WarnContext(ctx, "Failed to clean up spools", "upstream", upstream, "error", err)
-		}
+		// Fetch with a generous timeout and no low-speed check: mirror
+		// snapshots can be hours old, so the delta may be very large and
+		// GitHub's server-side pack computation can stall at near-zero
+		// transfer for minutes (same as initial clone).
+		//
+		// State remains StateCloning until fetch succeeds so that
+		// concurrent requests (via ensureCloneReady) block rather than
+		// serving from a potentially empty or stale mirror.
+		if err := repo.FetchLenient(ctx, gitclone.CloneTimeout); err != nil {
+			logger.WarnContext(ctx, "Post-restore fetch failed, discarding snapshot and falling back to clone",
+				"upstream", upstream, "error", err)
+			// The restored snapshot may be corrupt or empty. Remove it and
+			// fall through to a fresh clone so we don't re-upload bad data.
+			repo.ResetToEmpty()
+			if rmErr := os.RemoveAll(repo.Path()); rmErr != nil {
+				logger.WarnContext(ctx, "Failed to remove corrupt mirror", "upstream", upstream, "error", rmErr)
+			}
+		} else {
+			repo.MarkReady()
 
-		logger.InfoContext(ctx, "Mirror snapshot restored, serving immediately", "upstream", upstream)
+			if err := s.cleanupSpools(upstream); err != nil {
+				logger.WarnContext(ctx, "Failed to clean up spools", "upstream", upstream, "error", err)
+			}
 
-		// Fetch synchronously so the mirror is fresh before we serve from it.
-		// Mirror snapshots can be hours old; serving stale data defeats the
-		// purpose of the cache. Call repo.Fetch directly instead of
-		// backgroundFetch, which would skip because MarkReady sets lastFetch.
-		if err := repo.Fetch(ctx); err != nil {
-			logger.WarnContext(ctx, "Post-restore fetch failed, serving from snapshot", "upstream", upstream, "error", err)
-		}
+			logger.InfoContext(ctx, "Post-restore fetch completed, serving", "upstream", upstream)
 
-		if s.config.SnapshotInterval > 0 {
-			s.scheduleSnapshotJobs(repo)
+			if s.config.SnapshotInterval > 0 {
+				s.scheduleSnapshotJobs(repo)
+			}
+			if s.config.RepackInterval > 0 {
+				s.scheduleRepackJobs(repo)
+			}
+			return
 		}
-		if s.config.RepackInterval > 0 {
-			s.scheduleRepackJobs(repo)
-		}
-		return
 	}
 
 	logger.InfoContext(ctx, "Starting clone", "upstream", upstream, "path", repo.Path())
