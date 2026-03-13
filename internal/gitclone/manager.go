@@ -320,14 +320,26 @@ func WithReadLockReturn[T any](repo *Repository, fn func() (T, error)) (T, error
 	return fn()
 }
 
-// MarkRestored configures a restored snapshot (e.g. from S3) as a mirror and
-// leaves the repository in StateCloning. The caller must call MarkReady after
-// a successful catch-up fetch to transition to StateReady. While in
-// StateCloning, requests are proxied to upstream instead of served from the
-// potentially-stale local mirror.
+// TryStartCloning atomically transitions the repository from StateEmpty to
+// StateCloning. Returns true if this goroutine won the transition and should
+// proceed with the clone/restore; false if another goroutine already claimed it.
+func (r *Repository) TryStartCloning() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.state != StateEmpty {
+		return false
+	}
+	r.state = StateCloning
+	return true
+}
+
+// MarkRestored configures a restored snapshot (e.g. from S3) as a mirror.
+// The caller must have already transitioned to StateCloning (via
+// TryStartCloning) before extracting the snapshot. On error the state is
+// left as StateCloning so the caller can fall back to a fresh clone.
 func (r *Repository) MarkRestored(ctx context.Context) error {
 	r.mu.Lock()
-	if r.state != StateEmpty {
+	if r.state == StateReady {
 		r.mu.Unlock()
 		return nil
 	}
@@ -338,14 +350,9 @@ func (r *Repository) MarkRestored(ctx context.Context) error {
 	if err == nil && r.config.Maintenance {
 		err = registerMaintenance(ctx, r.path)
 	}
-
-	r.mu.Lock()
 	if err != nil {
-		r.state = StateEmpty
-		r.mu.Unlock()
 		return errors.Wrap(err, "configure mirror after restore")
 	}
-	r.mu.Unlock()
 	return nil
 }
 
@@ -360,7 +367,7 @@ func (r *Repository) MarkReady() {
 
 func (r *Repository) Clone(ctx context.Context) error {
 	r.mu.Lock()
-	if r.state != StateEmpty {
+	if r.state == StateReady {
 		r.mu.Unlock()
 		return nil
 	}
