@@ -320,6 +320,17 @@ func WithReadLockReturn[T any](repo *Repository, fn func() (T, error)) (T, error
 	return fn()
 }
 
+// ResetToEmpty transitions the repository back to StateEmpty so that a
+// subsequent call to TryStartCloning can re-attempt the clone. Use this
+// when a restored snapshot turns out to be corrupt or empty and needs to
+// be replaced with a fresh clone.
+func (r *Repository) ResetToEmpty() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.state = StateEmpty
+	r.lastFetch = time.Time{}
+}
+
 // TryStartCloning atomically transitions the repository from StateEmpty to
 // StateCloning. Returns true if this goroutine won the transition and should
 // proceed with the clone/restore; false if another goroutine already claimed it.
@@ -466,17 +477,17 @@ func configureMirror(ctx context.Context, repoPath string, packThreads int) erro
 	return nil
 }
 
-// cloneTimeout bounds `git clone --mirror` so a stuck clone cannot block
+// CloneTimeout bounds `git clone --mirror` so a stuck clone cannot block
 // the repo indefinitely. This is deliberately generous: large repos may
 // take 10-20 minutes for GitHub to compute the server-side pack.
-const cloneTimeout = 30 * time.Minute
+const CloneTimeout = 30 * time.Minute
 
 func (r *Repository) executeClone(ctx context.Context) error {
 	if err := os.MkdirAll(filepath.Dir(r.path), 0o750); err != nil {
 		return errors.Wrap(err, "create clone directory")
 	}
 
-	cloneCtx, cancel := context.WithTimeout(ctx, cloneTimeout)
+	cloneCtx, cancel := context.WithTimeout(ctx, CloneTimeout)
 	defer cancel()
 
 	config := DefaultGitTuningConfig()
@@ -525,6 +536,19 @@ func (r *Repository) Fetch(ctx context.Context) error {
 // for catch-up fetches after snapshot restore where the delta may be large and
 // the default fetchTimeout is too short.
 func (r *Repository) FetchWithTimeout(ctx context.Context, timeout time.Duration) error {
+	return r.fetchInternal(ctx, timeout, true)
+}
+
+// FetchLenient fetches from upstream with the given timeout but without the
+// low-speed transfer check. Use this for post-restore catch-up fetches where
+// the delta may be very large and GitHub's server-side pack computation can
+// stall at near-zero transfer rate for minutes — the same situation that
+// executeClone handles by omitting lowSpeedLimit.
+func (r *Repository) FetchLenient(ctx context.Context, timeout time.Duration) error {
+	return r.fetchInternal(ctx, timeout, false)
+}
+
+func (r *Repository) fetchInternal(ctx context.Context, timeout time.Duration, enforceSpeedLimit bool) error {
 	select {
 	case <-r.fetchSem:
 		defer func() {
@@ -547,12 +571,20 @@ func (r *Repository) FetchWithTimeout(ctx context.Context, timeout time.Duration
 
 	config := DefaultGitTuningConfig()
 
+	args := []string{
+		"-C", r.path,
+		"-c", "http.postBuffer=" + strconv.Itoa(config.PostBuffer),
+	}
+	if enforceSpeedLimit {
+		args = append(args,
+			"-c", "http.lowSpeedLimit="+strconv.Itoa(config.LowSpeedLimit),
+			"-c", "http.lowSpeedTime="+strconv.Itoa(int(config.LowSpeedTime.Seconds())),
+		)
+	}
+	args = append(args, "fetch", "--prune", "--prune-tags")
+
 	// #nosec G204 - r.path is controlled by us
-	cmd, err := r.gitCommand(fetchCtx, "-C", r.path,
-		"-c", "http.postBuffer="+strconv.Itoa(config.PostBuffer),
-		"-c", "http.lowSpeedLimit="+strconv.Itoa(config.LowSpeedLimit),
-		"-c", "http.lowSpeedTime="+strconv.Itoa(int(config.LowSpeedTime.Seconds())),
-		"fetch", "--prune", "--prune-tags")
+	cmd, err := r.gitCommand(fetchCtx, args...)
 	if err != nil {
 		return errors.Wrap(err, "create git command")
 	}
