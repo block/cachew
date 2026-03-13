@@ -461,10 +461,12 @@ func (s *Strategy) startClone(ctx context.Context, repo *gitclone.Repository) {
 
 		logger.InfoContext(ctx, "Mirror snapshot restored, serving immediately", "upstream", upstream)
 
-		// Schedule a background fetch to freshen the mirror.
-		s.scheduler.Submit(upstream, "fetch", func(ctx context.Context) error {
-			return s.backgroundFetch(ctx, repo)
-		})
+		// Fetch synchronously so the mirror is fresh before we serve from it.
+		// Mirror snapshots can be hours old; serving stale data defeats the
+		// purpose of the cache.
+		if err := s.backgroundFetch(ctx, repo); err != nil {
+			logger.WarnContext(ctx, "Post-restore fetch failed, serving from snapshot", "upstream", upstream, "error", err)
+		}
 
 		if s.config.SnapshotInterval > 0 {
 			s.scheduleSnapshotJobs(repo)
@@ -533,7 +535,9 @@ func (s *Strategy) maybeBackgroundFetch(repo *gitclone.Repository) {
 		return
 	}
 
-	s.scheduler.Submit(repo.UpstreamURL(), "fetch", func(ctx context.Context) error {
+	// Use a separate queue from snapshot/repack so fetches are not serialized
+	// behind long-running jobs on the same upstream URL queue.
+	s.scheduler.Submit(repo.UpstreamURL()+"/fetch", "fetch", func(ctx context.Context) error {
 		return s.backgroundFetch(ctx, repo)
 	})
 }

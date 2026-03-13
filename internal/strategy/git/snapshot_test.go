@@ -39,9 +39,9 @@ func TestSnapshotHTTPEndpoint(t *testing.T) {
 	cm := gitclone.NewManagerProvider(ctx, gitclone.Config{
 		MirrorRoot: mirrorRoot,
 	}, nil)
-	_, err = git.New(ctx, git.Config{
-		SnapshotInterval: 24 * time.Hour,
-	}, newTestScheduler(ctx, t), memCache, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
+	// SnapshotInterval=0 disables periodic snapshot jobs so they don't
+	// overwrite the fake cached snapshot we insert below.
+	_, err = git.New(ctx, git.Config{}, newTestScheduler(ctx, t), memCache, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
 	assert.NoError(t, err)
 
 	// Create a fake snapshot in the cache with a Last-Modified after the

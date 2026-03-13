@@ -185,7 +185,9 @@ func (s *Strategy) handleSnapshotRequest(w http.ResponseWriter, r *http.Request,
 		http.Error(w, "Repository unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	s.maybeBackgroundFetch(repo)
+	if err := s.ensureRefsUpToDate(ctx, repo); err != nil {
+		logger.WarnContext(ctx, "Failed to check upstream refs for snapshot", "upstream", upstreamURL, "error", err)
+	}
 
 	cacheKey := snapshotCacheKey(upstreamURL)
 
