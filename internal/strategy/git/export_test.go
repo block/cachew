@@ -10,6 +10,6 @@ func (s *Strategy) GenerateAndUploadSnapshot(ctx context.Context, repo *gitclone
 	return s.generateAndUploadSnapshot(ctx, repo)
 }
 
-func ConvertSnapshotToMirror(ctx context.Context, repoPath, upstreamURL string) error {
-	return convertSnapshotToMirror(ctx, repoPath, upstreamURL)
+func (s *Strategy) GenerateAndUploadMirrorSnapshot(ctx context.Context, repo *gitclone.Repository) error {
+	return s.generateAndUploadMirrorSnapshot(ctx, repo)
 }

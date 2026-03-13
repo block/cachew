@@ -557,10 +557,6 @@ func (r *Repository) FetchWithTimeout(ctx context.Context, timeout time.Duration
 // cannot block the fetch path indefinitely.
 const fetchTimeout = 5 * time.Minute
 
-// CatchUpFetchTimeout is used for catch-up fetches after snapshot restore,
-// where the delta may be significantly larger than a regular periodic fetch.
-const CatchUpFetchTimeout = 30 * time.Minute
-
 // lsRemoteTimeout bounds `git ls-remote` so a slow or unresponsive upstream
 // cannot block the request path indefinitely.
 const lsRemoteTimeout = 60 * time.Second

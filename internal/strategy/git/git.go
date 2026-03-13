@@ -6,7 +6,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"fmt"
 	"io"
 	"net/http"
 	"net/http/httputil"
@@ -446,49 +445,33 @@ func (s *Strategy) startClone(ctx context.Context, repo *gitclone.Repository) {
 	logger := logging.FromContext(ctx)
 	upstream := repo.UpstreamURL()
 
-	logger.InfoContext(ctx, "Attempting snapshot restore", "upstream", upstream)
+	logger.InfoContext(ctx, "Attempting mirror snapshot restore", "upstream", upstream)
 
 	if err := s.tryRestoreSnapshot(ctx, repo); err != nil {
-		logger.InfoContext(ctx, "Snapshot restore failed, falling back to clone", "upstream", upstream, "error", err)
+		logger.InfoContext(ctx, "Mirror snapshot restore failed, falling back to clone", "upstream", upstream, "error", err)
 	} else {
+		// Mirror snapshot restored successfully. The bare mirror is immediately
+		// servable — mark ready and let background fetch handle freshening.
+		repo.MarkReady()
+
 		if err := s.cleanupSpools(upstream); err != nil {
 			logger.WarnContext(ctx, "Failed to clean up spools", "upstream", upstream, "error", err)
 		}
 
-		logger.InfoContext(ctx, "Snapshot restored, running synchronous catch-up fetch", "upstream", upstream,
-			"state", repo.State())
+		logger.InfoContext(ctx, "Mirror snapshot restored, serving immediately", "upstream", upstream)
 
-		start := time.Now()
-		if err := repo.FetchWithTimeout(ctx, gitclone.CatchUpFetchTimeout); err != nil {
-			logger.ErrorContext(ctx, "Catch-up fetch failed, nuking stale mirror and falling through to fresh clone",
-				"upstream", upstream, "error", err, "duration", time.Since(start))
+		// Schedule a background fetch to freshen the mirror.
+		s.scheduler.Submit(upstream, "fetch", func(ctx context.Context) error {
+			return s.backgroundFetch(ctx, repo)
+		})
 
-			// Delete the stale snapshot from cache so future restarts don't
-			// restore the same stale snapshot in an infinite loop.
-			cacheKey := snapshotCacheKey(upstream)
-			if delErr := s.cache.Delete(ctx, cacheKey); delErr != nil {
-				logger.WarnContext(ctx, "Failed to delete stale snapshot from cache", "upstream", upstream, "error", delErr)
-			}
-
-			// Reset the repo to StateEmpty and remove the stale mirror from disk,
-			// then fall through to the fresh clone path below.
-			if resetErr := repo.Reset(); resetErr != nil {
-				logger.ErrorContext(ctx, "Failed to reset stale mirror", "upstream", upstream, "error", resetErr)
-				return
-			}
-		} else {
-			repo.MarkReady()
-			logger.InfoContext(ctx, "Catch-up fetch after snapshot restore completed", "upstream", upstream,
-				"duration", time.Since(start))
-
-			if s.config.SnapshotInterval > 0 {
-				s.scheduleSnapshotJobs(repo)
-			}
-			if s.config.RepackInterval > 0 {
-				s.scheduleRepackJobs(repo)
-			}
-			return
+		if s.config.SnapshotInterval > 0 {
+			s.scheduleSnapshotJobs(repo)
 		}
+		if s.config.RepackInterval > 0 {
+			s.scheduleRepackJobs(repo)
+		}
+		return
 	}
 
 	logger.InfoContext(ctx, "Starting clone", "upstream", upstream, "path", repo.Path())
@@ -516,15 +499,12 @@ func (s *Strategy) startClone(ctx context.Context, repo *gitclone.Repository) {
 	}
 }
 
-// tryRestoreSnapshot attempts to restore a mirror from an S3 snapshot.
-// On failure the repo path is cleaned up so the caller can fall back to clone.
-//
-// Snapshots are non-bare clones with remote.origin.url pointing to the cachew
-// server (so end-user git pulls go through the proxy). When restoring into the
-// mirror path we must fix the remote URL back to the real upstream and convert
-// the repo to bare, otherwise backgroundFetch would loop back to cachew itself.
+// tryRestoreSnapshot attempts to restore a mirror from an S3 mirror snapshot.
+// Mirror snapshots are bare repositories that can be extracted and used directly
+// without any conversion. On failure the repo path is cleaned up so the caller
+// can fall back to clone.
 func (s *Strategy) tryRestoreSnapshot(ctx context.Context, repo *gitclone.Repository) error {
-	cacheKey := snapshotCacheKey(repo.UpstreamURL())
+	cacheKey := mirrorSnapshotCacheKey(repo.UpstreamURL())
 
 	if err := os.MkdirAll(filepath.Dir(repo.Path()), 0o750); err != nil {
 		return errors.Wrap(err, "create parent directory for restore")
@@ -534,15 +514,9 @@ func (s *Strategy) tryRestoreSnapshot(ctx context.Context, repo *gitclone.Reposi
 
 	if err := snapshot.Restore(ctx, s.cache, cacheKey, repo.Path(), s.config.ZstdThreads); err != nil {
 		_ = os.RemoveAll(repo.Path())
-		return errors.Wrap(err, "restore snapshot")
+		return errors.Wrap(err, "restore mirror snapshot")
 	}
-	logger.InfoContext(ctx, "Snapshot archive extracted", "upstream", repo.UpstreamURL(), "path", repo.Path())
-
-	if err := convertSnapshotToMirror(ctx, repo.Path(), repo.UpstreamURL()); err != nil {
-		_ = os.RemoveAll(repo.Path())
-		return errors.Wrap(err, "convert snapshot to mirror")
-	}
-	logger.InfoContext(ctx, "Snapshot converted to bare mirror", "upstream", repo.UpstreamURL())
+	logger.InfoContext(ctx, "Mirror snapshot extracted", "upstream", repo.UpstreamURL(), "path", repo.Path())
 
 	if err := repo.MarkRestored(ctx); err != nil {
 		_ = os.RemoveAll(repo.Path())
@@ -551,170 +525,6 @@ func (s *Strategy) tryRestoreSnapshot(ctx context.Context, repo *gitclone.Reposi
 	logger.InfoContext(ctx, "Repository marked as restored", "upstream", repo.UpstreamURL(), "state", repo.State())
 
 	return nil
-}
-
-// convertSnapshotToMirror converts a restored non-bare snapshot into a bare
-// mirror suitable for serving upload-pack. It resets remote.origin.url to the
-// real upstream, sets core.bare = true, remaps refs/remotes/origin/* to
-// refs/heads/*, and configures mirror-style fetch refspecs.
-func convertSnapshotToMirror(ctx context.Context, repoPath, upstreamURL string) error {
-	// The snapshot is a non-bare clone (.git subdir). Detect this by checking
-	// for the .git directory and, if present, relocate it to a bare layout.
-	dotGit := filepath.Join(repoPath, ".git")
-	if info, err := os.Stat(dotGit); err == nil && info.IsDir() {
-		if err := convertToBare(repoPath, dotGit); err != nil {
-			return err
-		}
-	}
-
-	// Mark the repo as bare so git treats it as a mirror.
-	// #nosec G204 - repoPath is controlled by us
-	cmd := exec.CommandContext(ctx, "git", "-C", repoPath, "config", "core.bare", "true")
-	if output, err := cmd.CombinedOutput(); err != nil {
-		return errors.Wrapf(err, "set core.bare: %s", string(output))
-	}
-
-	// Remap refs/remotes/origin/* → refs/heads/* so branches are served
-	// correctly by upload-pack. Snapshots are created with a regular
-	// `git clone` (not --mirror), so branches live under refs/remotes/origin/.
-	if err := RemapRemoteRefs(ctx, repoPath); err != nil {
-		return errors.Wrap(err, "remap remote refs")
-	}
-
-	// Reset the remote URL to the actual upstream.
-	// #nosec G204 - repoPath and upstreamURL are controlled by us
-	cmd = exec.CommandContext(ctx, "git", "-C", repoPath, "remote", "set-url", "origin", upstreamURL)
-	if output, err := cmd.CombinedOutput(); err != nil {
-		return errors.Wrapf(err, "set remote URL: %s", string(output))
-	}
-
-	// Set mirror-style fetch refspec so subsequent fetches map refs 1:1
-	// instead of putting them under refs/remotes/origin/.
-	// #nosec G204 - repoPath is controlled by us
-	cmd = exec.CommandContext(ctx, "git", "-C", repoPath, "config", "remote.origin.fetch", "+refs/*:refs/*")
-	if output, err := cmd.CombinedOutput(); err != nil {
-		return errors.Wrapf(err, "set mirror fetch refspec: %s", string(output))
-	}
-
-	// Mark remote as mirror so git treats it equivalently to --mirror clone.
-	// #nosec G204 - repoPath is controlled by us
-	cmd = exec.CommandContext(ctx, "git", "-C", repoPath, "config", "remote.origin.mirror", "true")
-	if output, err := cmd.CombinedOutput(); err != nil {
-		return errors.Wrapf(err, "set remote.origin.mirror: %s", string(output))
-	}
-
-	return nil
-}
-
-// RemapRemoteRefs moves refs/remotes/origin/* to refs/heads/* in a bare repo
-// using git update-ref for correctness (handles both loose and packed refs,
-// maintains sorted packed-refs, and is atomic).
-// This is needed because snapshots are created with `git clone` (not --mirror),
-// which stores branches as remote tracking refs rather than local heads.
-func RemapRemoteRefs(ctx context.Context, repoPath string) error {
-	// List remote tracking refs and existing head refs to know which ones to skip.
-	// #nosec G204 - repoPath is controlled by us
-	listCmd := exec.CommandContext(ctx, "git", "-C", repoPath, "for-each-ref",
-		"--format=%(refname) %(objectname)", "refs/remotes/origin/", "refs/heads/")
-	listOutput, err := listCmd.CombinedOutput()
-	if err != nil {
-		return errors.Wrapf(err, "list refs: %s", string(listOutput))
-	}
-
-	if len(bytes.TrimSpace(listOutput)) == 0 {
-		return nil // nothing to remap
-	}
-
-	// Collect existing refs/heads/* so we don't overwrite them.
-	existingHeads := map[string]bool{}
-	for line := range strings.SplitSeq(string(listOutput), "\n") {
-		if line == "" {
-			continue
-		}
-		parts := strings.SplitN(line, " ", 2)
-		if len(parts) != 2 {
-			continue
-		}
-		if strings.HasPrefix(parts[0], "refs/heads/") {
-			existingHeads[parts[0]] = true
-		}
-	}
-
-	// Build update-ref transaction: create refs/heads/<branch> and delete
-	// refs/remotes/origin/<branch> for each remote tracking ref.
-	var txn bytes.Buffer
-	for line := range strings.SplitSeq(string(listOutput), "\n") {
-		if line == "" {
-			continue
-		}
-		parts := strings.SplitN(line, " ", 2)
-		if len(parts) != 2 {
-			continue
-		}
-
-		ref, sha := parts[0], parts[1]
-		branchName, ok := strings.CutPrefix(ref, "refs/remotes/origin/")
-		if !ok || branchName == "HEAD" {
-			continue
-		}
-
-		newRef := "refs/heads/" + branchName
-		// Skip if refs/heads/<branch> already exists (e.g. main).
-		if existingHeads[newRef] {
-			fmt.Fprintf(&txn, "delete %s %s\n", ref, sha)
-			continue
-		}
-		fmt.Fprintf(&txn, "create %s %s\n", newRef, sha)
-		fmt.Fprintf(&txn, "delete %s %s\n", ref, sha)
-	}
-
-	if txn.Len() == 0 {
-		return nil
-	}
-
-	// #nosec G204 - repoPath is controlled by us
-	updateCmd := exec.CommandContext(ctx, "git", "-C", repoPath, "update-ref", "--stdin")
-	updateCmd.Stdin = &txn
-	if output, err := updateCmd.CombinedOutput(); err != nil {
-		return errors.Wrapf(err, "update-ref: %s", string(output))
-	}
-
-	// Clean up leftover empty refs/remotes directory.
-	_ = os.RemoveAll(filepath.Join(repoPath, "refs", "remotes"))
-
-	return nil
-}
-
-// convertToBare moves the contents of .git/ up into repoPath, removing the
-// working tree, so the directory becomes a bare repository.
-func convertToBare(repoPath, dotGit string) error {
-	entries, err := os.ReadDir(dotGit)
-	if err != nil {
-		return errors.Wrap(err, "read .git directory")
-	}
-
-	// Remove working tree files (everything except .git).
-	topEntries, err := os.ReadDir(repoPath)
-	if err != nil {
-		return errors.Wrap(err, "read repo directory")
-	}
-	for _, e := range topEntries {
-		if e.Name() == ".git" {
-			continue
-		}
-		_ = os.RemoveAll(filepath.Join(repoPath, e.Name()))
-	}
-
-	// Move .git/* contents up to repoPath.
-	for _, e := range entries {
-		src := filepath.Join(dotGit, e.Name())
-		dst := filepath.Join(repoPath, e.Name())
-		if err := os.Rename(src, dst); err != nil {
-			return errors.Wrapf(err, "move %s", e.Name())
-		}
-	}
-
-	return errors.Wrap(os.Remove(dotGit), "remove .git directory")
 }
 
 func (s *Strategy) maybeBackgroundFetch(repo *gitclone.Repository) {

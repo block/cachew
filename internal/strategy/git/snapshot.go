@@ -32,6 +32,10 @@ func snapshotCacheKey(upstreamURL string) cache.Key {
 	return cache.NewKey(upstreamURL + ".snapshot")
 }
 
+func mirrorSnapshotCacheKey(upstreamURL string) cache.Key {
+	return cache.NewKey(upstreamURL + ".mirror-snapshot")
+}
+
 // remoteURLForSnapshot returns the URL to embed as remote.origin.url in snapshots.
 // When a server URL is configured, it returns the cachew URL for the repo so that
 // git pull goes through cachew. Otherwise it falls back to the upstream URL.
@@ -116,9 +120,41 @@ func (s *Strategy) generateAndUploadSnapshot(ctx context.Context, repo *gitclone
 	return nil
 }
 
+// generateAndUploadMirrorSnapshot creates a snapshot of the bare mirror
+// directory itself (not a non-bare clone). The resulting tarball can be
+// restored directly as a mirror without any conversion. This is used for
+// pod-to-pod bootstrap: a new cachew pod restores the mirror snapshot and
+// is immediately ready to serve, with background fetch handling freshening.
+func (s *Strategy) generateAndUploadMirrorSnapshot(ctx context.Context, repo *gitclone.Repository) error {
+	logger := logging.FromContext(ctx)
+	upstream := repo.UpstreamURL()
+
+	logger.InfoContext(ctx, "Mirror snapshot generation started", "upstream", upstream)
+
+	mu := s.snapshotMutexFor(upstream)
+	mu.Lock()
+	defer mu.Unlock()
+
+	cacheKey := mirrorSnapshotCacheKey(upstream)
+	ttl := 7 * 24 * time.Hour
+	excludePatterns := []string{"*.lock"}
+
+	if err := repo.WithReadLock(func() error {
+		return snapshot.Create(ctx, s.cache, cacheKey, repo.Path(), ttl, excludePatterns, s.config.ZstdThreads)
+	}); err != nil {
+		return errors.Wrap(err, "create mirror snapshot")
+	}
+
+	logger.InfoContext(ctx, "Mirror snapshot generation completed", "upstream", upstream)
+	return nil
+}
+
 func (s *Strategy) scheduleSnapshotJobs(repo *gitclone.Repository) {
 	s.scheduler.SubmitPeriodicJob(repo.UpstreamURL(), "snapshot-periodic", s.config.SnapshotInterval, func(ctx context.Context) error {
 		return s.generateAndUploadSnapshot(ctx, repo)
+	})
+	s.scheduler.SubmitPeriodicJob(repo.UpstreamURL(), "mirror-snapshot-periodic", s.config.SnapshotInterval, func(ctx context.Context) error {
+		return s.generateAndUploadMirrorSnapshot(ctx, repo)
 	})
 }
 
