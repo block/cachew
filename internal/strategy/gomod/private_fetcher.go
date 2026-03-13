@@ -296,16 +296,17 @@ func (p *privateFetcher) generateZip(ctx context.Context, repo *gitclone.Reposit
 	defer os.RemoveAll(tmpDir) //nolint:errcheck
 
 	cloneDir := filepath.Join(tmpDir, "repo")
+	gitRef := VersionToGitRef(version)
 
 	// Local clone from the mirror at the requested ref — git hardlinks objects by default.
 	// We use --no-checkout then checkout the specific ref so that both tagged versions and
 	// raw commit hashes (from pseudo-versions) work; --branch only accepts branch/tag names.
-	// #nosec G204 - repo.Path(), gitRef, and cloneDir are controlled by us
-	gitRef := VersionToGitRef(version)
+	// #nosec G204 - repo.Path() and cloneDir are controlled by us
 	cmd := exec.CommandContext(ctx, "git", "clone", "--no-checkout", repo.Path(), cloneDir)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return nil, errors.Wrapf(err, "git clone: %s", string(output))
 	}
+	// #nosec G204 - cloneDir and gitRef are controlled by us
 	cmd = exec.CommandContext(ctx, "git", "-C", cloneDir, "checkout", gitRef)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return nil, errors.Wrapf(err, "git checkout %s: %s", gitRef, string(output))
