@@ -459,24 +459,38 @@ func configureMirror(ctx context.Context, repoPath string, packThreads int) erro
 	return nil
 }
 
+// cloneTimeout bounds `git clone --mirror` so a stuck clone cannot block
+// the repo indefinitely. This is deliberately generous: large repos may
+// take 10-20 minutes for GitHub to compute the server-side pack.
+const cloneTimeout = 30 * time.Minute
+
 func (r *Repository) executeClone(ctx context.Context) error {
 	if err := os.MkdirAll(filepath.Dir(r.path), 0o750); err != nil {
 		return errors.Wrap(err, "create clone directory")
 	}
 
+	cloneCtx, cancel := context.WithTimeout(ctx, cloneTimeout)
+	defer cancel()
+
 	config := DefaultGitTuningConfig()
+	// lowSpeedLimit is intentionally omitted: during initial clone of large
+	// repos the server-side pack computation can take minutes at near-zero
+	// transfer rate, which would trip the speed check. The cloneTimeout
+	// provides the overall safety net instead.
 	// #nosec G204 - r.upstreamURL and r.path are controlled by us
 	args := []string{
 		"clone", "--mirror",
 		"-c", "http.postBuffer=" + strconv.Itoa(config.PostBuffer),
-		"-c", "http.lowSpeedLimit=" + strconv.Itoa(config.LowSpeedLimit),
-		"-c", "http.lowSpeedTime=" + strconv.Itoa(int(config.LowSpeedTime.Seconds())),
 		r.upstreamURL, r.path,
 	}
 
-	cmd, err := r.gitCommand(ctx, args...)
+	cmd, err := r.gitCommand(cloneCtx, args...)
 	if err != nil {
 		return errors.Wrap(err, "create git command")
+	}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 	}
 	output, err := cmd.CombinedOutput()
 	if err != nil {
