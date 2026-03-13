@@ -333,6 +333,19 @@ func (r *Repository) TryStartCloning() bool {
 	return true
 }
 
+// WithFetchExclusion runs fn while holding the fetch semaphore, preventing
+// concurrent git fetch operations. Use this for operations like tar that
+// read the repository directory non-atomically and need a consistent view.
+func (r *Repository) WithFetchExclusion(ctx context.Context, fn func() error) error {
+	select {
+	case <-r.fetchSem:
+		defer func() { r.fetchSem <- struct{}{} }()
+		return fn()
+	case <-ctx.Done():
+		return errors.Wrap(ctx.Err(), "context cancelled waiting for fetch exclusion")
+	}
+}
+
 // MarkRestored configures a restored snapshot (e.g. from S3) as a mirror.
 // The caller must have already transitioned to StateCloning (via
 // TryStartCloning) before extracting the snapshot. On error the state is
