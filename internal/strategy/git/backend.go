@@ -186,10 +186,11 @@ func (s *Strategy) ensureRefsUpToDate(ctx context.Context, repo *gitclone.Reposi
 		return errors.Wrap(err, "check upstream refs")
 	}
 	if needsFetch {
-		logging.FromContext(ctx).DebugContext(ctx, "Refs stale, scheduling background fetch", "upstream", repo.UpstreamURL())
-		s.scheduler.Submit(repo.UpstreamURL(), "fetch", func(ctx context.Context) error {
-			return s.backgroundFetch(ctx, repo)
-		})
+		logger := logging.FromContext(ctx)
+		logger.DebugContext(ctx, "Refs stale, fetching synchronously", "upstream", repo.UpstreamURL())
+		if err := s.backgroundFetch(ctx, repo); err != nil {
+			logger.WarnContext(ctx, "Synchronous fetch failed", "upstream", repo.UpstreamURL(), "error", err)
+		}
 	}
 	return nil
 }

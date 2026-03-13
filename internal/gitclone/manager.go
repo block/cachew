@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/alecthomas/errors"
@@ -49,7 +50,7 @@ func DefaultGitTuningConfig() GitTuningConfig {
 	return GitTuningConfig{
 		PostBuffer:    524288000, // 500MB buffer
 		LowSpeedLimit: 1000,      // 1KB/s minimum speed
-		LowSpeedTime:  10 * time.Minute,
+		LowSpeedTime:  60 * time.Second,
 	}
 }
 
@@ -319,9 +320,11 @@ func WithReadLockReturn[T any](repo *Repository, fn func() (T, error)) (T, error
 	return fn()
 }
 
-// MarkRestored transitions a repository from StateEmpty to StateReady after an
-// external restore (e.g. from an S3 snapshot). It applies the same mirror
-// configuration that Clone would, so the repo is ready to serve upload-pack.
+// MarkRestored configures a restored snapshot (e.g. from S3) as a mirror and
+// leaves the repository in StateCloning. The caller must call MarkReady after
+// a successful catch-up fetch to transition to StateReady. While in
+// StateCloning, requests are proxied to upstream instead of served from the
+// potentially-stale local mirror.
 func (r *Repository) MarkRestored(ctx context.Context) error {
 	r.mu.Lock()
 	if r.state != StateEmpty {
@@ -342,11 +345,17 @@ func (r *Repository) MarkRestored(ctx context.Context) error {
 		r.mu.Unlock()
 		return errors.Wrap(err, "configure mirror after restore")
 	}
+	r.mu.Unlock()
+	return nil
+}
 
+// MarkReady transitions the repository to StateReady, indicating it is
+// up-to-date and can serve requests from the local mirror.
+func (r *Repository) MarkReady() {
+	r.mu.Lock()
 	r.state = StateReady
 	r.lastFetch = time.Now()
 	r.mu.Unlock()
-	return nil
 }
 
 func (r *Repository) Clone(ctx context.Context) error {
@@ -437,24 +446,38 @@ func configureMirror(ctx context.Context, repoPath string, packThreads int) erro
 	return nil
 }
 
+// cloneTimeout bounds `git clone --mirror` so a stuck clone cannot block
+// the repo indefinitely. This is deliberately generous: large repos may
+// take 10-20 minutes for GitHub to compute the server-side pack.
+const cloneTimeout = 30 * time.Minute
+
 func (r *Repository) executeClone(ctx context.Context) error {
 	if err := os.MkdirAll(filepath.Dir(r.path), 0o750); err != nil {
 		return errors.Wrap(err, "create clone directory")
 	}
 
+	cloneCtx, cancel := context.WithTimeout(ctx, cloneTimeout)
+	defer cancel()
+
 	config := DefaultGitTuningConfig()
+	// lowSpeedLimit is intentionally omitted: during initial clone of large
+	// repos the server-side pack computation can take minutes at near-zero
+	// transfer rate, which would trip the speed check. The cloneTimeout
+	// provides the overall safety net instead.
 	// #nosec G204 - r.upstreamURL and r.path are controlled by us
 	args := []string{
 		"clone", "--mirror",
 		"-c", "http.postBuffer=" + strconv.Itoa(config.PostBuffer),
-		"-c", "http.lowSpeedLimit=" + strconv.Itoa(config.LowSpeedLimit),
-		"-c", "http.lowSpeedTime=" + strconv.Itoa(int(config.LowSpeedTime.Seconds())),
 		r.upstreamURL, r.path,
 	}
 
-	cmd, err := r.gitCommand(ctx, args...)
+	cmd, err := r.gitCommand(cloneCtx, args...)
 	if err != nil {
 		return errors.Wrap(err, "create git command")
+	}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 	}
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -475,6 +498,13 @@ func (r *Repository) executeClone(ctx context.Context) error {
 }
 
 func (r *Repository) Fetch(ctx context.Context) error {
+	return r.FetchWithTimeout(ctx, fetchTimeout)
+}
+
+// FetchWithTimeout fetches from upstream with a configurable timeout. Use this
+// for catch-up fetches after snapshot restore where the delta may be large and
+// the default fetchTimeout is too short.
+func (r *Repository) FetchWithTimeout(ctx context.Context, timeout time.Duration) error {
 	select {
 	case <-r.fetchSem:
 		defer func() {
@@ -492,13 +522,13 @@ func (r *Repository) Fetch(ctx context.Context) error {
 		}
 	}
 
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	fetchCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 
 	config := DefaultGitTuningConfig()
 
 	// #nosec G204 - r.path is controlled by us
-	cmd, err := r.gitCommand(ctx, "-C", r.path,
+	cmd, err := r.gitCommand(fetchCtx, "-C", r.path,
 		"-c", "http.postBuffer="+strconv.Itoa(config.PostBuffer),
 		"-c", "http.lowSpeedLimit="+strconv.Itoa(config.LowSpeedLimit),
 		"-c", "http.lowSpeedTime="+strconv.Itoa(int(config.LowSpeedTime.Seconds())),
@@ -506,14 +536,27 @@ func (r *Repository) Fetch(ctx context.Context) error {
 	if err != nil {
 		return errors.Wrap(err, "create git command")
 	}
+	// Start the process in its own process group so we can kill the entire
+	// tree (git spawns child processes like git-remote-https that inherit
+	// stdout/stderr pipes and prevent CombinedOutput from returning).
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return errors.Wrapf(err, "git fetch: %s", string(output))
 	}
 
+	r.mu.Lock()
 	r.lastFetch = time.Now()
+	r.mu.Unlock()
 	return nil
 }
+
+// fetchTimeout bounds `git fetch` so a slow or unresponsive upstream
+// cannot block the fetch path indefinitely.
+const fetchTimeout = 5 * time.Minute
 
 // lsRemoteTimeout bounds `git ls-remote` so a slow or unresponsive upstream
 // cannot block the request path indefinitely.
