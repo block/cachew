@@ -85,6 +85,72 @@ func Create(ctx context.Context, remote cache.Cache, key cache.Key, directory st
 	return errors.Join(errs...)
 }
 
+// CreateSubdir archives a single named subdirectory within parentDir using tar+zstd,
+// producing an archive whose paths start with "./{subdir}/...". This allows the
+// client to extract the archive into the parent-equivalent directory and have the
+// subdirectory land in the correct location.
+//
+// Example: CreateSubdir(ctx, cache, key, "/repo/.git", "lfs", ttl) creates an
+// archive with paths like "./lfs/objects/xx/yy/sha256". The client extracts it
+// into the ".git/" directory to get ".git/lfs/objects/xx/yy/sha256".
+func CreateSubdir(ctx context.Context, remote cache.Cache, key cache.Key, parentDir, subdir string, ttl time.Duration) error {
+	subdirPath := filepath.Join(parentDir, subdir)
+	if info, err := os.Stat(subdirPath); err != nil {
+		return errors.Wrap(err, "failed to stat subdir")
+	} else if !info.IsDir() {
+		return errors.Errorf("not a directory: %s", subdirPath)
+	}
+
+	headers := make(http.Header)
+	headers.Set("Content-Type", "application/zstd")
+	headers.Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", subdir+".tar.zst"))
+
+	wc, err := remote.Create(ctx, key, headers, ttl)
+	if err != nil {
+		return errors.Wrap(err, "failed to create object")
+	}
+
+	// tar from parentDir, archiving only the named subdir so paths are ./subdir/...
+	tarCmd := exec.CommandContext(ctx, "tar", "-cpf", "-", "-C", parentDir, "--", subdir)
+	zstdCmd := exec.CommandContext(ctx, "zstd", "-c", "-T4")
+
+	tarStdout, err := tarCmd.StdoutPipe()
+	if err != nil {
+		return errors.Join(errors.Wrap(err, "failed to create tar stdout pipe"), wc.Close())
+	}
+
+	var tarStderr, zstdStderr bytes.Buffer
+	tarCmd.Stderr = &tarStderr
+
+	zstdCmd.Stdin = tarStdout
+	zstdCmd.Stdout = wc
+	zstdCmd.Stderr = &zstdStderr
+
+	if err := tarCmd.Start(); err != nil {
+		return errors.Join(errors.Wrap(err, "failed to start tar"), wc.Close())
+	}
+	if err := zstdCmd.Start(); err != nil {
+		return errors.Join(errors.Wrap(err, "failed to start zstd"), tarCmd.Wait(), wc.Close())
+	}
+
+	tarErr := tarCmd.Wait()
+	zstdErr := zstdCmd.Wait()
+	closeErr := wc.Close()
+
+	var errs []error
+	if tarErr != nil {
+		errs = append(errs, errors.Errorf("tar failed: %w: %s", tarErr, tarStderr.String()))
+	}
+	if zstdErr != nil {
+		errs = append(errs, errors.Errorf("zstd failed: %w: %s", zstdErr, zstdStderr.String()))
+	}
+	if closeErr != nil {
+		errs = append(errs, errors.Wrap(closeErr, "failed to close writer"))
+	}
+
+	return errors.Join(errs...)
+}
+
 // Restore downloads an archive from the cache and extracts it to a directory.
 //
 // The archive is decompressed with zstd and extracted with tar, preserving

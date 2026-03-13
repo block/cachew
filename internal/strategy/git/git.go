@@ -34,8 +34,9 @@ func Register(r *strategy.Registry, scheduler jobscheduler.Provider, cloneManage
 }
 
 type Config struct {
-	SnapshotInterval time.Duration `hcl:"snapshot-interval,optional" help:"How often to generate tar.zstd snapshots. 0 disables snapshots." default:"0"`
-	RepackInterval   time.Duration `hcl:"repack-interval,optional" help:"How often to run full repack. 0 disables." default:"0"`
+	SnapshotInterval   time.Duration `hcl:"snapshot-interval,optional" help:"How often to generate tar.zstd snapshots. 0 disables snapshots." default:"0"`
+	RepackInterval     time.Duration `hcl:"repack-interval,optional" help:"How often to run full repack. 0 disables." default:"0"`
+	LFSSnapshotEnabled bool          `hcl:"lfs-snapshot-enabled,optional" help:"When true, also generate a separate LFS object snapshot at /git/{repo}/lfs-snapshot.tar.zst on each snapshot interval. Requires git-lfs and a configured GitHub App." default:"false"`
 	// ServerURL is embedded as remote.origin.url in snapshots so git pull goes through cachew.
 	ServerURL string `hcl:"server-url,optional" help:"Base URL of this cachew instance, embedded in snapshot remote URLs." default:"${CACHEW_URL}"`
 }
@@ -121,6 +122,9 @@ func New(
 	for _, repo := range existing {
 		if s.config.SnapshotInterval > 0 {
 			s.scheduleSnapshotJobs(repo)
+			if s.config.LFSSnapshotEnabled {
+				s.scheduleLFSSnapshotJobs(repo)
+			}
 		}
 		if s.config.RepackInterval > 0 {
 			s.scheduleRepackJobs(repo)
@@ -191,6 +195,11 @@ func (s *Strategy) handleRequest(w http.ResponseWriter, r *http.Request) {
 
 	if strings.HasSuffix(pathValue, "/snapshot.tar.zst") {
 		s.handleSnapshotRequest(w, r, host, pathValue)
+		return
+	}
+
+	if strings.HasSuffix(pathValue, "/lfs-snapshot.tar.zst") {
+		s.handleLFSSnapshotRequest(w, r, host, pathValue)
 		return
 	}
 
@@ -439,6 +448,9 @@ func (s *Strategy) startClone(ctx context.Context, repo *gitclone.Repository) {
 
 	if s.config.SnapshotInterval > 0 {
 		s.scheduleSnapshotJobs(repo)
+		if s.config.LFSSnapshotEnabled {
+			s.scheduleLFSSnapshotJobs(repo)
+		}
 	}
 	if s.config.RepackInterval > 0 {
 		s.scheduleRepackJobs(repo)
