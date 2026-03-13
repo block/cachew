@@ -443,6 +443,14 @@ func (s *Strategy) ensureCloneReady(ctx context.Context, repo *gitclone.Reposito
 }
 
 func (s *Strategy) startClone(ctx context.Context, repo *gitclone.Repository) {
+	// Atomically claim the clone so only one goroutine performs the restore
+	// or clone. Without this gate, concurrent snapshot requests each call
+	// startClone and extract tarballs over the same directory, corrupting
+	// packed-refs and other git metadata.
+	if !repo.TryStartCloning() {
+		return
+	}
+
 	logger := logging.FromContext(ctx)
 	upstream := repo.UpstreamURL()
 
