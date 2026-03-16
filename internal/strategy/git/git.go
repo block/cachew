@@ -567,15 +567,11 @@ func (s *Strategy) submitFetch(repo *gitclone.Repository) {
 	// Use a separate queue from snapshot/repack so fetches are not serialized
 	// behind long-running jobs on the same upstream URL queue.
 	s.scheduler.Submit(repo.UpstreamURL()+"/fetch", "fetch", func(ctx context.Context) error {
-		return s.backgroundFetch(ctx, repo)
+		return s.doFetch(ctx, repo)
 	})
 }
 
-func (s *Strategy) backgroundFetch(ctx context.Context, repo *gitclone.Repository) error {
-	if !repo.NeedsFetch(s.cloneManager.Config().FetchInterval) {
-		return nil
-	}
-
+func (s *Strategy) doFetch(ctx context.Context, repo *gitclone.Repository) error {
 	logger := logging.FromContext(ctx)
 	logger.InfoContext(ctx, "Fetching updates", "upstream", repo.UpstreamURL(), "path", repo.Path())
 
