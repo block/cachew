@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/alecthomas/errors"
+
 	"github.com/block/cachew/internal/gitclone"
 	"github.com/block/cachew/internal/httputil"
 	"github.com/block/cachew/internal/logging"
@@ -181,11 +183,10 @@ func (s *Strategy) serveFromBackend(w http.ResponseWriter, r *http.Request, repo
 // checkRefsStale checks whether the local mirror's refs are behind upstream.
 // Returns true if a fetch is needed. The caller decides whether to fetch
 // synchronously or fall back to upstream.
-func (s *Strategy) checkRefsStale(ctx context.Context, repo *gitclone.Repository) bool {
+func (s *Strategy) checkRefsStale(ctx context.Context, repo *gitclone.Repository) (bool, error) {
 	needsFetch, err := repo.EnsureRefsUpToDate(ctx)
 	if err != nil {
-		logging.FromContext(ctx).WarnContext(ctx, "Failed to check upstream refs", "error", err)
-		return false
+		return false, errors.Wrap(err, "check upstream refs")
 	}
-	return needsFetch
+	return needsFetch, nil
 }

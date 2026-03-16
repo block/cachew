@@ -261,7 +261,11 @@ func (s *Strategy) serveReadyRepo(w http.ResponseWriter, r *http.Request, repo *
 	ctx := r.Context()
 	logger := logging.FromContext(ctx)
 
-	if isInfoRefs && s.checkRefsStale(ctx, repo) {
+	stale, err := s.checkRefsStale(ctx, repo)
+	if err != nil {
+		logger.WarnContext(ctx, "Failed to check upstream refs", "upstream", repo.UpstreamURL(), "error", err)
+	}
+	if isInfoRefs && stale {
 		// Mirror is behind upstream. Forward to upstream so the client gets
 		// fresh refs immediately, and kick off a background fetch so the
 		// mirror catches up for subsequent requests.
