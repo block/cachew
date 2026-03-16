@@ -180,17 +180,13 @@ func (s *Strategy) serveFromBackend(w http.ResponseWriter, r *http.Request, repo
 	return false
 }
 
-func (s *Strategy) ensureRefsUpToDate(ctx context.Context, repo *gitclone.Repository) error {
+// checkRefsStale checks whether the local mirror's refs are behind upstream.
+// Returns true if a fetch is needed. The caller decides whether to fetch
+// synchronously or fall back to upstream.
+func (s *Strategy) checkRefsStale(ctx context.Context, repo *gitclone.Repository) (bool, error) {
 	needsFetch, err := repo.EnsureRefsUpToDate(ctx)
 	if err != nil {
-		return errors.Wrap(err, "check upstream refs")
+		return false, errors.Wrap(err, "check upstream refs")
 	}
-	if needsFetch {
-		logger := logging.FromContext(ctx)
-		logger.DebugContext(ctx, "Refs stale, fetching synchronously", "upstream", repo.UpstreamURL())
-		if err := s.backgroundFetch(ctx, repo); err != nil {
-			logger.WarnContext(ctx, "Synchronous fetch failed", "upstream", repo.UpstreamURL(), "error", err)
-		}
-	}
-	return nil
+	return needsFetch, nil
 }
