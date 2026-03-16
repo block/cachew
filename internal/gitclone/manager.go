@@ -694,21 +694,35 @@ func (r *Repository) GetUpstreamRefs(ctx context.Context) (map[string]string, er
 	return ParseGitRefs(output), nil
 }
 
-func (r *Repository) Repack(ctx context.Context) error {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
+// repackTimeout bounds `git repack` so a slow repack on a large repository
+// cannot block the scheduler queue indefinitely.
+const repackTimeout = 10 * time.Minute
 
+// Repack consolidates pack files using geometric repacking. Unlike a full
+// repack (-a), geometric repacking only merges packs when there is significant
+// fragmentation (many small packs), making it orders of magnitude faster on
+// large repositories in steady state. The --write-midx and --write-bitmap-index
+// flags maintain the multi-pack index and reachability bitmaps for efficient
+// serving via git http-backend.
+func (r *Repository) Repack(ctx context.Context) error {
 	logger := logging.FromContext(ctx)
-	logger.InfoContext(ctx, "Full repack started", "upstream", r.upstreamURL)
+	logger.InfoContext(ctx, "Geometric repack started", "upstream", r.upstreamURL)
+
+	repackCtx, cancel := context.WithTimeout(ctx, repackTimeout)
+	defer cancel()
 
 	// #nosec G204 - r.path is controlled by us
-	cmd := exec.CommandContext(ctx, "git", "-C", r.path, "repack", "-adb", "--write-midx", "--write-bitmap-index")
+	cmd := exec.CommandContext(repackCtx, "git", "-C", r.path, "repack", "-d", "--geometric=2", "--write-midx", "--write-bitmap-index")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return errors.Wrapf(err, "git repack: %s", string(output))
 	}
 
-	logger.InfoContext(ctx, "Full repack completed", "upstream", r.upstreamURL)
+	logger.InfoContext(ctx, "Geometric repack completed", "upstream", r.upstreamURL)
 	return nil
 }
 
