@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/alecthomas/errors"
 
@@ -190,15 +189,21 @@ func (s *Strategy) handleSnapshotRequest(w http.ResponseWriter, r *http.Request,
 		http.Error(w, "Repository unavailable", http.StatusServiceUnavailable)
 		return
 	}
+	// Fetch in the background to keep the mirror fresh for subsequent
+	// git-fetch/git-pull operations through cachew, but don't block
+	// snapshot serving on it.
 	refsStale, err := s.checkRefsStale(ctx, repo)
 	if err != nil {
 		logger.WarnContext(ctx, "Failed to check upstream refs", "upstream", upstreamURL, "error", err)
 	}
 	if refsStale {
-		logger.InfoContext(ctx, "Refs stale for snapshot request, fetching", "upstream", upstreamURL)
-		if err := repo.Fetch(ctx); err != nil {
-			logger.WarnContext(ctx, "Fetch for snapshot failed", "upstream", upstreamURL, "error", err)
-		}
+		logger.InfoContext(ctx, "Refs stale for snapshot request, fetching in background", "upstream", upstreamURL)
+		go func() {
+			bgCtx := context.WithoutCancel(ctx)
+			if err := repo.Fetch(bgCtx); err != nil {
+				logger.WarnContext(bgCtx, "Background fetch for snapshot failed", "upstream", upstreamURL, "error", err)
+			}
+		}()
 	}
 
 	cacheKey := snapshotCacheKey(upstreamURL)
@@ -210,20 +215,14 @@ func (s *Strategy) handleSnapshotRequest(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	// Only serve the cached snapshot if it was generated after the mirror's
-	// last successful fetch. Otherwise regenerate from the fresh mirror.
+	// Always serve a cached snapshot if one exists. The workstation will
+	// git-fetch through cachew after extracting the snapshot, which picks
+	// up any commits that arrived since the snapshot was built. Regeneration
+	// happens in the background via the periodic snapshot job and the
+	// background upload in writeSnapshotSpool, keeping the cached snapshot
+	// reasonably fresh without blocking requests.
 	if reader != nil {
-		stale := true
-		if lastMod := headers.Get("Last-Modified"); lastMod != "" {
-			if t, parseErr := time.Parse(http.TimeFormat, lastMod); parseErr == nil {
-				stale = repo.LastFetch().After(t)
-			}
-		}
-		if stale {
-			logger.InfoContext(ctx, "Cached snapshot predates last fetch, regenerating", "upstream", upstreamURL)
-			_ = reader.Close()
-			reader = nil
-		}
+		logger.DebugContext(ctx, "Serving cached snapshot", "upstream", upstreamURL)
 	}
 
 	if reader == nil {
