@@ -581,7 +581,8 @@ func (s *Strategy) doFetch(ctx context.Context, repo *gitclone.Repository) error
 
 	start := time.Now()
 	if err := repo.Fetch(ctx); err != nil {
-		return errors.Errorf("fetch failed in %s: %w", time.Since(start), err)
+		logger.ErrorContext(ctx, "Fetch failed", "upstream", repo.UpstreamURL(), "duration", time.Since(start), "error", err)
+		return errors.Errorf("fetch failed: %w", err)
 	}
 	logger.InfoContext(ctx, "Fetch completed", "upstream", repo.UpstreamURL(), "duration", time.Since(start))
 	return nil
