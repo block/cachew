@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httputil"
 	"os"
@@ -128,8 +129,6 @@ func New(
 		if err != nil {
 			logger.WarnContext(ctx, "Failed to get pre-fetch refs for existing repo", "upstream", repo.UpstreamURL(),
 				"error", err)
-		} else {
-			logger.InfoContext(ctx, "Pre-fetch refs for existing repo", "upstream", repo.UpstreamURL(), "refs", preRefs)
 		}
 
 		start := time.Now()
@@ -146,7 +145,8 @@ func New(
 			logger.WarnContext(ctx, "Failed to get post-fetch refs for existing repo", "upstream", repo.UpstreamURL(),
 				"error", err)
 		} else {
-			logger.InfoContext(ctx, "Post-fetch refs for existing repo", "upstream", repo.UpstreamURL(), "refs", postRefs)
+			maps.DeleteFunc(postRefs, func(k, v string) bool { return preRefs[k] == v })
+			logger.InfoContext(ctx, "Post-fetch changed refs for existing repo", "upstream", repo.UpstreamURL(), "refs", postRefs)
 		}
 
 		if s.config.SnapshotInterval > 0 {

@@ -19,11 +19,16 @@ git-clone {}
 
 metrics {}
 
-
 git {
   #bundle-interval = "24h"
   snapshot-interval = "1h"
   repack-interval = "1h"
+}
+
+host "https://ghcr.io" {
+  headers = {
+    "Authorization": "Bearer QQ=="
+  }
 }
 
 host "https://w3.org" {}
