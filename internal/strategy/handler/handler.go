@@ -142,6 +142,14 @@ func (h *Handler) fetchAndCache(w http.ResponseWriter, r *http.Request, key cach
 		return
 	}
 
+	// Forward safe headers from the original request, without overwriting headers set by transform.
+	forwardable := httputil.FilterHeaders(r.Header, httputil.HopByHopHeaders...)
+	for key, values := range forwardable {
+		if upstreamReq.Header.Get(key) == "" {
+			upstreamReq.Header[key] = values
+		}
+	}
+
 	resp, err := h.client.Do(upstreamReq)
 	if err != nil {
 		h.errorHandler(httputil.Errorf(http.StatusBadGateway, "failed to fetch: %w", err), w, r)

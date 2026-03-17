@@ -117,21 +117,6 @@ func (k *Key) MarshalText() ([]byte, error) {
 	return []byte(k.String()), nil
 }
 
-// FilterTransportHeaders returns a copy of the given headers with standard HTTP transport headers removed.
-// These headers are typically added by HTTP clients/servers and should not be cached.
-func FilterTransportHeaders(headers http.Header) http.Header {
-	filtered := make(http.Header)
-	for key, values := range headers {
-		// Skip standard HTTP headers added by transport layer or that shouldn't be cached
-		if key == "Content-Length" || key == "Date" || key == "Accept-Encoding" ||
-			key == "User-Agent" || key == "Transfer-Encoding" || key == "Time-To-Live" {
-			continue
-		}
-		filtered[key] = values
-	}
-	return filtered
-}
-
 // Stats contains health and usage statistics for a cache.
 type Stats struct {
 	// Objects is the number of objects currently in the cache.
