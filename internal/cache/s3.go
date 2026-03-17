@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"runtime"
+	"strconv"
 	"time"
 
 	"github.com/alecthomas/errors"
@@ -243,6 +244,8 @@ func (s *S3) Open(ctx context.Context, key Key) (io.ReadCloser, http.Header, err
 	if headers.Get("Last-Modified") == "" && !objInfo.LastModified.IsZero() {
 		headers.Set("Last-Modified", objInfo.LastModified.UTC().Format(http.TimeFormat))
 	}
+
+	headers.Set("Content-Length", strconv.FormatInt(objInfo.Size, 10))
 
 	// Reset expiration time to implement LRU (same as disk cache).
 	// Only refresh when remaining TTL is below 50% of max to avoid a

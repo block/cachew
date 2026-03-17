@@ -24,7 +24,9 @@ import (
 // The operation is fully streaming - no temporary files are created.
 // Exclude patterns use tar's --exclude syntax.
 // threads controls zstd parallelism; 0 uses all available CPU cores.
-func Create(ctx context.Context, remote cache.Cache, key cache.Key, directory string, ttl time.Duration, excludePatterns []string, threads int) error {
+// Any extra headers are merged into the cache metadata alongside the default
+// Content-Type and Content-Disposition headers.
+func Create(ctx context.Context, remote cache.Cache, key cache.Key, directory string, ttl time.Duration, excludePatterns []string, threads int, extraHeaders ...http.Header) error {
 	if threads <= 0 {
 		threads = runtime.NumCPU()
 	}
@@ -39,6 +41,13 @@ func Create(ctx context.Context, remote cache.Cache, key cache.Key, directory st
 	headers := make(http.Header)
 	headers.Set("Content-Type", "application/zstd")
 	headers.Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filepath.Base(directory)+".tar.zst"))
+	for _, eh := range extraHeaders {
+		for k, vals := range eh {
+			for _, v := range vals {
+				headers.Set(k, v)
+			}
+		}
+	}
 
 	wc, err := remote.Create(ctx, key, headers, ttl)
 	if err != nil {
