@@ -230,7 +230,7 @@ func TestSnapshotGenerationViaLocalClone(t *testing.T) {
 	assert.Equal(t, upstreamURL+"\n", string(output))
 
 	// Snapshot working directory should have been cleaned up.
-	snapshotWorkDir := filepath.Join(mirrorRoot, ".snapshots", "github.com", "org", "repo")
+	snapshotWorkDir := filepath.Join(mirrorRoot, ".snapshots", "github.com", "org", "repo", "base")
 	_, err = os.Stat(snapshotWorkDir)
 	assert.True(t, os.IsNotExist(err))
 }
@@ -682,7 +682,7 @@ func TestDeferredRestoreOnlyScheduledOnce(t *testing.T) {
 	time.Sleep(time.Second)
 }
 
-func TestSnapshotRemoteURLUsesServerURL(t *testing.T) {
+func TestSnapshotRemoteURLUsesUpstreamURL(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not found in PATH")
 	}
@@ -691,7 +691,6 @@ func TestSnapshotRemoteURLUsesServerURL(t *testing.T) {
 	tmpDir := t.TempDir()
 	mirrorRoot := filepath.Join(tmpDir, "mirrors")
 	upstreamURL := "https://github.com/org/repo"
-	serverURL := "http://cachew.example.com"
 
 	mirrorPath := filepath.Join(mirrorRoot, "github.com", "org", "repo")
 	createTestMirrorRepo(t, mirrorPath)
@@ -701,7 +700,7 @@ func TestSnapshotRemoteURLUsesServerURL(t *testing.T) {
 	mux := newTestMux()
 
 	cm := gitclone.NewManagerProvider(ctx, gitclone.Config{MirrorRoot: mirrorRoot}, nil)
-	s, err := git.New(ctx, git.Config{ServerURL: serverURL}, newTestScheduler(ctx, t), memCache, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
+	s, err := git.New(ctx, git.Config{}, newTestScheduler(ctx, t), memCache, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
 	assert.NoError(t, err)
 
 	manager, err := cm()
@@ -720,5 +719,5 @@ func TestSnapshotRemoteURLUsesServerURL(t *testing.T) {
 	cmd := exec.Command("git", "-C", restoreDir, "remote", "get-url", "origin")
 	output, err := cmd.CombinedOutput()
 	assert.NoError(t, err, string(output))
-	assert.Equal(t, serverURL+"/git/github.com/org/repo\n", string(output))
+	assert.Equal(t, upstreamURL+"\n", string(output))
 }

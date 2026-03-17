@@ -11,7 +11,9 @@ import (
 	"github.com/alecthomas/errors"
 )
 
-func (r *Repository) gitCommand(ctx context.Context, args ...string) (*exec.Cmd, error) {
+// GitCommand returns a git subprocess configured with repository-scoped
+// authentication and any per-URL git config overrides disabled.
+func (r *Repository) GitCommand(ctx context.Context, args ...string) (*exec.Cmd, error) {
 	repoURL := r.upstreamURL
 	var token string
 	if r.credentialProvider != nil && strings.Contains(repoURL, "github.com") {
