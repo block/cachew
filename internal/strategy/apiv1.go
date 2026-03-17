@@ -13,6 +13,7 @@ import (
 	"github.com/alecthomas/errors"
 
 	"github.com/block/cachew/internal/cache"
+	"github.com/block/cachew/internal/httputil"
 	"github.com/block/cachew/internal/logging"
 )
 
@@ -116,7 +117,7 @@ func (d *APIV1) putObject(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Extract and filter headers from request
-	headers := cache.FilterTransportHeaders(r.Header)
+	headers := httputil.FilterHeaders(r.Header, httputil.TransportHeaders...)
 
 	namespacedCache := d.cache.Namespace(namespace)
 	cw, err := namespacedCache.Create(r.Context(), key, headers, ttl)

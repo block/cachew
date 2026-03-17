@@ -27,16 +27,18 @@ func RegisterHost(r *Registry) {
 //
 // In this example, the strategy will be mounted under "/github.com".
 type HostConfig struct {
-	Target string `hcl:"target,label" help:"The target URL to proxy requests to."`
+	Target  string            `hcl:"target,label" help:"The target URL to proxy requests to."`
+	Headers map[string]string `hcl:"headers,optional" help:"Headers to add to upstream requests."`
 }
 
 // The Host [Strategy] forwards all GET requests to the specified host, caching the response payloads.
 type Host struct {
-	target *url.URL
-	cache  cache.Cache
-	client *http.Client
-	logger *slog.Logger
-	prefix string
+	target  *url.URL
+	cache   cache.Cache
+	client  *http.Client
+	logger  *slog.Logger
+	prefix  string
+	headers map[string]string
 }
 
 var _ Strategy = (*Host)(nil)
@@ -48,11 +50,12 @@ func NewHost(ctx context.Context, config HostConfig, cache cache.Cache, mux Mux)
 	}
 	prefix := "/" + u.Host + u.EscapedPath()
 	h := &Host{
-		target: u,
-		cache:  cache,
-		client: &http.Client{},
-		logger: logging.FromContext(ctx),
-		prefix: prefix,
+		target:  u,
+		cache:   cache,
+		client:  &http.Client{},
+		logger:  logging.FromContext(ctx),
+		prefix:  prefix,
+		headers: config.Headers,
 	}
 
 	hdlr := handler.New(h.client, cache).
@@ -61,7 +64,14 @@ func NewHost(ctx context.Context, config HostConfig, cache cache.Cache, mux Mux)
 		}).
 		Transform(func(r *http.Request) (*http.Request, error) {
 			targetURL := h.buildTargetURL(r)
-			return http.NewRequestWithContext(r.Context(), http.MethodGet, targetURL.String(), nil)
+			req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, targetURL.String(), nil)
+			if err != nil {
+				return nil, errors.Wrap(err, "creating upstream request")
+			}
+			for k, v := range h.headers {
+				req.Header.Set(k, v)
+			}
+			return req, nil
 		})
 
 	mux.Handle("GET "+prefix+"/", hdlr)

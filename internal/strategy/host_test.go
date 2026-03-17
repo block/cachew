@@ -98,6 +98,39 @@ func TestHostInvalidTargetURL(t *testing.T) {
 	assert.Error(t, err)
 }
 
+func TestHostHeaders(t *testing.T) {
+	var receivedHeaders http.Header
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedHeaders = r.Header.Clone()
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer backend.Close()
+
+	_, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelError})
+	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: time.Hour})
+	assert.NoError(t, err)
+	defer memCache.Close()
+
+	mux := http.NewServeMux()
+	_, err = strategy.NewHost(ctx, strategy.HostConfig{
+		Target:  backend.URL,
+		Headers: map[string]string{"Authorization": "Bearer QQ==", "X-Custom": "value"},
+	}, memCache, mux)
+	assert.NoError(t, err)
+
+	u, _ := url.Parse(backend.URL)
+	reqPath := "/" + u.Host + "/test"
+
+	req := httptest.NewRequestWithContext(ctx, http.MethodGet, reqPath, nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "Bearer QQ==", receivedHeaders.Get("Authorization"))
+	assert.Equal(t, "value", receivedHeaders.Get("X-Custom"))
+}
+
 func TestHostString(t *testing.T) {
 	_, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelError})
 	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: time.Hour})

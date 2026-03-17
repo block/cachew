@@ -281,6 +281,79 @@ func TestBuilder(t *testing.T) {
 	}
 }
 
+func TestHeaderForwarding(t *testing.T) {
+	var receivedHeaders http.Header
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedHeaders = r.Header.Clone()
+		_, _ = fmt.Fprint(w, "ok")
+	}))
+	defer upstream.Close()
+
+	c := mustNewMemoryCache()
+	ctx := logging.ContextWithLogger(context.Background(), slog.Default())
+
+	t.Run("ForwardsOriginalHeaders", func(t *testing.T) {
+		h := handler.New(http.DefaultClient, c).
+			CacheKey(func(_ *http.Request) string { return "fwd-test-1" }).
+			Transform(func(r *http.Request) (*http.Request, error) {
+				return http.NewRequestWithContext(r.Context(), http.MethodGet, upstream.URL+"/test", nil)
+			})
+		r := httptest.NewRequest(http.MethodGet, "http://example.com/test", nil)
+		r = r.WithContext(ctx)
+		r.Header.Set("Accept", "application/json")
+		r.Header.Set("X-Custom", "forwarded")
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+
+		assert.Equal(t, http.StatusOK, w.Code)
+		assert.Equal(t, "application/json", receivedHeaders.Get("Accept"))
+		assert.Equal(t, "forwarded", receivedHeaders.Get("X-Custom"))
+	})
+
+	t.Run("StripsHopByHopHeaders", func(t *testing.T) {
+		h := handler.New(http.DefaultClient, c).
+			CacheKey(func(_ *http.Request) string { return "fwd-test-2" }).
+			Transform(func(r *http.Request) (*http.Request, error) {
+				return http.NewRequestWithContext(r.Context(), http.MethodGet, upstream.URL+"/test", nil)
+			})
+		r := httptest.NewRequest(http.MethodGet, "http://example.com/test", nil)
+		r = r.WithContext(ctx)
+		r.Header.Set("Connection", "keep-alive")
+		r.Header.Set("Keep-Alive", "timeout=5")
+		r.Header.Set("Accept", "text/html")
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+
+		assert.Equal(t, http.StatusOK, w.Code)
+		assert.Equal(t, "text/html", receivedHeaders.Get("Accept"))
+		assert.Equal(t, "", receivedHeaders.Get("Connection"))
+		assert.Equal(t, "", receivedHeaders.Get("Keep-Alive"))
+	})
+
+	t.Run("TransformHeadersTakePrecedence", func(t *testing.T) {
+		h := handler.New(http.DefaultClient, c).
+			CacheKey(func(_ *http.Request) string { return "fwd-test-3" }).
+			Transform(func(r *http.Request) (*http.Request, error) {
+				req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, upstream.URL+"/test", nil)
+				if err != nil {
+					return nil, err
+				}
+				req.Header.Set("Authorization", "Bearer override")
+				return req, nil
+			})
+		r := httptest.NewRequest(http.MethodGet, "http://example.com/test", nil)
+		r = r.WithContext(ctx)
+		r.Header.Set("Authorization", "Bearer original")
+		r.Header.Set("X-Custom", "forwarded")
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+
+		assert.Equal(t, http.StatusOK, w.Code)
+		assert.Equal(t, "Bearer override", receivedHeaders.Get("Authorization"))
+		assert.Equal(t, "forwarded", receivedHeaders.Get("X-Custom"))
+	})
+}
+
 func TestHandlerMethodChaining(t *testing.T) {
 	c := mustNewMemoryCache()
 	client := &http.Client{}

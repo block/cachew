@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/alecthomas/errors"
+
+	"github.com/block/cachew/internal/httputil"
 )
 
 const defaultNamespace = "-"
@@ -66,7 +68,7 @@ func (c *Remote) Open(ctx context.Context, key Key) (io.ReadCloser, http.Header,
 	}
 
 	// Filter out HTTP transport headers
-	headers := FilterTransportHeaders(resp.Header)
+	headers := httputil.FilterHeaders(resp.Header, httputil.TransportHeaders...)
 
 	return resp.Body, headers, nil
 }
@@ -98,7 +100,7 @@ func (c *Remote) Stat(ctx context.Context, key Key) (http.Header, error) {
 	}
 
 	// Filter out HTTP transport headers
-	headers := FilterTransportHeaders(resp.Header)
+	headers := httputil.FilterHeaders(resp.Header, httputil.TransportHeaders...)
 
 	return headers, nil
 }
