@@ -154,9 +154,10 @@ func (p *privateFetcher) modulePathToGitURL(modulePath string) string {
 	return "https://" + modulePath
 }
 
-func (p *privateFetcher) verifyCommitExists(ctx context.Context, repo *gitclone.Repository, ref string) error {
+func (p *privateFetcher) verifyCommitExists(ctx context.Context, repo *gitclone.Repository, version string) error {
+	ref := VersionToGitRef(version)
 	if !repo.HasCommit(ctx, ref) {
-		return errors.Errorf("commit %s not found in repository %s", ref, repo.UpstreamURL())
+		return errors.Errorf("commit %s not found in repository %s", version, repo.UpstreamURL())
 	}
 	return nil
 }
@@ -254,7 +255,7 @@ func (p *privateFetcher) getDefaultBranchVersion(ctx context.Context, repo *gitc
 }
 
 func (p *privateFetcher) generateInfo(ctx context.Context, repo *gitclone.Repository, version string) (io.ReadSeekCloser, error) {
-	commitTime, err := p.getCommitTime(ctx, repo, version)
+	commitTime, err := p.getCommitTime(ctx, repo, VersionToGitRef(version))
 	if err != nil {
 		return nil, err
 	}
@@ -275,12 +276,12 @@ func (p *privateFetcher) generateInfo(ctx context.Context, repo *gitclone.Reposi
 func (p *privateFetcher) generateMod(ctx context.Context, repo *gitclone.Repository, modulePath, version string) io.ReadSeekCloser {
 	output, err := gitclone.WithReadLockReturn(repo, func() ([]byte, error) {
 		// #nosec G204 - version and repo.Path() are controlled by this package, not user input
-		cmd := exec.CommandContext(ctx, "git", "-C", repo.Path(), "show", fmt.Sprintf("%s:go.mod", version))
+		cmd := exec.CommandContext(ctx, "git", "-C", repo.Path(), "show", fmt.Sprintf("%s:go.mod", VersionToGitRef(version)))
 		return cmd.CombinedOutput()
 	})
 
 	if err != nil {
-		minimal := fmt.Sprintf("module %s\n\ngo 1.21\n", modulePath)
+		minimal := fmt.Sprintf("module %s\n", modulePath)
 		return newReadSeekCloser(bytes.NewReader([]byte(minimal)))
 	}
 
@@ -295,12 +296,20 @@ func (p *privateFetcher) generateZip(ctx context.Context, repo *gitclone.Reposit
 	defer os.RemoveAll(tmpDir) //nolint:errcheck
 
 	cloneDir := filepath.Join(tmpDir, "repo")
+	gitRef := VersionToGitRef(version)
 
-	// Local clone from the mirror at the requested version — git hardlinks objects by default.
-	// #nosec G204 - repo.Path(), version, and cloneDir are controlled by us
-	cmd := exec.CommandContext(ctx, "git", "clone", "--branch", version, repo.Path(), cloneDir)
+	// Local clone from the mirror at the requested ref — git hardlinks objects by default.
+	// We use --no-checkout then checkout the specific ref so that both tagged versions and
+	// raw commit hashes (from pseudo-versions) work; --branch only accepts branch/tag names.
+	// #nosec G204 - repo.Path() and cloneDir are controlled by us
+	cmd := exec.CommandContext(ctx, "git", "clone", "--no-checkout", repo.Path(), cloneDir)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return nil, errors.Wrapf(err, "git clone: %s", string(output))
+	}
+	// #nosec G204 - cloneDir and gitRef are controlled by us
+	cmd = exec.CommandContext(ctx, "git", "-C", cloneDir, "checkout", gitRef)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return nil, errors.Wrapf(err, "git checkout %s: %s", gitRef, string(output))
 	}
 
 	var buf bytes.Buffer
@@ -322,4 +331,18 @@ func newReadSeekCloser(r *bytes.Reader) io.ReadSeekCloser {
 
 func (r *readSeekCloser) Close() error {
 	return nil
+}
+
+// VersionToGitRef converts a Go module version string to a git ref. For pseudo-versions
+// (e.g. v0.0.0-20160603174536-ad42235f7e24), it extracts the commit hash suffix. For
+// all other versions (tagged releases, pre-releases, +incompatible), it returns the
+// version unchanged.
+func VersionToGitRef(version string) string {
+	if module.IsPseudoVersion(version) {
+		rev, err := module.PseudoVersionRev(version)
+		if err == nil {
+			return rev
+		}
+	}
+	return version
 }
