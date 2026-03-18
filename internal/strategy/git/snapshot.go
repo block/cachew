@@ -102,7 +102,7 @@ func (s *Strategy) generateAndUploadSnapshot(ctx context.Context, repo *gitclone
 	}
 
 	cacheKey := snapshotCacheKey(upstream)
-	excludePatterns := []string{"*.lock"}
+	excludePatterns := []string{"./.git/*.lock"}
 
 	err = snapshot.Create(ctx, s.cache, cacheKey, snapshotDir, 0, excludePatterns, s.config.ZstdThreads)
 
@@ -303,7 +303,7 @@ func (s *Strategy) streamSnapshotDirect(w http.ResponseWriter, r *http.Request, 
 	w.Header().Set("Content-Type", "application/zstd")
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filepath.Base(repoDir)+".tar.zst"))
 
-	excludePatterns := []string{"*.lock"}
+	excludePatterns := []string{"./.git/*.lock"}
 	if err := snapshot.StreamTo(ctx, w, repoDir, excludePatterns, s.config.ZstdThreads); err != nil {
 		logger.ErrorContext(ctx, "Failed to stream snapshot to client", "upstream", upstreamURL, "error", err)
 	}
@@ -369,7 +369,7 @@ func (s *Strategy) writeSnapshotSpool(w http.ResponseWriter, r *http.Request, re
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filepath.Base(repoDir)+".tar.zst"))
 
 	tw := NewSpoolTeeWriter(w, spool)
-	excludePatterns := []string{"*.lock"}
+	excludePatterns := []string{"./.git/*.lock"}
 	if err := snapshot.StreamTo(ctx, tw, repoDir, excludePatterns, s.config.ZstdThreads); err != nil {
 		logger.ErrorContext(ctx, "Failed to stream snapshot to client", "upstream", upstreamURL, "error", err)
 		spool.MarkError(err)

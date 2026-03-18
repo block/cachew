@@ -134,6 +134,13 @@ func TestSnapshotOnDemandGenerationViaHTTP(t *testing.T) {
 // createTestMirrorRepo creates a bare mirror-style repo at mirrorPath with one commit.
 func createTestMirrorRepo(t *testing.T, mirrorPath string) {
 	t.Helper()
+	createTestMirrorRepoWithFiles(t, mirrorPath, map[string]string{
+		"hello.txt": "hello\n",
+	})
+}
+
+func createTestMirrorRepoWithFiles(t *testing.T, mirrorPath string, files map[string]string) {
+	t.Helper()
 	tmpWork := t.TempDir()
 
 	for _, args := range [][]string{
@@ -146,7 +153,11 @@ func createTestMirrorRepo(t *testing.T, mirrorPath string) {
 		assert.NoError(t, err, string(output))
 	}
 
-	assert.NoError(t, os.WriteFile(filepath.Join(tmpWork, "hello.txt"), []byte("hello\n"), 0o644))
+	for name, content := range files {
+		path := filepath.Join(tmpWork, name)
+		assert.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+		assert.NoError(t, os.WriteFile(path, []byte(content), 0o644))
+	}
 
 	for _, args := range [][]string{
 		{"-C", tmpWork, "add", "."},
@@ -222,6 +233,54 @@ func TestSnapshotGenerationViaLocalClone(t *testing.T) {
 	snapshotWorkDir := filepath.Join(mirrorRoot, ".snapshots", "github.com", "org", "repo")
 	_, err = os.Stat(snapshotWorkDir)
 	assert.True(t, os.IsNotExist(err))
+}
+
+func TestSnapshotGenerationIncludesTrackedLockFiles(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not found in PATH")
+	}
+
+	_, ctx := logging.Configure(context.Background(), logging.Config{})
+	tmpDir := t.TempDir()
+	mirrorRoot := filepath.Join(tmpDir, "mirrors")
+	upstreamURL := "https://github.com/org/repo"
+
+	mirrorPath := filepath.Join(mirrorRoot, "github.com", "org", "repo")
+	createTestMirrorRepoWithFiles(t, mirrorPath, map[string]string{
+		"hello.txt":           "hello\n",
+		"package-lock.json":   "{\n  \"name\": \"repo\"\n}\n",
+		"subdir/Gemfile.lock": "GEM\n",
+	})
+
+	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: time.Hour})
+	assert.NoError(t, err)
+	mux := newTestMux()
+
+	cm := gitclone.NewManagerProvider(ctx, gitclone.Config{MirrorRoot: mirrorRoot}, nil)
+	s, err := git.New(ctx, git.Config{}, newTestScheduler(ctx, t), memCache, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
+	assert.NoError(t, err)
+
+	manager, err := cm()
+	assert.NoError(t, err)
+	repo, err := manager.GetOrCreate(ctx, upstreamURL)
+	assert.NoError(t, err)
+	assert.Equal(t, gitclone.StateReady, repo.State())
+
+	err = s.GenerateAndUploadSnapshot(ctx, repo)
+	assert.NoError(t, err)
+
+	cacheKey := cache.NewKey(upstreamURL + ".snapshot")
+	restoreDir := filepath.Join(tmpDir, "restored")
+	err = snapshot.Restore(ctx, memCache, cacheKey, restoreDir, 0)
+	assert.NoError(t, err)
+
+	data, err := os.ReadFile(filepath.Join(restoreDir, "package-lock.json"))
+	assert.NoError(t, err)
+	assert.Equal(t, "{\n  \"name\": \"repo\"\n}\n", string(data))
+
+	data, err = os.ReadFile(filepath.Join(restoreDir, "subdir", "Gemfile.lock"))
+	assert.NoError(t, err)
+	assert.Equal(t, "GEM\n", string(data))
 }
 
 func TestMirrorSnapshotRestoreDirectly(t *testing.T) {

@@ -88,6 +88,55 @@ func TestCreateWithExcludePatterns(t *testing.T) {
 	assert.IsError(t, err, os.ErrNotExist)
 }
 
+func TestCreateExcludesOnlyGitLockFiles(t *testing.T) {
+	ctx := logging.ContextWithLogger(context.Background(), slog.Default())
+	mem, err := cache.NewMemory(ctx, cache.MemoryConfig{LimitMB: 100, MaxTTL: time.Hour})
+	assert.NoError(t, err)
+	defer mem.Close()
+	key := cache.Key{1, 2, 3}
+
+	srcDir := t.TempDir()
+	// Tracked lock files that should be included.
+	assert.NoError(t, os.WriteFile(filepath.Join(srcDir, "package-lock.json"), []byte("npm"), 0o644))
+	assert.NoError(t, os.WriteFile(filepath.Join(srcDir, "yarn.lock"), []byte("yarn"), 0o644))
+	assert.NoError(t, os.MkdirAll(filepath.Join(srcDir, "subdir"), 0o755))
+	assert.NoError(t, os.WriteFile(filepath.Join(srcDir, "subdir", "Gemfile.lock"), []byte("ruby"), 0o644))
+
+	// Git internal lock files that should be excluded.
+	assert.NoError(t, os.MkdirAll(filepath.Join(srcDir, ".git"), 0o755))
+	assert.NoError(t, os.WriteFile(filepath.Join(srcDir, ".git", "index.lock"), []byte("git"), 0o644))
+	assert.NoError(t, os.WriteFile(filepath.Join(srcDir, ".git", "HEAD"), []byte("ref: refs/heads/main"), 0o644))
+
+	err = snapshot.Create(ctx, mem, key, srcDir, time.Hour, []string{"./.git/*.lock"}, 0)
+	assert.NoError(t, err)
+
+	dstDir := t.TempDir()
+	err = snapshot.Restore(ctx, mem, key, dstDir, 0)
+	assert.NoError(t, err)
+
+	// Tracked lock files must be present.
+	content, err := os.ReadFile(filepath.Join(dstDir, "package-lock.json"))
+	assert.NoError(t, err)
+	assert.Equal(t, "npm", string(content))
+
+	content, err = os.ReadFile(filepath.Join(dstDir, "yarn.lock"))
+	assert.NoError(t, err)
+	assert.Equal(t, "yarn", string(content))
+
+	content, err = os.ReadFile(filepath.Join(dstDir, "subdir", "Gemfile.lock"))
+	assert.NoError(t, err)
+	assert.Equal(t, "ruby", string(content))
+
+	// Git internal lock file must be excluded.
+	_, err = os.Stat(filepath.Join(dstDir, ".git", "index.lock"))
+	assert.IsError(t, err, os.ErrNotExist)
+
+	// Other .git files should still be present.
+	content, err = os.ReadFile(filepath.Join(dstDir, ".git", "HEAD"))
+	assert.NoError(t, err)
+	assert.Equal(t, "ref: refs/heads/main", string(content))
+}
+
 func TestCreatePreservesSymlinks(t *testing.T) {
 	ctx := logging.ContextWithLogger(context.Background(), slog.Default())
 	mem, err := cache.NewMemory(ctx, cache.MemoryConfig{LimitMB: 100, MaxTTL: time.Hour})
