@@ -9,6 +9,17 @@ log {
   level = "debug"
 }
 
+opa {
+  policy = <<EOF
+  package cachew.authz
+  default allow := false
+  allow if input.method == "GET"
+  allow if input.method == "HEAD"
+  allow if startswith(input.remote_addr, "127.0.0.1:")
+
+  EOF
+}
+
 git-clone {}
 
 # github-app {

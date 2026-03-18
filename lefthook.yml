@@ -4,7 +4,7 @@ output:
   - failure
 pre-commit:
   commands:
-    format:
+    fmt:
       run: just fmt
       stage_fixed: true
 pre-push:

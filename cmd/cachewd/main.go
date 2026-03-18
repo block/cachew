@@ -27,6 +27,7 @@ import (
 	"github.com/block/cachew/internal/jobscheduler"
 	"github.com/block/cachew/internal/logging"
 	"github.com/block/cachew/internal/metrics"
+	"github.com/block/cachew/internal/opa"
 	"github.com/block/cachew/internal/reaper"
 	"github.com/block/cachew/internal/strategy"
 	"github.com/block/cachew/internal/strategy/git"
@@ -42,6 +43,7 @@ type GlobalConfig struct {
 	MetricsConfig    metrics.Config      `hcl:"metrics,block"`
 	GitCloneConfig   gitclone.Config     `hcl:"git-clone,block"`
 	GithubAppConfigs []githubapp.Config  `hcl:"github-app,block,optional"`
+	OPAConfig        opa.Config          `hcl:"opa,block"`
 }
 
 type CLI struct {
@@ -102,7 +104,9 @@ func main() {
 
 	logger.InfoContext(ctx, "Starting cachewd", "bind", globalConfig.Bind)
 
-	server := newServer(ctx, mux, globalConfig.Bind, globalConfig.MetricsConfig)
+	server, err := newServer(ctx, mux, globalConfig.Bind, globalConfig.MetricsConfig, globalConfig.OPAConfig)
+	kctx.FatalIfErrorf(err)
+
 	err = server.ListenAndServe()
 	kctx.FatalIfErrorf(err)
 }
@@ -191,14 +195,17 @@ func extractPathPrefix(path string) string {
 	return prefix
 }
 
-func newServer(ctx context.Context, muxHandler http.Handler, bind string, metricsConfig metrics.Config) *http.Server {
-	logger := logging.FromContext(ctx)
-
+func newServer(ctx context.Context, muxHandler http.Handler, bind string, metricsConfig metrics.Config, opaConfig opa.Config) (*http.Server, error) {
 	var handler http.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		labeler, _ := otelhttp.LabelerFromContext(r.Context())
 		labeler.Add(attribute.String("cachew.http.path.prefix", extractPathPrefix(r.URL.Path)))
 		muxHandler.ServeHTTP(w, r)
 	})
+
+	handler, err := opa.Middleware(ctx, opaConfig, handler)
+	if err != nil {
+		return nil, errors.Errorf("initialise OPA middleware: %w", err)
+	}
 
 	// Add standard otelhttp middleware
 	handler = otelhttp.NewMiddleware(metricsConfig.ServiceName,
@@ -208,6 +215,7 @@ func newServer(ctx context.Context, muxHandler http.Handler, bind string, metric
 
 	handler = httputil.LoggingMiddleware(handler)
 
+	logger := logging.FromContext(ctx)
 	return &http.Server{
 		Addr:              bind,
 		Handler:           handler,
@@ -220,7 +228,7 @@ func newServer(ctx context.Context, muxHandler http.Handler, bind string, metric
 		ConnContext: func(ctx context.Context, c net.Conn) context.Context {
 			return logging.ContextWithLogger(ctx, logger.With("client", c.RemoteAddr().String()))
 		},
-	}
+	}, nil
 }
 
 // loadGlobalConfig unmarshals the global config from HCL, using a two-pass
