@@ -21,10 +21,11 @@ import (
 type CLI struct {
 	LoggingConfig logging.Config `embed:"" prefix:"log-"`
 
-	URL      string `help:"Remote cache server URL." default:"http://127.0.0.1:8080"`
-	Platform bool   `help:"Prefix keys with platform ($${os}-$${arch}-)."`
-	Daily    bool   `help:"Prefix keys with date ($${YYYY}-$${MM}-$${DD}-). Mutually exclusive with --hourly." xor:"timeprefix"`
-	Hourly   bool   `help:"Prefix keys with date and hour ($${YYYY}-$${MM}-$${DD}-$${HH}-). Mutually exclusive with --daily." xor:"timeprefix"`
+	URL           string `help:"Remote cache server URL." default:"http://127.0.0.1:8080"`
+	Authorization string `help:"Authorization header value (e.g. 'Bearer <token>')."`
+	Platform      bool   `help:"Prefix keys with platform ($${os}-$${arch}-)."`
+	Daily         bool   `help:"Prefix keys with date ($${YYYY}-$${MM}-$${DD}-). Mutually exclusive with --hourly." xor:"timeprefix"`
+	Hourly        bool   `help:"Prefix keys with date and hour ($${YYYY}-$${MM}-$${DD}-$${HH}-). Mutually exclusive with --daily." xor:"timeprefix"`
 
 	Get        GetCmd        `cmd:"" help:"Download object from cache." group:"Operations:"`
 	Stat       StatCmd       `cmd:"" help:"Show metadata for cached object." group:"Operations:"`
@@ -42,7 +43,13 @@ func main() {
 	ctx := context.Background()
 	_, ctx = logging.Configure(ctx, cli.LoggingConfig)
 
-	remote := cache.NewRemote(cli.URL)
+	var headerFunc cache.HeaderFunc
+	if cli.Authorization != "" {
+		headerFunc = func() http.Header {
+			return http.Header{"Authorization": {cli.Authorization}}
+		}
+	}
+	remote := cache.NewRemote(cli.URL, headerFunc)
 	defer remote.Close()
 
 	kctx.BindTo(ctx, (*context.Context)(nil))

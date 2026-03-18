@@ -26,16 +26,39 @@ type Remote struct {
 
 var _ Cache = (*Remote)(nil)
 
-// NewRemote creates a new remote cache client.
-func NewRemote(baseURL string) *Remote {
+// HeaderFunc returns headers to attach to each outgoing request.
+type HeaderFunc func() http.Header
+
+// NewRemote creates a new remote cache client. If headerFunc is non-nil,
+// its returned headers are added to every outgoing request.
+func NewRemote(baseURL string, headerFunc HeaderFunc) *Remote {
 	transport := http.DefaultTransport.(*http.Transport).Clone() //nolint:errcheck
 	transport.MaxIdleConns = 100
 	transport.MaxIdleConnsPerHost = 100
 
+	var rt http.RoundTripper = transport
+	if headerFunc != nil {
+		rt = &headerTransport{base: transport, headerFunc: headerFunc}
+	}
+
 	return &Remote{
 		baseURL: baseURL + "/api/v1",
-		client:  &http.Client{Transport: transport},
+		client:  &http.Client{Transport: rt},
 	}
+}
+
+type headerTransport struct {
+	base       http.RoundTripper
+	headerFunc HeaderFunc
+}
+
+func (t *headerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	for key, values := range t.headerFunc() {
+		for _, value := range values {
+			req.Header.Add(key, value)
+		}
+	}
+	return t.base.RoundTrip(req) //nolint:wrapcheck
 }
 
 func (c *Remote) String() string { return "remote:" + c.baseURL }
