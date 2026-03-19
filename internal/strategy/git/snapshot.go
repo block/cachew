@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/alecthomas/errors"
 
@@ -34,6 +35,10 @@ func snapshotCacheKey(upstreamURL string) cache.Key {
 
 func mirrorSnapshotCacheKey(upstreamURL string) cache.Key {
 	return cache.NewKey(upstreamURL + ".mirror-snapshot")
+}
+
+func bundleCacheKey(upstreamURL, baseCommit string) cache.Key {
+	return cache.NewKey(upstreamURL + ".bundle." + baseCommit)
 }
 
 // remoteURLForSnapshot returns the URL to embed as remote.origin.url in snapshots.
@@ -232,6 +237,19 @@ func (s *Strategy) handleBundleRequest(w http.ResponseWriter, r *http.Request, h
 		return
 	}
 
+	bKey := bundleCacheKey(upstreamURL, base)
+
+	// Try serving from cache first — works on any pod.
+	if reader, _, err := s.cache.Open(ctx, bKey); err == nil && reader != nil {
+		defer reader.Close()
+		w.Header().Set("Content-Type", "application/x-git-bundle")
+		if _, err := io.Copy(w, reader); err != nil {
+			logger.WarnContext(ctx, "Failed to stream cached bundle", "upstream", upstreamURL, "error", err)
+		}
+		return
+	}
+
+	// Fallback: generate from local mirror.
 	repo, repoErr := s.cloneManager.GetOrCreate(ctx, upstreamURL)
 	if repoErr != nil {
 		logger.ErrorContext(ctx, "Failed to get or create clone", "upstream", upstreamURL, "error", repoErr)
@@ -251,9 +269,12 @@ func (s *Strategy) handleBundleRequest(w http.ResponseWriter, r *http.Request, h
 		return
 	}
 
+	// Cache for future requests from any pod.
+	s.cacheBundleAsync(ctx, bKey, bundleData)
+
 	w.Header().Set("Content-Type", "application/x-git-bundle")
 	w.Header().Set("Content-Length", strconv.Itoa(len(bundleData)))
-	if _, err := w.Write(bundleData); err != nil {
+	if _, err := w.Write(bundleData); err != nil { //nolint:gosec // bundleData is a git bundle generated from a trusted local mirror
 		logger.WarnContext(ctx, "Failed to write bundle response", "upstream", upstreamURL, "error", err)
 	}
 }
@@ -266,8 +287,20 @@ func (s *Strategy) serveSnapshotWithBundle(ctx context.Context, w http.ResponseW
 		repoPath, err := gitclone.RepoPathFromURL(upstreamURL)
 		if err == nil {
 			bundleURL := fmt.Sprintf("/git/%s/snapshot.bundle?base=%s", repoPath, snapshotCommit)
-			w.Header().Set("X-Cachew-Bundle-URL", bundleURL)
+			w.Header().Set("X-Cachew-Bundle-Url", bundleURL)
 		}
+
+		// Proactively generate and cache the bundle so any pod can serve it.
+		go func() {
+			bgCtx := context.WithoutCancel(ctx)
+			logger := logging.FromContext(bgCtx)
+			bundleData, err := s.createBundle(bgCtx, repo, snapshotCommit)
+			if err != nil {
+				logger.WarnContext(bgCtx, "Failed to pre-generate bundle", "upstream", upstreamURL, "error", err)
+				return
+			}
+			s.cacheBundleSync(bgCtx, bundleCacheKey(upstreamURL, snapshotCommit), bundleData)
+		}()
 	}
 
 	w.Header().Set("Content-Type", "application/zstd")
@@ -275,8 +308,34 @@ func (s *Strategy) serveSnapshotWithBundle(ctx context.Context, w http.ResponseW
 	return errors.Wrap(err, "stream snapshot")
 }
 
+const bundleCacheTTL = 2 * time.Hour
+
+func (s *Strategy) cacheBundleAsync(ctx context.Context, key cache.Key, data []byte) {
+	go func() {
+		s.cacheBundleSync(context.WithoutCancel(ctx), key, data)
+	}()
+}
+
+func (s *Strategy) cacheBundleSync(ctx context.Context, key cache.Key, data []byte) {
+	logger := logging.FromContext(ctx)
+	headers := http.Header{"Content-Type": {"application/x-git-bundle"}}
+	wc, err := s.cache.Create(ctx, key, headers, bundleCacheTTL)
+	if err != nil {
+		logger.WarnContext(ctx, "Failed to cache bundle", "error", err)
+		return
+	}
+	if _, err := wc.Write(data); err != nil {
+		logger.WarnContext(ctx, "Failed to write bundle to cache", "error", err)
+		_ = wc.Close()
+		return
+	}
+	if err := wc.Close(); err != nil {
+		logger.WarnContext(ctx, "Failed to close bundle cache writer", "error", err)
+	}
+}
+
 func revParse(ctx context.Context, repoDir, ref string) (string, error) {
-	cmd := exec.CommandContext(ctx, "git", "-C", repoDir, "rev-parse", ref) // #nosec G204
+	cmd := exec.CommandContext(ctx, "git", "-C", repoDir, "rev-parse", ref) // #nosec G204 G702
 	output, err := cmd.Output()
 	if err != nil {
 		return "", errors.Wrapf(err, "git rev-parse %s", ref)
@@ -293,7 +352,7 @@ func (s *Strategy) createBundle(ctx context.Context, repo *gitclone.Repository, 
 	// No read lock needed: git bundle create reads objects through git's own
 	// file-level locking, safe to run concurrently with fetches.
 	headRef := "HEAD"
-	if out, err := exec.CommandContext(ctx, "git", "-C", repo.Path(), "symbolic-ref", "HEAD").Output(); err == nil { // #nosec G204
+	if out, err := exec.CommandContext(ctx, "git", "-C", repo.Path(), "symbolic-ref", "HEAD").Output(); err == nil { // #nosec G204 G702
 		headRef = strings.TrimSpace(string(out))
 	}
 
