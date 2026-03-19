@@ -219,6 +219,11 @@ func (s *Strategy) handleRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if strings.HasSuffix(pathValue, "/snapshot.bundle") {
+		s.handleBundleRequest(w, r, host, pathValue)
+		return
+	}
+
 	service := r.URL.Query().Get("service")
 	isReceivePack := service == "git-receive-pack" || strings.HasSuffix(pathValue, "/git-receive-pack")
 
