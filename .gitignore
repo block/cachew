@@ -12,3 +12,5 @@ block-test.hcl
 # Binaries
 /cachew
 /cachewd
+cachew-playpen-overrides.hcl
+.run/playpen.cachew.run.xml

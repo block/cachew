@@ -1,0 +1,13 @@
+language: go
+hooks-version: 2
+environment: BLOX
+build: |
+  TARGET_ARCH="${PLAYPEN_ARCHITECTURE}"
+  echo "Building cachewd for linux/${TARGET_ARCH}"
+  just build linux ${TARGET_ARCH}
+  mkdir -p ${PLAYPEN_LOCAL_TMP_DIR}/bin
+  cp dist/cachewd-linux-${TARGET_ARCH} ${PLAYPEN_LOCAL_TMP_DIR}/bin/${PLAYPEN_LAUNCHABLE_NAME}
+  chmod +x ${PLAYPEN_LOCAL_TMP_DIR}/bin/${PLAYPEN_LAUNCHABLE_NAME}
+  if [ -f cachew-playpen-overrides.hcl ]; then
+    cp cachew-playpen-overrides.hcl ${PLAYPEN_LOCAL_TMP_DIR}/
+  fi
