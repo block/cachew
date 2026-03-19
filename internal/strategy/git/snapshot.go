@@ -219,60 +219,60 @@ func (s *Strategy) handleSnapshotRequest(w http.ResponseWriter, r *http.Request,
 	}
 }
 
-// serveSnapshotWithBundle serves a cached snapshot, optionally appending a
-// delta bundle covering commits between the snapshot's HEAD and the mirror's
-// current HEAD. When no bundle is needed (common case), the snapshot is
-// streamed directly without buffering.
-func (s *Strategy) serveSnapshotWithBundle(ctx context.Context, w http.ResponseWriter, reader io.ReadCloser, headers http.Header, repo *gitclone.Repository, upstreamURL string) error {
+func (s *Strategy) handleBundleRequest(w http.ResponseWriter, r *http.Request, host, pathValue string) {
+	ctx := r.Context()
 	logger := logging.FromContext(ctx)
 
+	repoPath := ExtractRepoPath(strings.TrimSuffix(pathValue, "/snapshot.bundle"))
+	upstreamURL := "https://" + host + "/" + repoPath
+
+	base := r.URL.Query().Get("base")
+	if base == "" {
+		http.Error(w, "missing base query parameter", http.StatusBadRequest)
+		return
+	}
+
+	repo, repoErr := s.cloneManager.GetOrCreate(ctx, upstreamURL)
+	if repoErr != nil {
+		logger.ErrorContext(ctx, "Failed to get or create clone", "upstream", upstreamURL, "error", repoErr)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+	if cloneErr := s.ensureCloneReady(ctx, repo); cloneErr != nil {
+		logger.ErrorContext(ctx, "Clone unavailable for bundle", "upstream", upstreamURL, "error", cloneErr)
+		http.Error(w, "Repository unavailable", http.StatusServiceUnavailable)
+		return
+	}
+
+	bundleData, err := s.createBundle(ctx, repo, base)
+	if err != nil {
+		logger.WarnContext(ctx, "Failed to create bundle", "upstream", upstreamURL, "base", base, "error", err)
+		http.Error(w, "Bundle not available", http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/x-git-bundle")
+	w.Header().Set("Content-Length", strconv.Itoa(len(bundleData)))
+	if _, err := w.Write(bundleData); err != nil {
+		logger.WarnContext(ctx, "Failed to write bundle response", "upstream", upstreamURL, "error", err)
+	}
+}
+
+func (s *Strategy) serveSnapshotWithBundle(ctx context.Context, w http.ResponseWriter, reader io.ReadCloser, headers http.Header, repo *gitclone.Repository, upstreamURL string) error {
 	snapshotCommit := headers.Get("X-Cachew-Snapshot-Commit")
 	mirrorHead := s.getMirrorHead(ctx, repo)
 
-	var bundleData []byte
 	if snapshotCommit != "" && mirrorHead != "" && snapshotCommit != mirrorHead {
-		var err error
-		bundleData, err = s.createBundle(ctx, repo, snapshotCommit)
-		if err != nil {
-			logger.WarnContext(ctx, "Failed to create delta bundle, serving snapshot only",
-				"upstream", upstreamURL, "error", err)
+		repoPath, err := gitclone.RepoPathFromURL(upstreamURL)
+		if err == nil {
+			bundleURL := fmt.Sprintf("/git/%s/snapshot.bundle?base=%s", repoPath, snapshotCommit)
+			w.Header().Set("X-Cachew-Bundle-URL", bundleURL)
 		}
 	}
 
-	if len(bundleData) == 0 {
-		w.Header().Set("Content-Type", "application/zstd")
-		_, err := io.Copy(w, reader)
-		return errors.Wrap(err, "stream snapshot")
-	}
-
-	// Determine snapshot size so the client can split snapshot from bundle.
-	// Prefer Content-Length from cache headers (works for S3), fall back to
-	// Stat/Seek on the reader (works for disk cache).
-	var snapshotSize int64
-	if cl := headers.Get("Content-Length"); cl != "" {
-		snapshotSize, _ = strconv.ParseInt(cl, 10, 64) //nolint:errcheck // best-effort; zero triggers readerSize fallback
-	}
-	if snapshotSize == 0 {
-		var err error
-		snapshotSize, err = readerSize(reader)
-		if err != nil {
-			logger.WarnContext(ctx, "Cannot determine snapshot size, serving without bundle",
-				"upstream", upstreamURL, "error", err)
-			w.Header().Set("Content-Type", "application/zstd")
-			_, err := io.Copy(w, reader)
-			return errors.Wrap(err, "stream snapshot")
-		}
-	}
-
-	w.Header().Set("Content-Type", "application/x-cachew-snapshot")
-	w.Header().Set("X-Cachew-Snapshot-Size", strconv.FormatInt(snapshotSize, 10))
-	if _, err := io.Copy(w, reader); err != nil {
-		return errors.Wrap(err, "write snapshot portion")
-	}
-	if _, err := w.Write(bundleData); err != nil { //nolint:gosec // bundleData is a git bundle from a trusted mirror
-		return errors.Wrap(err, "write bundle")
-	}
-	return nil
+	w.Header().Set("Content-Type", "application/zstd")
+	_, err := io.Copy(w, reader)
+	return errors.Wrap(err, "stream snapshot")
 }
 
 func revParse(ctx context.Context, repoDir, ref string) (string, error) {
@@ -284,71 +284,40 @@ func revParse(ctx context.Context, repoDir, ref string) (string, error) {
 	return strings.TrimSpace(string(output)), nil
 }
 
-// readerSize returns the size of the underlying content without consuming it.
-// Works for *os.File (disk cache) and io.Seeker implementations.
-func readerSize(r io.Reader) (int64, error) {
-	if f, ok := r.(interface{ Stat() (os.FileInfo, error) }); ok {
-		info, err := f.Stat()
-		if err != nil {
-			return 0, errors.Wrap(err, "stat reader")
-		}
-		return info.Size(), nil
-	}
-	if s, ok := r.(io.Seeker); ok {
-		cur, err := s.Seek(0, io.SeekCurrent)
-		if err != nil {
-			return 0, errors.Wrap(err, "seek current")
-		}
-		end, err := s.Seek(0, io.SeekEnd)
-		if err != nil {
-			return 0, errors.Wrap(err, "seek end")
-		}
-		if _, err := s.Seek(cur, io.SeekStart); err != nil {
-			return 0, errors.Wrap(err, "seek restore")
-		}
-		return end - cur, nil
-	}
-	return 0, errors.New("reader does not support size queries")
-}
-
 func (s *Strategy) getMirrorHead(ctx context.Context, repo *gitclone.Repository) string {
-	head, _ := gitclone.WithReadLockReturn(repo, func() (string, error) { //nolint:errcheck // best-effort; empty string signals failure to callers
-		return revParse(ctx, repo.Path(), "HEAD")
-	})
+	head, _ := revParse(ctx, repo.Path(), "HEAD") //nolint:errcheck // best-effort; empty string signals failure to callers
 	return head
 }
 
 func (s *Strategy) createBundle(ctx context.Context, repo *gitclone.Repository, baseCommit string) ([]byte, error) {
-	return gitclone.WithReadLockReturn(repo, func() ([]byte, error) { //nolint:wrapcheck // error is already wrapped inside the closure
-		// Resolve HEAD to its concrete branch ref (e.g. refs/heads/main) to
-		// avoid ambiguity when a branch named "HEAD" exists in the mirror.
-		headRef := "HEAD"
-		if out, err := exec.CommandContext(ctx, "git", "-C", repo.Path(), "symbolic-ref", "HEAD").Output(); err == nil { // #nosec G204
-			headRef = strings.TrimSpace(string(out))
-		}
+	// No read lock needed: git bundle create reads objects through git's own
+	// file-level locking, safe to run concurrently with fetches.
+	headRef := "HEAD"
+	if out, err := exec.CommandContext(ctx, "git", "-C", repo.Path(), "symbolic-ref", "HEAD").Output(); err == nil { // #nosec G204
+		headRef = strings.TrimSpace(string(out))
+	}
 
-		tmpFile, err := os.CreateTemp("", "cachew-bundle-*.bundle")
-		if err != nil {
-			return nil, errors.Wrap(err, "create bundle temp file")
-		}
-		bundlePath := tmpFile.Name()
-		defer os.Remove(bundlePath) //nolint:errcheck
-		if err := tmpFile.Close(); err != nil {
-			return nil, errors.Wrap(err, "close bundle temp file")
-		}
+	tmpFile, err := os.CreateTemp("", "cachew-bundle-*.bundle")
+	if err != nil {
+		return nil, errors.Wrap(err, "create bundle temp file")
+	}
+	bundlePath := tmpFile.Name()
+	defer os.Remove(bundlePath) //nolint:errcheck
+	if err := tmpFile.Close(); err != nil {
+		return nil, errors.Wrap(err, "close bundle temp file")
+	}
 
-		cmd := exec.CommandContext(ctx, "git", "-C", repo.Path(), "bundle", "create", //nolint:gosec // baseCommit is a SHA string from rev-parse
-			bundlePath, headRef, "^"+baseCommit)
-		if output, err := cmd.CombinedOutput(); err != nil {
-			return nil, errors.Wrapf(err, "git bundle create: %s", string(output))
-		}
+	cmd := exec.CommandContext(ctx, "git", "-C", repo.Path(), "bundle", "create", //nolint:gosec // baseCommit is a SHA string from rev-parse
+		bundlePath, headRef, "^"+baseCommit)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return nil, errors.Wrapf(err, "git bundle create: %s", string(output))
+	}
 
-		data, err := os.ReadFile(bundlePath) //nolint:gosec // bundlePath is a temp file we created
-		if err != nil {
-			return nil, errors.Wrap(err, "read bundle file")
-		}
-		return data, nil
-	})
+	data, err := os.ReadFile(bundlePath) //nolint:gosec // bundlePath is a temp file we created
+	if err != nil {
+		return nil, errors.Wrap(err, "read bundle file")
+	}
+	return data, nil
 }
 
 // serveSnapshotWithSpool handles snapshot cache misses using the spool pattern.
