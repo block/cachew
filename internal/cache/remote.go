@@ -29,9 +29,10 @@ var _ Cache = (*Remote)(nil)
 // HeaderFunc returns headers to attach to each outgoing request.
 type HeaderFunc func() http.Header
 
-// NewRemote creates a new remote cache client. If headerFunc is non-nil,
-// its returned headers are added to every outgoing request.
-func NewRemote(baseURL string, headerFunc HeaderFunc) *Remote {
+// NewHTTPClient creates an *http.Client that attaches headerFunc headers
+// to every outgoing request. Useful for callers that need to talk to
+// non-API endpoints (e.g. /git/) with the same auth as the cache client.
+func NewHTTPClient(headerFunc HeaderFunc) *http.Client {
 	transport := http.DefaultTransport.(*http.Transport).Clone() //nolint:errcheck
 	transport.MaxIdleConns = 100
 	transport.MaxIdleConnsPerHost = 100
@@ -40,10 +41,15 @@ func NewRemote(baseURL string, headerFunc HeaderFunc) *Remote {
 	if headerFunc != nil {
 		rt = &headerTransport{base: transport, headerFunc: headerFunc}
 	}
+	return &http.Client{Transport: rt}
+}
 
+// NewRemote creates a new remote cache client. If headerFunc is non-nil,
+// its returned headers are added to every outgoing request.
+func NewRemote(baseURL string, headerFunc HeaderFunc) *Remote {
 	return &Remote{
 		baseURL: baseURL + "/api/v1",
-		client:  &http.Client{Transport: rt},
+		client:  NewHTTPClient(headerFunc),
 	}
 }
 

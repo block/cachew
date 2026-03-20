@@ -166,17 +166,23 @@ func StreamTo(ctx context.Context, w io.Writer, directory string, excludePattern
 // The operation is fully streaming - no temporary files are created.
 // threads controls zstd parallelism; 0 uses all available CPU cores.
 func Restore(ctx context.Context, remote cache.Cache, key cache.Key, directory string, threads int) error {
-	if threads <= 0 {
-		threads = runtime.NumCPU()
-	}
-
 	rc, _, err := remote.Open(ctx, key)
 	if err != nil {
 		return errors.Wrap(err, "failed to open object")
 	}
 	defer rc.Close()
 
-	// Create target directory if it doesn't exist
+	return Extract(ctx, rc, directory, threads)
+}
+
+// Extract decompresses a zstd+tar stream into directory, preserving all file
+// permissions, ownership, and symlinks. threads controls zstd parallelism;
+// 0 uses all available CPU cores.
+func Extract(ctx context.Context, r io.Reader, directory string, threads int) error {
+	if threads <= 0 {
+		threads = runtime.NumCPU()
+	}
+
 	if err := os.MkdirAll(directory, 0o750); err != nil {
 		return errors.Wrap(err, "failed to create target directory")
 	}
@@ -184,7 +190,7 @@ func Restore(ctx context.Context, remote cache.Cache, key cache.Key, directory s
 	zstdCmd := exec.CommandContext(ctx, "zstd", "-dc", fmt.Sprintf("-T%d", threads)) //nolint:gosec // threads is a validated integer, not user input
 	tarCmd := exec.CommandContext(ctx, "tar", "-xpf", "-", "-C", directory)
 
-	zstdCmd.Stdin = rc
+	zstdCmd.Stdin = r
 	zstdStdout, err := zstdCmd.StdoutPipe()
 	if err != nil {
 		return errors.Wrap(err, "failed to create zstd stdout pipe")
