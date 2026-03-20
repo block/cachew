@@ -211,7 +211,7 @@ func TestSnapshotGenerationViaLocalClone(t *testing.T) {
 
 	// Restore the snapshot and verify it is a working (non-bare) checkout.
 	restoreDir := filepath.Join(tmpDir, "restored")
-	err = snapshot.Restore(ctx, memCache, cacheKey, restoreDir, 0)
+	_, err = snapshot.Restore(ctx, memCache, cacheKey, restoreDir, 0)
 	assert.NoError(t, err)
 
 	// A non-bare clone has a .git directory (not a bare repo).
@@ -271,7 +271,7 @@ func TestSnapshotGenerationIncludesTrackedLockFiles(t *testing.T) {
 
 	cacheKey := cache.NewKey(upstreamURL + ".snapshot")
 	restoreDir := filepath.Join(tmpDir, "restored")
-	err = snapshot.Restore(ctx, memCache, cacheKey, restoreDir, 0)
+	_, err = snapshot.Restore(ctx, memCache, cacheKey, restoreDir, 0)
 	assert.NoError(t, err)
 
 	data, err := os.ReadFile(filepath.Join(restoreDir, "package-lock.json"))
@@ -316,7 +316,7 @@ func TestMirrorSnapshotRestoreDirectly(t *testing.T) {
 	// Restore the mirror snapshot into a new directory.
 	restoreDir := filepath.Join(tmpDir, "restored-mirror")
 	cacheKey := cache.NewKey(upstreamURL + ".mirror-snapshot")
-	err = snapshot.Restore(ctx, memCache, cacheKey, restoreDir, 0)
+	_, err = snapshot.Restore(ctx, memCache, cacheKey, restoreDir, 0)
 	assert.NoError(t, err)
 
 	// Should be bare already (no .git subdir).
@@ -391,7 +391,7 @@ func TestMirrorSnapshotWithMultipleBranches(t *testing.T) {
 	// Restore and verify all branches are present as refs/heads/*.
 	restoreDir := filepath.Join(tmpDir, "restored-mirror")
 	cacheKey := cache.NewKey(upstreamURL + ".mirror-snapshot")
-	err = snapshot.Restore(ctx, memCache, cacheKey, restoreDir, 0)
+	_, err = snapshot.Restore(ctx, memCache, cacheKey, restoreDir, 0)
 	assert.NoError(t, err)
 
 	cmd := exec.Command("git", "-C", restoreDir, "show-ref", "--heads")
@@ -482,7 +482,7 @@ func TestSnapshotRemoteURLUsesServerURL(t *testing.T) {
 
 	cacheKey := cache.NewKey(upstreamURL + ".snapshot")
 	restoreDir := filepath.Join(tmpDir, "restored")
-	err = snapshot.Restore(ctx, memCache, cacheKey, restoreDir, 0)
+	_, err = snapshot.Restore(ctx, memCache, cacheKey, restoreDir, 0)
 	assert.NoError(t, err)
 
 	cmd := exec.Command("git", "-C", restoreDir, "remote", "get-url", "origin")

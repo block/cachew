@@ -159,20 +159,51 @@ func StreamTo(ctx context.Context, w io.Writer, directory string, excludePattern
 	return errors.Join(errs...)
 }
 
+// RestoreResult contains metadata about a completed restore operation.
+type RestoreResult struct {
+	// BytesRead is the number of compressed bytes read from the cache.
+	BytesRead int64
+	// Duration is the wall-clock time for the restore operation.
+	Duration time.Duration
+}
+
+// countingReader wraps an io.Reader and counts the number of bytes read.
+type countingReader struct {
+	r io.Reader
+	n int64
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += int64(n)
+	return n, err //nolint:wrapcheck
+}
+
 // Restore downloads an archive from the cache and extracts it to a directory.
 //
 // The archive is decompressed with zstd and extracted with tar, preserving
 // all file permissions, ownership, and symlinks.
 // The operation is fully streaming - no temporary files are created.
 // threads controls zstd parallelism; 0 uses all available CPU cores.
-func Restore(ctx context.Context, remote cache.Cache, key cache.Key, directory string, threads int) error {
+func Restore(ctx context.Context, remote cache.Cache, key cache.Key, directory string, threads int) (*RestoreResult, error) {
+	start := time.Now()
+
 	rc, _, err := remote.Open(ctx, key)
 	if err != nil {
-		return errors.Wrap(err, "failed to open object")
+		return nil, errors.Wrap(err, "failed to open object")
 	}
 	defer rc.Close()
 
-	return Extract(ctx, rc, directory, threads)
+	cr := &countingReader{r: rc}
+
+	if err := Extract(ctx, cr, directory, threads); err != nil {
+		return nil, err
+	}
+
+	return &RestoreResult{
+		BytesRead: cr.n,
+		Duration:  time.Since(start),
+	}, nil
 }
 
 // Extract decompresses a zstd+tar stream into directory, preserving all file
@@ -183,6 +214,7 @@ func Extract(ctx context.Context, r io.Reader, directory string, threads int) er
 		threads = runtime.NumCPU()
 	}
 
+	// Create target directory if it doesn't exist
 	if err := os.MkdirAll(directory, 0o750); err != nil {
 		return errors.Wrap(err, "failed to create target directory")
 	}

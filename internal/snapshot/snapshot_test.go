@@ -38,7 +38,7 @@ func TestCreateAndRestoreRoundTrip(t *testing.T) {
 	assert.Equal(t, "application/zstd", headers.Get("Content-Type"))
 
 	dstDir := t.TempDir()
-	err = snapshot.Restore(ctx, mem, key, dstDir, 0)
+	_, err = snapshot.Restore(ctx, mem, key, dstDir, 0)
 	assert.NoError(t, err)
 
 	content1, err := os.ReadFile(filepath.Join(dstDir, "file1.txt"))
@@ -75,7 +75,7 @@ func TestCreateWithExcludePatterns(t *testing.T) {
 	assert.NoError(t, err)
 
 	dstDir := t.TempDir()
-	err = snapshot.Restore(ctx, mem, key, dstDir, 0)
+	_, err = snapshot.Restore(ctx, mem, key, dstDir, 0)
 	assert.NoError(t, err)
 
 	_, err = os.Stat(filepath.Join(dstDir, "include.txt"))
@@ -111,7 +111,7 @@ func TestCreateExcludesOnlyGitLockFiles(t *testing.T) {
 	assert.NoError(t, err)
 
 	dstDir := t.TempDir()
-	err = snapshot.Restore(ctx, mem, key, dstDir, 0)
+	_, err = snapshot.Restore(ctx, mem, key, dstDir, 0)
 	assert.NoError(t, err)
 
 	// Tracked lock files must be present.
@@ -152,7 +152,7 @@ func TestCreatePreservesSymlinks(t *testing.T) {
 	assert.NoError(t, err)
 
 	dstDir := t.TempDir()
-	err = snapshot.Restore(ctx, mem, key, dstDir, 0)
+	_, err = snapshot.Restore(ctx, mem, key, dstDir, 0)
 	assert.NoError(t, err)
 
 	info, err := os.Lstat(filepath.Join(dstDir, "link.txt"))
@@ -219,7 +219,7 @@ func TestRestoreNonexistentKey(t *testing.T) {
 	key := cache.Key{1, 2, 3}
 
 	dstDir := t.TempDir()
-	err = snapshot.Restore(ctx, mem, key, dstDir, 0)
+	_, err = snapshot.Restore(ctx, mem, key, dstDir, 0)
 	assert.Error(t, err)
 }
 
@@ -237,7 +237,7 @@ func TestRestoreCreatesTargetDirectory(t *testing.T) {
 	assert.NoError(t, err)
 
 	dstDir := filepath.Join(t.TempDir(), "nested", "target")
-	err = snapshot.Restore(ctx, mem, key, dstDir, 0)
+	_, err = snapshot.Restore(ctx, mem, key, dstDir, 0)
 	assert.NoError(t, err)
 
 	content, err := os.ReadFile(filepath.Join(dstDir, "file.txt"))
@@ -266,7 +266,7 @@ func TestRestoreContextCancellation(t *testing.T) {
 	cancel()
 
 	dstDir := t.TempDir()
-	err = snapshot.Restore(cancelCtx, mem, key, dstDir, 0)
+	_, err = snapshot.Restore(cancelCtx, mem, key, dstDir, 0)
 	assert.Error(t, err)
 }
 
@@ -283,7 +283,7 @@ func TestCreateEmptyDirectory(t *testing.T) {
 	assert.NoError(t, err)
 
 	dstDir := t.TempDir()
-	err = snapshot.Restore(ctx, mem, key, dstDir, 0)
+	_, err = snapshot.Restore(ctx, mem, key, dstDir, 0)
 	assert.NoError(t, err)
 
 	entries, err := os.ReadDir(dstDir)
@@ -307,7 +307,7 @@ func TestCreateWithNestedDirectories(t *testing.T) {
 	assert.NoError(t, err)
 
 	dstDir := t.TempDir()
-	err = snapshot.Restore(ctx, mem, key, dstDir, 0)
+	_, err = snapshot.Restore(ctx, mem, key, dstDir, 0)
 	assert.NoError(t, err)
 
 	content, err := os.ReadFile(filepath.Join(dstDir, "a", "b", "c", "d", "e", "deep.txt"))

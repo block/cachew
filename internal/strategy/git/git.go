@@ -140,6 +140,8 @@ func New(
 		logger.InfoContext(ctx, "Startup fetch completed for existing repo", "upstream", repo.UpstreamURL(),
 			"duration", time.Since(start))
 
+		recordCloneMetrics(ctx, "local", time.Since(start), 0)
+
 		postRefs, err := repo.GetLocalRefs(ctx)
 		if err != nil {
 			logger.WarnContext(ctx, "Failed to get post-fetch refs for existing repo", "upstream", repo.UpstreamURL(),
@@ -469,8 +471,10 @@ func (s *Strategy) startClone(ctx context.Context, repo *gitclone.Repository) {
 
 	logger.InfoContext(ctx, "Attempting mirror snapshot restore", "upstream", upstream)
 
-	if err := s.tryRestoreSnapshot(ctx, repo); err != nil {
-		logger.InfoContext(ctx, "Mirror snapshot restore failed, falling back to clone", "upstream", upstream, "error", err)
+	cloneStart := time.Now()
+	restoreResult, restoreErr := s.tryRestoreSnapshot(ctx, repo)
+	if restoreErr != nil {
+		logger.InfoContext(ctx, "Mirror snapshot restore failed, falling back to clone", "upstream", upstream, "error", restoreErr)
 	} else {
 		logger.InfoContext(ctx, "Mirror snapshot restored, fetching to freshen", "upstream", upstream)
 
@@ -500,6 +504,9 @@ func (s *Strategy) startClone(ctx context.Context, repo *gitclone.Repository) {
 
 			logger.InfoContext(ctx, "Post-restore fetch completed, serving", "upstream", upstream)
 
+			recordCloneSuccess(ctx, "mirror")
+			recordCloneMetrics(ctx, "mirror", time.Since(cloneStart), restoreResult.BytesRead)
+
 			if s.config.SnapshotInterval > 0 {
 				s.scheduleSnapshotJobs(repo)
 			}
@@ -522,10 +529,14 @@ func (s *Strategy) startClone(ctx context.Context, repo *gitclone.Repository) {
 
 	if err != nil {
 		logger.ErrorContext(ctx, "Clone failed", "upstream", upstream, "error", err)
+		recordCloneFailure(ctx, "upstream", err)
 		return
 	}
 
 	logger.InfoContext(ctx, "Clone completed", "upstream", upstream, "path", repo.Path())
+
+	recordCloneSuccess(ctx, "upstream")
+	recordCloneMetrics(ctx, "upstream", time.Since(cloneStart), 0)
 
 	if s.config.SnapshotInterval > 0 {
 		s.scheduleSnapshotJobs(repo)
@@ -539,28 +550,30 @@ func (s *Strategy) startClone(ctx context.Context, repo *gitclone.Repository) {
 // Mirror snapshots are bare repositories that can be extracted and used directly
 // without any conversion. On failure the repo path is cleaned up so the caller
 // can fall back to clone.
-func (s *Strategy) tryRestoreSnapshot(ctx context.Context, repo *gitclone.Repository) error {
+func (s *Strategy) tryRestoreSnapshot(ctx context.Context, repo *gitclone.Repository) (*snapshot.RestoreResult, error) {
 	cacheKey := mirrorSnapshotCacheKey(repo.UpstreamURL())
 
 	if err := os.MkdirAll(filepath.Dir(repo.Path()), 0o750); err != nil {
-		return errors.Wrap(err, "create parent directory for restore")
+		return nil, errors.Wrap(err, "create parent directory for restore")
 	}
 
 	logger := logging.FromContext(ctx)
 
-	if err := snapshot.Restore(ctx, s.cache, cacheKey, repo.Path(), s.config.ZstdThreads); err != nil {
+	result, err := snapshot.Restore(ctx, s.cache, cacheKey, repo.Path(), s.config.ZstdThreads)
+	if err != nil {
 		_ = os.RemoveAll(repo.Path())
-		return errors.Wrap(err, "restore mirror snapshot")
+		return nil, errors.Wrap(err, "restore mirror snapshot")
 	}
-	logger.InfoContext(ctx, "Mirror snapshot extracted", "upstream", repo.UpstreamURL(), "path", repo.Path())
+	logger.InfoContext(ctx, "Mirror snapshot extracted", "upstream", repo.UpstreamURL(), "path", repo.Path(),
+		"bytes_read", result.BytesRead, "duration_ms", result.Duration.Milliseconds())
 
 	if err := repo.MarkRestored(ctx); err != nil {
 		_ = os.RemoveAll(repo.Path())
-		return errors.Wrap(err, "mark restored")
+		return nil, errors.Wrap(err, "mark restored")
 	}
 	logger.InfoContext(ctx, "Repository marked as restored", "upstream", repo.UpstreamURL(), "state", repo.State())
 
-	return nil
+	return result, nil
 }
 
 func (s *Strategy) maybeBackgroundFetch(repo *gitclone.Repository) {

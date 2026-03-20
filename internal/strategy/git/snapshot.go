@@ -21,6 +21,18 @@ import (
 	"github.com/block/cachew/internal/snapshot"
 )
 
+// countingResponseWriter wraps an http.ResponseWriter to track bytes written.
+type countingResponseWriter struct {
+	http.ResponseWriter
+	bytesWritten int64
+}
+
+func (cw *countingResponseWriter) Write(b []byte) (int, error) {
+	n, err := cw.ResponseWriter.Write(b)
+	cw.bytesWritten += int64(n)
+	return n, err
+}
+
 func snapshotDirForURL(mirrorRoot, upstreamURL string) (string, error) {
 	repoPath, err := gitclone.RepoPathFromURL(upstreamURL)
 	if err != nil {
@@ -213,15 +225,22 @@ func (s *Strategy) handleSnapshotRequest(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
+	cw := &countingResponseWriter{ResponseWriter: w}
+	serveStart := time.Now()
+
 	if reader == nil {
-		s.serveSnapshotWithSpool(w, r, repo, upstreamURL)
+		recordSnapshotCacheResult(ctx, false)
+		s.serveSnapshotWithSpool(cw, r, repo, upstreamURL)
+		recordSnapshotServe(ctx, "live", time.Since(serveStart), cw.bytesWritten)
 		return
 	}
 	defer reader.Close()
+	recordSnapshotCacheResult(ctx, true)
 
-	if err := s.serveSnapshotWithBundle(ctx, w, reader, headers, repo, upstreamURL); err != nil {
+	if err := s.serveSnapshotWithBundle(ctx, cw, reader, headers, repo, upstreamURL); err != nil {
 		logger.ErrorContext(ctx, "Failed to serve snapshot", "upstream", upstreamURL, "error", err)
 	}
+	recordSnapshotServe(ctx, "cache", time.Since(serveStart), cw.bytesWritten)
 }
 
 func (s *Strategy) handleBundleRequest(w http.ResponseWriter, r *http.Request, host, pathValue string) {

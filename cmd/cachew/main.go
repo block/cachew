@@ -200,9 +200,11 @@ type RestoreCmd struct {
 func (c *RestoreCmd) Run(ctx context.Context, cache cache.Cache) error {
 	fmt.Fprintf(os.Stderr, "Restoring to %s...\n", c.Directory) //nolint:forbidigo
 	namespacedCache := cache.Namespace(c.Namespace)
-	if err := snapshot.Restore(ctx, namespacedCache, c.Key.Key(), c.Directory, c.ZstdThreads); err != nil {
+	result, err := snapshot.Restore(ctx, namespacedCache, c.Key.Key(), c.Directory, c.ZstdThreads)
+	if err != nil {
 		return errors.Wrap(err, "failed to restore snapshot")
 	}
+	fmt.Fprintf(os.Stderr, "Restored %d bytes in %dms\n", result.BytesRead, result.Duration.Milliseconds()) //nolint:forbidigo
 
 	fmt.Fprintf(os.Stderr, "Snapshot restored: %s\n", c.Key.String()) //nolint:forbidigo
 	return nil
