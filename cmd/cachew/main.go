@@ -35,6 +35,8 @@ type CLI struct {
 
 	Snapshot SnapshotCmd `cmd:"" help:"Create compressed archive of directory and upload." group:"Snapshots:"`
 	Restore  RestoreCmd  `cmd:"" help:"Download and extract archive to directory." group:"Snapshots:"`
+
+	Git GitCmd `cmd:"" help:"Git-aware operations." group:"Git:"`
 }
 
 func main() {
@@ -51,9 +53,11 @@ func main() {
 	}
 	remote := cache.NewRemote(cli.URL, headerFunc)
 	defer remote.Close()
+	httpClient := cache.NewHTTPClient(headerFunc)
 
 	kctx.BindTo(ctx, (*context.Context)(nil))
 	kctx.BindTo(remote, (*cache.Cache)(nil))
+	kctx.Bind(httpClient)
 	kctx.FatalIfErrorf(kctx.Run(ctx))
 }
 
