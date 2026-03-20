@@ -214,6 +214,9 @@ func newServer(ctx context.Context, muxHandler http.Handler, bind string, metric
 	)(handler)
 
 	handler = httputil.LoggingMiddleware(handler)
+	if os.Getenv("IS_PLAYPEN") != "true" {
+		handler = httputil.PlaypenGuardMiddleware(handler)
+	}
 
 	logger := logging.FromContext(ctx)
 	return &http.Server{
