@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 
 	"github.com/alecthomas/errors"
@@ -14,14 +15,11 @@ import (
 	"github.com/block/cachew/internal/logging"
 )
 
-// DefaultPolicy allows only GET and HEAD requests.
+// DefaultPolicy allows only GET and HEAD requests from localhost.
 const DefaultPolicy = `package cachew.authz
 
-default allow := false
-
-allow if input.method == "GET"
-allow if input.method == "HEAD"
-allow if startswith(input.remote_addr, "127.0.0.1:")
+deny contains "method not allowed" if not input.method in {"GET", "HEAD"}
+deny contains "remote address not allowed" if not startswith(input.remote_addr, "127.0.0.1:")
 `
 
 // Config for OPA policy evaluation. If neither Policy nor PolicyFile is set,
@@ -34,47 +32,97 @@ type Config struct {
 }
 
 // Middleware returns an http.Handler that evaluates OPA policy before delegating to next.
-// The policy must define a boolean "allow" rule under package cachew.authz.
+// The policy must define a set "deny" rule under package cachew.authz whose elements
+// are human-readable reason strings (e.g. `deny contains "unauthenticated" if ...`).
+// If the deny set is empty, the request is allowed. Otherwise it is rejected and
+// the reasons are included in the response body and server logs.
 func Middleware(ctx context.Context, cfg Config, next http.Handler) (http.Handler, error) {
 	policy, err := loadPolicy(cfg)
 	if err != nil {
 		return nil, err
 	}
 
-	opts := []func(*rego.Rego){
-		rego.Query("data.cachew.authz.allow"),
-		rego.Module("policy.rego", policy),
-	}
-
-	if cfg.Data != "" || cfg.DataFile != "" {
-		opaData, err := loadData(cfg)
-		if err != nil {
-			return nil, err
-		}
-		opts = append(opts, rego.Data(opaData))
-	}
-
-	prepared, err := rego.New(opts...).PrepareForEval(ctx)
+	dataOpts, err := dataOptions(cfg)
 	if err != nil {
-		return nil, errors.Errorf("compile OPA policy: %w", err)
+		return nil, err
+	}
+
+	prepared, err := prepareQuery(ctx, "data.cachew.authz.deny", policy, dataOpts)
+	if err != nil {
+		return nil, errors.Errorf("compile OPA deny query: %w", err)
 	}
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		input := buildInput(r)
 		logger := logging.FromContext(r.Context())
-		results, err := prepared.Eval(r.Context(), rego.EvalInput(input))
+
+		reasons, err := evalDeny(r.Context(), prepared, input)
 		if err != nil {
 			logger.Error("OPA evaluation failed", "error", err)
 			http.Error(w, "policy evaluation error", http.StatusInternalServerError)
 			return
 		}
-		if !results.Allowed() {
-			logger.Warn("OPA denied request", "method", r.Method, "path", r.URL.Path, "remote_addr", r.RemoteAddr)
-			http.Error(w, "forbidden", http.StatusForbidden)
+		if len(reasons) > 0 {
+			logger.Warn("OPA denied request", "method", r.Method, "path", r.URL.Path, "remote_addr", r.RemoteAddr, "reasons", reasons)
+			http.Error(w, "forbidden: "+strings.Join(reasons, "; "), http.StatusForbidden)
 			return
 		}
+
 		next.ServeHTTP(w, r)
 	}), nil
+}
+
+// prepareQuery compiles a single Rego query against the given policy and data options.
+func prepareQuery(ctx context.Context, query, policy string, dataOpts []func(*rego.Rego)) (rego.PreparedEvalQuery, error) {
+	opts := make([]func(*rego.Rego), 0, 2+len(dataOpts))
+	opts = append(opts, rego.Query(query), rego.Module("policy.rego", policy))
+	opts = append(opts, dataOpts...)
+	prepared, err := rego.New(opts...).PrepareForEval(ctx)
+	if err != nil {
+		return prepared, errors.Errorf("prepare query: %w", err)
+	}
+	return prepared, nil
+}
+
+// dataOptions returns rego options for loading external data, if configured.
+func dataOptions(cfg Config) ([]func(*rego.Rego), error) {
+	if cfg.Data == "" && cfg.DataFile == "" {
+		return nil, nil
+	}
+	opaData, err := loadData(cfg)
+	if err != nil {
+		return nil, err
+	}
+	return []func(*rego.Rego){rego.Data(opaData)}, nil
+}
+
+// evalDeny evaluates the prepared deny query and returns any denial reason strings.
+// If the policy produces no deny reasons, nil is returned.
+func evalDeny(ctx context.Context, prepared rego.PreparedEvalQuery, input map[string]any) ([]string, error) {
+	results, err := prepared.Eval(ctx, rego.EvalInput(input))
+	if err != nil {
+		return nil, errors.Errorf("evaluate deny query: %w", err)
+	}
+	if len(results) == 0 || len(results[0].Expressions) == 0 {
+		return nil, nil
+	}
+	val := results[0].Expressions[0].Value
+	// OPA represents sets as []interface{} in the Go bindings.
+	set, isSet := val.([]any)
+	if !isSet {
+		return nil, nil
+	}
+	if len(set) == 0 {
+		return nil, nil
+	}
+	reasons := make([]string, 0, len(set))
+	for _, v := range set {
+		if s, isString := v.(string); isString {
+			reasons = append(reasons, s)
+		}
+	}
+	sort.Strings(reasons) // deterministic order for logging/testing
+	return reasons, nil
 }
 
 func loadPolicy(cfg Config) (string, error) {

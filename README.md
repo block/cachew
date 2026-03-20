@@ -51,7 +51,7 @@ opa {
 }
 ```
 
-Policies must be written under `package cachew.authz` and define a boolean `allow` rule. The input document available to policies contains:
+Policies must be written under `package cachew.authz` and define a `deny` rule that collects human-readable reason strings. If the deny set is empty the request is allowed; otherwise it is rejected and the reasons are included in the response body and server logs. The input document available to policies contains:
 
 | Field | Type | Description |
 |---|---|---|
@@ -63,7 +63,16 @@ Policies must be written under `package cachew.authz` and define a boolean `allo
 Since `remote_addr` includes the port, use `startswith` to match by IP:
 
 ```rego
-allow if startswith(input.remote_addr, "127.0.0.1:")
+deny contains "remote address not allowed" if not startswith(input.remote_addr, "127.0.0.1:")
+```
+
+Example policy that requires authentication and blocks writes:
+
+```rego
+package cachew.authz
+deny contains "unauthenticated" if not input.headers["authorization"]
+deny contains "writes are not allowed" if input.method == "PUT"
+deny contains "deletes are not allowed" if input.method == "DELETE"
 ```
 
 Policies can reference external data that becomes available as `data.*` in Rego. Provide it inline via `data` or from a file via `data-file`:
@@ -90,8 +99,7 @@ opa {
 
 ```rego
 package cachew.authz
-default allow := false
-allow if net.cidr_contains(data.allowed_cidrs[_], input.remote_addr)
+deny contains "address not in allowed CIDR" if not net.cidr_contains(data.allowed_cidrs[_], input.remote_addr)
 ```
 
 If `data-file` is not set, `data.*` is empty but policies can still use `http.send` to fetch data at evaluation time.
