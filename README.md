@@ -1,117 +1,284 @@
-# Cachew (pronounced cashew) is a super-fast pass-through cache
+# Cachew
 
-Cachew is a server and tooling for incredibly efficient, protocol-aware caching. It is
-designed to be used at scale, with minimal impact on upstream systems. By "protocol-aware", we mean that the proxy isn't
-just a naive HTTP proxy, it is aware of the higher level protocol being proxied (Git, Docker, etc.) and can make more efficient decisions.
+Cachew (pronounced "cashew") is a tiered, protocol-aware, caching HTTP proxy for software engineering infrastructure. It understands higher-level protocols (Git, Docker, Go modules, etc.) and makes smarter caching decisions than a naive HTTP proxy.
 
-## Git
+## Strategies
 
-Git causes a number of problems for us, but the most obvious are:
+### Git
 
-1. Rate limiting by service providers.
-2. `git clone` is very slow, even discounting network overhead
+Caches Git repositories with two complementary techniques:
 
-To solve this we apply two different strategies on the server:
+1. **Snapshots** — periodic `.tar.zst` archives that restore 4–5x faster than `git clone`.
+2. **Pack caching** — passthrough caching of packs from `git-upload-pack` for incremental pulls.
 
-1. Periodic full `.tar.zst` snapshots of the repository. These snapshots restore 4-5x faster than `git clone`.
-2. Passthrough caching of the packs returned by `POST /repo.git/git-upload-pack` to support incremental pulls.
-
-On the client we redirect git to the proxy:
+Redirect Git traffic through cachew:
 
 ```ini
-[url "https://cachew.local/github/"]
+[url "https://cachew.example.com/git/github.com/"]
   insteadOf = https://github.com/
 ```
 
-As Git itself isn't aware of the snapshots, Git-specific code in the Cachew CLI can be used to reconstruct a repository.
+Restore a repository from a snapshot (with automatic delta bundle to reach HEAD):
 
-## Authorization (OPA)
-
-Cachew uses [Open Policy Agent](https://www.openpolicyagent.org/) (OPA) for request authorization. A default policy is
-always active even without any configuration, allowing any request from 127.0.0.1 and `GET` and `HEAD` requests from
-elsewhere.
-
-To customise the policy, add an `opa` block to your configuration with either an inline policy or a path to a `.rego` file:
+```sh
+cachew git restore https://github.com/org/repo ./repo
+```
 
 ```hcl
-# Inline policy
-opa {
-  policy = <<EOF
-    package cachew.authz
-    default allow := false
-    allow if input.method == "GET"
-    allow if input.method == "HEAD"
-    allow if { input.method == "POST"; input.path[0] == "api" }
-  EOF
-}
-
-# Or reference an external file
-opa {
-  policy-file = "./policy.rego"
+git {
+  snapshot-interval = "1h"
+  repack-interval   = "1h"
 }
 ```
 
-Policies must be written under `package cachew.authz` and define a `deny` rule that collects human-readable reason strings. If the deny set is empty the request is allowed; otherwise it is rejected and the reasons are included in the response body and server logs. The input document available to policies contains:
+### GitHub Releases
 
-| Field | Type | Description |
-|---|---|---|
-| `input.method` | string | HTTP method (GET, POST, etc.) |
-| `input.path` | []string | URL path split by `/` (e.g. `["api", "v1", "object"]`) |
-| `input.headers` | map[string]string | Request headers (lowercased keys) |
-| `input.remote_addr` | string | Client address (ip:port) |
+Caches public and private GitHub release assets. Private orgs use a token or GitHub App for authentication.
 
-Since `remote_addr` includes the port, use `startswith` to match by IP:
-
-```rego
-deny contains "remote address not allowed" if not startswith(input.remote_addr, "127.0.0.1:")
-```
-
-Example policy that requires authentication and blocks writes:
-
-```rego
-package cachew.authz
-deny contains "unauthenticated" if not input.headers["authorization"]
-deny contains "writes are not allowed" if input.method == "PUT"
-deny contains "deletes are not allowed" if input.method == "DELETE"
-```
-
-Policies can reference external data that becomes available as `data.*` in Rego. Provide it inline via `data` or from a file via `data-file`:
+**URL pattern:** `/github-releases/{owner}/{repo}/{tag}/{asset}`
 
 ```hcl
-# Inline JSON data
-opa {
-  policy-file = "./policy.rego"
-  data = <<EOF
-    {"allowed_cidrs": ["10.0.0.0/8"], "jwks": {"keys": [...]}}
-  EOF
-}
-
-# Or from a file
-opa {
-  policy-file = "./policy.rego"
-  data-file = "./opa-data.json"
+github-releases {
+  token        = "${GITHUB_TOKEN}"
+  private-orgs = ["myorg"]
 }
 ```
 
-```json
-{"allowed_cidrs": ["10.0.0.0/8"], "jwks": {"keys": [...]}}
+### Go Modules
+
+Go module proxy (`GOPROXY`-compatible). Private modules are fetched via git clone.
+
+**URL pattern:** `/gomod/...`
+
+```sh
+export GOPROXY=http://cachew.example.com/gomod,direct
 ```
 
-```rego
-package cachew.authz
-deny contains "address not in allowed CIDR" if not net.cidr_contains(data.allowed_cidrs[_], input.remote_addr)
+```hcl
+gomod {
+  proxy         = "https://proxy.golang.org"
+  private-paths = ["github.com/myorg/*"]
+}
 ```
 
-If `data-file` is not set, `data.*` is empty but policies can still use `http.send` to fetch data at evaluation time.
+### Hermit
 
-## Docker
-
-## Hermit
-
-Caches Hermit package downloads from all sources (golang.org, npm, GitHub releases, etc.).
+Caches [Hermit](https://cashapp.github.io/hermit/) package downloads. GitHub release URLs are automatically routed through the `github-releases` strategy.
 
 **URL pattern:** `/hermit/{host}/{path...}`
 
-Example: `GET /hermit/golang.org/dl/go1.21.0.tar.gz`
+```hcl
+hermit {}
+```
 
-GitHub releases are automatically redirected to the `github-releases` strategy.
+### Artifactory
+
+Caches artifacts from JFrog Artifactory with host-based or path-based routing.
+
+```hcl
+artifactory "example.jfrog.io" {
+  target = "https://example.jfrog.io"
+}
+```
+
+### Host
+
+Generic reverse-proxy caching for arbitrary HTTP hosts, with optional custom headers.
+
+```hcl
+host "https://ghcr.io" {
+  headers = {
+    "Authorization": "Bearer QQ=="
+  }
+}
+
+host "https://w3.org" {}
+```
+
+### HTTP Proxy
+
+Caching proxy for clients that use absolute-form HTTP requests (e.g. Android `sdkmanager --proxy_host`).
+
+```hcl
+proxy {}
+```
+
+## Cache Backends
+
+Multiple backends can be configured simultaneously — they are automatically combined into a tiered cache. Reads check each tier in order and backfill lower tiers on a hit. Writes go to all tiers in parallel.
+
+### Memory
+
+In-memory LRU cache.
+
+```hcl
+memory {
+  limit-mb = 1024   # default
+  max-ttl  = "1h"   # default
+}
+```
+
+### Disk
+
+On-disk LRU cache with TTL-based eviction.
+
+```hcl
+disk {
+  limit-mb = 250000
+  max-ttl  = "8h"
+}
+```
+
+### S3
+
+S3-compatible object storage (AWS S3, MinIO, etc.).
+
+```hcl
+s3 {
+  bucket   = "my-cache-bucket"
+  endpoint = "s3.amazonaws.com"
+  region   = "us-east-1"
+}
+```
+
+## Authorization (OPA)
+
+Cachew uses [Open Policy Agent](https://www.openpolicyagent.org/) for request authorization. The default policy allows all methods from `127.0.0.1` and `GET`/`HEAD` from elsewhere.
+
+Policies must be in `package cachew.authz` and define a `deny` rule set. If the set is empty, the request is allowed; otherwise the reasons are returned to the client.
+
+```hcl
+opa {
+  policy = <<EOF
+    package cachew.authz
+    deny contains "unauthenticated" if not input.headers["authorization"]
+    deny contains "writes not allowed" if input.method == "PUT"
+  EOF
+}
+```
+
+Or reference an external file with optional data:
+
+```hcl
+opa {
+  policy-file = "./policy.rego"
+  data-file   = "./opa-data.json"
+}
+```
+
+**Input fields:** `input.method`, `input.path` (string array), `input.headers`, `input.remote_addr` (includes port — use `startswith` to match by IP).
+
+## GitHub App Authentication
+
+For private Git repositories and GitHub release assets, configure a GitHub App:
+
+```hcl
+github-app {
+  app-id           = "12345"
+  private-key-path = "./github-app.pem"
+  installations    = { "myorg": "67890" }
+}
+```
+
+Installations can also be discovered dynamically via the GitHub API.
+
+## CLI
+
+### Server (`cachewd`)
+
+```sh
+cachewd --config cachew.hcl
+cachewd --schema  # print config schema
+```
+
+### Client (`cachew`)
+
+```sh
+# Object operations
+cachew get <namespace> <key> [-o file]
+cachew put <namespace> <key> [file] [--ttl 1h]
+cachew stat <namespace> <key>
+cachew delete <namespace> <key>
+cachew namespaces
+
+# Directory snapshots
+cachew snapshot <namespace> <key> <directory> [--ttl 1h] [--exclude pattern]
+cachew restore <namespace> <key> <directory>
+
+# Git
+cachew git restore <repo-url> <directory> [--no-bundle]
+```
+
+**Global flags:** `--url` (`CACHEW_URL`), `--authorization` (`CACHEW_AUTHORIZATION`), `--platform` (prefix keys with `os-arch`), `--daily`/`--hourly` (prefix keys with date).
+
+## Observability
+
+```hcl
+log {
+  level = "info"  # debug, info, warn, error
+}
+
+metrics {
+  service-name = "cachew"
+}
+```
+
+Admin endpoints: `/_liveness`, `/_readiness`, `PUT /admin/log/level`, `/admin/pprof/`.
+
+## Full Configuration Example
+
+```hcl
+state = "./state"
+bind  = "0.0.0.0:8080"
+url   = "http://cachew.example.com:8080/"
+
+log {
+  level = "info"
+}
+
+opa {
+  policy = <<EOF
+    package cachew.authz
+    deny contains "not localhost" if not startswith(input.remote_addr, "127.0.0.1:")
+  EOF
+}
+
+metrics {}
+
+github-app {
+  app-id           = "12345"
+  private-key-path = "./github-app.pem"
+}
+
+git-clone {}
+
+git {
+  snapshot-interval = "1h"
+  repack-interval   = "1h"
+}
+
+github-releases {
+  token        = "${GITHUB_TOKEN}"
+  private-orgs = ["myorg"]
+}
+
+gomod {
+  proxy         = "https://proxy.golang.org"
+  private-paths = ["github.com/myorg/*"]
+}
+
+hermit {}
+
+host "https://ghcr.io" {
+  headers = {
+    "Authorization": "Bearer ${GHCR_TOKEN}"
+  }
+}
+
+disk {
+  limit-mb = 250000
+  max-ttl  = "8h"
+}
+
+proxy {}
+```
