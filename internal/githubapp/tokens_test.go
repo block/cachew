@@ -4,8 +4,11 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
+	"encoding/json"
 	"encoding/pem"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -54,9 +57,8 @@ func TestNewTokenManagerProvider(t *testing.T) {
 
 	t.Run("ErrorsOnIncompleteConfigs", func(t *testing.T) {
 		for _, config := range []githubapp.Config{
-			{AppID: "123", Installations: map[string]string{"org": "inst"}},
-			{PrivateKeyPath: "/tmp/key.pem", Installations: map[string]string{"org": "inst"}},
-			{AppID: "123", PrivateKeyPath: "/tmp/key.pem"},
+			{AppID: "123"},
+			{PrivateKeyPath: "/tmp/key.pem"},
 		} {
 			provider := githubapp.NewTokenManagerProvider([]githubapp.Config{config}, logger)
 			_, err := provider()
@@ -71,7 +73,6 @@ func TestNewTokenManagerProvider(t *testing.T) {
 			{
 				AppID:          "111",
 				PrivateKeyPath: keyPath,
-				Installations:  map[string]string{"orgA": "inst-a", "orgB": "inst-b"},
 			},
 		}, logger)
 		tm, err := provider()
@@ -86,120 +87,109 @@ func TestNewTokenManagerProvider(t *testing.T) {
 			{
 				AppID:          "111",
 				PrivateKeyPath: keyPath1,
-				Installations:  map[string]string{"orgA": "inst-a"},
 			},
 			{
 				AppID:          "222",
 				PrivateKeyPath: keyPath2,
-				Installations:  map[string]string{"orgB": "inst-b"},
 			},
 		}, logger)
 		tm, err := provider()
 		assert.NoError(t, err)
 		assert.NotZero(t, tm)
 	})
+}
 
-	t.Run("DuplicateOrgAcrossApps", func(t *testing.T) {
-		keyPath1 := generateTestKey(t)
-		keyPath2 := generateTestKey(t)
-		provider := githubapp.NewTokenManagerProvider([]githubapp.Config{
-			{
-				AppID:          "111",
-				PrivateKeyPath: keyPath1,
-				Installations:  map[string]string{"orgA": "inst-a"},
-			},
-			{
-				AppID:          "222",
-				PrivateKeyPath: keyPath2,
-				Installations:  map[string]string{"orgA": "inst-a2"},
-			},
-		}, logger)
-		_, err := provider()
-		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "org \"orgA\" is configured in both")
+func TestGetTokenForOrgDynamicDiscovery(t *testing.T) {
+	// Mock GitHub API that returns installation IDs for known orgs
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /orgs/squareup/installation", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]any{"id": 12345}) //nolint:errcheck
 	})
-}
+	mux.HandleFunc("GET /orgs/AfterpayTouch/installation", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]any{"id": 67890}) //nolint:errcheck
+	})
+	mux.HandleFunc("GET /orgs/unknown-org/installation", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	})
+	mux.HandleFunc("GET /users/unknown-org/installation", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	})
+	mux.HandleFunc("POST /app/installations/12345/access_tokens", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(map[string]any{"token": "ghs_squareup_token", "expires_at": "2099-01-01T00:00:00Z"}) //nolint:errcheck
+	})
+	mux.HandleFunc("POST /app/installations/67890/access_tokens", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(map[string]any{"token": "ghs_afterpay_token", "expires_at": "2099-01-01T00:00:00Z"}) //nolint:errcheck
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
 
-func TestGetTokenForOrgRouting(t *testing.T) {
-	keyPath1 := generateTestKey(t)
-	keyPath2 := generateTestKey(t)
-	logger := slog.Default()
-
-	provider := githubapp.NewTokenManagerProvider([]githubapp.Config{
-		{
-			AppID:          "111",
-			PrivateKeyPath: keyPath1,
-			Installations:  map[string]string{"orgA": "inst-a"},
-		},
-		{
-			AppID:          "222",
-			PrivateKeyPath: keyPath2,
-			Installations:  map[string]string{"orgB": "inst-b"},
-		},
-	}, logger)
-	tm, err := provider()
-	assert.NoError(t, err)
-
-	_, err = tm.GetTokenForOrg(t.Context(), "unknown-org")
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "no GitHub App configured for org")
-}
-
-func TestGetTokenForOrgFallback(t *testing.T) {
 	keyPath := generateTestKey(t)
 	logger := slog.Default()
 
-	t.Run("FallbackUsedForUnknownOrg", func(t *testing.T) {
-		provider := githubapp.NewTokenManagerProvider([]githubapp.Config{
-			{
-				AppID:          "111",
-				PrivateKeyPath: keyPath,
-				Installations:  map[string]string{"squareup": "inst-sq"},
-				FallbackOrg:    "squareup",
-			},
-		}, logger)
-		tm, err := provider()
+	tm := githubapp.NewTokenManagerForTest(t, []githubapp.Config{
+		{
+			AppID:          "111",
+			PrivateKeyPath: keyPath,
+			FallbackOrg:    "squareup",
+		},
+	}, logger, server.URL, server.Client())
+
+	ctx := logging.ContextWithLogger(t.Context(), slog.Default())
+
+	t.Run("DiscoverAndCacheInstallation", func(t *testing.T) {
+		token, err := tm.GetTokenForOrg(ctx, "squareup")
 		assert.NoError(t, err)
+		assert.Equal(t, "ghs_squareup_token", token)
 
-		ctx := logging.ContextWithLogger(t.Context(), slog.Default())
-		// Unknown org should not error when fallback is configured
-		// (will fail at the HTTP level but not at the routing level)
-		_, err = tm.GetTokenForOrg(ctx, "cashapp")
-		// Error is expected here because we don't have a real GitHub API,
-		// but it should NOT be "no GitHub App configured for org"
-		assert.Error(t, err)
-		assert.NotContains(t, err.Error(), "no GitHub App configured for org")
-	})
-
-	t.Run("FallbackOrgNotInInstallations", func(t *testing.T) {
-		provider := githubapp.NewTokenManagerProvider([]githubapp.Config{
-			{
-				AppID:          "111",
-				PrivateKeyPath: keyPath,
-				Installations:  map[string]string{"squareup": "inst-sq"},
-				FallbackOrg:    "nonexistent",
-			},
-		}, logger)
-		_, err := provider()
-		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "fallback-org \"nonexistent\" is not in the installations map")
-	})
-
-	t.Run("NoFallbackStillErrorsForUnknownOrg", func(t *testing.T) {
-		provider := githubapp.NewTokenManagerProvider([]githubapp.Config{
-			{
-				AppID:          "111",
-				PrivateKeyPath: keyPath,
-				Installations:  map[string]string{"squareup": "inst-sq"},
-			},
-		}, logger)
-		tm, err := provider()
+		// Second call should use cache
+		token, err = tm.GetTokenForOrg(ctx, "squareup")
 		assert.NoError(t, err)
-
-		_, err = tm.GetTokenForOrg(t.Context(), "unknown-org")
-		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "no GitHub App configured for org")
+		assert.Equal(t, "ghs_squareup_token", token)
 	})
+
+	t.Run("DiscoverNewOrg", func(t *testing.T) {
+		token, err := tm.GetTokenForOrg(ctx, "AfterpayTouch")
+		assert.NoError(t, err)
+		assert.Equal(t, "ghs_afterpay_token", token)
+	})
+
+	t.Run("FallbackForUnknownOrg", func(t *testing.T) {
+		token, err := tm.GetTokenForOrg(ctx, "unknown-org")
+		assert.NoError(t, err)
+		assert.Equal(t, "ghs_squareup_token", token)
+	})
+}
+
+func TestGetTokenForOrgNoFallback(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /orgs/unknown-org/installation", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	})
+	mux.HandleFunc("GET /users/unknown-org/installation", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	keyPath := generateTestKey(t)
+	logger := slog.Default()
+
+	tm := githubapp.NewTokenManagerForTest(t, []githubapp.Config{
+		{
+			AppID:          "111",
+			PrivateKeyPath: keyPath,
+		},
+	}, logger, server.URL, server.Client())
+
+	ctx := logging.ContextWithLogger(t.Context(), slog.Default())
+
+	_, err := tm.GetTokenForOrg(ctx, "unknown-org")
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "no GitHub App installation found for org")
 }
 
 func TestGetTokenForOrgNilManager(t *testing.T) {

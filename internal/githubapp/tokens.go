@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -26,13 +27,18 @@ func NewTokenManagerProvider(configs []Config, logger *slog.Logger) TokenManager
 	})
 }
 
+const githubAPIBase = "https://api.github.com"
+
 // appState holds token management state for a single GitHub App.
 type appState struct {
 	appID        string
 	jwtGenerator *JWTGenerator
 	cacheConfig  TokenCacheConfig
 	httpClient   *http.Client
-	orgs         map[string]string // org -> installation ID
+	apiBase      string
+
+	installationMu    sync.RWMutex
+	installationCache map[string]string // org -> installation ID (dynamically discovered)
 
 	mu     sync.RWMutex
 	tokens map[string]*cachedToken
@@ -45,23 +51,25 @@ type cachedToken struct {
 
 // TokenManager manages GitHub App installation tokens across one or more apps.
 type TokenManager struct {
-	orgToApp    map[string]*appState
+	mu       sync.RWMutex
+	orgToApp map[string]*appState
+
+	apps        []*appState // all configured apps, for dynamic installation discovery
 	fallbackApp *appState
 	fallbackOrg string
 }
 
 func newTokenManager(configs []Config, logger *slog.Logger) (*TokenManager, error) {
-	orgToApp := map[string]*appState{}
+	var apps []*appState
 
 	for _, config := range configs {
-		hasAny := config.AppID != "" || config.PrivateKeyPath != "" || len(config.Installations) > 0
-		hasAll := config.AppID != "" && config.PrivateKeyPath != "" && len(config.Installations) > 0
+		hasAny := config.AppID != "" || config.PrivateKeyPath != ""
 		if !hasAny {
 			continue
 		}
-		if !hasAll {
-			return nil, errors.Errorf("github-app: incomplete configuration (app-id=%q, private-key-path=%q, installations=%d)",
-				config.AppID, config.PrivateKeyPath, len(config.Installations))
+		if config.AppID == "" || config.PrivateKeyPath == "" {
+			return nil, errors.Errorf("github-app: incomplete configuration (app-id=%q, private-key-path=%q)",
+				config.AppID, config.PrivateKeyPath)
 		}
 
 		cacheConfig := DefaultTokenCacheConfig()
@@ -70,38 +78,34 @@ func newTokenManager(configs []Config, logger *slog.Logger) (*TokenManager, erro
 			return nil, errors.Wrapf(err, "github app %q", config.AppID)
 		}
 
-		app := &appState{
-			appID:        config.AppID,
-			jwtGenerator: jwtGen,
-			cacheConfig:  cacheConfig,
-			httpClient:   http.DefaultClient,
-			orgs:         config.Installations,
-			tokens:       make(map[string]*cachedToken),
-		}
+		apps = append(apps, &appState{
+			appID:             config.AppID,
+			jwtGenerator:      jwtGen,
+			cacheConfig:       cacheConfig,
+			httpClient:        http.DefaultClient,
+			apiBase:           githubAPIBase,
+			installationCache: make(map[string]string),
+			tokens:            make(map[string]*cachedToken),
+		})
 
-		for org := range config.Installations {
-			if existing, exists := orgToApp[org]; exists {
-				return nil, errors.Errorf("org %q is configured in both github-app %q and %q", org, existing.appID, config.AppID)
-			}
-			orgToApp[org] = app
-		}
-
-		logger.Info("GitHub App configured", "app_id", config.AppID, "orgs", len(config.Installations))
+		logger.Info("GitHub App configured", "app_id", config.AppID)
 	}
 
-	if len(orgToApp) == 0 {
+	if len(apps) == 0 {
 		return nil, nil //nolint:nilnil
 	}
 
-	tm := &TokenManager{orgToApp: orgToApp}
+	tm := &TokenManager{
+		orgToApp: make(map[string]*appState),
+		apps:     apps,
+	}
 
-	for _, config := range configs {
+	for i, config := range configs {
 		if config.FallbackOrg != "" {
-			app, ok := orgToApp[config.FallbackOrg]
-			if !ok {
-				return nil, errors.Errorf("fallback-org %q is not in the installations map for app %q", config.FallbackOrg, config.AppID)
+			if i >= len(apps) {
+				continue
 			}
-			tm.fallbackApp = app
+			tm.fallbackApp = apps[i]
 			tm.fallbackOrg = config.FallbackOrg
 			logger.Info("GitHub App fallback configured", "fallback_org", config.FallbackOrg, "app_id", config.AppID)
 			break
@@ -112,24 +116,48 @@ func newTokenManager(configs []Config, logger *slog.Logger) (*TokenManager, erro
 }
 
 // GetTokenForOrg returns an installation token for the given GitHub organization.
-// If no installation is configured for the org, it falls back to the fallback org's
-// token to ensure authenticated rate limits.
+// It dynamically discovers the installation ID via the GitHub API on first use,
+// caches the result, and falls back to the fallback org's token for orgs where
+// the app is not installed.
 func (tm *TokenManager) GetTokenForOrg(ctx context.Context, org string) (string, error) {
 	if tm == nil {
 		return "", errors.New("token manager not initialized")
 	}
 
+	logger := logging.FromContext(ctx)
+
+	// Check cached discovery first
+	tm.mu.RLock()
 	app, ok := tm.orgToApp[org]
-	if !ok {
-		if tm.fallbackApp == nil {
-			return "", errors.Errorf("no GitHub App configured for org: %s", org)
+	tm.mu.RUnlock()
+	if ok {
+		return app.getToken(ctx, org)
+	}
+
+	// Discover installation via GitHub API
+	for _, app := range tm.apps {
+		installationID, err := app.lookupInstallationID(ctx, org)
+		if err != nil {
+			logger.DebugContext(ctx, "Dynamic installation lookup failed", "org", org, "app_id", app.appID, "error", err)
+			continue
 		}
-		logging.FromContext(ctx).InfoContext(ctx, "Using fallback org token", "requested_org", org,
-			"fallback_org", tm.fallbackOrg)
+
+		logger.InfoContext(ctx, "Dynamically discovered GitHub App installation", "org", org, "app_id", app.appID, "installation_id", installationID)
+
+		// Cache the mapping for future requests
+		tm.mu.Lock()
+		tm.orgToApp[org] = app
+		tm.mu.Unlock()
+		return app.getToken(ctx, org)
+	}
+
+	// Fall back to fallback org
+	if tm.fallbackApp != nil {
+		logger.InfoContext(ctx, "Using fallback org token", "requested_org", org, "fallback_org", tm.fallbackOrg)
 		return tm.fallbackApp.getToken(ctx, tm.fallbackOrg)
 	}
 
-	return app.getToken(ctx, org)
+	return "", errors.Errorf("no GitHub App installation found for org: %s", org)
 }
 
 // GetTokenForURL extracts the org from a GitHub URL and returns an installation token.
@@ -148,7 +176,9 @@ func (tm *TokenManager) GetTokenForURL(ctx context.Context, url string) (string,
 func (a *appState) getToken(ctx context.Context, org string) (string, error) {
 	logger := logging.FromContext(ctx).With("org", org, "app_id", a.appID)
 
-	installationID := a.orgs[org]
+	a.installationMu.RLock()
+	installationID := a.installationCache[org]
+	a.installationMu.RUnlock()
 	if installationID == "" {
 		return "", errors.Errorf("no installation ID for org: %s", org)
 	}
@@ -187,7 +217,7 @@ func (a *appState) fetchInstallationToken(ctx context.Context, installationID st
 		return "", time.Time{}, errors.Wrap(err, "generate JWT")
 	}
 
-	url := fmt.Sprintf("https://api.github.com/app/installations/%s/access_tokens", installationID)
+	url := fmt.Sprintf("%s/app/installations/%s/access_tokens", a.apiBase, installationID)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
 	if err != nil {
 		return "", time.Time{}, errors.Wrap(err, "create request")
@@ -216,6 +246,70 @@ func (a *appState) fetchInstallationToken(ctx context.Context, installationID st
 	}
 
 	return result.Token, result.ExpiresAt, nil
+}
+
+// lookupInstallationID queries the GitHub API to find the installation ID for the
+// given org. It tries /orgs/{org}/installation first, then /users/{user}/installation.
+// Results are cached in installationCache.
+func (a *appState) lookupInstallationID(ctx context.Context, org string) (string, error) {
+	// Check cache first
+	a.installationMu.RLock()
+	if id, ok := a.installationCache[org]; ok {
+		a.installationMu.RUnlock()
+		return id, nil
+	}
+	a.installationMu.RUnlock()
+
+	jwt, err := a.jwtGenerator.GenerateJWT()
+	if err != nil {
+		return "", errors.Wrap(err, "generate JWT")
+	}
+
+	// Try org endpoint first, then user endpoint
+	for _, endpoint := range []string{
+		fmt.Sprintf("%s/orgs/%s/installation", a.apiBase, org),
+		fmt.Sprintf("%s/users/%s/installation", a.apiBase, org),
+	} {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+		if err != nil {
+			return "", errors.Wrap(err, "create request")
+		}
+
+		req.Header.Set("Accept", "application/vnd.github+json")
+		req.Header.Set("Authorization", "Bearer "+jwt)
+		req.Header.Set("X-Github-Api-Version", "2022-11-28")
+
+		resp, err := a.httpClient.Do(req)
+		if err != nil {
+			return "", errors.Wrap(err, "execute request")
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode == http.StatusNotFound {
+			continue
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			return "", errors.Errorf("GitHub API returned status %d for %s", resp.StatusCode, endpoint)
+		}
+
+		var result struct {
+			ID int64 `json:"id"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+			return "", errors.Wrap(err, "decode response")
+		}
+
+		installationID := strconv.FormatInt(result.ID, 10)
+
+		a.installationMu.Lock()
+		a.installationCache[org] = installationID
+		a.installationMu.Unlock()
+
+		return installationID, nil
+	}
+
+	return "", errors.Errorf("no GitHub App installation found for %s", org)
 }
 
 func extractOrgFromURL(url string) (string, error) {
