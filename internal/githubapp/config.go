@@ -7,7 +7,7 @@ import "time"
 type Config struct {
 	AppID          string            `hcl:"app-id,optional" help:"GitHub App ID"`
 	PrivateKeyPath string            `hcl:"private-key-path,optional" help:"Path to GitHub App private key (PEM format)"`
-	Installations  map[string]string `hcl:"installations,optional" help:"Mapping of org names to installation IDs"`
+	Installations  map[string]string `hcl:"installations,optional" help:"Deprecated: installations are now discovered dynamically via the GitHub API"`
 	FallbackOrg    string            `hcl:"fallback-org,optional" help:"Org whose installation token is used for orgs without their own installation (ensures authenticated rate limits)"`
 }
 
