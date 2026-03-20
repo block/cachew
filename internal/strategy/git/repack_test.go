@@ -43,7 +43,7 @@ func TestRepackInterval(t *testing.T) {
 				RepackInterval: tt.repackInterval,
 			}, newTestScheduler(ctx, t), nil, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
 			assert.NoError(t, err)
-			assert.NotZero(t, s)
+			assert.True(t, s != nil)
 		})
 	}
 }
@@ -67,5 +67,5 @@ func TestRepackScheduledForExistingRepos(t *testing.T) {
 		RepackInterval: 24 * time.Hour,
 	}, newTestScheduler(ctx, t), nil, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
 	assert.NoError(t, err)
-	assert.NotZero(t, s)
+	assert.True(t, s != nil)
 }
