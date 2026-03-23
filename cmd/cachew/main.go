@@ -40,6 +40,13 @@ type CLI struct {
 }
 
 func main() {
+	// Override GOMAXPROCS: container environments may set it to a low value
+	// (e.g. 2) based on cgroup CPU limits. With few OS threads available, the
+	// Go scheduler can't run the zstd decoder, tar reader, and file-write
+	// goroutines concurrently — they time-slice, and the pipeline stalls.
+	// Using all available CPUs lets all goroutines actually run in parallel.
+	runtime.GOMAXPROCS(runtime.NumCPU())
+
 	cli := CLI{}
 	kctx := kong.Parse(&cli, kong.UsageOnError(), kong.HelpOptions{Compact: true}, kong.DefaultEnvars("CACHEW"), kong.Bind(&cli))
 	ctx := context.Background()
