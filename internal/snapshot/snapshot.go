@@ -247,11 +247,36 @@ type writeJob struct {
 	data   []byte
 }
 
+// safePath validates that name is a relative path that stays within dir when
+// joined. It rejects absolute paths and parent traversals (".."). Returns the
+// resolved path under dir.
+func safePath(dir, name string) (string, error) {
+	clean := filepath.Clean(name)
+	if filepath.IsAbs(clean) {
+		return "", errors.Errorf("path %q is absolute", name)
+	}
+	if clean == ".." || strings.HasPrefix(clean, ".."+string(os.PathSeparator)) {
+		return "", errors.Errorf("path %q escapes destination directory", name)
+	}
+	joined := filepath.Join(dir, clean)
+	if !strings.HasPrefix(joined, dir+string(os.PathSeparator)) && joined != dir {
+		return "", errors.Errorf("path %q resolves outside destination directory", name)
+	}
+	return joined, nil
+}
+
 // extractTarParallel reads a tar stream and writes files using a pool of
 // goroutines. The main goroutine reads tar entries and buffers small file
 // contents; workers write those files to disk concurrently. Large files are
 // written inline to keep memory use bounded.
 func extractTarParallel(ctx context.Context, r io.Reader, dir string) error {
+	// Resolve dir to absolute so containment checks are reliable.
+	var err error
+	dir, err = filepath.Abs(dir)
+	if err != nil {
+		return errors.Wrap(err, "resolve destination directory")
+	}
+
 	jobs := make(chan writeJob, extractWorkers*2)
 
 	var (
@@ -261,9 +286,7 @@ func extractTarParallel(ctx context.Context, r io.Reader, dir string) error {
 	)
 
 	for range extractWorkers {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for job := range jobs {
 				f, err := os.OpenFile(job.target, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, job.mode)
 				if err != nil {
@@ -279,19 +302,19 @@ func extractTarParallel(ctx context.Context, r io.Reader, dir string) error {
 					writeErrOnce.Do(func() { writeErr = errors.Errorf("close %s: %w", filepath.Base(job.target), err) })
 				}
 			}
-		}()
+		})
 	}
 
 	copyBuf := make([]byte, 1<<20) // reused only for inline large-file writes
 
 	// createdDirs is accessed only by the main goroutine, so no mutex needed.
 	createdDirs := make(map[string]struct{})
-	ensureDir := func(d string) error {
+	ensureDir := func(d string, mode os.FileMode) error {
 		if _, ok := createdDirs[d]; ok {
 			return nil
 		}
-		if err := os.MkdirAll(d, 0o750); err != nil {
-			return err
+		if err := os.MkdirAll(d, mode); err != nil { //nolint:gosec // path is validated by caller
+			return errors.Wrap(err, "mkdir")
 		}
 		createdDirs[d] = struct{}{}
 		return nil
@@ -307,7 +330,7 @@ loop:
 		}
 
 		hdr, err := tr.Next()
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {
@@ -315,23 +338,36 @@ loop:
 			break
 		}
 
-		name := filepath.Clean(hdr.Name)
-		if strings.HasPrefix(name, "..") {
-			readErr = errors.Errorf("tar entry %q escapes destination directory", hdr.Name)
+		target, err := safePath(dir, hdr.Name)
+		if err != nil {
+			readErr = errors.Errorf("unsafe tar entry %q: %w", hdr.Name, err)
 			break
 		}
 
-		target := filepath.Join(dir, name)
-
 		switch hdr.Typeflag {
 		case tar.TypeDir:
-			if err := ensureDir(target); err != nil {
+			if err := ensureDir(target, hdr.FileInfo().Mode()); err != nil {
 				readErr = errors.Errorf("mkdir %s: %w", hdr.Name, err)
 				break loop
 			}
 
+		case tar.TypeLink:
+			if err := ensureDir(filepath.Dir(target), 0o755); err != nil {
+				readErr = errors.Errorf("mkdir for hardlink %s: %w", hdr.Name, err)
+				break loop
+			}
+			linkTarget, err := safePath(dir, hdr.Linkname)
+			if err != nil {
+				readErr = errors.Errorf("unsafe hardlink target %q: %w", hdr.Linkname, err)
+				break loop
+			}
+			if err := os.Link(linkTarget, target); err != nil {
+				readErr = errors.Errorf("hardlink %s → %s: %w", hdr.Name, hdr.Linkname, err)
+				break loop
+			}
+
 		case tar.TypeReg:
-			if err := ensureDir(filepath.Dir(target)); err != nil {
+			if err := ensureDir(filepath.Dir(target), 0o755); err != nil {
 				readErr = errors.Errorf("mkdir %s: %w", hdr.Name, err)
 				break loop
 			}
@@ -352,7 +388,7 @@ loop:
 				jobs <- writeJob{target: target, mode: hdr.FileInfo().Mode(), data: buf}
 			} else {
 				// Large file: write inline to keep memory bounded.
-				f, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, hdr.FileInfo().Mode())
+				f, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, hdr.FileInfo().Mode()) //nolint:gosec // path traversal guarded above
 				if err != nil {
 					readErr = errors.Errorf("open %s: %w", hdr.Name, err)
 					break loop
@@ -369,8 +405,12 @@ loop:
 			}
 
 		case tar.TypeSymlink:
-			if err := ensureDir(filepath.Dir(target)); err != nil {
+			if err := ensureDir(filepath.Dir(target), 0o755); err != nil {
 				readErr = errors.Errorf("mkdir for symlink %s: %w", hdr.Name, err)
+				break loop
+			}
+			if _, err := safePath(dir, hdr.Linkname); err != nil {
+				readErr = errors.Errorf("unsafe symlink target %q: %w", hdr.Linkname, err)
 				break loop
 			}
 			if err := os.Symlink(hdr.Linkname, target); err != nil {
