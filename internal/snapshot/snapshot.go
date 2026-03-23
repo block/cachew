@@ -78,9 +78,8 @@ func Create(ctx context.Context, remote cache.Cache, key cache.Key, directory st
 
 	// Compression uses the in-process klauspost/compress/zstd encoder with NumCPU
 	// goroutines, producing parallel frames that can be decompressed in parallel.
-	// This eliminates the zstd subprocess and the IPC pipe between tar and the
-	// compressor: no subprocess spawning, no kernel pipes for IPC, no scheduling
-	// jitter from coordinating across process boundaries.
+	// This eliminates the zstd subprocess (one fewer fork/exec, one fewer
+	// kernel pipe) and removes the runtime dependency on the zstd binary.
 	enc, err := zstd.NewWriter(wc,
 		zstd.WithEncoderConcurrency(threads),
 		zstd.WithWindowSize(zstd.MaxWindowSize))
@@ -89,6 +88,7 @@ func Create(ctx context.Context, remote cache.Cache, key cache.Key, directory st
 	}
 
 	_, copyErr := io.Copy(enc, tarStdout)
+	tarStdout.Close() //nolint:errcheck,gosec // best-effort; tar will exit via SIGPIPE
 	encErr := enc.Close()
 	tarErr := tarCmd.Wait()
 	closeErr := wc.Close()
@@ -153,6 +153,7 @@ func StreamTo(ctx context.Context, w io.Writer, directory string, excludePattern
 	}
 
 	_, copyErr := io.Copy(enc, tarStdout)
+	tarStdout.Close() //nolint:errcheck,gosec // best-effort; tar will exit via SIGPIPE
 	encErr := enc.Close()
 	tarErr := tarCmd.Wait()
 
