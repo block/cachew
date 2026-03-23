@@ -23,13 +23,15 @@ func TestMiddlewareDefaultPolicy(t *testing.T) {
 	tests := []struct {
 		Name           string
 		Method         string
+		RemoteAddr     string
 		ExpectedStatus int
 	}{
-		{"GETAllowed", http.MethodGet, http.StatusOK},
-		{"HEADAllowed", http.MethodHead, http.StatusOK},
-		{"POSTDenied", http.MethodPost, http.StatusForbidden},
-		{"PUTDenied", http.MethodPut, http.StatusForbidden},
-		{"DELETEDenied", http.MethodDelete, http.StatusForbidden},
+		{"GETFromAnywhere", http.MethodGet, "10.0.0.1:9999", http.StatusOK},
+		{"HEADFromAnywhere", http.MethodHead, "10.0.0.1:9999", http.StatusOK},
+		{"POSTFromLocalhost", http.MethodPost, "127.0.0.1:12345", http.StatusOK},
+		{"PUTFromLocalhost", http.MethodPut, "127.0.0.1:12345", http.StatusOK},
+		{"POSTFromRemote", http.MethodPost, "10.0.0.1:9999", http.StatusForbidden},
+		{"DELETEFromRemote", http.MethodDelete, "10.0.0.1:9999", http.StatusForbidden},
 	}
 
 	next := http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {})
@@ -39,10 +41,7 @@ func TestMiddlewareDefaultPolicy(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.Name, func(t *testing.T) {
 			r := newRequest(test.Method, "/some/path")
-			// Default policy requires localhost; httptest uses 192.0.2.1, so
-			// non-localhost requests that are also non-GET/HEAD get two reasons.
-			// Override RemoteAddr so we only test the method rule.
-			r.RemoteAddr = "127.0.0.1:12345"
+			r.RemoteAddr = test.RemoteAddr
 			w := httptest.NewRecorder()
 			handler.ServeHTTP(w, r)
 			assert.Equal(t, test.ExpectedStatus, w.Code)
@@ -50,22 +49,10 @@ func TestMiddlewareDefaultPolicy(t *testing.T) {
 	}
 }
 
-func TestMiddlewareDefaultPolicyDeniesNonLocalhost(t *testing.T) {
-	next := http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {})
-	handler, err := opa.Middleware(t.Context(), opa.Config{}, next)
-	assert.NoError(t, err)
-
-	r := newRequest(http.MethodGet, "/some/path")
-	r.RemoteAddr = "10.0.0.1:9999"
-	w := httptest.NewRecorder()
-	handler.ServeHTTP(w, r)
-	assert.Equal(t, http.StatusForbidden, w.Code)
-	assert.Contains(t, w.Body.String(), "remote address not allowed")
-}
-
 func TestMiddlewareInlinePolicy(t *testing.T) {
 	policy := `package cachew.authz
-deny contains "only POST allowed" if input.method != "POST"
+default allow := false
+allow if input.method == "POST"
 `
 	next := http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {})
 	handler, err := opa.Middleware(t.Context(), opa.Config{Policy: policy}, next)
@@ -91,7 +78,8 @@ deny contains "only POST allowed" if input.method != "POST"
 
 func TestMiddlewarePolicyFile(t *testing.T) {
 	policy := `package cachew.authz
-deny contains "private path" if input.path[0] != "public"
+default allow := false
+allow if input.path[0] == "public"
 `
 	dir := t.TempDir()
 	path := filepath.Join(dir, "policy.rego")
@@ -121,10 +109,9 @@ deny contains "private path" if input.path[0] != "public"
 
 func TestMiddlewarePathBasedPolicy(t *testing.T) {
 	policy := `package cachew.authz
-deny contains "path not allowed" if {
-	not input.path[0] == "api"
-	not input.path[0] == "_liveness"
-}
+default allow := false
+allow if input.path[0] == "api"
+allow if input.path[0] == "_liveness"
 `
 	next := http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {})
 	handler, err := opa.Middleware(t.Context(), opa.Config{Policy: policy}, next)
@@ -151,7 +138,8 @@ deny contains "path not allowed" if {
 
 func TestMiddlewareInlineData(t *testing.T) {
 	policy := `package cachew.authz
-deny contains "method not in allowed set" if not data.allowed_methods[input.method]
+default allow := false
+allow if data.allowed_methods[input.method]
 `
 	next := http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {})
 	handler, err := opa.Middleware(t.Context(), opa.Config{
@@ -193,7 +181,8 @@ func TestMiddlewareInlineDataInvalidJSON(t *testing.T) {
 
 func TestMiddlewareDataFile(t *testing.T) {
 	policy := `package cachew.authz
-deny contains "method not in allowed set" if not data.allowed_methods[input.method]
+default allow := false
+allow if data.allowed_methods[input.method]
 `
 	dataJSON := `{"allowed_methods": {"POST": true, "PUT": true}}`
 
@@ -261,54 +250,20 @@ func TestMiddlewareInvalidPolicy(t *testing.T) {
 	assert.Error(t, err)
 }
 
-func TestMiddlewareDenyReasons(t *testing.T) {
+func TestMiddlewareHeaderBasedPolicy(t *testing.T) {
 	policy := `package cachew.authz
-deny contains "writes are not allowed" if input.method == "PUT"
-deny contains "deletes are not allowed" if input.method == "DELETE"
+default allow := false
+allow if input.headers["authorization"]
 `
 	next := http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {})
 	handler, err := opa.Middleware(t.Context(), opa.Config{Policy: policy}, next)
 	assert.NoError(t, err)
 
-	tests := []struct {
-		Name           string
-		Method         string
-		ExpectedStatus int
-		ExpectedBody   string
-	}{
-		{"GETAllowed", http.MethodGet, http.StatusOK, ""},
-		{"PUTDenied", http.MethodPut, http.StatusForbidden, "forbidden: writes are not allowed\n"},
-		{"DELETEDenied", http.MethodDelete, http.StatusForbidden, "forbidden: deletes are not allowed\n"},
-	}
-	for _, test := range tests {
-		t.Run(test.Name, func(t *testing.T) {
-			r := newRequest(test.Method, "/")
-			w := httptest.NewRecorder()
-			handler.ServeHTTP(w, r)
-			assert.Equal(t, test.ExpectedStatus, w.Code)
-			if test.ExpectedBody != "" {
-				assert.Equal(t, test.ExpectedBody, w.Body.String())
-			}
-		})
-	}
-}
-
-func TestMiddlewareDenyUnauthenticated(t *testing.T) {
-	policy := `package cachew.authz
-deny contains "unauthenticated" if not input.headers["authorization"]
-`
-	next := http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {})
-	handler, err := opa.Middleware(t.Context(), opa.Config{Policy: policy}, next)
-	assert.NoError(t, err)
-
-	// Without Authorization header: denied.
 	r := newRequest(http.MethodGet, "/")
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, r)
 	assert.Equal(t, http.StatusForbidden, w.Code)
-	assert.Equal(t, "forbidden: unauthenticated\n", w.Body.String())
 
-	// With Authorization header: allowed.
 	r = newRequest(http.MethodGet, "/")
 	r.Header.Set("Authorization", "Bearer token")
 	w = httptest.NewRecorder()
@@ -316,25 +271,7 @@ deny contains "unauthenticated" if not input.headers["authorization"]
 	assert.Equal(t, http.StatusOK, w.Code)
 }
 
-func TestMiddlewareDenyMultipleReasons(t *testing.T) {
-	policy := `package cachew.authz
-deny contains "reason-a" if input.method == "POST"
-deny contains "reason-b" if input.method == "POST"
-`
-	next := http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {})
-	handler, err := opa.Middleware(t.Context(), opa.Config{Policy: policy}, next)
-	assert.NoError(t, err)
-
-	r := newRequest(http.MethodPost, "/")
-	w := httptest.NewRecorder()
-	handler.ServeHTTP(w, r)
-	assert.Equal(t, http.StatusForbidden, w.Code)
-	// Reasons are sorted deterministically.
-	assert.Equal(t, "forbidden: reason-a; reason-b\n", w.Body.String())
-}
-
-func TestMiddlewareEmptyDenyAllowsAll(t *testing.T) {
-	// A policy with no deny rules allows everything.
+func TestMiddlewareEmptyPolicyDeniesAll(t *testing.T) {
 	policy := `package cachew.authz
 `
 	next := http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {})
@@ -345,6 +282,6 @@ func TestMiddlewareEmptyDenyAllowsAll(t *testing.T) {
 		r := newRequest(method, "/any/path")
 		w := httptest.NewRecorder()
 		handler.ServeHTTP(w, r)
-		assert.Equal(t, http.StatusOK, w.Code)
+		assert.Equal(t, http.StatusForbidden, w.Code)
 	}
 }
