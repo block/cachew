@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"os"
-	"sort"
 	"strings"
 
 	"github.com/alecthomas/errors"
@@ -15,11 +14,12 @@ import (
 	"github.com/block/cachew/internal/logging"
 )
 
-// DefaultPolicy allows only GET and HEAD requests from localhost.
+// DefaultPolicy allows GET and HEAD from any source, and all methods from localhost.
 const DefaultPolicy = `package cachew.authz
 
-deny contains "method not allowed" if not input.method in {"GET", "HEAD"}
-deny contains "remote address not allowed" if not startswith(input.remote_addr, "127.0.0.1:")
+default allow := false
+allow if input.method in {"GET", "HEAD"}
+allow if startswith(input.remote_addr, "127.0.0.1:")
 `
 
 // Config for OPA policy evaluation. If neither Policy nor PolicyFile is set,
@@ -32,10 +32,8 @@ type Config struct {
 }
 
 // Middleware returns an http.Handler that evaluates OPA policy before delegating to next.
-// The policy must define a set "deny" rule under package cachew.authz whose elements
-// are human-readable reason strings (e.g. `deny contains "unauthenticated" if ...`).
-// If the deny set is empty, the request is allowed. Otherwise it is rejected and
-// the reasons are included in the response body and server logs.
+// The policy must define a boolean "allow" rule under package cachew.authz.
+// If allow is true the request proceeds; otherwise it is rejected with 403.
 func Middleware(ctx context.Context, cfg Config, next http.Handler) (http.Handler, error) {
 	policy, err := loadPolicy(cfg)
 	if err != nil {
@@ -47,24 +45,24 @@ func Middleware(ctx context.Context, cfg Config, next http.Handler) (http.Handle
 		return nil, err
 	}
 
-	prepared, err := prepareQuery(ctx, "data.cachew.authz.deny", policy, dataOpts)
+	prepared, err := prepareQuery(ctx, "data.cachew.authz.allow", policy, dataOpts)
 	if err != nil {
-		return nil, errors.Errorf("compile OPA deny query: %w", err)
+		return nil, errors.Errorf("compile OPA allow query: %w", err)
 	}
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		input := buildInput(r)
 		logger := logging.FromContext(r.Context())
 
-		reasons, err := evalDeny(r.Context(), prepared, input)
+		allowed, err := evalAllow(r.Context(), prepared, input)
 		if err != nil {
 			logger.Error("OPA evaluation failed", "error", err)
 			http.Error(w, "policy evaluation error", http.StatusInternalServerError)
 			return
 		}
-		if len(reasons) > 0 {
-			logger.Warn("OPA denied request", "method", r.Method, "path", r.URL.Path, "remote_addr", r.RemoteAddr, "reasons", reasons)
-			http.Error(w, "forbidden: "+strings.Join(reasons, "; "), http.StatusForbidden)
+		if !allowed {
+			logger.Warn("OPA denied request", "method", r.Method, "path", r.URL.Path, "remote_addr", r.RemoteAddr)
+			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
 
@@ -96,33 +94,17 @@ func dataOptions(cfg Config) ([]func(*rego.Rego), error) {
 	return []func(*rego.Rego){rego.Data(opaData)}, nil
 }
 
-// evalDeny evaluates the prepared deny query and returns any denial reason strings.
-// If the policy produces no deny reasons, nil is returned.
-func evalDeny(ctx context.Context, prepared rego.PreparedEvalQuery, input map[string]any) ([]string, error) {
+// evalAllow evaluates the prepared allow query and returns whether the request is permitted.
+func evalAllow(ctx context.Context, prepared rego.PreparedEvalQuery, input map[string]any) (bool, error) {
 	results, err := prepared.Eval(ctx, rego.EvalInput(input))
 	if err != nil {
-		return nil, errors.Errorf("evaluate deny query: %w", err)
+		return false, errors.Errorf("evaluate allow query: %w", err)
 	}
 	if len(results) == 0 || len(results[0].Expressions) == 0 {
-		return nil, nil
+		return false, nil
 	}
-	val := results[0].Expressions[0].Value
-	// OPA represents sets as []interface{} in the Go bindings.
-	set, isSet := val.([]any)
-	if !isSet {
-		return nil, nil
-	}
-	if len(set) == 0 {
-		return nil, nil
-	}
-	reasons := make([]string, 0, len(set))
-	for _, v := range set {
-		if s, isString := v.(string); isString {
-			reasons = append(reasons, s)
-		}
-	}
-	sort.Strings(reasons) // deterministic order for logging/testing
-	return reasons, nil
+	allowed, ok := results[0].Expressions[0].Value.(bool)
+	return ok && allowed, nil
 }
 
 func loadPolicy(cfg Config) (string, error) {

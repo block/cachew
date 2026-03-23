@@ -143,16 +143,16 @@ s3 {
 
 ## Authorization (OPA)
 
-Cachew uses [Open Policy Agent](https://www.openpolicyagent.org/) for request authorization. The default policy allows all methods from `127.0.0.1` and `GET`/`HEAD` from elsewhere.
+Cachew uses [Open Policy Agent](https://www.openpolicyagent.org/) for request authorization. The default policy allows GET/HEAD from any source and all methods from `127.0.0.1`.
 
-Policies must be in `package cachew.authz` and define a `deny` rule set. If the set is empty, the request is allowed; otherwise the reasons are returned to the client.
+Policies must be in `package cachew.authz` and define an `allow` rule. If `allow` is true the request proceeds; otherwise it is rejected with 403.
 
 ```hcl
 opa {
   policy = <<EOF
     package cachew.authz
-    deny contains "unauthenticated" if not input.headers["authorization"]
-    deny contains "writes not allowed" if input.method == "PUT"
+    default allow := false
+    allow if input.headers["authorization"]
   EOF
 }
 ```
@@ -239,7 +239,8 @@ log {
 opa {
   policy = <<EOF
     package cachew.authz
-    deny contains "not localhost" if not startswith(input.remote_addr, "127.0.0.1:")
+    default allow := false
+    allow if startswith(input.remote_addr, "127.0.0.1:")
   EOF
 }
 
