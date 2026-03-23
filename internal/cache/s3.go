@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"bufio"
 	"context"
 	"crypto/tls"
 	"encoding/json"
@@ -350,8 +351,14 @@ func (s *S3) Create(ctx context.Context, key Key, headers http.Header, ttl time.
 		errCh:     make(chan error, 1),
 	}
 
-	// Start upload in background goroutine
-	go writer.upload(pr)
+	// Start upload in background goroutine. The buffered reader decouples the
+	// upstream pipe (zero-buffer io.Pipe from the archive process) from the
+	// upload chunking loop. Without it, when the uploader blocks on a full
+	// jobs channel or slow S3 part upload, the archive goroutine stalls
+	// because nobody is consuming the pipe. The 8 MiB buffer absorbs ongoing
+	// archive output during those brief stalls.
+	br := bufio.NewReaderSize(pr, 8<<20)
+	go writer.upload(pr, br)
 
 	return writer, nil
 }
@@ -422,7 +429,7 @@ func (w *s3Writer) Close() error {
 	return nil
 }
 
-func (w *s3Writer) upload(pr *io.PipeReader) {
+func (w *s3Writer) upload(pr *io.PipeReader, r io.Reader) {
 	var uploadErr error
 	defer func() {
 		// Use CloseWithError to propagate any error to the writer side
@@ -471,7 +478,7 @@ func (w *s3Writer) upload(pr *io.PipeReader) {
 		w.ctx,
 		w.s3.config.Bucket,
 		objectName,
-		pr,
+		r,
 		-1,
 		opts,
 	)
