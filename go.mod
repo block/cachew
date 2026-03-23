@@ -7,6 +7,7 @@ require (
 	github.com/alecthomas/kong v1.14.0
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/goproxy/goproxy v0.25.0
+	github.com/klauspost/compress v1.18.5
 	github.com/lmittmann/tint v1.1.3
 	github.com/minio/minio-go/v7 v7.0.98
 	github.com/open-policy-agent/opa v1.14.1
@@ -40,7 +41,6 @@ require (
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.28.0 // indirect
 	github.com/hexops/gotextdiff v1.0.3 // indirect
-	github.com/klauspost/compress v1.18.2 // indirect
 	github.com/klauspost/cpuid/v2 v2.2.11 // indirect
 	github.com/klauspost/crc32 v1.3.0 // indirect
 	github.com/lestrrat-go/blackmagic v1.0.4 // indirect

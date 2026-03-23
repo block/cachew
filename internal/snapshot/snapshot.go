@@ -2,6 +2,7 @@
 package snapshot
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/alecthomas/errors"
+	"github.com/klauspost/compress/zstd"
 
 	"github.com/block/cachew/internal/cache"
 )
@@ -61,38 +63,45 @@ func Create(ctx context.Context, remote cache.Cache, key cache.Key, directory st
 	tarArgs = append(tarArgs, ".")
 
 	tarCmd := exec.CommandContext(ctx, "tar", tarArgs...)
-	zstdCmd := exec.CommandContext(ctx, "zstd", "-c", fmt.Sprintf("-T%d", threads)) //nolint:gosec // threads is a validated integer, not user input
 
 	tarStdout, err := tarCmd.StdoutPipe()
 	if err != nil {
 		return errors.Join(errors.Wrap(err, "failed to create tar stdout pipe"), wc.Close())
 	}
 
-	var tarStderr, zstdStderr bytes.Buffer
+	var tarStderr bytes.Buffer
 	tarCmd.Stderr = &tarStderr
-
-	zstdCmd.Stdin = tarStdout
-	zstdCmd.Stdout = wc
-	zstdCmd.Stderr = &zstdStderr
 
 	if err := tarCmd.Start(); err != nil {
 		return errors.Join(errors.Wrap(err, "failed to start tar"), wc.Close())
 	}
 
-	if err := zstdCmd.Start(); err != nil {
-		return errors.Join(errors.Wrap(err, "failed to start zstd"), tarCmd.Wait(), wc.Close())
+	// Compression uses the in-process klauspost/compress/zstd encoder with NumCPU
+	// goroutines, producing parallel frames that can be decompressed in parallel.
+	// This eliminates the zstd subprocess and the IPC pipe between tar and the
+	// compressor: no subprocess spawning, no kernel pipes for IPC, no scheduling
+	// jitter from coordinating across process boundaries.
+	enc, err := zstd.NewWriter(wc,
+		zstd.WithEncoderConcurrency(threads),
+		zstd.WithWindowSize(zstd.MaxWindowSize))
+	if err != nil {
+		return errors.Join(errors.Wrap(err, "failed to create zstd encoder"), tarCmd.Wait(), wc.Close())
 	}
 
+	_, copyErr := io.Copy(enc, tarStdout)
+	encErr := enc.Close()
 	tarErr := tarCmd.Wait()
-	zstdErr := zstdCmd.Wait()
 	closeErr := wc.Close()
 
 	var errs []error
 	if tarErr != nil {
 		errs = append(errs, errors.Errorf("tar failed: %w: %s", tarErr, tarStderr.String()))
 	}
-	if zstdErr != nil {
-		errs = append(errs, errors.Errorf("zstd failed: %w: %s", zstdErr, zstdStderr.String()))
+	if copyErr != nil {
+		errs = append(errs, errors.Wrap(copyErr, "failed to copy tar output to zstd encoder"))
+	}
+	if encErr != nil {
+		errs = append(errs, errors.Wrap(encErr, "failed to close zstd encoder"))
 	}
 	if closeErr != nil {
 		errs = append(errs, errors.Wrap(closeErr, "failed to close writer"))
@@ -123,37 +132,39 @@ func StreamTo(ctx context.Context, w io.Writer, directory string, excludePattern
 	tarArgs = append(tarArgs, ".")
 
 	tarCmd := exec.CommandContext(ctx, "tar", tarArgs...)
-	zstdCmd := exec.CommandContext(ctx, "zstd", "-c", fmt.Sprintf("-T%d", threads)) //nolint:gosec // threads is a validated integer, not user input
 
 	tarStdout, err := tarCmd.StdoutPipe()
 	if err != nil {
 		return errors.Wrap(err, "failed to create tar stdout pipe")
 	}
 
-	var tarStderr, zstdStderr bytes.Buffer
+	var tarStderr bytes.Buffer
 	tarCmd.Stderr = &tarStderr
-
-	zstdCmd.Stdin = tarStdout
-	zstdCmd.Stdout = w
-	zstdCmd.Stderr = &zstdStderr
 
 	if err := tarCmd.Start(); err != nil {
 		return errors.Wrap(err, "failed to start tar")
 	}
 
-	if err := zstdCmd.Start(); err != nil {
-		return errors.Join(errors.Wrap(err, "failed to start zstd"), tarCmd.Wait())
+	enc, err := zstd.NewWriter(w,
+		zstd.WithEncoderConcurrency(threads),
+		zstd.WithWindowSize(zstd.MaxWindowSize))
+	if err != nil {
+		return errors.Join(errors.Wrap(err, "failed to create zstd encoder"), tarCmd.Wait())
 	}
 
+	_, copyErr := io.Copy(enc, tarStdout)
+	encErr := enc.Close()
 	tarErr := tarCmd.Wait()
-	zstdErr := zstdCmd.Wait()
 
 	var errs []error
 	if tarErr != nil {
 		errs = append(errs, errors.Errorf("tar failed: %w: %s", tarErr, tarStderr.String()))
 	}
-	if zstdErr != nil {
-		errs = append(errs, errors.Errorf("zstd failed: %w: %s", zstdErr, zstdStderr.String()))
+	if copyErr != nil {
+		errs = append(errs, errors.Wrap(copyErr, "failed to copy tar output to zstd encoder"))
+	}
+	if encErr != nil {
+		errs = append(errs, errors.Wrap(encErr, "failed to close zstd encoder"))
 	}
 
 	return errors.Join(errs...)
@@ -187,39 +198,28 @@ func Extract(ctx context.Context, r io.Reader, directory string, threads int) er
 		return errors.Wrap(err, "failed to create target directory")
 	}
 
-	zstdCmd := exec.CommandContext(ctx, "zstd", "-dc", fmt.Sprintf("-T%d", threads)) //nolint:gosec // threads is a validated integer, not user input
-	tarCmd := exec.CommandContext(ctx, "tar", "-xpf", "-", "-C", directory)
-
-	zstdCmd.Stdin = r
-	zstdStdout, err := zstdCmd.StdoutPipe()
+	// Decompression uses the in-process Go zstd decoder to avoid subprocess IPC
+	// overhead (no kernel pipes, no process spawning, no goroutine synchronization
+	// across process boundaries).
+	// Buffer between the source reader and the zstd decoder. The reader may be an
+	// io.Pipe (zero-copy, one Read per Write), so without buffering each small
+	// decoder read stalls the upstream goroutine. 8 MiB lets the decoder read
+	// ahead while the source fills the next chunk.
+	dec, err := zstd.NewReader(bufio.NewReaderSize(r, 8<<20), zstd.WithDecoderConcurrency(threads))
 	if err != nil {
-		return errors.Wrap(err, "failed to create zstd stdout pipe")
+		return errors.Wrap(err, "failed to create zstd decoder")
 	}
+	defer dec.Close()
 
-	var zstdStderr, tarStderr bytes.Buffer
-	zstdCmd.Stderr = &zstdStderr
+	tarCmd := exec.CommandContext(ctx, "tar", "-xpf", "-", "-C", directory)
+	tarCmd.Stdin = dec
 
-	tarCmd.Stdin = zstdStdout
+	var tarStderr bytes.Buffer
 	tarCmd.Stderr = &tarStderr
 
-	if err := zstdCmd.Start(); err != nil {
-		return errors.Wrap(err, "failed to start zstd")
+	if err := tarCmd.Run(); err != nil {
+		return errors.Errorf("tar failed: %w: %s", err, tarStderr.String())
 	}
 
-	if err := tarCmd.Start(); err != nil {
-		return errors.Join(errors.Wrap(err, "failed to start tar"), zstdCmd.Wait())
-	}
-
-	zstdErr := zstdCmd.Wait()
-	tarErr := tarCmd.Wait()
-
-	var errs []error
-	if zstdErr != nil {
-		errs = append(errs, errors.Errorf("zstd failed: %w: %s", zstdErr, zstdStderr.String()))
-	}
-	if tarErr != nil {
-		errs = append(errs, errors.Errorf("tar failed: %w: %s", tarErr, tarStderr.String()))
-	}
-
-	return errors.Join(errs...)
+	return nil
 }
