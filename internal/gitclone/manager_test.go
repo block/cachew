@@ -253,6 +253,36 @@ def456 refs/heads/develop
 	assert.Equal(t, "789012", refs["refs/tags/v1.0.0"])
 }
 
+func TestRepoPathFromURL(t *testing.T) {
+	tests := []struct {
+		name    string
+		url     string
+		want    string
+		wantErr bool
+	}{
+		{name: "valid org/repo", url: "https://github.com/squareup/blox", want: "github.com/squareup/blox"},
+		{name: "valid with .git suffix", url: "https://github.com/squareup/blox.git", want: "github.com/squareup/blox"},
+		{name: "valid nested path", url: "https://gitlab.com/group/subgroup/repo", want: "gitlab.com/group/subgroup/repo"},
+		{name: "org only", url: "https://github.com/squareup", wantErr: true},
+		{name: "org only trailing slash", url: "https://github.com/squareup/", wantErr: true},
+		{name: "org only with .git", url: "https://github.com/squareup/.git", wantErr: true},
+		{name: "host only", url: "https://github.com", wantErr: true},
+		{name: "host only trailing slash", url: "https://github.com/", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := RepoPathFromURL(tt.url)
+			if tt.wantErr {
+				assert.Error(t, err)
+				assert.Contains(t, err.Error(), "invalid repository URL")
+			} else {
+				assert.NoError(t, err)
+				assert.Equal(t, tt.want, got)
+			}
+		})
+	}
+}
+
 func TestState_String(t *testing.T) {
 	assert.Equal(t, "empty", StateEmpty.String())
 	assert.Equal(t, "cloning", StateCloning.String())

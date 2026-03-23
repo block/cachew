@@ -265,13 +265,21 @@ func (m *Manager) DiscoverExisting(ctx context.Context) ([]*Repository, error) {
 }
 
 // RepoPathFromURL extracts a normalised "host/path" from an upstream Git URL,
-// stripping any ".git" suffix.
+// stripping any ".git" suffix. The URL must contain at least an owner and
+// repository component (e.g. "github.com/org/repo"); org-only URLs like
+// "github.com/org" are rejected to prevent operations on parent directories
+// that could affect other repositories.
 func RepoPathFromURL(upstreamURL string) (string, error) {
 	parsed, err := url.Parse(upstreamURL)
 	if err != nil {
 		return "", errors.Wrap(err, "parse upstream URL")
 	}
-	return filepath.Join(parsed.Host, strings.TrimSuffix(parsed.Path, ".git")), nil
+	trimmed := strings.Trim(strings.TrimSuffix(parsed.Path, ".git"), "/")
+	parts := strings.Split(trimmed, "/")
+	if len(parts) < 2 || parts[0] == "" || parts[1] == "" {
+		return "", errors.Errorf("invalid repository URL %q: must contain at least owner and repository (e.g. host/owner/repo)", upstreamURL)
+	}
+	return filepath.Join(parsed.Host, trimmed), nil
 }
 
 func (m *Manager) clonePathForURL(upstreamURL string) (string, error) {
