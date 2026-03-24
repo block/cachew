@@ -191,10 +191,12 @@ func (q *RootScheduler) worker(ctx context.Context, id int) {
 			if !ok {
 				continue
 			}
-			jlogger := logger.With("job", job)
-			jlogger.InfoContext(ctx, "Running job")
+			start := time.Now()
+			logger.InfoContext(ctx, "Starting job", "job", job)
 			if err := job.run(ctx); err != nil {
-				jlogger.ErrorContext(ctx, "Job failed", "error", err)
+				logger.ErrorContext(ctx, "Job failed", "job", job, "error", err, "elapsed", time.Since(start))
+			} else {
+				logger.InfoContext(ctx, "Job completed", "job", job, "elapsed", time.Since(start))
 			}
 			q.markQueueInactive(job.queue)
 			q.workAvailable <- true
