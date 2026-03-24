@@ -326,6 +326,52 @@ func TestRepository_CloneSetsMirrorConfig(t *testing.T) {
 	}
 }
 
+func TestRepository_CloneFailedLeavesNoDebris(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+
+	clonePath := filepath.Join(tmpDir, "mirrors", "github.com", "owner", "repo")
+	repo := &Repository{
+		state:       StateEmpty,
+		path:        clonePath,
+		upstreamURL: "https://github.com/nonexistent-owner-abc123/nonexistent-repo-abc123",
+		fetchSem:    make(chan struct{}, 1),
+	}
+	repo.fetchSem <- struct{}{}
+
+	err := repo.Clone(ctx)
+	assert.Error(t, err)
+	assert.Equal(t, StateEmpty, repo.State())
+
+	_, statErr := os.Stat(clonePath)
+	assert.True(t, os.IsNotExist(statErr), "repo.Path() should not exist after failed clone")
+}
+
+func TestRepository_CloneDoesNotClobberSiblings(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+
+	mirrorRoot := filepath.Join(tmpDir, "mirrors")
+	siblingPath := filepath.Join(mirrorRoot, "github.com", "owner", "sibling")
+	assert.NoError(t, os.MkdirAll(siblingPath, 0o755))
+	assert.NoError(t, os.WriteFile(filepath.Join(siblingPath, "HEAD"), []byte("ref: refs/heads/main\n"), 0o644))
+
+	clonePath := filepath.Join(mirrorRoot, "github.com")
+	repo := &Repository{
+		state:       StateEmpty,
+		path:        clonePath,
+		upstreamURL: "https://github.com/",
+		fetchSem:    make(chan struct{}, 1),
+	}
+	repo.fetchSem <- struct{}{}
+
+	err := repo.Clone(ctx)
+	assert.Error(t, err)
+
+	_, statErr := os.Stat(siblingPath)
+	assert.NoError(t, statErr, "sibling mirror should still exist after failed clone")
+}
+
 func TestRepository_Repack(t *testing.T) {
 	_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelError})
 	tmpDir := t.TempDir()
