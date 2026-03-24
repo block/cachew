@@ -262,13 +262,13 @@ func (s *S3) Open(ctx context.Context, key Key) (io.ReadCloser, http.Header, err
 		}
 	}
 
-	// Get object
-	obj, err := s.client.GetObject(ctx, s.config.Bucket, objectName, minio.GetObjectOptions{})
+	// Download object using parallel range-GET for large objects.
+	reader, err := s.parallelGetReader(ctx, s.config.Bucket, objectName, objInfo.Size)
 	if err != nil {
-		return nil, nil, errors.Errorf("failed to get object: %w", err)
+		return nil, nil, err
 	}
 
-	return &s3Reader{obj: obj}, headers, nil
+	return reader, headers, nil
 }
 
 // refreshExpiration updates the Expires-At metadata on an S3 object using
