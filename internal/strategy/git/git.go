@@ -537,29 +537,41 @@ func (s *Strategy) startClone(ctx context.Context, repo *gitclone.Repository) {
 
 // tryRestoreSnapshot attempts to restore a mirror from an S3 mirror snapshot.
 // Mirror snapshots are bare repositories that can be extracted and used directly
-// without any conversion. On failure the repo path is cleaned up so the caller
-// can fall back to clone.
+// without any conversion. The snapshot is extracted into a temporary directory
+// and renamed into place only on success, so a failure can never delete an
+// existing mirror directory.
 func (s *Strategy) tryRestoreSnapshot(ctx context.Context, repo *gitclone.Repository) error {
 	cacheKey := mirrorSnapshotCacheKey(repo.UpstreamURL())
 
-	if err := os.MkdirAll(filepath.Dir(repo.Path()), 0o750); err != nil {
+	parentDir := filepath.Dir(repo.Path())
+	if err := os.MkdirAll(parentDir, 0o750); err != nil {
 		return errors.Wrap(err, "create parent directory for restore")
 	}
 
+	tmpDir, err := os.MkdirTemp(parentDir, ".restore-*")
+	if err != nil {
+		return errors.Wrap(err, "create temp restore directory")
+	}
+	defer os.RemoveAll(tmpDir) //nolint:errcheck // best-effort cleanup on failure
+
+	restoreDest := filepath.Join(tmpDir, "repo")
+
 	logger := logging.FromContext(ctx)
 
-	if err := snapshot.Restore(ctx, s.cache, cacheKey, repo.Path(), s.config.ZstdThreads); err != nil {
-		_ = os.RemoveAll(repo.Path())
+	if err := snapshot.Restore(ctx, s.cache, cacheKey, restoreDest, s.config.ZstdThreads); err != nil {
 		return errors.Wrap(err, "restore mirror snapshot")
 	}
-	logger.InfoContext(ctx, "Mirror snapshot extracted", "upstream", repo.UpstreamURL(), "path", repo.Path())
+	logger.InfoContext(ctx, "Mirror snapshot extracted", "upstream", repo.UpstreamURL(), "path", restoreDest)
 
-	if err := repo.MarkRestored(ctx); err != nil {
-		_ = os.RemoveAll(repo.Path())
-		return errors.Wrap(err, "mark restored")
+	if err := repo.ConfigureMirror(ctx, restoreDest); err != nil {
+		return errors.Wrap(err, "configure restored mirror")
 	}
-	logger.InfoContext(ctx, "Repository marked as restored", "upstream", repo.UpstreamURL(), "state", repo.State())
 
+	if err := os.Rename(restoreDest, repo.Path()); err != nil {
+		return errors.Wrap(err, "move restored snapshot into place")
+	}
+
+	logger.InfoContext(ctx, "Repository restored from snapshot", "upstream", repo.UpstreamURL())
 	return nil
 }
 

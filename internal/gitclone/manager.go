@@ -357,25 +357,16 @@ func (r *Repository) WithFetchExclusion(ctx context.Context, fn func() error) er
 	}
 }
 
-// MarkRestored configures a restored snapshot (e.g. from S3) as a mirror.
-// The caller must have already transitioned to StateCloning (via
-// TryStartCloning) before extracting the snapshot. On error the state is
-// left as StateCloning so the caller can fall back to a fresh clone.
-func (r *Repository) MarkRestored(ctx context.Context) error {
-	r.mu.Lock()
-	if r.state == StateReady {
-		r.mu.Unlock()
-		return nil
+// ConfigureMirror configures a git directory at repoPath as a mirror with
+// the repository's pack threads and optional maintenance settings.
+func (r *Repository) ConfigureMirror(ctx context.Context, repoPath string) error {
+	if err := configureMirror(ctx, repoPath, r.config.PackThreads); err != nil {
+		return errors.Wrap(err, "configure mirror")
 	}
-	r.state = StateCloning
-	r.mu.Unlock()
-
-	err := configureMirror(ctx, r.path, r.config.PackThreads)
-	if err == nil && r.config.Maintenance {
-		err = registerMaintenance(ctx, r.path)
-	}
-	if err != nil {
-		return errors.Wrap(err, "configure mirror after restore")
+	if r.config.Maintenance {
+		if err := registerMaintenance(ctx, repoPath); err != nil {
+			return errors.Wrap(err, "register maintenance")
+		}
 	}
 	return nil
 }
@@ -483,9 +474,20 @@ func configureMirror(ctx context.Context, repoPath string, packThreads int) erro
 const CloneTimeout = 30 * time.Minute
 
 func (r *Repository) executeClone(ctx context.Context) error {
-	if err := os.MkdirAll(filepath.Dir(r.path), 0o750); err != nil {
+	parentDir := filepath.Dir(r.path)
+	if err := os.MkdirAll(parentDir, 0o750); err != nil {
 		return errors.Wrap(err, "create clone directory")
 	}
+
+	tmpDir, err := os.MkdirTemp(parentDir, ".clone-*")
+	if err != nil {
+		return errors.Wrap(err, "create temp clone directory")
+	}
+	defer os.RemoveAll(tmpDir) //nolint:errcheck // best-effort cleanup on failure
+
+	// git clone --mirror creates a directory inside tmpDir; we point it at a
+	// known subdirectory so we can rename it atomically afterwards.
+	cloneDest := filepath.Join(tmpDir, "repo")
 
 	cloneCtx, cancel := context.WithTimeout(ctx, CloneTimeout)
 	defer cancel()
@@ -495,11 +497,11 @@ func (r *Repository) executeClone(ctx context.Context) error {
 	// repos the server-side pack computation can take minutes at near-zero
 	// transfer rate, which would trip the speed check. The cloneTimeout
 	// provides the overall safety net instead.
-	// #nosec G204 - r.upstreamURL and r.path are controlled by us
+	// #nosec G204 - r.upstreamURL and cloneDest are controlled by us
 	args := []string{
 		"clone", "--mirror",
 		"-c", "http.postBuffer=" + strconv.Itoa(config.PostBuffer),
-		r.upstreamURL, r.path,
+		r.upstreamURL, cloneDest,
 	}
 
 	cmd, err := r.gitCommand(cloneCtx, args...)
@@ -515,16 +517,13 @@ func (r *Repository) executeClone(ctx context.Context) error {
 		return errors.Wrapf(err, "git clone --mirror: %s", string(output))
 	}
 
-	if err := configureMirror(ctx, r.path, r.config.PackThreads); err != nil {
-		return errors.Wrap(err, "configure mirror")
+	if err := r.ConfigureMirror(ctx, cloneDest); err != nil {
+		return errors.WithStack(err)
 	}
 
-	if r.config.Maintenance {
-		if err := registerMaintenance(ctx, r.path); err != nil {
-			return errors.Wrap(err, "register maintenance")
-		}
+	if err := os.Rename(cloneDest, r.path); err != nil {
+		return errors.Wrap(err, "move clone into place")
 	}
-
 	return nil
 }
 

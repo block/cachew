@@ -352,7 +352,7 @@ func (s *Strategy) createBundle(ctx context.Context, repo *gitclone.Repository, 
 	// No read lock needed: git bundle create reads objects through git's own
 	// file-level locking, safe to run concurrently with fetches.
 	headRef := "HEAD"
-	if out, err := exec.CommandContext(ctx, "git", "-C", repo.Path(), "symbolic-ref", "HEAD").Output(); err == nil { // #nosec G204 G702
+	if out, err := exec.CommandContext(ctx, "git", "-C", repo.Path(), "symbolic-ref", "HEAD").Output(); err == nil { //nolint:gosec // repo.Path() is controlled by us
 		headRef = strings.TrimSpace(string(out))
 	}
 
