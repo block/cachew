@@ -143,7 +143,7 @@ s3 {
 
 ## Authorization (OPA)
 
-Cachew uses [Open Policy Agent](https://www.openpolicyagent.org/) for request authorization. The default policy allows GET/HEAD from any source and all methods from `127.0.0.1`.
+Cachew uses [Open Policy Agent](https://www.openpolicyagent.org/) for request authorization. The default policy allows all requests from localhost and restricts remote access to non-admin paths (`/api/*`, `/admin/*`).
 
 Policies must be in `package cachew.authz` and define an `allow` rule. If `allow` is true the request proceeds; otherwise it is rejected with 403.
 
