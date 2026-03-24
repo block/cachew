@@ -191,20 +191,48 @@ func (s *Strategy) handleSnapshotRequest(w http.ResponseWriter, r *http.Request,
 	repoPath := ExtractRepoPath(strings.TrimSuffix(pathValue, "/snapshot.tar.zst"))
 	upstreamURL := "https://" + host + "/" + repoPath
 
-	// Ensure the local mirror is ready before considering any cached snapshot.
 	repo, repoErr := s.cloneManager.GetOrCreate(ctx, upstreamURL)
 	if repoErr != nil {
 		logger.ErrorContext(ctx, "Failed to get or create clone", "upstream", upstreamURL, "error", repoErr)
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
+
+	cacheKey := snapshotCacheKey(upstreamURL)
+
+	// On cold start the local mirror may not be ready yet. Check the S3 cache
+	// first so we can stream a cached snapshot to the client immediately while
+	// the mirror restores in the background. This avoids blocking the client
+	// behind the full S3-download → extract → git-fetch pipeline.
+	if repo.State() != gitclone.StateReady {
+		reader, _, openErr := s.cache.Open(ctx, cacheKey)
+		if openErr == nil && reader != nil {
+			logger.InfoContext(ctx, "Serving cached snapshot while mirror warms up", "upstream", upstreamURL)
+			w.Header().Set("Content-Type", "application/zstd")
+			if _, err := io.Copy(w, reader); err != nil {
+				logger.WarnContext(ctx, "Failed to stream cached snapshot", "upstream", upstreamURL, "error", err)
+			}
+			_ = reader.Close()
+			// Don't eagerly restore the mirror here. The backfill reader
+			// already cached the snapshot to local disk, so future requests
+			// will be served at NVMe speed. The mirror will be restored
+			// lazily by the next request that falls through to ensureCloneReady
+			// (e.g. git fetch/pull) or by a periodic job.
+			return
+		}
+		if reader != nil {
+			_ = reader.Close()
+		}
+	}
+
+	// Either the mirror is already ready or no cached snapshot exists — fall
+	// through to the original path which blocks until the mirror is available.
 	if cloneErr := s.ensureCloneReady(ctx, repo); cloneErr != nil {
 		logger.ErrorContext(ctx, "Clone unavailable for snapshot", "upstream", upstreamURL, "error", cloneErr)
 		http.Error(w, "Repository unavailable", http.StatusServiceUnavailable)
 		return
 	}
 	s.maybeBackgroundFetch(repo)
-	cacheKey := snapshotCacheKey(upstreamURL)
 
 	reader, headers, err := s.cache.Open(ctx, cacheKey)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
