@@ -14,12 +14,12 @@ import (
 	"github.com/block/cachew/internal/logging"
 )
 
-// DefaultPolicy allows GET and HEAD from any source, and all methods from localhost.
+// DefaultPolicy allows all requests from localhost and restricts remote access to non-admin paths.
 const DefaultPolicy = `package cachew.authz
 
 default allow := false
-allow if input.method in {"GET", "HEAD"}
 allow if startswith(input.remote_addr, "127.0.0.1:")
+allow if not input.path[0] in {"api", "admin"}
 `
 
 // Config for OPA policy evaluation. If neither Policy nor PolicyFile is set,

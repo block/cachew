@@ -23,15 +23,19 @@ func TestMiddlewareDefaultPolicy(t *testing.T) {
 	tests := []struct {
 		Name           string
 		Method         string
+		Path           string
 		RemoteAddr     string
 		ExpectedStatus int
 	}{
-		{"GETFromAnywhere", http.MethodGet, "10.0.0.1:9999", http.StatusOK},
-		{"HEADFromAnywhere", http.MethodHead, "10.0.0.1:9999", http.StatusOK},
-		{"POSTFromLocalhost", http.MethodPost, "127.0.0.1:12345", http.StatusOK},
-		{"PUTFromLocalhost", http.MethodPut, "127.0.0.1:12345", http.StatusOK},
-		{"POSTFromRemote", http.MethodPost, "10.0.0.1:9999", http.StatusForbidden},
-		{"DELETEFromRemote", http.MethodDelete, "10.0.0.1:9999", http.StatusForbidden},
+		{"LocalhostGetAdmin", http.MethodGet, "/admin/log/level", "127.0.0.1:12345", http.StatusOK},
+		{"LocalhostPostAPI", http.MethodPost, "/api/v1/object/ns/key", "127.0.0.1:12345", http.StatusOK},
+		{"RemoteGetStrategy", http.MethodGet, "/git/github.com/org/repo", "10.0.0.1:9999", http.StatusOK},
+		{"RemotePostStrategy", http.MethodPost, "/git/github.com/org/repo", "10.0.0.1:9999", http.StatusOK},
+		{"RemoteLiveness", http.MethodGet, "/_liveness", "10.0.0.1:9999", http.StatusOK},
+		{"RemoteReadiness", http.MethodGet, "/_readiness", "10.0.0.1:9999", http.StatusOK},
+		{"RemoteGetAdmin", http.MethodGet, "/admin/pprof/", "10.0.0.1:9999", http.StatusForbidden},
+		{"RemotePostAPI", http.MethodPost, "/api/v1/object/ns/key", "10.0.0.1:9999", http.StatusForbidden},
+		{"RemoteDeleteAPI", http.MethodDelete, "/api/v1/object/ns/key", "10.0.0.1:9999", http.StatusForbidden},
 	}
 
 	next := http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {})
@@ -40,7 +44,7 @@ func TestMiddlewareDefaultPolicy(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.Name, func(t *testing.T) {
-			r := newRequest(test.Method, "/some/path")
+			r := newRequest(test.Method, test.Path)
 			r.RemoteAddr = test.RemoteAddr
 			w := httptest.NewRecorder()
 			handler.ServeHTTP(w, r)
