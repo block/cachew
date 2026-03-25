@@ -64,7 +64,7 @@ jobs:
 
       - name: Extract Docker metadata
         id: docker_meta
-        uses: docker/metadata-action@c1e51972afc2121e065aed6d45c65596fe445f3f # pin@v5.8.0
+        uses: docker/metadata-action@4378dc6be7f72231dfe78ac7e0364a44f1c9f54b # pin@v5.8.0
         with:
           images: |
             ghcr.io/${{ github.repository_owner }}/cachew
