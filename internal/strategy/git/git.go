@@ -56,6 +56,7 @@ type Strategy struct {
 	tokenManager   *githubapp.TokenManager
 	snapshotMu     sync.Map // keyed by upstream URL, values are *sync.Mutex
 	snapshotSpools sync.Map // keyed by upstream URL, values are *snapshotSpoolEntry
+	coldSnapshotMu sync.Map // keyed by upstream URL, values are *coldSnapshotEntry
 }
 
 func New(

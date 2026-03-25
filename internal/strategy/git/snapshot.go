@@ -205,23 +205,43 @@ func (s *Strategy) handleSnapshotRequest(w http.ResponseWriter, r *http.Request,
 	// the mirror restores in the background. This avoids blocking the client
 	// behind the full S3-download → extract → git-fetch pipeline.
 	if repo.State() != gitclone.StateReady {
-		reader, _, openErr := s.cache.Open(ctx, cacheKey)
-		if openErr == nil && reader != nil {
-			logger.InfoContext(ctx, "Serving cached snapshot while mirror warms up", "upstream", upstreamURL)
-			w.Header().Set("Content-Type", "application/zstd")
-			if _, err := io.Copy(w, reader); err != nil {
-				logger.WarnContext(ctx, "Failed to stream cached snapshot", "upstream", upstreamURL, "error", err)
+		entry := &coldSnapshotEntry{done: make(chan struct{})}
+		if existing, loaded := s.coldSnapshotMu.LoadOrStore(upstreamURL, entry); loaded {
+			winner := existing.(*coldSnapshotEntry)
+			<-winner.done
+			reader, _, openErr := s.cache.Open(ctx, cacheKey)
+			if openErr == nil && reader != nil {
+				defer reader.Close()
+				logger.InfoContext(ctx, "Serving locally cached snapshot after waiting for in-flight fill", "upstream", upstreamURL)
+				w.Header().Set("Content-Type", "application/zstd")
+				if _, err := io.Copy(w, reader); err != nil {
+					logger.WarnContext(ctx, "Failed to stream locally cached snapshot", "upstream", upstreamURL, "error", err)
+				}
+				return
 			}
-			_ = reader.Close()
-			// Don't eagerly restore the mirror here. The backfill reader
-			// already cached the snapshot to local disk, so future requests
-			// will be served at NVMe speed. The mirror will be restored
-			// lazily by the next request that falls through to ensureCloneReady
-			// (e.g. git fetch/pull) or by a periodic job.
-			return
-		}
-		if reader != nil {
-			_ = reader.Close()
+		} else {
+			defer func() {
+				close(entry.done)
+				s.coldSnapshotMu.Delete(upstreamURL)
+			}()
+			reader, _, openErr := s.cache.Open(ctx, cacheKey)
+			if openErr == nil && reader != nil {
+				logger.InfoContext(ctx, "Serving cached snapshot while mirror warms up", "upstream", upstreamURL)
+				w.Header().Set("Content-Type", "application/zstd")
+				if _, err := io.Copy(w, reader); err != nil {
+					logger.WarnContext(ctx, "Failed to stream cached snapshot", "upstream", upstreamURL, "error", err)
+				}
+				_ = reader.Close()
+				// Don't eagerly restore the mirror here. The backfill reader
+				// already cached the snapshot to local disk, so future requests
+				// will be served at NVMe speed. The mirror will be restored
+				// lazily by the next request that falls through to ensureCloneReady
+				// (e.g. git fetch/pull) or by a periodic job.
+				return
+			}
+			if reader != nil {
+				_ = reader.Close()
+			}
 		}
 	}
 
@@ -574,6 +594,10 @@ func (s *Strategy) writeSnapshotSpool(w http.ResponseWriter, r *http.Request, re
 type snapshotSpoolEntry struct {
 	spool *ResponseSpool
 	ready chan struct{}
+}
+
+type coldSnapshotEntry struct {
+	done chan struct{}
 }
 
 func snapshotSpoolDirForURL(mirrorRoot, upstreamURL string) (string, error) {
