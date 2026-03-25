@@ -146,7 +146,7 @@ func (t Tiered) backfillReader(ctx context.Context, key Key, src io.ReadCloser, 
 		logger.WarnContext(ctx, "Tier backfill: failed to create writer, skipping", "error", err)
 		return src
 	}
-	return newBackfillReadCloser(src, w, ctx, cancel)
+	return newBackfillReadCloser(ctx, src, w, cancel)
 }
 
 // backfillReadCloser tees reads from src into dst asynchronously. Chunks are
@@ -167,7 +167,7 @@ type backfillReadCloser struct {
 
 const backfillBufSize = 128 // number of chunks buffered (~32 MB at 256 KB each)
 
-func newBackfillReadCloser(src io.ReadCloser, dst io.WriteCloser, ctx context.Context, cancel context.CancelFunc) *backfillReadCloser {
+func newBackfillReadCloser(ctx context.Context, src io.ReadCloser, dst io.WriteCloser, cancel context.CancelFunc) *backfillReadCloser {
 	ch := make(chan []byte, backfillBufSize)
 	done := make(chan error, 1)
 	b := &backfillReadCloser{src: src, ch: ch, ctx: ctx, cancel: cancel, done: done}
@@ -184,12 +184,13 @@ func newBackfillReadCloser(src io.ReadCloser, dst io.WriteCloser, ctx context.Co
 			}
 		}
 		closeErr := dst.Close()
-		if err != nil {
+		switch {
+		case err != nil:
 			done <- err
-		} else if closeErr != nil {
+		case closeErr != nil:
 			cancel()
 			done <- closeErr
-		} else {
+		default:
 			done <- nil
 		}
 	}()

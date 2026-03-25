@@ -211,7 +211,11 @@ func (s *Strategy) handleSnapshotRequest(w http.ResponseWriter, r *http.Request,
 			<-winner.done
 			reader, _, openErr := s.cache.Open(ctx, cacheKey)
 			if openErr == nil && reader != nil {
-				defer reader.Close()
+				winner.serving.Add(1)
+				defer func() {
+					reader.Close()
+					winner.serving.Done()
+				}()
 				logger.InfoContext(ctx, "Serving locally cached snapshot after waiting for in-flight fill", "upstream", upstreamURL)
 				w.Header().Set("Content-Type", "application/zstd")
 				if _, err := io.Copy(w, reader); err != nil {
@@ -232,11 +236,11 @@ func (s *Strategy) handleSnapshotRequest(w http.ResponseWriter, r *http.Request,
 					logger.WarnContext(ctx, "Failed to stream cached snapshot", "upstream", upstreamURL, "error", err)
 				}
 				_ = reader.Close()
-				// Don't eagerly restore the mirror here. The backfill reader
-				// already cached the snapshot to local disk, so future requests
-				// will be served at NVMe speed. The mirror will be restored
-				// lazily by the next request that falls through to ensureCloneReady
-				// (e.g. git fetch/pull) or by a periodic job.
+				// Schedule a deferred mirror restore so the mirror eventually
+				// becomes hot and cachew can generate fresh bundle deltas.
+				// Without this, repos that only ever serve cached snapshots
+				// would never restore their mirror.
+				s.scheduleDeferredMirrorRestore(ctx, repo, entry)
 				return
 			}
 			if reader != nil {
@@ -587,6 +591,69 @@ func (s *Strategy) writeSnapshotSpool(w http.ResponseWriter, r *http.Request, re
 	}
 }
 
+// scheduleDeferredMirrorRestore schedules a one-shot background mirror restore
+// for a repo that was served from a cached S3 snapshot on cold start. Without
+// this, repos that only serve cached snapshots would never warm their mirror,
+// preventing cachew from generating fresh bundle deltas.
+//
+// Submitted to the scheduler immediately after the first S3 snapshot stream
+// completes. By this point the client snapshot is backfilled to local disk, so
+// subsequent snapshot serves read from NVMe and don't compete for S3 bandwidth.
+// The scheduler's concurrency limit naturally throttles the restore against
+// other background work. Only one restore is scheduled per upstream URL.
+func (s *Strategy) scheduleDeferredMirrorRestore(ctx context.Context, repo *gitclone.Repository, coldEntry *coldSnapshotEntry) {
+	upstream := repo.UpstreamURL()
+	if _, loaded := s.deferredRestoreOnce.LoadOrStore(upstream, true); loaded {
+		return
+	}
+
+	logger := logging.FromContext(ctx)
+	logger.InfoContext(ctx, "Scheduling deferred mirror restore", "upstream", upstream)
+
+	s.scheduler.Submit(upstream, "deferred-mirror-restore", func(ctx context.Context) error {
+		logger := logging.FromContext(ctx)
+		if repo.State() == gitclone.StateReady {
+			logger.InfoContext(ctx, "Mirror already ready, skipping deferred restore", "upstream", upstream)
+			return nil
+		}
+		if !repo.TryStartCloning() {
+			logger.InfoContext(ctx, "Mirror restore already in progress, skipping", "upstream", upstream)
+			return nil
+		}
+		// Wait for all in-flight cold snapshot serves to finish so the
+		// restore's disk writes don't compete with local cache reads.
+		coldEntry.serving.Wait()
+
+		logger.InfoContext(ctx, "Starting deferred mirror restore", "upstream", upstream)
+
+		if err := s.tryRestoreSnapshot(ctx, repo); err != nil {
+			logger.WarnContext(ctx, "Deferred mirror snapshot restore failed", "upstream", upstream, "error", err)
+			repo.ResetToEmpty()
+			return nil
+		}
+
+		if err := repo.FetchLenient(ctx, gitclone.CloneTimeout); err != nil {
+			logger.WarnContext(ctx, "Deferred mirror post-restore fetch failed", "upstream", upstream, "error", err)
+			repo.ResetToEmpty()
+			if rmErr := os.RemoveAll(repo.Path()); rmErr != nil {
+				logger.WarnContext(ctx, "Failed to remove mirror after failed fetch", "upstream", upstream, "error", rmErr)
+			}
+			return nil
+		}
+
+		repo.MarkReady()
+		logger.InfoContext(ctx, "Deferred mirror restore completed", "upstream", upstream)
+
+		if s.config.SnapshotInterval > 0 {
+			s.scheduleSnapshotJobs(repo)
+		}
+		if s.config.RepackInterval > 0 {
+			s.scheduleRepackJobs(repo)
+		}
+		return nil
+	})
+}
+
 // snapshotSpoolEntry holds a spool and a ready channel used to coordinate
 // writer election. The first goroutine stores the entry via LoadOrStore and
 // becomes the writer. It closes ready once the spool is created (or on
@@ -597,7 +664,8 @@ type snapshotSpoolEntry struct {
 }
 
 type coldSnapshotEntry struct {
-	done chan struct{}
+	done    chan struct{}
+	serving sync.WaitGroup // tracks all in-flight snapshot serves (winner + followers)
 }
 
 func snapshotSpoolDirForURL(mirrorRoot, upstreamURL string) (string, error) {
