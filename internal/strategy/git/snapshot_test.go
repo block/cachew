@@ -450,6 +450,238 @@ func createTestMirrorRepoWithBranches(t *testing.T, mirrorPath string, branches 
 	assert.NoError(t, err, string(output))
 }
 
+func TestSnapshotServesFreshSnapshotWithCommitHeader(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not found in PATH")
+	}
+
+	_, ctx := logging.Configure(context.Background(), logging.Config{})
+	tmpDir := t.TempDir()
+	mirrorRoot := filepath.Join(tmpDir, "mirrors")
+	upstreamURL := "https://github.com/org/repo"
+	mirrorPath := filepath.Join(mirrorRoot, "github.com", "org", "repo")
+	createTestMirrorRepo(t, mirrorPath)
+
+	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: time.Hour})
+	assert.NoError(t, err)
+	mux := newTestMux()
+
+	cm := gitclone.NewManagerProvider(ctx, gitclone.Config{MirrorRoot: mirrorRoot}, nil)
+	s, err := git.New(ctx, git.Config{}, newTestScheduler(ctx, t), memCache, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
+	assert.NoError(t, err)
+
+	manager, err := cm()
+	assert.NoError(t, err)
+	repo, err := manager.GetOrCreate(ctx, upstreamURL)
+	assert.NoError(t, err)
+
+	// Generate a snapshot — it will embed the mirror's HEAD as X-Cachew-Snapshot-Commit.
+	err = s.GenerateAndUploadSnapshot(ctx, repo)
+	assert.NoError(t, err)
+
+	// Serve the snapshot via HTTP. Since the mirror's HEAD matches the snapshot
+	// commit, no bundle URL should be set, but X-Cachew-Snapshot-Commit must
+	// be forwarded so the client knows the snapshot is fresh.
+	handler := mux.handlers["GET /git/{host}/{path...}"]
+	assert.NotZero(t, handler)
+
+	req := httptest.NewRequest(http.MethodGet, "/git/github.com/org/repo/snapshot.tar.zst", nil)
+	req = req.WithContext(ctx)
+	req.SetPathValue("host", "github.com")
+	req.SetPathValue("path", "org/repo/snapshot.tar.zst")
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	assert.Equal(t, 200, w.Code)
+	assert.NotEqual(t, "", w.Header().Get("X-Cachew-Snapshot-Commit"),
+		"X-Cachew-Snapshot-Commit should be set so client knows snapshot is fresh")
+	assert.Equal(t, "", w.Header().Get("X-Cachew-Bundle-Url"),
+		"no bundle URL when snapshot is already at mirror HEAD")
+}
+
+func TestSnapshotServesBundleURLWhenStale(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not found in PATH")
+	}
+
+	_, ctx := logging.Configure(context.Background(), logging.Config{})
+	tmpDir := t.TempDir()
+	mirrorRoot := filepath.Join(tmpDir, "mirrors")
+	upstreamURL := "https://github.com/org/repo"
+	mirrorPath := filepath.Join(mirrorRoot, "github.com", "org", "repo")
+	createTestMirrorRepo(t, mirrorPath)
+
+	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: time.Hour})
+	assert.NoError(t, err)
+	mux := newTestMux()
+
+	cm := gitclone.NewManagerProvider(ctx, gitclone.Config{MirrorRoot: mirrorRoot}, nil)
+	s, err := git.New(ctx, git.Config{}, newTestScheduler(ctx, t), memCache, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
+	assert.NoError(t, err)
+
+	manager, err := cm()
+	assert.NoError(t, err)
+	repo, err := manager.GetOrCreate(ctx, upstreamURL)
+	assert.NoError(t, err)
+
+	// Generate a snapshot at the current HEAD.
+	err = s.GenerateAndUploadSnapshot(ctx, repo)
+	assert.NoError(t, err)
+
+	// Add a new commit to the mirror so the snapshot becomes stale.
+	tmpWork := t.TempDir()
+	for _, args := range [][]string{
+		{"clone", mirrorPath, tmpWork},
+		{"-C", tmpWork, "config", "user.email", "test@test.com"},
+		{"-C", tmpWork, "config", "user.name", "Test"},
+	} {
+		cmd := exec.Command("git", args...)
+		output, err := cmd.CombinedOutput()
+		assert.NoError(t, err, string(output))
+	}
+	assert.NoError(t, os.WriteFile(filepath.Join(tmpWork, "new.txt"), []byte("new\n"), 0o644))
+	for _, args := range [][]string{
+		{"-C", tmpWork, "add", "."},
+		{"-C", tmpWork, "commit", "-m", "new commit"},
+		{"-C", tmpWork, "push", "origin", "HEAD"},
+	} {
+		cmd := exec.Command("git", args...)
+		output, err := cmd.CombinedOutput()
+		assert.NoError(t, err, string(output))
+	}
+
+	handler := mux.handlers["GET /git/{host}/{path...}"]
+	req := httptest.NewRequest(http.MethodGet, "/git/github.com/org/repo/snapshot.tar.zst", nil)
+	req = req.WithContext(ctx)
+	req.SetPathValue("host", "github.com")
+	req.SetPathValue("path", "org/repo/snapshot.tar.zst")
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	assert.Equal(t, 200, w.Code)
+	assert.NotEqual(t, "", w.Header().Get("X-Cachew-Snapshot-Commit"),
+		"X-Cachew-Snapshot-Commit should be set")
+	assert.NotEqual(t, "", w.Header().Get("X-Cachew-Bundle-Url"),
+		"bundle URL should be set when snapshot is stale")
+	assert.Contains(t, w.Header().Get("X-Cachew-Bundle-Url"), "snapshot.bundle?base=",
+		"bundle URL should include base parameter")
+
+	// Allow background bundle generation goroutine to finish.
+	time.Sleep(2 * time.Second)
+}
+
+func TestColdSnapshotServesWithoutCommitHeader(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not found in PATH")
+	}
+
+	_, ctx := logging.Configure(context.Background(), logging.Config{})
+	tmpDir := t.TempDir()
+	mirrorRoot := filepath.Join(tmpDir, "mirrors")
+
+	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: time.Hour})
+	assert.NoError(t, err)
+	mux := newTestMux()
+
+	cm := gitclone.NewManagerProvider(ctx, gitclone.Config{MirrorRoot: mirrorRoot}, nil)
+	_, err = git.New(ctx, git.Config{}, newTestScheduler(ctx, t), memCache, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
+	assert.NoError(t, err)
+
+	// Pre-populate the cache with a fake snapshot that has NO X-Cachew-Snapshot-Commit
+	// header, simulating a cold-start scenario where the snapshot was uploaded to S3
+	// without mirror metadata.
+	upstreamURL := "https://github.com/org/coldrepo"
+	cacheKey := cache.NewKey(upstreamURL + ".snapshot")
+	headers := make(map[string][]string)
+	headers["Content-Type"] = []string{"application/zstd"}
+	headers["Last-Modified"] = []string{time.Now().Add(time.Hour).UTC().Format(http.TimeFormat)}
+	writer, err := memCache.Create(ctx, cacheKey, headers, 24*time.Hour)
+	assert.NoError(t, err)
+	_, err = writer.Write([]byte("fake cold snapshot"))
+	assert.NoError(t, err)
+	assert.NoError(t, writer.Close())
+
+	handler := mux.handlers["GET /git/{host}/{path...}"]
+
+	// Use a cancelled context so ensureCloneReady fails quickly and the cold
+	// path returns the cached snapshot.
+	cancelCtx, cancel := context.WithCancel(ctx)
+
+	req := httptest.NewRequest(http.MethodGet, "/git/github.com/org/coldrepo/snapshot.tar.zst", nil)
+	req = req.WithContext(cancelCtx)
+	req.SetPathValue("host", "github.com")
+	req.SetPathValue("path", "org/coldrepo/snapshot.tar.zst")
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+	cancel()
+
+	// Cold path should serve the snapshot but without X-Cachew-Snapshot-Commit,
+	// signaling to the client that it needs to freshen.
+	assert.Equal(t, 200, w.Code)
+	assert.Equal(t, "", w.Header().Get("X-Cachew-Snapshot-Commit"),
+		"cold path should not set X-Cachew-Snapshot-Commit")
+	assert.Equal(t, "", w.Header().Get("X-Cachew-Bundle-Url"),
+		"cold path should not set bundle URL")
+}
+
+func TestDeferredRestoreOnlyScheduledOnce(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not found in PATH")
+	}
+
+	_, ctx := logging.Configure(context.Background(), logging.Config{})
+	tmpDir := t.TempDir()
+	mirrorRoot := filepath.Join(tmpDir, "mirrors")
+
+	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: time.Hour})
+	assert.NoError(t, err)
+	mux := newTestMux()
+
+	cm := gitclone.NewManagerProvider(ctx, gitclone.Config{MirrorRoot: mirrorRoot}, nil)
+	_, err = git.New(ctx, git.Config{}, newTestScheduler(ctx, t), memCache, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
+	assert.NoError(t, err)
+
+	// Pre-populate cache with a fake snapshot.
+	upstreamURL := "https://github.com/org/deferred-test"
+	cacheKey := cache.NewKey(upstreamURL + ".snapshot")
+	headers := make(map[string][]string)
+	headers["Content-Type"] = []string{"application/zstd"}
+	headers["Last-Modified"] = []string{time.Now().Add(time.Hour).UTC().Format(http.TimeFormat)}
+	writer, err := memCache.Create(ctx, cacheKey, headers, 24*time.Hour)
+	assert.NoError(t, err)
+	_, err = writer.Write([]byte("fake snapshot"))
+	assert.NoError(t, err)
+	assert.NoError(t, writer.Close())
+
+	handler := mux.handlers["GET /git/{host}/{path...}"]
+
+	// First request: cold path serves snapshot and schedules deferred restore.
+	req := httptest.NewRequest(http.MethodGet, "/git/github.com/org/deferred-test/snapshot.tar.zst", nil)
+	req = req.WithContext(ctx)
+	req.SetPathValue("host", "github.com")
+	req.SetPathValue("path", "org/deferred-test/snapshot.tar.zst")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	assert.Equal(t, 200, w.Code)
+
+	// Second request: should not panic or fail — deferred restore should only
+	// be scheduled once (idempotent via deferredRestoreOnce).
+	req2 := httptest.NewRequest(http.MethodGet, "/git/github.com/org/deferred-test/snapshot.tar.zst", nil)
+	req2 = req2.WithContext(ctx)
+	req2.SetPathValue("host", "github.com")
+	req2.SetPathValue("path", "org/deferred-test/snapshot.tar.zst")
+	w2 := httptest.NewRecorder()
+	handler.ServeHTTP(w2, req2)
+	// Second request may be 200 (from local cache) or 503 (clone not ready).
+	// The key assertion is that it doesn't panic from double-scheduling.
+
+	// Allow background goroutines to settle.
+	time.Sleep(time.Second)
+}
+
 func TestSnapshotRemoteURLUsesServerURL(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not found in PATH")

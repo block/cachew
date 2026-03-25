@@ -213,7 +213,7 @@ func (s *Strategy) handleSnapshotRequest(w http.ResponseWriter, r *http.Request,
 			if openErr == nil && reader != nil {
 				winner.serving.Add(1)
 				defer func() {
-					reader.Close()
+					_ = reader.Close()
 					winner.serving.Done()
 				}()
 				logger.InfoContext(ctx, "Serving locally cached snapshot after waiting for in-flight fill", "upstream", upstreamURL)
@@ -334,6 +334,12 @@ func (s *Strategy) handleBundleRequest(w http.ResponseWriter, r *http.Request, h
 func (s *Strategy) serveSnapshotWithBundle(ctx context.Context, w http.ResponseWriter, reader io.ReadCloser, headers http.Header, repo *gitclone.Repository, upstreamURL string) error {
 	snapshotCommit := headers.Get("X-Cachew-Snapshot-Commit")
 	mirrorHead := s.getMirrorHead(ctx, repo)
+
+	// Forward the snapshot commit to the client so it knows whether the
+	// snapshot is fresh (no bundle URL = already at HEAD, skip freshen).
+	if snapshotCommit != "" {
+		w.Header().Set("X-Cachew-Snapshot-Commit", snapshotCommit)
+	}
 
 	if snapshotCommit != "" && mirrorHead != "" && snapshotCommit != mirrorHead {
 		repoPath, err := gitclone.RepoPathFromURL(upstreamURL)
