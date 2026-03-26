@@ -459,3 +459,70 @@ func FuzzJobScheduler(f *testing.F) {
 		}
 	})
 }
+
+func TestJobSchedulerCloneConcurrencyLimit(t *testing.T) {
+	_, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelError})
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	scheduler := newTestScheduler(ctx, t, jobscheduler.Config{
+		Concurrency:         8,
+		MaxCloneConcurrency: 2,
+	})
+
+	var (
+		cloneRunning       atomic.Int32
+		maxCloneConcurrent atomic.Int32
+		fetchCompleted     atomic.Int32
+		cloneCompleted     atomic.Int32
+		allClonesBlocking  sync.WaitGroup
+	)
+
+	// Submit 4 clone jobs that block until released.
+	allClonesBlocking.Add(1)
+	for i := range 4 {
+		queue := fmt.Sprintf("repo%d", i)
+		scheduler.Submit(queue, "git-clone", func(_ context.Context) error {
+			current := cloneRunning.Add(1)
+			defer cloneRunning.Add(-1)
+			for {
+				maxVal := maxCloneConcurrent.Load()
+				if current <= maxVal {
+					break
+				}
+				if maxCloneConcurrent.CompareAndSwap(maxVal, current) {
+					break
+				}
+			}
+			allClonesBlocking.Wait()
+			cloneCompleted.Add(1)
+			return nil
+		})
+	}
+
+	// Submit fetch jobs on different queues — these should NOT be blocked by clone limit.
+	for i := range 4 {
+		queue := fmt.Sprintf("fetch-repo%d", i)
+		scheduler.Submit(queue, "git-fetch", func(_ context.Context) error {
+			fetchCompleted.Add(1)
+			return nil
+		})
+	}
+
+	// Fetch jobs should complete even while clone jobs are blocking workers.
+	eventually(t, 2*time.Second, func() bool {
+		return fetchCompleted.Load() == 4
+	}, "fetch jobs should complete without being blocked by clone limit")
+
+	// Clone concurrency should be capped at 2.
+	assert.True(t, maxCloneConcurrent.Load() <= 2,
+		"max concurrent clones (%d) should not exceed MaxCloneConcurrency (2)",
+		maxCloneConcurrent.Load())
+
+	// Release clone jobs.
+	allClonesBlocking.Done()
+
+	eventually(t, 2*time.Second, func() bool {
+		return cloneCompleted.Load() == 4
+	}, "all clone jobs should eventually complete")
+}
