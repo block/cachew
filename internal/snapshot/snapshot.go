@@ -63,25 +63,34 @@ func Create(ctx context.Context, remote cache.Cache, key cache.Key, directory st
 	tarCmd := exec.CommandContext(ctx, "tar", tarArgs...)
 	zstdCmd := exec.CommandContext(ctx, "zstd", "-c", fmt.Sprintf("-T%d", threads)) //nolint:gosec // threads is a validated integer, not user input
 
-	tarStdout, err := tarCmd.StdoutPipe()
+	// Use manual pipe so we can close both ends in the parent after starting
+	// children. This prevents deadlock if zstd exits while tar is still writing:
+	// closing the read end ensures tar receives SIGPIPE instead of blocking.
+	pr, pw, err := os.Pipe()
 	if err != nil {
-		return errors.Join(errors.Wrap(err, "failed to create tar stdout pipe"), wc.Close())
+		return errors.Join(errors.Wrap(err, "failed to create pipe"), wc.Close())
 	}
 
 	var tarStderr, zstdStderr bytes.Buffer
+	tarCmd.Stdout = pw
 	tarCmd.Stderr = &tarStderr
 
-	zstdCmd.Stdin = tarStdout
+	zstdCmd.Stdin = pr
 	zstdCmd.Stdout = wc
 	zstdCmd.Stderr = &zstdStderr
 
 	if err := tarCmd.Start(); err != nil {
+		pw.Close() //nolint:errcheck,gosec // best-effort cleanup
+		pr.Close() //nolint:errcheck,gosec // best-effort cleanup
 		return errors.Join(errors.Wrap(err, "failed to start tar"), wc.Close())
 	}
+	pw.Close() //nolint:errcheck,gosec // parent no longer needs write end; tar holds its own copy
 
 	if err := zstdCmd.Start(); err != nil {
+		pr.Close() //nolint:errcheck,gosec // let tar receive SIGPIPE so it exits
 		return errors.Join(errors.Wrap(err, "failed to start zstd"), tarCmd.Wait(), wc.Close())
 	}
+	pr.Close() //nolint:errcheck,gosec // parent no longer needs read end; if zstd dies, tar gets SIGPIPE
 
 	tarErr := tarCmd.Wait()
 	zstdErr := zstdCmd.Wait()
@@ -125,25 +134,31 @@ func StreamTo(ctx context.Context, w io.Writer, directory string, excludePattern
 	tarCmd := exec.CommandContext(ctx, "tar", tarArgs...)
 	zstdCmd := exec.CommandContext(ctx, "zstd", "-c", fmt.Sprintf("-T%d", threads)) //nolint:gosec // threads is a validated integer, not user input
 
-	tarStdout, err := tarCmd.StdoutPipe()
+	pr, pw, err := os.Pipe()
 	if err != nil {
-		return errors.Wrap(err, "failed to create tar stdout pipe")
+		return errors.Wrap(err, "failed to create pipe")
 	}
 
 	var tarStderr, zstdStderr bytes.Buffer
+	tarCmd.Stdout = pw
 	tarCmd.Stderr = &tarStderr
 
-	zstdCmd.Stdin = tarStdout
+	zstdCmd.Stdin = pr
 	zstdCmd.Stdout = w
 	zstdCmd.Stderr = &zstdStderr
 
 	if err := tarCmd.Start(); err != nil {
+		pw.Close() //nolint:errcheck,gosec // best-effort cleanup
+		pr.Close() //nolint:errcheck,gosec // best-effort cleanup
 		return errors.Wrap(err, "failed to start tar")
 	}
+	pw.Close() //nolint:errcheck,gosec // parent no longer needs write end; tar holds its own copy
 
 	if err := zstdCmd.Start(); err != nil {
+		pr.Close() //nolint:errcheck,gosec // let tar receive SIGPIPE so it exits
 		return errors.Join(errors.Wrap(err, "failed to start zstd"), tarCmd.Wait())
 	}
+	pr.Close() //nolint:errcheck,gosec // parent no longer needs read end; if zstd dies, tar gets SIGPIPE
 
 	tarErr := tarCmd.Wait()
 	zstdErr := zstdCmd.Wait()
@@ -190,25 +205,31 @@ func Extract(ctx context.Context, r io.Reader, directory string, threads int) er
 	zstdCmd := exec.CommandContext(ctx, "zstd", "-dc", fmt.Sprintf("-T%d", threads)) //nolint:gosec // threads is a validated integer, not user input
 	tarCmd := exec.CommandContext(ctx, "tar", "-xpf", "-", "-C", directory)
 
-	zstdCmd.Stdin = r
-	zstdStdout, err := zstdCmd.StdoutPipe()
+	pr, pw, err := os.Pipe()
 	if err != nil {
-		return errors.Wrap(err, "failed to create zstd stdout pipe")
+		return errors.Wrap(err, "failed to create pipe")
 	}
 
 	var zstdStderr, tarStderr bytes.Buffer
+	zstdCmd.Stdin = r
+	zstdCmd.Stdout = pw
 	zstdCmd.Stderr = &zstdStderr
 
-	tarCmd.Stdin = zstdStdout
+	tarCmd.Stdin = pr
 	tarCmd.Stderr = &tarStderr
 
 	if err := zstdCmd.Start(); err != nil {
+		pw.Close() //nolint:errcheck,gosec // best-effort cleanup
+		pr.Close() //nolint:errcheck,gosec // best-effort cleanup
 		return errors.Wrap(err, "failed to start zstd")
 	}
+	pw.Close() //nolint:errcheck,gosec // parent no longer needs write end; zstd holds its own copy
 
 	if err := tarCmd.Start(); err != nil {
+		pr.Close() //nolint:errcheck,gosec // let zstd receive SIGPIPE so it exits
 		return errors.Join(errors.Wrap(err, "failed to start tar"), zstdCmd.Wait())
 	}
+	pr.Close() //nolint:errcheck,gosec // parent no longer needs read end; if tar dies, zstd gets SIGPIPE
 
 	zstdErr := zstdCmd.Wait()
 	tarErr := tarCmd.Wait()
