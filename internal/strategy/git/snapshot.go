@@ -191,20 +191,72 @@ func (s *Strategy) handleSnapshotRequest(w http.ResponseWriter, r *http.Request,
 	repoPath := ExtractRepoPath(strings.TrimSuffix(pathValue, "/snapshot.tar.zst"))
 	upstreamURL := "https://" + host + "/" + repoPath
 
-	// Ensure the local mirror is ready before considering any cached snapshot.
 	repo, repoErr := s.cloneManager.GetOrCreate(ctx, upstreamURL)
 	if repoErr != nil {
 		logger.ErrorContext(ctx, "Failed to get or create clone", "upstream", upstreamURL, "error", repoErr)
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
+
+	cacheKey := snapshotCacheKey(upstreamURL)
+
+	// On cold start the local mirror may not be ready yet. Check the S3 cache
+	// first so we can stream a cached snapshot to the client immediately while
+	// the mirror restores in the background. This avoids blocking the client
+	// behind the full S3-download → extract → git-fetch pipeline.
+	if repo.State() != gitclone.StateReady {
+		entry := &coldSnapshotEntry{done: make(chan struct{})}
+		if existing, loaded := s.coldSnapshotMu.LoadOrStore(upstreamURL, entry); loaded {
+			winner := existing.(*coldSnapshotEntry)
+			<-winner.done
+			reader, _, openErr := s.cache.Open(ctx, cacheKey)
+			if openErr == nil && reader != nil {
+				winner.serving.Add(1)
+				defer func() {
+					_ = reader.Close()
+					winner.serving.Done()
+				}()
+				logger.InfoContext(ctx, "Serving locally cached snapshot after waiting for in-flight fill", "upstream", upstreamURL)
+				w.Header().Set("Content-Type", "application/zstd")
+				if _, err := io.Copy(w, reader); err != nil {
+					logger.WarnContext(ctx, "Failed to stream locally cached snapshot", "upstream", upstreamURL, "error", err)
+				}
+				return
+			}
+		} else {
+			defer func() {
+				close(entry.done)
+				s.coldSnapshotMu.Delete(upstreamURL)
+			}()
+			reader, _, openErr := s.cache.Open(ctx, cacheKey)
+			if openErr == nil && reader != nil {
+				logger.InfoContext(ctx, "Serving cached snapshot while mirror warms up", "upstream", upstreamURL)
+				w.Header().Set("Content-Type", "application/zstd")
+				if _, err := io.Copy(w, reader); err != nil {
+					logger.WarnContext(ctx, "Failed to stream cached snapshot", "upstream", upstreamURL, "error", err)
+				}
+				_ = reader.Close()
+				// Schedule a deferred mirror restore so the mirror eventually
+				// becomes hot and cachew can generate fresh bundle deltas.
+				// Without this, repos that only ever serve cached snapshots
+				// would never restore their mirror.
+				s.scheduleDeferredMirrorRestore(ctx, repo, entry)
+				return
+			}
+			if reader != nil {
+				_ = reader.Close()
+			}
+		}
+	}
+
+	// Either the mirror is already ready or no cached snapshot exists — fall
+	// through to the original path which blocks until the mirror is available.
 	if cloneErr := s.ensureCloneReady(ctx, repo); cloneErr != nil {
 		logger.ErrorContext(ctx, "Clone unavailable for snapshot", "upstream", upstreamURL, "error", cloneErr)
 		http.Error(w, "Repository unavailable", http.StatusServiceUnavailable)
 		return
 	}
 	s.maybeBackgroundFetch(repo)
-	cacheKey := snapshotCacheKey(upstreamURL)
 
 	reader, headers, err := s.cache.Open(ctx, cacheKey)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -282,6 +334,12 @@ func (s *Strategy) handleBundleRequest(w http.ResponseWriter, r *http.Request, h
 func (s *Strategy) serveSnapshotWithBundle(ctx context.Context, w http.ResponseWriter, reader io.ReadCloser, headers http.Header, repo *gitclone.Repository, upstreamURL string) error {
 	snapshotCommit := headers.Get("X-Cachew-Snapshot-Commit")
 	mirrorHead := s.getMirrorHead(ctx, repo)
+
+	// Forward the snapshot commit to the client so it knows whether the
+	// snapshot is fresh (no bundle URL = already at HEAD, skip freshen).
+	if snapshotCommit != "" {
+		w.Header().Set("X-Cachew-Snapshot-Commit", snapshotCommit)
+	}
 
 	if snapshotCommit != "" && mirrorHead != "" && snapshotCommit != mirrorHead {
 		repoPath, err := gitclone.RepoPathFromURL(upstreamURL)
@@ -539,6 +597,69 @@ func (s *Strategy) writeSnapshotSpool(w http.ResponseWriter, r *http.Request, re
 	}
 }
 
+// scheduleDeferredMirrorRestore schedules a one-shot background mirror restore
+// for a repo that was served from a cached S3 snapshot on cold start. Without
+// this, repos that only serve cached snapshots would never warm their mirror,
+// preventing cachew from generating fresh bundle deltas.
+//
+// Submitted to the scheduler immediately after the first S3 snapshot stream
+// completes. By this point the client snapshot is backfilled to local disk, so
+// subsequent snapshot serves read from NVMe and don't compete for S3 bandwidth.
+// The scheduler's concurrency limit naturally throttles the restore against
+// other background work. Only one restore is scheduled per upstream URL.
+func (s *Strategy) scheduleDeferredMirrorRestore(ctx context.Context, repo *gitclone.Repository, coldEntry *coldSnapshotEntry) {
+	upstream := repo.UpstreamURL()
+	if _, loaded := s.deferredRestoreOnce.LoadOrStore(upstream, true); loaded {
+		return
+	}
+
+	logger := logging.FromContext(ctx)
+	logger.InfoContext(ctx, "Scheduling deferred mirror restore", "upstream", upstream)
+
+	s.scheduler.Submit(upstream, "deferred-mirror-restore", func(ctx context.Context) error {
+		logger := logging.FromContext(ctx)
+		if repo.State() == gitclone.StateReady {
+			logger.InfoContext(ctx, "Mirror already ready, skipping deferred restore", "upstream", upstream)
+			return nil
+		}
+		if !repo.TryStartCloning() {
+			logger.InfoContext(ctx, "Mirror restore already in progress, skipping", "upstream", upstream)
+			return nil
+		}
+		// Wait for all in-flight cold snapshot serves to finish so the
+		// restore's disk writes don't compete with local cache reads.
+		coldEntry.serving.Wait()
+
+		logger.InfoContext(ctx, "Starting deferred mirror restore", "upstream", upstream)
+
+		if err := s.tryRestoreSnapshot(ctx, repo); err != nil {
+			logger.WarnContext(ctx, "Deferred mirror snapshot restore failed", "upstream", upstream, "error", err)
+			repo.ResetToEmpty()
+			return nil
+		}
+
+		if err := repo.FetchLenient(ctx, gitclone.CloneTimeout); err != nil {
+			logger.WarnContext(ctx, "Deferred mirror post-restore fetch failed", "upstream", upstream, "error", err)
+			repo.ResetToEmpty()
+			if rmErr := os.RemoveAll(repo.Path()); rmErr != nil {
+				logger.WarnContext(ctx, "Failed to remove mirror after failed fetch", "upstream", upstream, "error", rmErr)
+			}
+			return nil
+		}
+
+		repo.MarkReady()
+		logger.InfoContext(ctx, "Deferred mirror restore completed", "upstream", upstream)
+
+		if s.config.SnapshotInterval > 0 {
+			s.scheduleSnapshotJobs(repo)
+		}
+		if s.config.RepackInterval > 0 {
+			s.scheduleRepackJobs(repo)
+		}
+		return nil
+	})
+}
+
 // snapshotSpoolEntry holds a spool and a ready channel used to coordinate
 // writer election. The first goroutine stores the entry via LoadOrStore and
 // becomes the writer. It closes ready once the spool is created (or on
@@ -546,6 +667,11 @@ func (s *Strategy) writeSnapshotSpool(w http.ResponseWriter, r *http.Request, re
 type snapshotSpoolEntry struct {
 	spool *ResponseSpool
 	ready chan struct{}
+}
+
+type coldSnapshotEntry struct {
+	done    chan struct{}
+	serving sync.WaitGroup // tracks all in-flight snapshot serves (winner + followers)
 }
 
 func snapshotSpoolDirForURL(mirrorRoot, upstreamURL string) (string, error) {

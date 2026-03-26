@@ -44,18 +44,20 @@ type Config struct {
 }
 
 type Strategy struct {
-	config         Config
-	cache          cache.Cache
-	cloneManager   *gitclone.Manager
-	httpClient     *http.Client
-	proxy          *httputil.ReverseProxy
-	ctx            context.Context
-	scheduler      jobscheduler.Scheduler
-	spoolsMu       sync.Mutex
-	spools         map[string]*RepoSpools
-	tokenManager   *githubapp.TokenManager
-	snapshotMu     sync.Map // keyed by upstream URL, values are *sync.Mutex
-	snapshotSpools sync.Map // keyed by upstream URL, values are *snapshotSpoolEntry
+	config              Config
+	cache               cache.Cache
+	cloneManager        *gitclone.Manager
+	httpClient          *http.Client
+	proxy               *httputil.ReverseProxy
+	ctx                 context.Context
+	scheduler           jobscheduler.Scheduler
+	spoolsMu            sync.Mutex
+	spools              map[string]*RepoSpools
+	tokenManager        *githubapp.TokenManager
+	snapshotMu          sync.Map // keyed by upstream URL, values are *sync.Mutex
+	snapshotSpools      sync.Map // keyed by upstream URL, values are *snapshotSpoolEntry
+	coldSnapshotMu      sync.Map // keyed by upstream URL, values are *coldSnapshotEntry
+	deferredRestoreOnce sync.Map // keyed by upstream URL, ensures at most one deferred restore per repo
 }
 
 func New(
@@ -522,6 +524,7 @@ func (s *Strategy) startClone(ctx context.Context, repo *gitclone.Repository) {
 
 	if err != nil {
 		logger.ErrorContext(ctx, "Clone failed", "upstream", upstream, "error", err)
+		repo.ResetToEmpty()
 		return
 	}
 

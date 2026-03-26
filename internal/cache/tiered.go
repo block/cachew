@@ -146,43 +146,101 @@ func (t Tiered) backfillReader(ctx context.Context, key Key, src io.ReadCloser, 
 		logger.WarnContext(ctx, "Tier backfill: failed to create writer, skipping", "error", err)
 		return src
 	}
-	return &backfillReadCloser{src: src, dst: w, ctx: ctx, cancel: cancel}
+	return newBackfillReadCloser(ctx, src, w, cancel)
 }
 
-// backfillReadCloser tees reads from src into dst. If the full stream is
+// backfillReadCloser tees reads from src into dst asynchronously. Chunks are
+// sent to a background goroutine via a buffered channel so the Read path is
+// never blocked by disk I/O (up to ~32 MB of buffer). If the full stream is
 // consumed and Close completes without error, dst is closed normally
 // (committing the cached entry). On any write failure the backfill is
 // abandoned but reads continue unaffected.
 type backfillReadCloser struct {
-	src    io.ReadCloser
-	dst    io.WriteCloser
-	ctx    context.Context
-	cancel context.CancelFunc
-	failed bool
+	src     io.ReadCloser
+	ch      chan []byte
+	ctx     context.Context
+	cancel  context.CancelFunc
+	done    chan error
+	closed  bool
+	closeMu sync.Mutex
+}
+
+const backfillBufSize = 128 // number of chunks buffered (~32 MB at 256 KB each)
+
+func newBackfillReadCloser(ctx context.Context, src io.ReadCloser, dst io.WriteCloser, cancel context.CancelFunc) *backfillReadCloser {
+	ch := make(chan []byte, backfillBufSize)
+	done := make(chan error, 1)
+	b := &backfillReadCloser{src: src, ch: ch, ctx: ctx, cancel: cancel, done: done}
+	go func() {
+		var err error
+		for chunk := range ch {
+			if err == nil {
+				if _, wErr := dst.Write(chunk); wErr != nil {
+					logging.FromContext(ctx).WarnContext(ctx, "Tier backfill: write failed, abandoning", "error", wErr)
+					err = wErr
+					cancel()
+					// Keep draining the channel so the producer isn't blocked.
+				}
+			}
+		}
+		closeErr := dst.Close()
+		switch {
+		case err != nil:
+			done <- err
+		case closeErr != nil:
+			cancel()
+			done <- closeErr
+		default:
+			done <- nil
+		}
+	}()
+	return b
+}
+
+func (b *backfillReadCloser) closeChan() {
+	b.closeMu.Lock()
+	defer b.closeMu.Unlock()
+	if !b.closed {
+		b.closed = true
+		close(b.ch)
+	}
 }
 
 func (b *backfillReadCloser) Read(p []byte) (int, error) {
 	n, err := b.src.Read(p)
-	if n > 0 && !b.failed {
-		if _, wErr := b.dst.Write(p[:n]); wErr != nil {
-			logging.FromContext(b.ctx).WarnContext(b.ctx, "Tier backfill: write failed, abandoning", "error", wErr)
-			b.failed = true
-			b.cancel()
+	if n > 0 {
+		b.closeMu.Lock()
+		if !b.closed {
+			// Copy the data — p is reused by the caller.
+			chunk := make([]byte, n)
+			copy(chunk, p[:n])
+			select {
+			case b.ch <- chunk:
+			default:
+				// Buffer full — abandon backfill.
+				b.closed = true
+				close(b.ch)
+				b.cancel()
+			}
 		}
+		b.closeMu.Unlock()
+	}
+	if err != nil {
+		b.closeChan()
 	}
 	return n, err //nolint:wrapcheck // must return unwrapped io.EOF per io.Reader contract
 }
 
 func (b *backfillReadCloser) Close() error {
 	srcErr := b.src.Close()
-	if b.failed || srcErr != nil {
+	b.closeChan()
+	// Wait for the background writer to finish.
+	bgErr := <-b.done
+	if srcErr != nil || bgErr != nil {
 		b.cancel()
-		_ = b.dst.Close()
 		return errors.WithStack(srcErr)
 	}
-	dstErr := b.dst.Close()
-	b.cancel()
-	return errors.WithStack(dstErr)
+	return nil
 }
 
 func (t Tiered) String() string {
