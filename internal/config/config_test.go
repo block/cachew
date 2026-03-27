@@ -8,6 +8,48 @@ import (
 	"github.com/alecthomas/hcl/v2"
 )
 
+func TestUnwrapBlock(t *testing.T) {
+	tests := []struct {
+		name           string
+		block          *hcl.Block
+		expectedName   string
+		expectedLabels []string
+		expectedErr    string
+	}{
+		{
+			name:           "SimpleBlock",
+			block:          &hcl.Block{Name: "cache", Labels: []string{"disk"}},
+			expectedName:   "disk",
+			expectedLabels: []string{},
+		},
+		{
+			name:           "BlockWithExtraLabels",
+			block:          &hcl.Block{Name: "strategy", Labels: []string{"host", "https://ghcr.io"}},
+			expectedName:   "host",
+			expectedLabels: []string{"https://ghcr.io"},
+		},
+		{
+			name:        "MissingLabel",
+			block:       &hcl.Block{Name: "cache"},
+			expectedErr: "cache block requires a name label",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			name, inner, err := unwrapBlock(tt.block)
+			if tt.expectedErr != "" {
+				assert.Error(t, err)
+				assert.Contains(t, err.Error(), tt.expectedErr)
+				return
+			}
+			assert.NoError(t, err)
+			assert.Equal(t, tt.expectedName, name)
+			assert.Equal(t, tt.expectedName, inner.Name)
+			assert.Equal(t, tt.expectedLabels, inner.Labels)
+		})
+	}
+}
+
 func TestInjectEnvars(t *testing.T) {
 	type Scheduler struct {
 		Concurrency int `hcl:"concurrency"`

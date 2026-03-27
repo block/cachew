@@ -63,10 +63,17 @@ func Register[Config any, C Cache](r *Registry, id, description string, factory 
 }
 
 // Schema returns the schema for all registered cache backends.
+// Each entry is wrapped as a "cache <name> { ... }" block.
 func (r *Registry) Schema() *hcl.AST {
 	ast := &hcl.AST{}
 	for _, entry := range r.registry {
-		ast.Entries = append(ast.Entries, entry.schema)
+		wrapped := &hcl.Block{
+			Name:     "cache",
+			Labels:   append([]string{entry.schema.Name}, entry.schema.Labels...),
+			Body:     entry.schema.Body,
+			Comments: entry.schema.Comments,
+		}
+		ast.Entries = append(ast.Entries, wrapped)
 	}
 	return ast
 }

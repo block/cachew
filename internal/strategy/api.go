@@ -62,10 +62,17 @@ func Register[Config any, S Strategy](r *Registry, id, description string, facto
 }
 
 // Schema returns the schema for all registered strategies.
+// Each entry is wrapped as a "strategy <name> { ... }" block.
 func (r *Registry) Schema() *hcl.AST {
 	ast := &hcl.AST{}
 	for _, entry := range r.registry {
-		ast.Entries = append(ast.Entries, entry.schema)
+		wrapped := &hcl.Block{
+			Name:     "strategy",
+			Labels:   append([]string{entry.schema.Name}, entry.schema.Labels...),
+			Body:     entry.schema.Body,
+			Comments: entry.schema.Comments,
+		}
+		ast.Entries = append(ast.Entries, wrapped)
 	}
 	return ast
 }

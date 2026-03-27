@@ -1,5 +1,5 @@
 # Artifactory caching proxy strategy
-# artifactory "example.jfrog.io" {
+# strategy artifactory "example.jfrog.io" {
 #   target = "https://example.jfrog.io"
 # }
 
@@ -13,14 +13,10 @@ opa {
   policy = <<EOF
   package cachew.authz
   default allow := false
-  allow if input.method == "GET"
-  allow if input.method == "HEAD"
   allow if startswith(input.remote_addr, "127.0.0.1:")
-
+  allow if not input.path[0] in {"api", "admin"}
   EOF
 }
-
-git-clone {}
 
 # github-app {
 #   app-id = "app-id-value"
@@ -30,34 +26,34 @@ git-clone {}
 
 metrics {}
 
-git {
+strategy git {
   #bundle-interval = "24h"
   snapshot-interval = "1h"
   repack-interval = "1h"
 }
 
-host "https://ghcr.io" {
+strategy host "https://ghcr.io" {
   headers = {
     "Authorization": "Bearer QQ=="
   }
 }
 
-host "https://w3.org" {}
+strategy host "https://w3.org" {}
 
-github-releases {
+strategy github-releases {
   token = "${GITHUB_TOKEN}"
   private-orgs = ["alecthomas"]
 }
 
-disk {
-  limit-mb = 250000
-  max-ttl = "8h"
-}
-
-gomod {
+strategy gomod {
   proxy = "https://proxy.golang.org"
 }
 
-hermit { }
+strategy hermit { }
 
-proxy { }
+strategy proxy { }
+
+cache disk {
+  limit-mb = 250000
+  max-ttl = "8h"
+}
