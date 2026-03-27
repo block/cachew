@@ -87,6 +87,22 @@ func Split[GlobalConfig any](ast *hcl.AST) (global, providers *hcl.AST) {
 	return global, providers
 }
 
+// unwrapBlock extracts the registry name from a prefixed block (e.g. "cache disk { ... }")
+// and returns a copy of the block with Name set to the first label and remaining labels preserved.
+func unwrapBlock(block *hcl.Block) (name string, inner *hcl.Block, err error) {
+	if len(block.Labels) == 0 {
+		return "", nil, errors.Errorf("%s: %s block requires a name label", block.Pos, block.Name)
+	}
+	inner = &hcl.Block{
+		Pos:      block.Pos,
+		Name:     block.Labels[0],
+		Labels:   block.Labels[1:],
+		Body:     block.Body,
+		Comments: block.Comments,
+	}
+	return block.Labels[0], inner, nil
+}
+
 // Load HCL configuration and use that to construct the cache backend, and proxy strategies.
 // It returns an http.Handler that wraps mux — any loaded strategies that implement
 // strategy.Interceptor are applied as middleware before ServeMux route matching, so
@@ -107,22 +123,34 @@ func Load(
 		{Name: "apiv1"},
 	}
 
-	// First pass, instantiate caches
+	// First pass: collect cache backends and strategy candidates from prefixed blocks.
 	var caches []cache.Cache
 	for _, node := range ast.Entries {
-		switch node := node.(type) {
-		case *hcl.Block:
-			c, err := cr.Create(ctx, node.Name, node, vars)
-			if errors.Is(err, cache.ErrNotFound) {
-				strategyCandidates = append(strategyCandidates, node)
-				continue
-			} else if err != nil {
-				return nil, errors.Errorf("%s: %w", node.Pos, err)
+		block, ok := node.(*hcl.Block)
+		if !ok {
+			return nil, errors.Errorf("%s: attributes are not allowed", node.Position())
+		}
+		switch block.Name {
+		case "cache":
+			name, inner, err := unwrapBlock(block)
+			if err != nil {
+				return nil, err
+			}
+			c, err := cr.Create(ctx, name, inner, vars)
+			if err != nil {
+				return nil, errors.Errorf("%s: %w", block.Pos, err)
 			}
 			caches = append(caches, c)
 
-		case *hcl.Attribute:
-			return nil, errors.Errorf("%s: attributes are not allowed", node.Pos)
+		case "strategy":
+			_, inner, err := unwrapBlock(block)
+			if err != nil {
+				return nil, err
+			}
+			strategyCandidates = append(strategyCandidates, inner)
+
+		default:
+			return nil, errors.Errorf("%s: unknown block %q (expected \"cache\" or \"strategy\")", block.Pos, block.Name)
 		}
 	}
 	if len(caches) == 0 {
