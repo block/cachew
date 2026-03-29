@@ -29,6 +29,7 @@ import (
 	"github.com/block/cachew/internal/metrics"
 	"github.com/block/cachew/internal/opa"
 	"github.com/block/cachew/internal/reaper"
+	"github.com/block/cachew/internal/s3client"
 	"github.com/block/cachew/internal/strategy"
 	"github.com/block/cachew/internal/strategy/git"
 	"github.com/block/cachew/internal/strategy/gomod"
@@ -42,6 +43,7 @@ type GlobalConfig struct {
 	LoggingConfig    logging.Config      `hcl:"log,block"`
 	MetricsConfig    metrics.Config      `hcl:"metrics,block"`
 	GitCloneConfig   gitclone.Config     `hcl:"git-clone,block"`
+	S3Config         s3client.Config     `hcl:"s3,block,optional"`
 	GithubAppConfigs []githubapp.Config  `hcl:"github-app,block,optional"`
 	OPAConfig        opa.Config          `hcl:"opa,block"`
 }
@@ -75,10 +77,11 @@ func main() {
 	managerProvider := gitclone.NewManagerProvider(ctx, globalConfig.GitCloneConfig, func() (gitclone.CredentialProvider, error) {
 		return tokenManagerProvider()
 	})
+	s3ClientProvider := s3client.NewClientProvider(ctx, globalConfig.S3Config)
 
 	schedulerProvider := jobscheduler.NewProvider(ctx, globalConfig.SchedulerConfig)
 
-	cr, sr := newRegistries(schedulerProvider, managerProvider, tokenManagerProvider)
+	cr, sr := newRegistries(schedulerProvider, managerProvider, tokenManagerProvider, s3ClientProvider)
 
 	// Commands
 	switch { //nolint:gocritic
@@ -111,11 +114,11 @@ func main() {
 	kctx.FatalIfErrorf(err)
 }
 
-func newRegistries(scheduler jobscheduler.Provider, cloneManagerProvider gitclone.ManagerProvider, tokenManagerProvider githubapp.TokenManagerProvider) (*cache.Registry, *strategy.Registry) {
+func newRegistries(scheduler jobscheduler.Provider, cloneManagerProvider gitclone.ManagerProvider, tokenManagerProvider githubapp.TokenManagerProvider, s3ClientProvider s3client.ClientProvider) (*cache.Registry, *strategy.Registry) {
 	cr := cache.NewRegistry()
 	cache.RegisterMemory(cr)
 	cache.RegisterDisk(cr)
-	cache.RegisterS3(cr)
+	cache.RegisterS3(cr, s3ClientProvider)
 
 	sr := strategy.NewRegistry()
 	strategy.RegisterAPIV1(sr)
