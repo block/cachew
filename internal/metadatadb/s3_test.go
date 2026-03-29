@@ -6,17 +6,17 @@ import (
 
 	"github.com/block/cachew/internal/metadatadb"
 	"github.com/block/cachew/internal/metadatadb/metadatadbtest"
-	"github.com/block/cachew/internal/minitest"
+	"github.com/block/cachew/internal/s3client/s3clienttest"
 )
 
 func TestS3Backend(t *testing.T) {
-	minitest.Start(t)
+	bucket := s3clienttest.Start(t)
 
 	metadatadbtest.Suite(t, func(t *testing.T) metadatadb.Backend {
 		t.Helper()
 		return metadatadb.NewS3Backend(metadatadb.S3BackendConfig{
-			Client:  minitest.Client(t),
-			Bucket:  minitest.Bucket,
+			Client:  s3clienttest.Client(t),
+			Bucket:  bucket,
 			Prefix:  "_meta-" + t.Name(),
 			LockTTL: 5 * time.Second,
 		})
@@ -24,11 +24,11 @@ func TestS3Backend(t *testing.T) {
 }
 
 func TestS3BackendSoak(t *testing.T) {
-	minitest.Start(t)
+	bucket := s3clienttest.Start(t)
 
 	metadatadbtest.Soak(t, metadatadb.NewS3Backend(metadatadb.S3BackendConfig{
-		Client:  minitest.Client(t),
-		Bucket:  minitest.Bucket,
+		Client:  s3clienttest.Client(t),
+		Bucket:  bucket,
 		Prefix:  "_meta-soak",
 		LockTTL: 5 * time.Second,
 	}), metadatadbtest.SoakConfig{

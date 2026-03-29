@@ -11,26 +11,30 @@ import (
 	"github.com/block/cachew/internal/cache"
 	"github.com/block/cachew/internal/cache/cachetest"
 	"github.com/block/cachew/internal/logging"
-	"github.com/block/cachew/internal/minitest"
+	"github.com/block/cachew/internal/s3client"
+	"github.com/block/cachew/internal/s3client/s3clienttest"
 )
 
 // TestS3Cache tests the S3 cache implementation using MinIO in Docker.
 func TestS3Cache(t *testing.T) {
-	minitest.Start(t)
+	bucket := s3clienttest.Start(t)
 
 	cachetest.Suite(t, func(t *testing.T) cache.Cache {
+		s3clienttest.CleanBucket(t, bucket)
 		_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelDebug})
 
-		minitest.CleanBucket(t)
+		clientProvider := s3client.NewClientProvider(ctx, s3client.Config{
+			Endpoint:      s3clienttest.Addr,
+			Region:        "",
+			UseSSL:        false,
+			SkipSSLVerify: false,
+		})
 
 		c, err := cache.NewS3(ctx, cache.S3Config{
-			Endpoint:         minitest.Addr,
-			Bucket:           minitest.Bucket,
-			Region:           "",
-			UseSSL:           false,
+			Bucket:           bucket,
 			MaxTTL:           100 * time.Millisecond,
 			UploadPartSizeMB: 16,
-		})
+		}, clientProvider)
 		assert.NoError(t, err)
 		return c
 	})
@@ -41,20 +45,22 @@ func TestS3CacheSoak(t *testing.T) {
 		t.Skip("Skipping soak test; set SOAK_TEST=1 to run")
 	}
 
-	minitest.Start(t)
+	bucket := s3clienttest.Start(t)
 
 	_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelError})
 
-	minitest.CleanBucket(t)
+	clientProvider := s3client.NewClientProvider(ctx, s3client.Config{
+		Endpoint:      s3clienttest.Addr,
+		Region:        "",
+		UseSSL:        false,
+		SkipSSLVerify: false,
+	})
 
 	c, err := cache.NewS3(ctx, cache.S3Config{
-		Endpoint:         minitest.Addr,
-		Bucket:           minitest.Bucket,
-		Region:           "",
-		UseSSL:           false,
+		Bucket:           bucket,
 		MaxTTL:           10 * time.Minute,
 		UploadPartSizeMB: 16,
-	})
+	}, clientProvider)
 	assert.NoError(t, err)
 	defer c.Close()
 
