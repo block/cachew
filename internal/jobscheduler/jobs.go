@@ -16,9 +16,10 @@ import (
 )
 
 type Config struct {
-	Concurrency         int    `hcl:"concurrency" help:"The maximum number of concurrent jobs to run (0 means number of cores)." default:"4"`
-	MaxCloneConcurrency int    `hcl:"max-clone-concurrency" help:"Maximum number of concurrent clone jobs. Remaining worker slots are reserved for fetch/repack/snapshot jobs. 0 means no limit." default:"0"`
-	SchedulerDB         string `hcl:"scheduler-db" help:"Path to the scheduler state database." default:"${CACHEW_STATE}/scheduler.db"`
+	Concurrency         int      `hcl:"concurrency" help:"The maximum number of concurrent jobs to run (0 means number of cores)." default:"4"`
+	MaxCloneConcurrency int      `hcl:"max-clone-concurrency" help:"Maximum number of concurrent clone jobs. Remaining worker slots are reserved for fetch/repack/snapshot jobs. 0 means no limit." default:"0"`
+	SchedulerDB         string   `hcl:"scheduler-db" help:"Path to the scheduler state database." default:"${CACHEW_STATE}/scheduler.db"`
+	PriorityQueues      []string `hcl:"priority-queues,optional" help:"Queue name prefixes that should be dequeued before other jobs. Matches if the queue starts with any prefix."`
 }
 
 type queueJob struct {
@@ -80,6 +81,7 @@ type RootScheduler struct {
 	active              map[string]string // queue -> job id
 	activeClones        int
 	maxCloneConcurrency int
+	priorityQueues      []string
 	cancel              context.CancelFunc
 	store               ScheduleStore
 	metrics             *schedulerMetrics
@@ -122,6 +124,7 @@ func New(ctx context.Context, config Config) (*RootScheduler, error) {
 		workAvailable:       make(chan bool, 1024),
 		active:              make(map[string]string),
 		maxCloneConcurrency: maxClones,
+		priorityQueues:      config.PriorityQueues,
 		store:               store,
 		metrics:             m,
 	}
@@ -265,27 +268,55 @@ func isCloneJob(id string) bool {
 	return strings.HasSuffix(id, "clone") || strings.HasSuffix(id, "deferred-mirror-restore")
 }
 
-// Take the next job for any queue that is not already running a job.
+// takeNextJob selects the next eligible job. Priority queue jobs are preferred over non-priority jobs;
+// within the same priority tier, jobs are dequeued in submission order (FIFO).
 func (q *RootScheduler) takeNextJob() (queueJob, bool) {
 	q.lock.Lock()
 	defer q.lock.Unlock()
+	idx := -1
 	for i, job := range q.queue {
-		if _, active := q.active[job.queue]; active {
+		if !q.isEligibleLocked(job) {
 			continue
 		}
-		if q.maxCloneConcurrency > 0 && isCloneJob(job.id) && q.activeClones >= q.maxCloneConcurrency {
-			continue
+		if q.isPriority(job.queue) {
+			idx = i
+			break
 		}
-		q.queue = append(q.queue[:i], q.queue[i+1:]...)
-		q.workAvailable <- true
-		q.active[job.queue] = job.id
-		if isCloneJob(job.id) {
-			q.activeClones++
+		if idx == -1 {
+			idx = i
 		}
-		q.recordGaugesLocked()
-		return job, true
 	}
-	return queueJob{}, false
+	if idx == -1 {
+		return queueJob{}, false
+	}
+	job := q.queue[idx]
+	q.queue = append(q.queue[:idx], q.queue[idx+1:]...)
+	q.workAvailable <- true
+	q.active[job.queue] = job.id
+	if isCloneJob(job.id) {
+		q.activeClones++
+	}
+	q.recordGaugesLocked()
+	return job, true
+}
+
+func (q *RootScheduler) isEligibleLocked(job queueJob) bool {
+	if _, active := q.active[job.queue]; active {
+		return false
+	}
+	if q.maxCloneConcurrency > 0 && isCloneJob(job.id) && q.activeClones >= q.maxCloneConcurrency {
+		return false
+	}
+	return true
+}
+
+func (q *RootScheduler) isPriority(queue string) bool {
+	for _, prefix := range q.priorityQueues {
+		if strings.HasPrefix(queue, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // recordGaugesLocked updates gauge metrics. Must be called with q.lock held.

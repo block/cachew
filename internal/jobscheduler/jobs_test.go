@@ -460,6 +460,66 @@ func FuzzJobScheduler(f *testing.F) {
 	})
 }
 
+func TestJobSchedulerPriorityQueues(t *testing.T) {
+	_, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelError})
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	// Single worker so jobs execute sequentially, making order deterministic.
+	scheduler := newTestScheduler(ctx, t, jobscheduler.Config{
+		Concurrency:    1,
+		PriorityQueues: []string{"https://github.com/important/"},
+	})
+
+	var (
+		mu    sync.Mutex
+		order []string
+	)
+
+	// Block the single worker so all subsequent submits queue up.
+	blockerStarted := make(chan struct{})
+	blocker := make(chan struct{})
+	scheduler.Submit("blocker", "block", func(_ context.Context) error {
+		close(blockerStarted)
+		<-blocker
+		return nil
+	})
+	<-blockerStarted
+
+	// Submit non-priority first, then priority. Priority should execute first after the blocker.
+	scheduler.Submit("https://github.com/random/repo", "job", func(_ context.Context) error {
+		mu.Lock()
+		order = append(order, "random")
+		mu.Unlock()
+		return nil
+	})
+	scheduler.Submit("https://github.com/important/monorepo", "job", func(_ context.Context) error {
+		mu.Lock()
+		order = append(order, "important")
+		mu.Unlock()
+		return nil
+	})
+	scheduler.Submit("https://github.com/other/thing", "job", func(_ context.Context) error {
+		mu.Lock()
+		order = append(order, "other")
+		mu.Unlock()
+		return nil
+	})
+
+	// Release the blocker.
+	close(blocker)
+
+	eventually(t, 2*time.Second, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(order) == 3
+	}, "all jobs should complete")
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, "important", order[0], "priority job should execute first, got: %v", order)
+}
+
 func TestJobSchedulerCloneConcurrencyLimit(t *testing.T) {
 	_, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelError})
 	ctx, cancel := context.WithCancel(ctx)
