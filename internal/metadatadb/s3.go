@@ -71,6 +71,9 @@ func NewS3Backend(ctx context.Context, clientProvider s3client.ClientProvider, c
 		return nil, errors.Errorf("bucket %s does not exist", config.Bucket)
 	}
 
+	logging.FromContext(ctx).InfoContext(ctx, "Constructing S3 metadata backend",
+		"bucket", config.Bucket, "prefix", config.Prefix, "lock-ttl", config.LockTTL, "sync-interval", config.SyncInterval)
+
 	ctx, cancel := context.WithCancel(ctx)
 	return &S3Backend{
 		client:       client,

@@ -57,3 +57,5 @@ cache disk {
   limit-mb = 250000
   max-ttl = "8h"
 }
+
+metadata memory {}

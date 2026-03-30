@@ -6,12 +6,15 @@ import (
 	"sync"
 
 	"github.com/alecthomas/errors"
+
+	"github.com/block/cachew/internal/logging"
 )
 
 // RegisterMemory registers the in-memory metadata backend.
 func RegisterMemory(r *Registry) {
 	Register(r, "memory", "In-memory metadata store for testing and single-instance deployments",
-		func(_ context.Context, _ MemoryConfig) (*MemoryBackend, error) {
+		func(ctx context.Context, _ MemoryConfig) (*MemoryBackend, error) {
+			logging.FromContext(ctx).InfoContext(ctx, "Constructing in-memory metadata backend")
 			return NewMemoryBackend(), nil
 		},
 	)

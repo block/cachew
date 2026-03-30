@@ -179,16 +179,16 @@ func Load(
 		return nil, nil, errors.Errorf("%s: expected at least one cache backend", ast.Pos)
 	}
 
-	var metadata metadatadb.Backend
-	if classified.metadata != nil {
-		name, inner, err := unwrapBlock(classified.metadata)
-		if err != nil {
-			return nil, nil, err
-		}
-		metadata, err = mr.Create(ctx, name, inner, vars)
-		if err != nil {
-			return nil, nil, errors.Errorf("%s: %w", classified.metadata.Pos, err)
-		}
+	if classified.metadata == nil {
+		return nil, nil, errors.Errorf("%s: expected a metadata backend", ast.Pos)
+	}
+	metaName, metaInner, err := unwrapBlock(classified.metadata)
+	if err != nil {
+		return nil, nil, err
+	}
+	metadata, err := mr.Create(ctx, metaName, metaInner, vars)
+	if err != nil {
+		return nil, nil, errors.Errorf("%s: %w", classified.metadata.Pos, err)
 	}
 
 	cache := cache.MaybeNewTiered(ctx, caches)
