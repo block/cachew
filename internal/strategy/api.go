@@ -71,6 +71,7 @@ func (r *Registry) Schema() *hcl.AST {
 			Labels:   append([]string{entry.schema.Name}, entry.schema.Labels...),
 			Body:     entry.schema.Body,
 			Comments: entry.schema.Comments,
+			Repeated: true,
 		}
 		ast.Entries = append(ast.Entries, wrapped)
 	}

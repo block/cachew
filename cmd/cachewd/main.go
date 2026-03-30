@@ -26,6 +26,7 @@ import (
 	"github.com/block/cachew/internal/httputil"
 	"github.com/block/cachew/internal/jobscheduler"
 	"github.com/block/cachew/internal/logging"
+	"github.com/block/cachew/internal/metadatadb"
 	"github.com/block/cachew/internal/metrics"
 	"github.com/block/cachew/internal/opa"
 	"github.com/block/cachew/internal/reaper"
@@ -74,23 +75,23 @@ func main() {
 
 	// Start initialising
 	tokenManagerProvider := githubapp.NewTokenManagerProvider(globalConfig.GithubAppConfigs, logger)
-	managerProvider := gitclone.NewManagerProvider(ctx, globalConfig.GitCloneConfig, func() (gitclone.CredentialProvider, error) {
+	gitManagerProvider := gitclone.NewManagerProvider(ctx, globalConfig.GitCloneConfig, func() (gitclone.CredentialProvider, error) {
 		return tokenManagerProvider()
 	})
 	s3ClientProvider := s3client.NewClientProvider(ctx, globalConfig.S3Config)
 
 	schedulerProvider := jobscheduler.NewProvider(ctx, globalConfig.SchedulerConfig)
 
-	cr, sr := newRegistries(schedulerProvider, managerProvider, tokenManagerProvider, s3ClientProvider)
+	cr, mr, sr := newRegistries(schedulerProvider, gitManagerProvider, tokenManagerProvider, s3ClientProvider)
 
 	// Commands
 	switch { //nolint:gocritic
 	case cli.Schema:
-		printSchema(kctx, cr, sr)
+		printSchema(kctx, cr, mr, sr)
 		return
 	}
 
-	mux, err := newMux(ctx, cr, sr, providersConfigHCL, envars)
+	mux, err := newMux(ctx, cr, mr, sr, providersConfigHCL, envars)
 	fatalIfError(ctx, logger, err, "Failed to load config")
 
 	metricsClient, err := metrics.New(ctx, globalConfig.MetricsConfig)
@@ -114,11 +115,24 @@ func main() {
 	fatalIfError(ctx, logger, err, "Server stopped")
 }
 
-func newRegistries(scheduler jobscheduler.Provider, cloneManagerProvider gitclone.ManagerProvider, tokenManagerProvider githubapp.TokenManagerProvider, s3ClientProvider s3client.ClientProvider) (*cache.Registry, *strategy.Registry) {
+func newRegistries(
+	scheduler jobscheduler.Provider,
+	cloneManagerProvider gitclone.ManagerProvider,
+	tokenManagerProvider githubapp.TokenManagerProvider,
+	s3ClientProvider s3client.ClientProvider,
+) (
+	*cache.Registry,
+	*metadatadb.Registry,
+	*strategy.Registry,
+) {
 	cr := cache.NewRegistry()
 	cache.RegisterMemory(cr)
 	cache.RegisterDisk(cr)
 	cache.RegisterS3(cr, s3ClientProvider)
+
+	mr := metadatadb.NewRegistry()
+	metadatadb.RegisterMemory(mr)
+	metadatadb.RegisterS3(mr, s3ClientProvider)
 
 	sr := strategy.NewRegistry()
 	strategy.RegisterAPIV1(sr)
@@ -130,11 +144,11 @@ func newRegistries(scheduler jobscheduler.Provider, cloneManagerProvider gitclon
 	git.Register(sr, scheduler, cloneManagerProvider, tokenManagerProvider)
 	gomod.Register(sr, cloneManagerProvider)
 
-	return cr, sr
+	return cr, mr, sr
 }
 
-func printSchema(kctx *kong.Context, cr *cache.Registry, sr *strategy.Registry) {
-	schema := config.Schema[GlobalConfig](cr, sr)
+func printSchema(kctx *kong.Context, cr *cache.Registry, mr *metadatadb.Registry, sr *strategy.Registry) {
+	schema := config.Schema[GlobalConfig](cr, mr, sr)
 	text, err := hcl.MarshalAST(schema)
 	kctx.FatalIfErrorf(err)
 
@@ -146,7 +160,7 @@ func printSchema(kctx *kong.Context, cr *cache.Registry, sr *strategy.Registry) 
 	}
 }
 
-func newMux(ctx context.Context, cr *cache.Registry, sr *strategy.Registry, providersConfigHCL *hcl.AST, vars map[string]string) (http.Handler, error) {
+func newMux(ctx context.Context, cr *cache.Registry, mr *metadatadb.Registry, sr *strategy.Registry, providersConfigHCL *hcl.AST, vars map[string]string) (http.Handler, error) {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /_liveness", func(w http.ResponseWriter, _ *http.Request) {
@@ -179,7 +193,7 @@ func newMux(ctx context.Context, cr *cache.Registry, sr *strategy.Registry, prov
 		http.DefaultServeMux.ServeHTTP(w, r)
 	}))
 
-	handler, err := config.Load(ctx, cr, sr, providersConfigHCL, mux, vars)
+	handler, _, err := config.Load(ctx, cr, mr, sr, providersConfigHCL, mux, vars)
 	if err != nil {
 		return nil, errors.Errorf("load config: %w", err)
 	}
