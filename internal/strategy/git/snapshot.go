@@ -81,6 +81,7 @@ func (s *Strategy) cloneForSnapshot(ctx context.Context, repo *gitclone.Reposito
 func (s *Strategy) generateAndUploadSnapshot(ctx context.Context, repo *gitclone.Repository) error {
 	logger := logging.FromContext(ctx)
 	upstream := repo.UpstreamURL()
+	start := time.Now()
 
 	logger.InfoContext(ctx, "Snapshot generation started", "upstream", upstream)
 
@@ -126,9 +127,11 @@ func (s *Strategy) generateAndUploadSnapshot(ctx context.Context, repo *gitclone
 		logger.WarnContext(ctx, "Failed to clean up snapshot dir", "error", rmErr)
 	}
 	if err != nil {
+		s.metrics.recordOperation(ctx, "snapshot", "error", time.Since(start))
 		return errors.Wrap(err, "create snapshot")
 	}
 
+	s.metrics.recordOperation(ctx, "snapshot", "success", time.Since(start))
 	logger.InfoContext(ctx, "Snapshot generation completed", "upstream", upstream)
 	return nil
 }
