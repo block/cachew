@@ -58,6 +58,7 @@ type Strategy struct {
 	snapshotSpools      sync.Map // keyed by upstream URL, values are *snapshotSpoolEntry
 	coldSnapshotMu      sync.Map // keyed by upstream URL, values are *coldSnapshotEntry
 	deferredRestoreOnce sync.Map // keyed by upstream URL, ensures at most one deferred restore per repo
+	metrics             *gitMetrics
 }
 
 func New(
@@ -108,6 +109,11 @@ func New(
 		return nil, errors.Wrap(err, "failed to create scheduler")
 	}
 
+	m, err := newGitMetrics()
+	if err != nil {
+		return nil, errors.Wrap(err, "create git metrics")
+	}
+
 	s := &Strategy{
 		config:       config,
 		cache:        cache,
@@ -117,47 +123,11 @@ func New(
 		scheduler:    scheduler.WithQueuePrefix("git"),
 		spools:       make(map[string]*RepoSpools),
 		tokenManager: tokenManager,
+		metrics:      m,
 	}
 	s.config.ServerURL = strings.TrimRight(config.ServerURL, "/")
 
-	existing, err := s.cloneManager.DiscoverExisting(ctx)
-	if err != nil {
-		logger.WarnContext(ctx, "Failed to discover existing clones", "error", err)
-	}
-	for _, repo := range existing {
-		logger.InfoContext(ctx, "Running startup fetch for existing repo", "upstream", repo.UpstreamURL())
-
-		preRefs, err := repo.GetLocalRefs(ctx)
-		if err != nil {
-			logger.WarnContext(ctx, "Failed to get pre-fetch refs for existing repo", "upstream", repo.UpstreamURL(),
-				"error", err)
-		}
-
-		start := time.Now()
-		if err := repo.FetchLenient(ctx, gitclone.CloneTimeout); err != nil {
-			logger.ErrorContext(ctx, "Startup fetch failed for existing repo", "upstream", repo.UpstreamURL(), "error", err,
-				"duration", time.Since(start))
-			continue
-		}
-		logger.InfoContext(ctx, "Startup fetch completed for existing repo", "upstream", repo.UpstreamURL(),
-			"duration", time.Since(start))
-
-		postRefs, err := repo.GetLocalRefs(ctx)
-		if err != nil {
-			logger.WarnContext(ctx, "Failed to get post-fetch refs for existing repo", "upstream", repo.UpstreamURL(),
-				"error", err)
-		} else {
-			maps.DeleteFunc(postRefs, func(k, v string) bool { return preRefs[k] == v })
-			logger.InfoContext(ctx, "Post-fetch changed refs for existing repo", "upstream", repo.UpstreamURL(), "refs", postRefs)
-		}
-
-		if s.config.SnapshotInterval > 0 {
-			s.scheduleSnapshotJobs(repo)
-		}
-		if s.config.RepackInterval > 0 {
-			s.scheduleRepackJobs(repo)
-		}
-	}
+	s.warmExistingRepos(ctx)
 
 	s.proxy = &httputil.ReverseProxy{
 		Director: func(req *http.Request) {
@@ -198,6 +168,48 @@ func New(
 
 var _ strategy.Strategy = (*Strategy)(nil)
 
+func (s *Strategy) warmExistingRepos(ctx context.Context) {
+	logger := logging.FromContext(ctx)
+	existing, err := s.cloneManager.DiscoverExisting(ctx)
+	if err != nil {
+		logger.WarnContext(ctx, "Failed to discover existing clones", "error", err)
+	}
+	for _, repo := range existing {
+		logger.InfoContext(ctx, "Running startup fetch for existing repo", "upstream", repo.UpstreamURL())
+
+		preRefs, err := repo.GetLocalRefs(ctx)
+		if err != nil {
+			logger.WarnContext(ctx, "Failed to get pre-fetch refs for existing repo", "upstream", repo.UpstreamURL(),
+				"error", err)
+		}
+
+		start := time.Now()
+		if err := repo.FetchLenient(ctx, gitclone.CloneTimeout); err != nil {
+			logger.ErrorContext(ctx, "Startup fetch failed for existing repo", "upstream", repo.UpstreamURL(), "error", err,
+				"duration", time.Since(start))
+			continue
+		}
+		logger.InfoContext(ctx, "Startup fetch completed for existing repo", "upstream", repo.UpstreamURL(),
+			"duration", time.Since(start))
+
+		postRefs, err := repo.GetLocalRefs(ctx)
+		if err != nil {
+			logger.WarnContext(ctx, "Failed to get post-fetch refs for existing repo", "upstream", repo.UpstreamURL(),
+				"error", err)
+		} else {
+			maps.DeleteFunc(postRefs, func(k, v string) bool { return preRefs[k] == v })
+			logger.InfoContext(ctx, "Post-fetch changed refs for existing repo", "upstream", repo.UpstreamURL(), "refs", postRefs)
+		}
+
+		if s.config.SnapshotInterval > 0 {
+			s.scheduleSnapshotJobs(repo)
+		}
+		if s.config.RepackInterval > 0 {
+			s.scheduleRepackJobs(repo)
+		}
+	}
+}
+
 // SetHTTPTransport overrides the HTTP transport used for upstream requests.
 // This is intended for testing.
 func (s *Strategy) SetHTTPTransport(t http.RoundTripper) {
@@ -217,11 +229,13 @@ func (s *Strategy) handleRequest(w http.ResponseWriter, r *http.Request) {
 	logger.DebugContext(ctx, "Git request", "method", r.Method, "host", host, "path", pathValue)
 
 	if strings.HasSuffix(pathValue, "/snapshot.tar.zst") {
+		s.metrics.recordRequest(ctx, "snapshot")
 		s.handleSnapshotRequest(w, r, host, pathValue)
 		return
 	}
 
 	if strings.HasSuffix(pathValue, "/snapshot.bundle") {
+		s.metrics.recordRequest(ctx, "bundle")
 		s.handleBundleRequest(w, r, host, pathValue)
 		return
 	}
@@ -230,10 +244,13 @@ func (s *Strategy) handleRequest(w http.ResponseWriter, r *http.Request) {
 	isReceivePack := service == "git-receive-pack" || strings.HasSuffix(pathValue, "/git-receive-pack")
 
 	if isReceivePack {
+		s.metrics.recordRequest(ctx, "receive-pack")
 		logger.DebugContext(ctx, "Forwarding write operation to upstream")
 		s.forwardToUpstream(w, r, host, pathValue)
 		return
 	}
+
+	s.metrics.recordRequest(ctx, "upload-pack")
 
 	repoPath := ExtractRepoPath(pathValue)
 	upstreamURL := "https://" + host + "/" + repoPath
@@ -514,6 +531,7 @@ func (s *Strategy) startClone(ctx context.Context, repo *gitclone.Repository) {
 
 	logger.InfoContext(ctx, "Starting clone", "upstream", upstream, "path", repo.Path())
 
+	cloneStart := time.Now()
 	err := repo.Clone(ctx)
 
 	// Clean up spools regardless of clone success or failure, so that subsequent
@@ -523,11 +541,13 @@ func (s *Strategy) startClone(ctx context.Context, repo *gitclone.Repository) {
 	}
 
 	if err != nil {
+		s.metrics.recordOperation(ctx, "clone", "error", time.Since(cloneStart))
 		logger.ErrorContext(ctx, "Clone failed", "upstream", upstream, "error", err)
 		repo.ResetToEmpty()
 		return
 	}
 
+	s.metrics.recordOperation(ctx, "clone", "success", time.Since(cloneStart))
 	logger.InfoContext(ctx, "Clone completed", "upstream", upstream, "path", repo.Path())
 
 	if s.config.SnapshotInterval > 0 {
@@ -601,9 +621,11 @@ func (s *Strategy) doFetch(ctx context.Context, repo *gitclone.Repository) error
 
 	start := time.Now()
 	if err := repo.Fetch(ctx); err != nil {
+		s.metrics.recordOperation(ctx, "fetch", "error", time.Since(start))
 		logger.ErrorContext(ctx, "Fetch failed", "upstream", repo.UpstreamURL(), "duration", time.Since(start), "error", err)
 		return errors.Errorf("fetch failed: %w", err)
 	}
+	s.metrics.recordOperation(ctx, "fetch", "success", time.Since(start))
 	logger.InfoContext(ctx, "Fetch completed", "upstream", repo.UpstreamURL(), "duration", time.Since(start))
 	return nil
 }

@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/alecthomas/errors"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
 
 	"github.com/block/cachew/internal/logging"
 )
@@ -80,6 +82,7 @@ type RootScheduler struct {
 	maxCloneConcurrency int
 	cancel              context.CancelFunc
 	store               ScheduleStore
+	metrics             *schedulerMetrics
 }
 
 var _ Scheduler = &RootScheduler{}
@@ -111,11 +114,16 @@ func New(ctx context.Context, config Config) (*RootScheduler, error) {
 		// Default: reserve at least half the workers for non-clone jobs.
 		maxClones = max(1, config.Concurrency/2)
 	}
+	m, err := newSchedulerMetrics()
+	if err != nil {
+		return nil, errors.Wrap(err, "create scheduler metrics")
+	}
 	q := &RootScheduler{
 		workAvailable:       make(chan bool, 1024),
 		active:              make(map[string]string),
 		maxCloneConcurrency: maxClones,
 		store:               store,
+		metrics:             m,
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	q.cancel = cancel
@@ -141,8 +149,9 @@ func (q *RootScheduler) WithQueuePrefix(prefix string) Scheduler {
 
 func (q *RootScheduler) Submit(queue, id string, run func(ctx context.Context) error) {
 	q.lock.Lock()
-	defer q.lock.Unlock()
 	q.queue = append(q.queue, queueJob{queue: queue, id: id, run: run})
+	q.metrics.queueDepth.Record(context.Background(), int64(len(q.queue)))
+	q.lock.Unlock()
 	q.workAvailable <- true
 }
 
@@ -201,16 +210,42 @@ func (q *RootScheduler) worker(ctx context.Context, id int) {
 			if !ok {
 				continue
 			}
+			jobAttrs := attribute.String("job.type", jobType(job.id))
 			start := time.Now()
 			logger.InfoContext(ctx, "Starting job", "job", job)
-			if err := job.run(ctx); err != nil {
-				logger.ErrorContext(ctx, "Job failed", "job", job, "error", err, "elapsed", time.Since(start))
+			err := job.run(ctx)
+			elapsed := time.Since(start)
+			status := "success"
+			if err != nil {
+				status = "error"
+				logger.ErrorContext(ctx, "Job failed", "job", job, "error", err, "elapsed", elapsed)
 			} else {
-				logger.InfoContext(ctx, "Job completed", "job", job, "elapsed", time.Since(start))
+				logger.InfoContext(ctx, "Job completed", "job", job, "elapsed", elapsed)
 			}
+			statusAttr := attribute.String("status", status)
+			q.metrics.jobsTotal.Add(ctx, 1, metric.WithAttributes(jobAttrs, statusAttr))
+			q.metrics.jobDuration.Record(ctx, elapsed.Seconds(), metric.WithAttributes(jobAttrs, statusAttr))
 			q.markQueueInactive(job.queue)
 			q.workAvailable <- true
 		}
+	}
+}
+
+// jobType extracts a normalised job type from the job ID for metric labels.
+func jobType(id string) string {
+	switch {
+	case strings.HasSuffix(id, "clone"):
+		return "clone"
+	case strings.HasSuffix(id, "deferred-mirror-restore"):
+		return "clone"
+	case strings.HasSuffix(id, "fetch"):
+		return "fetch"
+	case strings.HasSuffix(id, "snapshot-periodic"), strings.HasSuffix(id, "mirror-snapshot-periodic"):
+		return "snapshot"
+	case strings.HasSuffix(id, "repack-periodic"):
+		return "repack"
+	default:
+		return "other"
 	}
 }
 
@@ -221,6 +256,7 @@ func (q *RootScheduler) markQueueInactive(queue string) {
 		q.activeClones--
 	}
 	delete(q.active, queue)
+	q.recordGaugesLocked()
 }
 
 // isCloneJob returns true for job IDs that represent long-running clone operations
@@ -246,7 +282,16 @@ func (q *RootScheduler) takeNextJob() (queueJob, bool) {
 		if isCloneJob(job.id) {
 			q.activeClones++
 		}
+		q.recordGaugesLocked()
 		return job, true
 	}
 	return queueJob{}, false
+}
+
+// recordGaugesLocked updates gauge metrics. Must be called with q.lock held.
+func (q *RootScheduler) recordGaugesLocked() {
+	ctx := context.Background()
+	q.metrics.queueDepth.Record(ctx, int64(len(q.queue)))
+	q.metrics.activeWorkers.Record(ctx, int64(len(q.active)))
+	q.metrics.activeClones.Record(ctx, int64(q.activeClones))
 }
