@@ -91,27 +91,27 @@ func main() {
 	}
 
 	mux, err := newMux(ctx, cr, sr, providersConfigHCL, envars)
-	kctx.FatalIfErrorf(err)
+	fatalIfError(ctx, logger, err, "Failed to load config")
 
 	metricsClient, err := metrics.New(ctx, globalConfig.MetricsConfig)
-	kctx.FatalIfErrorf(err, "failed to create metrics client")
+	fatalIfError(ctx, logger, err, "Failed to create metrics client")
 	defer func() {
 		if err := metricsClient.Close(); err != nil {
-			logger.ErrorContext(ctx, "failed to close metrics client", "error", err)
+			logger.ErrorContext(ctx, "Failed to close metrics client", "error", err)
 		}
 	}()
 
 	if err := metricsClient.ServeMetrics(ctx); err != nil {
-		kctx.FatalIfErrorf(err, "failed to start metrics server")
+		fatalIfError(ctx, logger, err, "Failed to start metrics server")
 	}
 
 	logger.InfoContext(ctx, "Starting cachewd", "bind", globalConfig.Bind)
 
 	server, err := newServer(ctx, mux, globalConfig.Bind, globalConfig.MetricsConfig, globalConfig.OPAConfig)
-	kctx.FatalIfErrorf(err)
+	fatalIfError(ctx, logger, err, "Failed to create server")
 
 	err = server.ListenAndServe()
-	kctx.FatalIfErrorf(err)
+	fatalIfError(ctx, logger, err, "Server stopped")
 }
 
 func newRegistries(scheduler jobscheduler.Provider, cloneManagerProvider gitclone.ManagerProvider, tokenManagerProvider githubapp.TokenManagerProvider, s3ClientProvider s3client.ClientProvider) (*cache.Registry, *strategy.Registry) {
@@ -185,6 +185,14 @@ func newMux(ctx context.Context, cr *cache.Registry, sr *strategy.Registry, prov
 	}
 
 	return handler, nil
+}
+
+func fatalIfError(ctx context.Context, logger *slog.Logger, err error, msg string) {
+	if err == nil {
+		return
+	}
+	logger.ErrorContext(ctx, msg, "error", err)
+	os.Exit(1)
 }
 
 // extractPathPrefix extracts the strategy name, path prefix from a request path.
