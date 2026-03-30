@@ -39,9 +39,9 @@ type memoryEntry struct {
 
 type Memory struct {
 	config      MemoryConfig
-	namespace   string
+	namespace   Namespace
 	mu          *sync.RWMutex
-	entries     map[string]map[Key]*memoryEntry // namespace -> key -> entry
+	entries     map[Namespace]map[Key]*memoryEntry // namespace -> key -> entry
 	currentSize *atomic.Int64
 }
 
@@ -50,7 +50,7 @@ func NewMemory(ctx context.Context, config MemoryConfig) (*Memory, error) {
 	return &Memory{
 		config:      config,
 		mu:          &sync.RWMutex{},
-		entries:     make(map[string]map[Key]*memoryEntry),
+		entries:     make(map[Namespace]map[Key]*memoryEntry),
 		currentSize: &atomic.Int64{},
 	}, nil
 }
@@ -169,7 +169,7 @@ func (m *Memory) Stats(_ context.Context) (Stats, error) {
 
 func (m *Memory) evictOldest(neededSpace int64) {
 	type entryInfo struct {
-		namespace string
+		namespace Namespace
 		key       Key
 		size      int64
 		expiresAt time.Time
@@ -209,7 +209,7 @@ func (m *Memory) evictOldest(neededSpace int64) {
 
 type memoryWriter struct {
 	cache     *Memory
-	namespace string
+	namespace Namespace
 	key       Key
 	buf       *bytes.Buffer
 	expiresAt time.Time
@@ -278,7 +278,7 @@ func (w *memoryWriter) Close() error {
 }
 
 // Namespace creates a namespaced view of the memory cache.
-func (m *Memory) Namespace(namespace string) Cache {
+func (m *Memory) Namespace(namespace Namespace) Cache {
 	c := *m
 	c.namespace = namespace
 	return &c
@@ -292,7 +292,7 @@ func (m *Memory) ListNamespaces(_ context.Context) ([]string, error) {
 	namespaces := make([]string, 0, len(m.entries))
 	for ns := range m.entries {
 		if ns != "" {
-			namespaces = append(namespaces, ns)
+			namespaces = append(namespaces, string(ns))
 		}
 	}
 	return namespaces, nil

@@ -15,13 +15,13 @@ import (
 	"github.com/block/cachew/internal/httputil"
 )
 
-const defaultNamespace = "-"
+const defaultNamespace Namespace = "default"
 
 // Remote implements Cache as a client for the remote cache server.
 type Remote struct {
 	baseURL   string
 	client    *http.Client
-	namespace string
+	namespace Namespace
 }
 
 var _ Cache = (*Remote)(nil)
@@ -275,7 +275,7 @@ func (wc *writeCloser) Close() error {
 }
 
 // Namespace creates a namespaced view of the remote cache.
-func (c *Remote) Namespace(namespace string) Cache {
+func (c *Remote) Namespace(namespace Namespace) Cache {
 	return &Remote{
 		baseURL:   c.baseURL,
 		client:    c.client,

@@ -90,13 +90,16 @@ func (r *Registry) Create(
 	ctx context.Context,
 	name string,
 	config *hcl.Block,
-	cache cache.Cache,
+	c cache.Cache,
 	mux Mux,
 	vars map[string]string,
 ) (Strategy, error) {
+	ns, err := cache.ParseNamespace(name)
+	if err != nil {
+		return nil, errors.Errorf("strategy %q: %w", name, err)
+	}
 	if entry, ok := r.registry[name]; ok {
-		// Create a namespaced view of the cache for this strategy
-		namespacedCache := cache.Namespace(name)
+		namespacedCache := c.Namespace(ns)
 		return errors.WithStack2(entry.factory(ctx, config, namespacedCache, mux, vars))
 	}
 	return nil, errors.Errorf("%s: %w", name, ErrNotFound)

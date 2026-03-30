@@ -301,7 +301,7 @@ func (t tieredWriter) Write(p []byte) (n int, err error) {
 
 // Namespace creates a namespaced view of the tiered cache.
 // All underlying caches are also namespaced.
-func (t Tiered) Namespace(namespace string) Cache {
+func (t Tiered) Namespace(namespace Namespace) Cache {
 	namespaced := make([]Cache, len(t.caches))
 	for i, c := range t.caches {
 		namespaced[i] = c.Namespace(namespace)

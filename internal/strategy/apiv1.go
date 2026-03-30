@@ -46,7 +46,11 @@ func NewAPIV1(ctx context.Context, _ struct{}, cache cache.Cache, mux Mux) (*API
 func (d *APIV1) String() string { return "default" }
 
 func (d *APIV1) statObject(w http.ResponseWriter, r *http.Request) {
-	namespace := r.PathValue("namespace")
+	namespace, err := cache.ParseNamespace(r.PathValue("namespace"))
+	if err != nil {
+		d.httpError(w, http.StatusBadRequest, err, "Invalid namespace")
+		return
+	}
 	key, err := cache.ParseKey(r.PathValue("key"))
 	if err != nil {
 		d.httpError(w, http.StatusBadRequest, err, "Invalid key")
@@ -69,7 +73,11 @@ func (d *APIV1) statObject(w http.ResponseWriter, r *http.Request) {
 }
 
 func (d *APIV1) getObject(w http.ResponseWriter, r *http.Request) {
-	namespace := r.PathValue("namespace")
+	namespace, err := cache.ParseNamespace(r.PathValue("namespace"))
+	if err != nil {
+		d.httpError(w, http.StatusBadRequest, err, "Invalid namespace")
+		return
+	}
 	key, err := cache.ParseKey(r.PathValue("key"))
 	if err != nil {
 		d.httpError(w, http.StatusBadRequest, err, "Invalid key")
@@ -99,7 +107,11 @@ func (d *APIV1) getObject(w http.ResponseWriter, r *http.Request) {
 }
 
 func (d *APIV1) putObject(w http.ResponseWriter, r *http.Request) {
-	namespace := r.PathValue("namespace")
+	namespace, err := cache.ParseNamespace(r.PathValue("namespace"))
+	if err != nil {
+		d.httpError(w, http.StatusBadRequest, err, "Invalid namespace")
+		return
+	}
 	key, err := cache.ParseKey(r.PathValue("key"))
 	if err != nil {
 		d.httpError(w, http.StatusBadRequest, err, "Invalid key")
@@ -138,7 +150,11 @@ func (d *APIV1) putObject(w http.ResponseWriter, r *http.Request) {
 }
 
 func (d *APIV1) deleteObject(w http.ResponseWriter, r *http.Request) {
-	namespace := r.PathValue("namespace")
+	namespace, err := cache.ParseNamespace(r.PathValue("namespace"))
+	if err != nil {
+		d.httpError(w, http.StatusBadRequest, err, "Invalid namespace")
+		return
+	}
 	key, err := cache.ParseKey(r.PathValue("key"))
 	if err != nil {
 		d.httpError(w, http.StatusBadRequest, err, "Invalid key")

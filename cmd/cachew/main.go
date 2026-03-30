@@ -62,9 +62,9 @@ func main() {
 }
 
 type GetCmd struct {
-	Namespace string      `arg:"" help:"Namespace for organizing cache objects."`
-	Key       PlatformKey `arg:"" help:"Object key (hex or string)."`
-	Output    *os.File    `short:"o" help:"Output file (default: stdout)." default:"-"`
+	Namespace cache.Namespace `arg:"" help:"Namespace for organizing cache objects."`
+	Key       PlatformKey     `arg:"" help:"Object key (hex or string)."`
+	Output    *os.File        `short:"o" help:"Output file (default: stdout)." default:"-"`
 }
 
 func (c *GetCmd) Run(ctx context.Context, cache cache.Cache) error {
@@ -88,8 +88,8 @@ func (c *GetCmd) Run(ctx context.Context, cache cache.Cache) error {
 }
 
 type StatCmd struct {
-	Namespace string      `arg:"" help:"Namespace for organizing cache objects."`
-	Key       PlatformKey `arg:"" help:"Object key (hex or string)."`
+	Namespace cache.Namespace `arg:"" help:"Namespace for organizing cache objects."`
+	Key       PlatformKey     `arg:"" help:"Object key (hex or string)."`
 }
 
 func (c *StatCmd) Run(ctx context.Context, cache cache.Cache) error {
@@ -109,7 +109,7 @@ func (c *StatCmd) Run(ctx context.Context, cache cache.Cache) error {
 }
 
 type PutCmd struct {
-	Namespace string            `arg:"" help:"Namespace for organizing cache objects."`
+	Namespace cache.Namespace   `arg:"" help:"Namespace for organizing cache objects."`
 	Key       PlatformKey       `arg:"" help:"Object key (hex or string)."`
 	Input     *os.File          `arg:"" help:"Input file (default: stdin)." default:"-"`
 	TTL       time.Duration     `help:"Time to live for the object."`
@@ -142,8 +142,8 @@ func (c *PutCmd) Run(ctx context.Context, cache cache.Cache) error {
 }
 
 type DeleteCmd struct {
-	Namespace string      `arg:"" help:"Namespace for organizing cache objects."`
-	Key       PlatformKey `arg:"" help:"Object key (hex or string)."`
+	Namespace cache.Namespace `arg:"" help:"Namespace for organizing cache objects."`
+	Key       PlatformKey     `arg:"" help:"Object key (hex or string)."`
 }
 
 func (c *DeleteCmd) Run(ctx context.Context, cache cache.Cache) error {
@@ -171,12 +171,12 @@ func (c *NamespacesCmd) Run(ctx context.Context, cache cache.Cache) error {
 }
 
 type SnapshotCmd struct {
-	Namespace   string        `arg:"" help:"Namespace for organizing cache objects."`
-	Key         PlatformKey   `arg:"" help:"Object key (hex or string)."`
-	Directory   string        `arg:"" help:"Directory to archive." type:"path"`
-	TTL         time.Duration `help:"Time to live for the object."`
-	Exclude     []string      `help:"Patterns to exclude (tar --exclude syntax)."`
-	ZstdThreads int           `help:"Threads for zstd compression (0 = all CPU cores)." default:"0"`
+	Namespace   cache.Namespace `arg:"" help:"Namespace for organizing cache objects."`
+	Key         PlatformKey     `arg:"" help:"Object key (hex or string)."`
+	Directory   string          `arg:"" help:"Directory to archive." type:"path"`
+	TTL         time.Duration   `help:"Time to live for the object."`
+	Exclude     []string        `help:"Patterns to exclude (tar --exclude syntax)."`
+	ZstdThreads int             `help:"Threads for zstd compression (0 = all CPU cores)." default:"0"`
 }
 
 func (c *SnapshotCmd) Run(ctx context.Context, cache cache.Cache) error {
@@ -191,10 +191,10 @@ func (c *SnapshotCmd) Run(ctx context.Context, cache cache.Cache) error {
 }
 
 type RestoreCmd struct {
-	Namespace   string      `arg:"" help:"Namespace for organizing cache objects."`
-	Key         PlatformKey `arg:"" help:"Object key (hex or string)."`
-	Directory   string      `arg:"" help:"Target directory for extraction." type:"path"`
-	ZstdThreads int         `help:"Threads for zstd decompression (0 = all CPU cores)." default:"0"`
+	Namespace   cache.Namespace `arg:"" help:"Namespace for organizing cache objects."`
+	Key         PlatformKey     `arg:"" help:"Object key (hex or string)."`
+	Directory   string          `arg:"" help:"Target directory for extraction." type:"path"`
+	ZstdThreads int             `help:"Threads for zstd decompression (0 = all CPU cores)." default:"0"`
 }
 
 func (c *RestoreCmd) Run(ctx context.Context, cache cache.Cache) error {

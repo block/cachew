@@ -38,7 +38,7 @@ type DiskConfig struct {
 type Disk struct {
 	logger       *slog.Logger
 	config       DiskConfig
-	namespace    string
+	namespace    Namespace
 	db           *diskMetaDB
 	size         *atomic.Int64
 	runEviction  chan struct{}
@@ -287,12 +287,12 @@ func (d *Disk) Open(ctx context.Context, key Key) (io.ReadCloser, http.Header, e
 	return f, headers, nil
 }
 
-func (d *Disk) keyToPath(namespace string, key Key) string {
+func (d *Disk) keyToPath(namespace Namespace, key Key) string {
 	hexKey := key.String()
 
 	// Use first two hex digits as directory, full hex as filename
 	if namespace != "" {
-		return filepath.Join(namespace, hexKey[:2], hexKey)
+		return filepath.Join(string(namespace), hexKey[:2], hexKey)
 	}
 	return filepath.Join(hexKey[:2], hexKey)
 }
@@ -320,7 +320,7 @@ func (d *Disk) evictionLoop(ctx context.Context) {
 }
 
 type evictFileInfo struct {
-	namespace  string
+	namespace  Namespace
 	key        Key
 	path       string
 	size       int64
@@ -329,7 +329,7 @@ type evictFileInfo struct {
 }
 
 type evictEntryKey struct {
-	namespace string
+	namespace Namespace
 	key       Key
 }
 
@@ -338,7 +338,7 @@ func (d *Disk) evict() error {
 	var expiredEntries []evictEntryKey
 	now := time.Now()
 
-	err := d.db.walk(func(key Key, namespace string, expiresAt time.Time) error {
+	err := d.db.walk(func(key Key, namespace Namespace, expiresAt time.Time) error {
 		path := d.keyToPath(namespace, key)
 		fullPath := filepath.Join(d.config.Root, path)
 
@@ -421,7 +421,7 @@ type diskWriter struct {
 	disk      *Disk
 	file      *os.File
 	key       Key
-	namespace string
+	namespace Namespace
 	path      string
 	tempPath  string
 	expiresAt time.Time
@@ -477,7 +477,7 @@ func (w *diskWriter) Close() error {
 }
 
 // Namespace creates a namespaced view of the disk cache.
-func (d *Disk) Namespace(namespace string) Cache {
+func (d *Disk) Namespace(namespace Namespace) Cache {
 	// Create a shallow copy with the namespace set
 	c := *d
 	c.namespace = namespace

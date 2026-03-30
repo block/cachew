@@ -8,11 +8,46 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"regexp"
 	"time"
 
 	"github.com/alecthomas/errors"
 	"github.com/alecthomas/hcl/v2"
 )
+
+var namespaceRe = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]*$`)
+
+// Namespace identifies a logical partition within a cache or metadata store.
+// Valid names start with an alphanumeric character and contain only
+// alphanumerics, hyphens, and underscores.
+type Namespace string
+
+// ValidateNamespace checks that a namespace name is valid.
+func ValidateNamespace(name string) error {
+	if !namespaceRe.MatchString(name) {
+		return errors.Errorf("invalid namespace %q: must match %s", name, namespaceRe)
+	}
+	return nil
+}
+
+// ParseNamespace validates and returns a Namespace from a plain string.
+func ParseNamespace(name string) (Namespace, error) {
+	if err := ValidateNamespace(name); err != nil {
+		return "", err
+	}
+	return Namespace(name), nil
+}
+
+func (n *Namespace) String() string { return string(*n) }
+
+// UnmarshalText implements encoding.TextUnmarshaler with validation.
+func (n *Namespace) UnmarshalText(text []byte) error {
+	if err := ValidateNamespace(string(text)); err != nil {
+		return err
+	}
+	*n = Namespace(text)
+	return nil
+}
 
 // ErrNotFound is returned when a cache backend is not found.
 var ErrNotFound = errors.New("cache backend not found")
@@ -143,7 +178,7 @@ type Cache interface {
 	String() string
 	// Namespace creates a namespaced view of this cache.
 	// All operations on the returned cache will use the given namespace prefix.
-	Namespace(namespace string) Cache
+	Namespace(namespace Namespace) Cache
 	// Stat returns the headers of an existing object in the cache.
 	//
 	// Expired files MUST not be returned.
