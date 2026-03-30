@@ -4,14 +4,26 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"log/slog"
 	"net/http"
 	"sync"
 	"time"
 
 	"github.com/alecthomas/errors"
 	"github.com/minio/minio-go/v7"
+
+	"github.com/block/cachew/internal/logging"
+	"github.com/block/cachew/internal/s3client"
 )
+
+// RegisterS3 registers the S3 metadata backend. The clientProvider supplies the
+// shared minio client constructed from the global s3 config block.
+func RegisterS3(r *Registry, clientProvider s3client.ClientProvider) {
+	Register(r, "s3", "Stores metadata state in S3 with periodic sync",
+		func(ctx context.Context, config S3BackendConfig) (*S3Backend, error) {
+			return NewS3Backend(ctx, clientProvider, config)
+		},
+	)
+}
 
 // S3Backend stores metadata state as JSON objects in S3 with periodic sync.
 // Writes are applied to local state immediately and queued for the next flush.
@@ -19,7 +31,6 @@ import (
 // recovery. The idempotence token maps to the S3 object ETag.
 type S3Backend struct {
 	client       *minio.Client
-	logger       *slog.Logger
 	bucket       string
 	prefix       string
 	lockTTL      time.Duration
@@ -32,15 +43,13 @@ type S3Backend struct {
 
 // S3BackendConfig configures the S3 metadata backend.
 type S3BackendConfig struct {
-	Client       *minio.Client
-	Logger       *slog.Logger
-	Bucket       string
-	Prefix       string
-	LockTTL      time.Duration
-	SyncInterval time.Duration
+	Bucket       string        `hcl:"bucket" help:"S3 bucket name."`
+	Prefix       string        `hcl:"prefix,optional" help:"Key prefix for metadata objects." default:"_meta"`
+	LockTTL      time.Duration `hcl:"lock-ttl,optional" help:"TTL for namespace locks." default:"30s"`
+	SyncInterval time.Duration `hcl:"sync-interval,optional" help:"Interval between periodic syncs." default:"30s"`
 }
 
-func NewS3Backend(ctx context.Context, config S3BackendConfig) (*S3Backend, error) {
+func NewS3Backend(ctx context.Context, clientProvider s3client.ClientProvider, config S3BackendConfig) (*S3Backend, error) {
 	if config.Prefix == "" {
 		config.Prefix = "_meta"
 	}
@@ -50,11 +59,11 @@ func NewS3Backend(ctx context.Context, config S3BackendConfig) (*S3Backend, erro
 	if config.SyncInterval == 0 {
 		config.SyncInterval = 30 * time.Second
 	}
-	logger := config.Logger
-	if logger == nil {
-		logger = slog.Default()
+	client, err := clientProvider()
+	if err != nil {
+		return nil, errors.Wrap(err, "create S3 client")
 	}
-	exists, err := config.Client.BucketExists(ctx, config.Bucket)
+	exists, err := client.BucketExists(ctx, config.Bucket)
 	if err != nil {
 		return nil, errors.Errorf("failed to check if bucket exists: %w", err)
 	}
@@ -64,8 +73,7 @@ func NewS3Backend(ctx context.Context, config S3BackendConfig) (*S3Backend, erro
 
 	ctx, cancel := context.WithCancel(ctx)
 	return &S3Backend{
-		client:       config.Client,
-		logger:       logger,
+		client:       client,
 		bucket:       config.Bucket,
 		prefix:       config.Prefix,
 		lockTTL:      config.LockTTL,
@@ -197,7 +205,7 @@ func (s *S3Backend) lockNamespace(ctx context.Context, namespace string) error {
 		}
 
 		if err := s.tryExpireStaleLock(ctx, key); err != nil {
-			s.logger.WarnContext(ctx, "stale lock check failed", "key", key, "error", err)
+			logging.FromContext(ctx).WarnContext(ctx, "stale lock check failed", "key", key, "error", err)
 		} else {
 			continue
 		}
@@ -263,7 +271,7 @@ func (n *s3Namespace) doSync(ctx context.Context) error {
 		}
 		defer func() {
 			if err := n.backend.unlockNamespace(ctx, n.name); err != nil {
-				n.backend.logger.WarnContext(ctx, "unlock failed", "namespace", n.name, "error", err)
+				logging.FromContext(ctx).WarnContext(ctx, "unlock failed", "namespace", n.name, "error", err)
 			}
 		}()
 	}
@@ -333,16 +341,17 @@ func (n *s3Namespace) restorePending(ops []Op) {
 
 func (n *s3Namespace) syncLoop() {
 	defer close(n.done)
-	logger := n.backend.logger.With("namespace", n.name)
+	ctx := n.backend.ctx
+	logger := logging.FromContext(ctx).With("namespace", n.name)
 	ticker := time.NewTicker(n.backend.syncInterval)
 	defer ticker.Stop()
 	for {
 		select {
-		case <-n.backend.ctx.Done():
+		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if err := n.doSync(n.backend.ctx); err != nil {
-				logger.WarnContext(n.backend.ctx, "sync failed", "error", err)
+			if err := n.doSync(ctx); err != nil {
+				logger.WarnContext(ctx, "sync failed", "error", err)
 			}
 		}
 	}

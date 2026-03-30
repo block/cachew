@@ -16,6 +16,7 @@ import (
 
 	"github.com/block/cachew/internal/cache"
 	"github.com/block/cachew/internal/logging"
+	"github.com/block/cachew/internal/metadatadb"
 	"github.com/block/cachew/internal/strategy"
 	_ "github.com/block/cachew/internal/strategy/git"   // Register git strategy
 	_ "github.com/block/cachew/internal/strategy/gomod" // Register gomod strategy
@@ -39,14 +40,15 @@ func (l *loggingMux) HandleFunc(pattern string, handler func(http.ResponseWriter
 var _ strategy.Mux = (*loggingMux)(nil)
 
 // Schema returns the configuration file schema.
-func Schema[GlobalConfig any](cr *cache.Registry, sr *strategy.Registry) *hcl.AST {
+func Schema[GlobalConfig any](cr *cache.Registry, mr *metadatadb.Registry, sr *strategy.Registry) *hcl.AST {
 	globalSchema, err := hcl.Schema(new(GlobalConfig))
 	if err != nil {
 		panic(err)
 	}
-	return &hcl.AST{
-		Entries: append(globalSchema.Entries, append(sr.Schema().Entries, cr.Schema().Entries...)...),
-	}
+	globalSchema.Entries = append(globalSchema.Entries, sr.Schema().Entries...)
+	globalSchema.Entries = append(globalSchema.Entries, cr.Schema().Entries...)
+	globalSchema.Entries = append(globalSchema.Entries, mr.Schema().Entries...)
+	return globalSchema
 }
 
 // Split configuration into global config and provider-specific config.
@@ -103,28 +105,17 @@ func unwrapBlock(block *hcl.Block) (name string, inner *hcl.Block, err error) {
 	return block.Labels[0], inner, nil
 }
 
-// Load HCL configuration and use that to construct the cache backend, and proxy strategies.
-// It returns an http.Handler that wraps mux — any loaded strategies that implement
-// strategy.Interceptor are applied as middleware before ServeMux route matching, so
-// that they can inspect r.RequestURI rather than the path-only r.URL.Path.
-func Load(
-	ctx context.Context,
-	cr *cache.Registry,
-	sr *strategy.Registry,
-	ast *hcl.AST,
-	mux *http.ServeMux,
-	vars map[string]string,
-) (http.Handler, error) {
-	logger := logging.FromContext(ctx)
-	expandVars(ast, vars)
+type classifiedBlocks struct {
+	caches     []*hcl.Block
+	metadata   *hcl.Block
+	strategies []*hcl.Block
+}
 
-	strategyCandidates := []*hcl.Block{
+func classifyBlocks(ast *hcl.AST) (*classifiedBlocks, error) {
+	result := &classifiedBlocks{
 		// Always enable the default API strategy
-		{Name: "apiv1"},
+		strategies: []*hcl.Block{{Name: "apiv1"}},
 	}
-
-	// First pass: collect cache backends and strategy candidates from prefixed blocks.
-	var caches []cache.Cache
 	for _, node := range ast.Entries {
 		block, ok := node.(*hcl.Block)
 		if !ok {
@@ -132,29 +123,72 @@ func Load(
 		}
 		switch block.Name {
 		case "cache":
-			name, inner, err := unwrapBlock(block)
-			if err != nil {
-				return nil, err
+			result.caches = append(result.caches, block)
+		case "metadata":
+			if result.metadata != nil {
+				return nil, errors.Errorf("%s: only one metadata block is allowed", block.Pos)
 			}
-			c, err := cr.Create(ctx, name, inner, vars)
-			if err != nil {
-				return nil, errors.Errorf("%s: %w", block.Pos, err)
-			}
-			caches = append(caches, c)
-
+			result.metadata = block
 		case "strategy":
 			_, inner, err := unwrapBlock(block)
 			if err != nil {
 				return nil, err
 			}
-			strategyCandidates = append(strategyCandidates, inner)
-
+			result.strategies = append(result.strategies, inner)
 		default:
-			return nil, errors.Errorf("%s: unknown block %q (expected \"cache\" or \"strategy\")", block.Pos, block.Name)
+			return nil, errors.Errorf("%s: unknown block %q (expected \"cache\", \"metadata\", or \"strategy\")", block.Pos, block.Name)
 		}
 	}
+	return result, nil
+}
+
+// Load HCL configuration and use that to construct the cache backend, and proxy strategies.
+// It returns an http.Handler that wraps mux — any loaded strategies that implement
+// strategy.Interceptor are applied as middleware before ServeMux route matching, so
+// that they can inspect r.RequestURI rather than the path-only r.URL.Path.
+func Load(
+	ctx context.Context,
+	cr *cache.Registry,
+	mr *metadatadb.Registry,
+	sr *strategy.Registry,
+	ast *hcl.AST,
+	mux *http.ServeMux,
+	vars map[string]string,
+) (http.Handler, metadatadb.Backend, error) {
+	logger := logging.FromContext(ctx)
+	expandVars(ast, vars)
+
+	classified, err := classifyBlocks(ast)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	var caches []cache.Cache
+	for _, block := range classified.caches {
+		name, inner, err := unwrapBlock(block)
+		if err != nil {
+			return nil, nil, err
+		}
+		c, err := cr.Create(ctx, name, inner, vars)
+		if err != nil {
+			return nil, nil, errors.Errorf("%s: %w", block.Pos, err)
+		}
+		caches = append(caches, c)
+	}
 	if len(caches) == 0 {
-		return nil, errors.Errorf("%s: expected at least one cache backend", ast.Pos)
+		return nil, nil, errors.Errorf("%s: expected at least one cache backend", ast.Pos)
+	}
+
+	var metadata metadatadb.Backend
+	if classified.metadata != nil {
+		name, inner, err := unwrapBlock(classified.metadata)
+		if err != nil {
+			return nil, nil, err
+		}
+		metadata, err = mr.Create(ctx, name, inner, vars)
+		if err != nil {
+			return nil, nil, errors.Errorf("%s: %w", classified.metadata.Pos, err)
+		}
 	}
 
 	cache := cache.MaybeNewTiered(ctx, caches)
@@ -165,13 +199,13 @@ func Load(
 	// Collect strategies that implement Interceptor separately — they need
 	// to run before ServeMux route matching, not as mux routes.
 	var interceptors []strategy.Interceptor
-	for _, block := range strategyCandidates {
+	for _, block := range classified.strategies {
 		name := block.Name
 		slogger := logger.With("strategy", name)
 		mlog := &loggingMux{logger: slogger, mux: mux}
 		s, err := sr.Create(ctx, name, block, cache, mlog, vars)
 		if err != nil {
-			return nil, errors.Errorf("%s: %w", block.Pos, err)
+			return nil, nil, errors.Errorf("%s: %w", block.Pos, err)
 		}
 		if interceptor, ok := s.(strategy.Interceptor); ok {
 			interceptors = append(interceptors, interceptor)
@@ -184,7 +218,7 @@ func Load(
 	for i := len(interceptors) - 1; i >= 0; i-- {
 		h = interceptors[i].Intercept(h)
 	}
-	return h, nil
+	return h, metadata, nil
 }
 
 // ExpandVars expands environment variable references in HCL strings and heredocs.

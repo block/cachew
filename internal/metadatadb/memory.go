@@ -8,6 +8,18 @@ import (
 	"github.com/alecthomas/errors"
 )
 
+// RegisterMemory registers the in-memory metadata backend.
+func RegisterMemory(r *Registry) {
+	Register(r, "memory", "In-memory metadata store for testing and single-instance deployments",
+		func(_ context.Context, _ MemoryConfig) (*MemoryBackend, error) {
+			return NewMemoryBackend(), nil
+		},
+	)
+}
+
+// MemoryConfig is the configuration for the in-memory metadata backend.
+type MemoryConfig struct{}
+
 // MemoryBackend is an in-memory Backend for testing and single-instance
 // deployments. Ops are applied directly — there is no sync or persistence.
 type MemoryBackend struct {
