@@ -97,9 +97,8 @@ func Soak(t *testing.T, backend metadatadb.Backend, config SoakConfig) SoakResul
 	ctx, cancel := context.WithTimeout(ctx, config.Duration+time.Minute)
 	defer cancel()
 
-	cfg := metadatadb.Config{SyncInterval: time.Hour, LockTTL: 5 * time.Second}
-	store := metadatadb.New(ctx, cfg, backend)
-	t.Cleanup(func() { assert.NoError(t, store.Close()) })
+	store := metadatadb.New(ctx, backend)
+	t.Cleanup(func() { assert.NoError(t, store.Close(ctx)) })
 
 	ns := store.Namespace("soak")
 	tr := newTracker()
