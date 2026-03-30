@@ -32,7 +32,7 @@ type S3BackendConfig struct {
 	LockTTL time.Duration
 }
 
-func NewS3Backend(config S3BackendConfig) *S3Backend {
+func NewS3Backend(ctx context.Context, config S3BackendConfig) (*S3Backend, error) {
 	if config.Prefix == "" {
 		config.Prefix = "_meta"
 	}
@@ -43,13 +43,21 @@ func NewS3Backend(config S3BackendConfig) *S3Backend {
 	if logger == nil {
 		logger = slog.Default()
 	}
+	exists, err := config.Client.BucketExists(ctx, config.Bucket)
+	if err != nil {
+		return nil, errors.Errorf("failed to check if bucket exists: %w", err)
+	}
+	if !exists {
+		return nil, errors.Errorf("bucket %s does not exist", config.Bucket)
+	}
+
 	return &S3Backend{
 		client:  config.Client,
 		logger:  logger,
 		bucket:  config.Bucket,
 		prefix:  config.Prefix,
 		lockTTL: config.LockTTL,
-	}
+	}, nil
 }
 
 func (s *S3Backend) stateKey(namespace string) string { return s.prefix + "/" + namespace + ".json" }

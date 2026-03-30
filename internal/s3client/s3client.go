@@ -100,11 +100,5 @@ func NewClient(ctx context.Context, config Config) (*minio.Client, error) {
 		return nil, errors.Errorf("failed to create minio client: %w", err)
 	}
 
-	// Verify connectivity and credentials up front so misconfiguration is
-	// caught at startup rather than on the first cache request.
-	if _, err := mc.ListBuckets(ctx); err != nil {
-		return nil, errors.Errorf("failed to connect to S3 endpoint %s: %w", config.Endpoint, err)
-	}
-
 	return mc, nil
 }
