@@ -2,10 +2,8 @@ package metadatadbtest
 
 import (
 	"context"
-	"encoding/json"
 	"log/slog"
 	"testing"
-	"time"
 
 	"github.com/alecthomas/assert/v2"
 
@@ -14,63 +12,67 @@ import (
 )
 
 // Suite runs a comprehensive test suite against a metadatadb.Backend implementation.
-func Suite(t *testing.T, newBackend func(t *testing.T) metadatadb.Backend) {
+// The factory must return n backends that share the same underlying storage.
+func Suite(t *testing.T, newBackends func(t *testing.T, n int) []metadatadb.Backend) {
+	one := func(t *testing.T) metadatadb.Backend { return newBackends(t, 1)[0] }
+
 	t.Run("Scalar", func(t *testing.T) {
-		testScalar(t, newBackend(t))
+		testScalar(t, one(t))
 	})
 	t.Run("ScalarDelete", func(t *testing.T) {
-		testScalarDelete(t, newBackend(t))
+		testScalarDelete(t, one(t))
 	})
 	t.Run("ScalarStruct", func(t *testing.T) {
-		testScalarStruct(t, newBackend(t))
+		testScalarStruct(t, one(t))
 	})
 	t.Run("Int", func(t *testing.T) {
-		testInt(t, newBackend(t))
+		testInt(t, one(t))
 	})
 	t.Run("IntArithmetic", func(t *testing.T) {
-		testIntArithmetic(t, newBackend(t))
+		testIntArithmetic(t, one(t))
 	})
 	t.Run("IntDivByZero", func(t *testing.T) {
-		testIntDivByZero(t, newBackend(t))
+		testIntDivByZero(t, one(t))
 	})
 	t.Run("Set", func(t *testing.T) {
-		testSet(t, newBackend(t))
+		testSet(t, one(t))
 	})
 	t.Run("SetRemove", func(t *testing.T) {
-		testSetRemove(t, newBackend(t))
+		testSetRemove(t, one(t))
 	})
 	t.Run("Map", func(t *testing.T) {
-		testMap(t, newBackend(t))
+		testMap(t, one(t))
 	})
 	t.Run("MapDelete", func(t *testing.T) {
-		testMapDelete(t, newBackend(t))
+		testMapDelete(t, one(t))
 	})
 	t.Run("MapStruct", func(t *testing.T) {
-		testMapStruct(t, newBackend(t))
+		testMapStruct(t, one(t))
 	})
 	t.Run("IntMap", func(t *testing.T) {
-		testIntMap(t, newBackend(t))
+		testIntMap(t, one(t))
 	})
 	t.Run("IntMapIncr", func(t *testing.T) {
-		testIntMapIncr(t, newBackend(t))
+		testIntMapIncr(t, one(t))
 	})
 	t.Run("List", func(t *testing.T) {
-		testList(t, newBackend(t))
+		testList(t, one(t))
 	})
 	t.Run("NamespaceIsolation", func(t *testing.T) {
-		testNamespaceIsolation(t, newBackend(t))
+		testNamespaceIsolation(t, one(t))
 	})
 	t.Run("FlushPersists", func(t *testing.T) {
-		testFlushPersists(t, newBackend(t))
+		testFlushPersists(t, one(t))
 	})
 	t.Run("FlushRoundTrip", func(t *testing.T) {
-		testFlushRoundTrip(t, newBackend(t))
+		testFlushRoundTrip(t, one(t))
 	})
 	t.Run("TwoStoresSync", func(t *testing.T) {
-		testTwoStoresSync(t, newBackend(t))
+		testTwoStoresSync(t, one(t))
 	})
-	t.Run("TokenMismatch", func(t *testing.T) {
-		testTokenMismatch(t, newBackend(t))
+	t.Run("TwoBackendsConcurrentOps", func(t *testing.T) {
+		backends := newBackends(t, 2)
+		testTwoBackendsConcurrentOps(t, backends[0], backends[1])
 	})
 }
 
@@ -80,9 +82,8 @@ func testContext() context.Context {
 
 func newStore(t *testing.T, backend metadatadb.Backend) *metadatadb.Store {
 	t.Helper()
-	cfg := metadatadb.Config{SyncInterval: time.Hour, LockTTL: 5 * time.Second}
-	s := metadatadb.New(testContext(), cfg, backend)
-	t.Cleanup(func() { assert.NoError(t, s.Close()) })
+	s := metadatadb.New(testContext(), backend)
+	t.Cleanup(func() { assert.NoError(t, s.Close(testContext())) })
 	return s
 }
 
@@ -406,30 +407,29 @@ func testTwoStoresSync(t *testing.T, backend metadatadb.Backend) {
 	assert.Equal(t, int64(15), metadatadb.NewInt(ns1, "counter").Get())
 }
 
-func testTokenMismatch(t *testing.T, backend metadatadb.Backend) {
+func testTwoBackendsConcurrentOps(t *testing.T, b1, b2 metadatadb.Backend) {
 	ctx := testContext()
+	s1 := metadatadb.New(ctx, b1)
+	t.Cleanup(func() { assert.NoError(t, s1.Close(ctx)) })
+	s2 := metadatadb.New(ctx, b2)
+	t.Cleanup(func() { assert.NoError(t, s2.Close(ctx)) })
 
-	// Directly exercise the Backend token semantics.
-	_, token, err := backend.Load(ctx, "test")
-	assert.NoError(t, err)
-	assert.NoError(t, backend.Store(ctx, "test", json.RawMessage(`{"key":"v1"}`), token))
+	ns1 := s1.Namespace("shared")
+	ns2 := s2.Namespace("shared")
 
-	// Two readers load the same version.
-	_, token1, err := backend.Load(ctx, "test")
-	assert.NoError(t, err)
-	_, token2, err := backend.Load(ctx, "test")
-	assert.NoError(t, err)
-	assert.Equal(t, token1, token2)
+	// Both backends apply ops locally before either flushes.
+	metadatadb.NewInt(ns1, "val").Add(10)
+	metadatadb.NewInt(ns2, "val").Add(-5)
 
-	// First writer succeeds.
-	assert.NoError(t, backend.Store(ctx, "test", json.RawMessage(`{"key":"v2"}`), token1))
+	// Backend 1 flushes first — remote becomes 10.
+	assert.NoError(t, ns1.Flush(ctx))
 
-	// Second writer fails — token is stale.
-	err = backend.Store(ctx, "test", json.RawMessage(`{"key":"v3"}`), token2)
-	assert.IsError(t, err, metadatadb.ErrInvalidToken)
+	// Backend 2 flushes — replays Add(-5) onto remote 10 = 5.
+	assert.NoError(t, ns2.Flush(ctx))
 
-	// Reload and retry succeeds.
-	_, token3, err := backend.Load(ctx, "test")
-	assert.NoError(t, err)
-	assert.NoError(t, backend.Store(ctx, "test", json.RawMessage(`{"key":"v3"}`), token3))
+	// Backend 1 reloads to pick up backend 2's contribution.
+	assert.NoError(t, ns1.Flush(ctx))
+
+	assert.Equal(t, int64(5), metadatadb.NewInt(ns1, "val").Get())
+	assert.Equal(t, int64(5), metadatadb.NewInt(ns2, "val").Get())
 }

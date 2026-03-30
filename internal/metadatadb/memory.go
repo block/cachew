@@ -3,73 +3,60 @@ package metadatadb
 import (
 	"context"
 	"encoding/json"
-	"strconv"
 	"sync"
-	"sync/atomic"
 
 	"github.com/alecthomas/errors"
 )
 
 // MemoryBackend is an in-memory Backend for testing and single-instance
-// deployments. It is safe for concurrent use across multiple Store instances.
+// deployments. Ops are applied directly — there is no sync or persistence.
 type MemoryBackend struct {
-	mu      sync.Mutex
-	data    map[string]json.RawMessage
-	tokens  map[string]string
-	version atomic.Int64
-	locks   map[string]chan struct{}
+	mu    sync.RWMutex
+	state map[string]map[string]any // namespace -> state
 }
 
 func NewMemoryBackend() *MemoryBackend {
-	return &MemoryBackend{
-		data:   make(map[string]json.RawMessage),
-		tokens: make(map[string]string),
-		locks:  make(map[string]chan struct{}),
-	}
+	return &MemoryBackend{state: make(map[string]map[string]any)}
 }
 
-func (m *MemoryBackend) Load(_ context.Context, namespace string) (json.RawMessage, string, error) {
+func (m *MemoryBackend) Apply(_ context.Context, namespace string, ops ...Op) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.data[namespace], m.tokens[namespace], nil
-}
-
-func (m *MemoryBackend) Store(_ context.Context, namespace string, data json.RawMessage, token string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.tokens[namespace] != token {
-		return ErrInvalidToken
+	ns := m.ns(namespace)
+	for _, o := range ops {
+		applyOp(ns, o)
 	}
-	m.data[namespace] = data
-	m.tokens[namespace] = strconv.FormatInt(m.version.Add(1), 10)
 	return nil
 }
 
-func (m *MemoryBackend) Lock(ctx context.Context, namespace string) error {
-	for {
-		m.mu.Lock()
-		ch, locked := m.locks[namespace]
-		if !locked {
-			m.locks[namespace] = make(chan struct{})
-			m.mu.Unlock()
-			return nil
-		}
-		m.mu.Unlock()
-
-		select {
-		case <-ch:
-		case <-ctx.Done():
-			return errors.WithStack(ctx.Err())
-		}
-	}
+func (m *MemoryBackend) Query(_ context.Context, namespace string, q ReadOp, target any) error {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	result := queryState(m.ns(namespace), q)
+	return errors.Wrap(jsonUnmarshalInto(result, target), "memory query")
 }
 
-func (m *MemoryBackend) Unlock(_ context.Context, namespace string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if ch, ok := m.locks[namespace]; ok {
-		close(ch)
-		delete(m.locks, namespace)
+func (m *MemoryBackend) Flush(_ context.Context, _ string) error { return nil }
+func (m *MemoryBackend) Close(_ context.Context) error           { return nil }
+
+func (m *MemoryBackend) ns(namespace string) map[string]any {
+	ns, ok := m.state[namespace]
+	if !ok {
+		ns = make(map[string]any)
+		m.state[namespace] = ns
 	}
-	return nil
+	return ns
+}
+
+// jsonUnmarshalInto marshals src to JSON then unmarshals into target,
+// bridging between the internal any-typed state and the caller's typed pointer.
+func jsonUnmarshalInto(src any, target any) error {
+	if src == nil {
+		return nil
+	}
+	data, err := json.Marshal(src)
+	if err != nil {
+		return errors.Wrap(err, "marshal")
+	}
+	return errors.Wrap(json.Unmarshal(data, target), "unmarshal")
 }
