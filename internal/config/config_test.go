@@ -1,11 +1,19 @@
 package config //nolint:testpackage
 
 import (
+	"context"
+	"log/slog"
+	"net/http"
 	"strings"
 	"testing"
 
 	"github.com/alecthomas/assert/v2"
 	"github.com/alecthomas/hcl/v2"
+
+	"github.com/block/cachew/internal/cache"
+	"github.com/block/cachew/internal/logging"
+	"github.com/block/cachew/internal/metadatadb"
+	"github.com/block/cachew/internal/strategy"
 )
 
 func TestUnwrapBlock(t *testing.T) {
@@ -174,4 +182,20 @@ git-clone {
 			assert.Equal(t, strings.TrimSpace(tt.expected), strings.TrimSpace(string(got)))
 		})
 	}
+}
+
+func TestLoadRequiresMetadataBackend(t *testing.T) {
+	cr := cache.NewRegistry()
+	cache.RegisterMemory(cr)
+	mr := metadatadb.NewRegistry()
+	metadatadb.RegisterMemory(mr)
+	sr := strategy.NewRegistry()
+
+	ast, err := hcl.Parse(strings.NewReader(`cache memory {}`))
+	assert.NoError(t, err)
+
+	ctx := logging.ContextWithLogger(context.Background(), slog.Default())
+	_, _, err = Load(ctx, cr, mr, sr, ast, http.NewServeMux(), nil)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "expected a metadata backend")
 }
