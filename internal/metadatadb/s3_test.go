@@ -25,7 +25,6 @@ func TestS3Backend(t *testing.T) {
 		for i := range backends {
 			b, err := metadatadb.NewS3Backend(ctx, s3client.ClientProvider(func() (*minio.Client, error) { return s3clienttest.Client(t), nil }), metadatadb.S3BackendConfig{
 				Bucket:       bucket,
-				Prefix:       "_meta-" + t.Name(),
 				LockTTL:      5 * time.Second,
 				SyncInterval: time.Hour,
 			})
@@ -42,7 +41,6 @@ func TestS3BackendSoak(t *testing.T) {
 
 	b, err := metadatadb.NewS3Backend(ctx, s3client.ClientProvider(func() (*minio.Client, error) { return s3clienttest.Client(t), nil }), metadatadb.S3BackendConfig{
 		Bucket:       bucket,
-		Prefix:       "_meta-soak",
 		LockTTL:      5 * time.Second,
 		SyncInterval: time.Hour,
 	})

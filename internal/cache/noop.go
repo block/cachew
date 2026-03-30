@@ -62,7 +62,7 @@ var _ Cache = (*noOpCache)(nil)
 var _ io.WriteCloser = (*noOpWriter)(nil)
 
 // Namespace creates a namespaced view (no-op for noop cache).
-func (n *noOpCache) Namespace(_ string) Cache {
+func (n *noOpCache) Namespace(_ Namespace) Cache {
 	return n
 }
 

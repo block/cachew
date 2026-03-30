@@ -47,7 +47,7 @@ type S3Config struct {
 type S3 struct {
 	logger    *slog.Logger
 	config    S3Config
-	namespace string
+	namespace Namespace
 	client    *minio.Client
 }
 
@@ -107,12 +107,12 @@ func (s *S3) Close() error {
 	return nil
 }
 
-func (s *S3) keyToPath(namespace string, key Key) string {
+func (s *S3) keyToPath(namespace Namespace, key Key) string {
 	hexKey := key.String()
 	prefix := ""
 
 	if namespace != "" {
-		prefix = namespace + "/"
+		prefix = string(namespace) + "/"
 	}
 
 	// Use first two hex digits as directory, full hex as filename
@@ -336,7 +336,7 @@ func (s *S3) Stats(_ context.Context) (Stats, error) {
 type s3Writer struct {
 	s3        *S3
 	key       Key
-	namespace string
+	namespace Namespace
 	pipe      *io.PipeWriter
 	expiresAt time.Time
 	headers   http.Header
@@ -445,7 +445,7 @@ func (w *s3Writer) upload(pr *io.PipeReader, r io.Reader) {
 }
 
 // Namespace creates a namespaced view of the S3 cache.
-func (s *S3) Namespace(namespace string) Cache {
+func (s *S3) Namespace(namespace Namespace) Cache {
 	c := *s
 	c.namespace = namespace
 	return &c

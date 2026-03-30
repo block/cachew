@@ -32,7 +32,6 @@ func RegisterS3(r *Registry, clientProvider s3client.ClientProvider) {
 type S3Backend struct {
 	client       *minio.Client
 	bucket       string
-	prefix       string
 	lockTTL      time.Duration
 	syncInterval time.Duration
 	mu           sync.Mutex
@@ -44,15 +43,16 @@ type S3Backend struct {
 // S3BackendConfig configures the S3 metadata backend.
 type S3BackendConfig struct {
 	Bucket       string        `hcl:"bucket" help:"S3 bucket name."`
-	Prefix       string        `hcl:"prefix,optional" help:"Key prefix for metadata objects." default:"_meta"`
 	LockTTL      time.Duration `hcl:"lock-ttl,optional" help:"TTL for namespace locks." default:"30s"`
 	SyncInterval time.Duration `hcl:"sync-interval,optional" help:"Interval between periodic syncs." default:"30s"`
 }
 
+// s3MetadataPrefix is the fixed key prefix for all metadata objects in S3.
+// It starts with "." to avoid collisions with cache namespaces, which are
+// validated to not start with ".".
+const s3MetadataPrefix = ".metadata"
+
 func NewS3Backend(ctx context.Context, clientProvider s3client.ClientProvider, config S3BackendConfig) (*S3Backend, error) {
-	if config.Prefix == "" {
-		config.Prefix = "_meta"
-	}
 	if config.LockTTL == 0 {
 		config.LockTTL = 30 * time.Second
 	}
@@ -72,13 +72,12 @@ func NewS3Backend(ctx context.Context, clientProvider s3client.ClientProvider, c
 	}
 
 	logging.FromContext(ctx).InfoContext(ctx, "Constructing S3 metadata backend",
-		"bucket", config.Bucket, "prefix", config.Prefix, "lock-ttl", config.LockTTL, "sync-interval", config.SyncInterval)
+		"bucket", config.Bucket, "prefix", s3MetadataPrefix, "lock-ttl", config.LockTTL, "sync-interval", config.SyncInterval)
 
 	ctx, cancel := context.WithCancel(ctx)
 	return &S3Backend{
 		client:       client,
 		bucket:       config.Bucket,
-		prefix:       config.Prefix,
 		lockTTL:      config.LockTTL,
 		syncInterval: config.SyncInterval,
 		ns:           make(map[string]*s3Namespace),
@@ -139,8 +138,12 @@ func (s *S3Backend) Close(_ context.Context) error {
 
 // S3 object key helpers
 
-func (s *S3Backend) stateKey(namespace string) string { return s.prefix + "/" + namespace + ".json" }
-func (s *S3Backend) lockKey(namespace string) string  { return s.prefix + "/" + namespace + ".lock" }
+func (s *S3Backend) stateKey(namespace string) string {
+	return s3MetadataPrefix + "/" + namespace + ".json"
+}
+func (s *S3Backend) lockKey(namespace string) string {
+	return s3MetadataPrefix + "/" + namespace + ".lock"
+}
 
 // S3 load/store/lock/unlock
 

@@ -22,16 +22,16 @@ var (
 // diskMetaDB manages expiration times and headers for cache entries using bbolt.
 type diskMetaDB struct {
 	db              *bbolt.DB
-	namespacesCache sync.Map // map[string]bool - concurrent-safe
+	namespacesCache sync.Map // map[Namespace]bool - concurrent-safe
 }
 
 // compositeKey creates a unique database key from namespace and cache key.
 // Format: "namespace/hexkey" when namespace is set, or just "hexkey" when empty.
-func compositeKey(namespace string, key Key) []byte {
+func compositeKey(namespace Namespace, key Key) []byte {
 	if namespace == "" {
 		return []byte(key.String())
 	}
-	return []byte(namespace + "/" + key.String())
+	return []byte(string(namespace) + "/" + key.String())
 }
 
 // newDiskMetaDB creates a new bbolt-backed metadata storage for the disk cache.
@@ -65,7 +65,7 @@ func newDiskMetaDB(dbPath string) (*diskMetaDB, error) {
 		return ttlBucket.ForEach(func(k, _ []byte) error {
 			namespace, _, found := bytes.Cut(k, []byte("/"))
 			if found && len(namespace) > 0 {
-				metaDB.namespacesCache.Store(string(namespace), true)
+				metaDB.namespacesCache.Store(Namespace(namespace), true)
 			}
 			return nil
 		})
@@ -77,7 +77,7 @@ func newDiskMetaDB(dbPath string) (*diskMetaDB, error) {
 	return metaDB, nil
 }
 
-func (s *diskMetaDB) setTTL(namespace string, key Key, expiresAt time.Time) error {
+func (s *diskMetaDB) setTTL(namespace Namespace, key Key, expiresAt time.Time) error {
 	ttlBytes, err := expiresAt.MarshalBinary()
 	if err != nil {
 		return errors.Errorf("failed to marshal TTL: %w", err)
@@ -100,7 +100,7 @@ func (s *diskMetaDB) setTTL(namespace string, key Key, expiresAt time.Time) erro
 	return nil
 }
 
-func (s *diskMetaDB) set(key Key, namespace string, expiresAt time.Time, headers http.Header) error {
+func (s *diskMetaDB) set(key Key, namespace Namespace, expiresAt time.Time, headers http.Header) error {
 	ttlBytes, err := expiresAt.MarshalBinary()
 	if err != nil {
 		return errors.Errorf("failed to marshal TTL: %w", err)
@@ -133,7 +133,7 @@ func (s *diskMetaDB) set(key Key, namespace string, expiresAt time.Time, headers
 	return nil
 }
 
-func (s *diskMetaDB) getTTL(namespace string, key Key) (time.Time, error) {
+func (s *diskMetaDB) getTTL(namespace Namespace, key Key) (time.Time, error) {
 	var expiresAt time.Time
 	dbKey := compositeKey(namespace, key)
 	err := s.db.View(func(tx *bbolt.Tx) error {
@@ -147,7 +147,7 @@ func (s *diskMetaDB) getTTL(namespace string, key Key) (time.Time, error) {
 	return expiresAt, errors.WithStack(err)
 }
 
-func (s *diskMetaDB) getHeaders(namespace string, key Key) (http.Header, error) {
+func (s *diskMetaDB) getHeaders(namespace Namespace, key Key) (http.Header, error) {
 	var headers http.Header
 	dbKey := compositeKey(namespace, key)
 	err := s.db.View(func(tx *bbolt.Tx) error {
@@ -161,7 +161,7 @@ func (s *diskMetaDB) getHeaders(namespace string, key Key) (http.Header, error) 
 	return headers, errors.WithStack(err)
 }
 
-func (s *diskMetaDB) delete(namespace string, key Key) error {
+func (s *diskMetaDB) delete(namespace Namespace, key Key) error {
 	dbKey := compositeKey(namespace, key)
 	return errors.WithStack(s.db.Update(func(tx *bbolt.Tx) error {
 		ttlBucket := tx.Bucket(ttlBucketName)
@@ -195,19 +195,19 @@ func (s *diskMetaDB) deleteAll(entries []evictEntryKey) error {
 	}))
 }
 
-func (s *diskMetaDB) walk(fn func(key Key, namespace string, expiresAt time.Time) error) error {
+func (s *diskMetaDB) walk(fn func(key Key, namespace Namespace, expiresAt time.Time) error) error {
 	return errors.WithStack(s.db.View(func(tx *bbolt.Tx) error {
 		ttlBucket := tx.Bucket(ttlBucketName)
 		if ttlBucket == nil {
 			return nil
 		}
 		return ttlBucket.ForEach(func(k, v []byte) error {
-			var namespace string
+			var namespace Namespace
 			var key Key
 
 			before, hexKey, found := bytes.Cut(k, []byte("/"))
 			if found {
-				namespace = string(before)
+				namespace = Namespace(before)
 			} else {
 				hexKey = k
 			}
@@ -251,8 +251,8 @@ func (s *diskMetaDB) close() error {
 func (s *diskMetaDB) listNamespaces() ([]string, error) {
 	var namespaces []string
 	s.namespacesCache.Range(func(key, _ any) bool {
-		if ns, ok := key.(string); ok {
-			namespaces = append(namespaces, ns)
+		if ns, ok := key.(Namespace); ok {
+			namespaces = append(namespaces, string(ns))
 		}
 		return true
 	})

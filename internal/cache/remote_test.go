@@ -33,7 +33,7 @@ func TestRemoteCache(t *testing.T) {
 		t.Cleanup(ts.Close)
 
 		client := cache.NewRemote(ts.URL, nil)
-		return client
+		return client.Namespace("test")
 	})
 }
 
@@ -57,7 +57,7 @@ func TestRemoteCacheSoak(t *testing.T) {
 	ts := httptest.NewServer(mux)
 	defer ts.Close()
 
-	client := cache.NewRemote(ts.URL, nil)
+	client := cache.NewRemote(ts.URL, nil).Namespace("test")
 	defer client.Close()
 
 	cachetest.Soak(t, client, cachetest.SoakConfig{
