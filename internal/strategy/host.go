@@ -2,14 +2,12 @@ package strategy
 
 import (
 	"context"
-	"log/slog"
 	"net/http"
 	"net/url"
 
 	"github.com/alecthomas/errors"
 
 	"github.com/block/cachew/internal/cache"
-	"github.com/block/cachew/internal/logging"
 	"github.com/block/cachew/internal/strategy/handler"
 )
 
@@ -36,14 +34,13 @@ type Host struct {
 	target  *url.URL
 	cache   cache.Cache
 	client  *http.Client
-	logger  *slog.Logger
 	prefix  string
 	headers map[string]string
 }
 
 var _ Strategy = (*Host)(nil)
 
-func NewHost(ctx context.Context, config HostConfig, cache cache.Cache, mux Mux) (*Host, error) {
+func NewHost(_ context.Context, config HostConfig, cache cache.Cache, mux Mux) (*Host, error) {
 	u, err := url.Parse(config.Target)
 	if err != nil {
 		return nil, errors.Errorf("invalid target URL: %w", err)
@@ -53,7 +50,6 @@ func NewHost(ctx context.Context, config HostConfig, cache cache.Cache, mux Mux)
 		target:  u,
 		cache:   cache,
 		client:  &http.Client{},
-		logger:  logging.FromContext(ctx),
 		prefix:  prefix,
 		headers: config.Headers,
 	}
@@ -91,12 +87,8 @@ func (d *Host) buildTargetURL(r *http.Request) *url.URL {
 		path = "/"
 	}
 
-	targetURL, err := url.Parse(d.target.String())
-	if err != nil {
-		d.logger.Error("Failed to parse target URL", "error", err, "target", d.target)
-		return &url.URL{}
-	}
+	targetURL := *d.target
 	targetURL.Path = path
 	targetURL.RawQuery = r.URL.RawQuery
-	return targetURL
+	return &targetURL
 }

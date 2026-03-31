@@ -211,7 +211,12 @@ func (s *S3) Open(ctx context.Context, key Key) (io.ReadCloser, http.Header, err
 			remaining := expiresAt.Sub(now)
 			if remaining < s.config.MaxTTL/2 {
 				newExpiresAt := now.Add(s.config.MaxTTL)
-				go s.refreshExpiration(context.WithoutCancel(ctx), objectName, objInfo, newExpiresAt)
+				go func() {
+					bgCtx := context.WithoutCancel(ctx)
+					if err := s.refreshExpiration(bgCtx, objectName, objInfo, newExpiresAt); err != nil {
+						s.logger.WarnContext(bgCtx, "Failed to refresh S3 expiration", "object", objectName, "error", err)
+					}
+				}()
 			}
 		}
 	}
@@ -227,11 +232,11 @@ func (s *S3) Open(ctx context.Context, key Key) (io.ReadCloser, http.Header, err
 
 // refreshExpiration updates the Expires-At metadata on an S3 object using
 // server-side copy-to-self with metadata replacement. This avoids re-uploading
-// the object data. Errors are logged but not returned since this is best-effort.
-func (s *S3) refreshExpiration(ctx context.Context, objectName string, objInfo minio.ObjectInfo, newExpiresAt time.Time) {
+// the object data.
+func (s *S3) refreshExpiration(ctx context.Context, objectName string, objInfo minio.ObjectInfo, newExpiresAt time.Time) error {
 	newExpiresAtBytes, err := newExpiresAt.MarshalText()
 	if err != nil {
-		return
+		return errors.Wrap(err, "marshal expiration time")
 	}
 
 	// Rebuild user metadata with updated expiration
@@ -250,10 +255,9 @@ func (s *S3) refreshExpiration(ctx context.Context, objectName string, objInfo m
 		ReplaceMetadata: true,
 	}
 	if _, err := s.client.CopyObject(ctx, dst, src); err != nil {
-		s.logger.WarnContext(ctx, "Failed to refresh S3 expiration",
-			"object", objectName,
-			"error", err.Error())
+		return errors.Wrap(err, "copy object")
 	}
+	return nil
 }
 
 const s3ErrNoSuchKey = "NoSuchKey"

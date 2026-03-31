@@ -2,7 +2,6 @@ package handler
 
 import (
 	"io"
-	"log/slog"
 	"maps"
 	"net/http"
 	"os"
@@ -106,40 +105,45 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	logger.DebugContext(ctx, "Processing request", "cache_key", cacheKeyStr)
 
-	if h.serveCached(w, r, key, logger) {
+	served, err := h.serveCached(w, r, key)
+	if err != nil {
+		logger.ErrorContext(ctx, "Failed to serve from cache", "error", err)
+	}
+	if served {
 		return
 	}
 
-	h.fetchAndCache(w, r, key, logger)
+	if err := h.fetchAndCache(w, r, key); err != nil {
+		logger.ErrorContext(ctx, "Failed to fetch and cache", "error", err)
+	}
 }
 
-func (h *Handler) serveCached(w http.ResponseWriter, r *http.Request, key cache.Key, logger *slog.Logger) bool {
+func (h *Handler) serveCached(w http.ResponseWriter, r *http.Request, key cache.Key) (bool, error) {
 	cr, headers, err := h.cache.Open(r.Context(), key)
 	if err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
 			h.errorHandler(httputil.Errorf(http.StatusInternalServerError, "failed to open cache: %w", err), w, r)
-			return true
+			return true, nil
 		}
-		return false
+		return false, nil
 	}
 
-	logger.DebugContext(r.Context(), "Cache hit")
+	logging.FromContext(r.Context()).DebugContext(r.Context(), "Cache hit")
 	defer cr.Close()
 	maps.Copy(w.Header(), headers)
 	if _, err := io.Copy(w, cr); err != nil {
-		logger.ErrorContext(r.Context(), "Failed to stream from cache", "error", err)
-		httputil.ErrorResponse(w, r, http.StatusInternalServerError, "Failed to stream from cache", "error", err)
+		return true, errors.Wrap(err, "stream from cache")
 	}
-	return true
+	return true, nil
 }
 
-func (h *Handler) fetchAndCache(w http.ResponseWriter, r *http.Request, key cache.Key, logger *slog.Logger) {
-	logger.DebugContext(r.Context(), "Cache miss, fetching from upstream")
+func (h *Handler) fetchAndCache(w http.ResponseWriter, r *http.Request, key cache.Key) error {
+	logging.FromContext(r.Context()).DebugContext(r.Context(), "Cache miss, fetching from upstream")
 
 	upstreamReq, err := h.transformFunc(r)
 	if err != nil {
 		h.errorHandler(err, w, r)
-		return
+		return nil
 	}
 
 	// Forward safe headers from the original request, without overwriting headers set by transform.
@@ -153,53 +157,46 @@ func (h *Handler) fetchAndCache(w http.ResponseWriter, r *http.Request, key cach
 	resp, err := h.client.Do(upstreamReq)
 	if err != nil {
 		h.errorHandler(httputil.Errorf(http.StatusBadGateway, "failed to fetch: %w", err), w, r)
-		return
+		return nil
 	}
-	defer func() {
-		if closeErr := resp.Body.Close(); closeErr != nil {
-			logger.ErrorContext(r.Context(), "Failed to close response body", "error", closeErr)
-		}
-	}()
+	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		h.streamNonOKResponse(w, resp, logger)
-		return
+		return h.streamNonOKResponse(w, resp)
 	}
 
-	h.streamAndCache(w, r, key, resp, logger)
+	return h.streamAndCache(w, r, key, resp)
 }
 
-func (h *Handler) streamNonOKResponse(w http.ResponseWriter, resp *http.Response, logger *slog.Logger) {
+func (h *Handler) streamNonOKResponse(w http.ResponseWriter, resp *http.Response) error {
 	w.WriteHeader(resp.StatusCode)
 	if _, err := io.Copy(w, resp.Body); err != nil {
-		logger.ErrorContext(resp.Request.Context(), "Failed to stream error response", "error", err)
+		return errors.Wrap(err, "stream non-OK response")
 	}
+	return nil
 }
 
-func (h *Handler) streamAndCache(w http.ResponseWriter, r *http.Request, key cache.Key, resp *http.Response, logger *slog.Logger) {
+func (h *Handler) streamAndCache(w http.ResponseWriter, r *http.Request, key cache.Key, resp *http.Response) error {
 	ttl := h.ttlFunc(r)
 	responseHeaders := maps.Clone(resp.Header)
 	cw, err := h.cache.Create(r.Context(), key, responseHeaders, ttl)
 	if err != nil {
 		h.errorHandler(httputil.Errorf(http.StatusInternalServerError, "failed to create cache entry: %w", err), w, r)
-		return
+		return nil
 	}
 
 	pr, pw := io.Pipe()
 	go func() {
 		mw := io.MultiWriter(pw, cw)
 		_, copyErr := io.Copy(mw, resp.Body)
-		closeErr := errors.Join(cw.Close(), resp.Body.Close())
+		closeErr := cw.Close()
 		pw.CloseWithError(errors.Join(copyErr, closeErr))
 	}()
 
 	maps.Copy(w.Header(), resp.Header)
-	if _, err := io.Copy(w, pr); err != nil {
-		logger.ErrorContext(r.Context(), "Failed to stream response", "error", err)
-	}
-	if closeErr := pr.Close(); closeErr != nil {
-		logger.ErrorContext(r.Context(), "Failed to close pipe", "error", closeErr)
-	}
+	_, copyErr := io.Copy(w, pr)
+	closeErr := pr.Close()
+	return errors.Wrap(errors.Join(copyErr, closeErr), "stream and cache response")
 }
 
 func defaultErrorHandler(err error, w http.ResponseWriter, r *http.Request) {
