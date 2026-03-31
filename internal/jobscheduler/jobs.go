@@ -18,19 +18,23 @@ import (
 type Config struct {
 	Concurrency         int    `hcl:"concurrency" help:"The maximum number of concurrent jobs to run (0 means number of cores)." default:"4"`
 	MaxCloneConcurrency int    `hcl:"max-clone-concurrency" help:"Maximum number of concurrent clone jobs. Remaining worker slots are reserved for fetch/repack/snapshot jobs. 0 means no limit." default:"0"`
+	MaxCost             int    `hcl:"max-cost" help:"Maximum total cost of concurrently running jobs. Each job declares its own cost at submission. 0 means Concurrency * 4." default:"0"`
 	SchedulerDB         string `hcl:"scheduler-db" help:"Path to the scheduler state database." default:"${CACHEW_STATE}/scheduler.db"`
 }
 
-type queueJob struct {
-	id    string
-	queue string
-	run   func(ctx context.Context) error
+// Job describes a unit of work to submit to the scheduler.
+type Job struct {
+	Queue string
+	ID    string
+	Cost  int
+	Clone bool // Subject to MaxCloneConcurrency limits.
+	Run   func(ctx context.Context) error
 }
 
 func jobKey(queue, id string) string { return id + ":" + queue }
 
-func (j *queueJob) String() string                { return jobKey(j.queue, j.id) }
-func (j *queueJob) Run(ctx context.Context) error { return errors.WithStack(j.run(ctx)) }
+func (j *Job) String() string                { return jobKey(j.Queue, j.ID) }
+func (j *Job) run(ctx context.Context) error { return errors.WithStack(j.Run(ctx)) }
 
 // Scheduler runs background jobs concurrently across multiple serialised queues.
 //
@@ -43,14 +47,14 @@ type Scheduler interface {
 	//
 	// This is useful to avoid collisions across strategies.
 	WithQueuePrefix(prefix string) Scheduler
-	// Submit a job to the queue.
+	// Submit a job to the scheduler.
 	//
 	// Jobs run concurrently across queues, but never within a queue.
-	Submit(queue, id string, run func(ctx context.Context) error)
-	// SubmitPeriodicJob submits a job to the queue that runs immediately, and then periodically after the interval.
+	Submit(job Job)
+	// SubmitPeriodicJob submits a job that runs immediately, then repeats after the interval.
 	//
 	// Jobs run concurrently across queues, but never within a queue.
-	SubmitPeriodicJob(queue, id string, interval time.Duration, run func(ctx context.Context) error)
+	SubmitPeriodicJob(job Job, interval time.Duration)
 }
 
 type prefixedScheduler struct {
@@ -58,12 +62,14 @@ type prefixedScheduler struct {
 	scheduler Scheduler
 }
 
-func (p *prefixedScheduler) Submit(queue, id string, run func(ctx context.Context) error) {
-	p.scheduler.Submit(queue, p.prefix+id, run)
+func (p *prefixedScheduler) Submit(job Job) {
+	job.ID = p.prefix + job.ID
+	p.scheduler.Submit(job)
 }
 
-func (p *prefixedScheduler) SubmitPeriodicJob(queue, id string, interval time.Duration, run func(ctx context.Context) error) {
-	p.scheduler.SubmitPeriodicJob(queue, p.prefix+id, interval, run)
+func (p *prefixedScheduler) SubmitPeriodicJob(job Job, interval time.Duration) {
+	job.ID = p.prefix + job.ID
+	p.scheduler.SubmitPeriodicJob(job, interval)
 }
 
 func (p *prefixedScheduler) WithQueuePrefix(prefix string) Scheduler {
@@ -76,9 +82,13 @@ func (p *prefixedScheduler) WithQueuePrefix(prefix string) Scheduler {
 type RootScheduler struct {
 	workAvailable       chan bool
 	lock                sync.Mutex
-	queue               []queueJob
+	queue               []Job
 	active              map[string]string // queue -> job id
+	activeCost          int
+	activeCosts         map[string]int // queue -> cost of running job
+	maxCost             int
 	activeClones        int
+	activeCloneQueues   map[string]bool
 	maxCloneConcurrency int
 	cancel              context.CancelFunc
 	store               ScheduleStore
@@ -111,8 +121,11 @@ func New(ctx context.Context, config Config) (*RootScheduler, error) {
 	}
 	maxClones := config.MaxCloneConcurrency
 	if maxClones == 0 && config.Concurrency > 1 {
-		// Default: reserve at least half the workers for non-clone jobs.
 		maxClones = max(1, config.Concurrency/2)
+	}
+	maxCost := config.MaxCost
+	if maxCost == 0 {
+		maxCost = config.Concurrency * 4
 	}
 	m, err := newSchedulerMetrics()
 	if err != nil {
@@ -121,6 +134,9 @@ func New(ctx context.Context, config Config) (*RootScheduler, error) {
 	q := &RootScheduler{
 		workAvailable:       make(chan bool, 1024),
 		active:              make(map[string]string),
+		activeCosts:         make(map[string]int),
+		activeCloneQueues:   make(map[string]bool),
+		maxCost:             maxCost,
 		maxCloneConcurrency: maxClones,
 		store:               store,
 		metrics:             m,
@@ -147,20 +163,21 @@ func (q *RootScheduler) WithQueuePrefix(prefix string) Scheduler {
 	}
 }
 
-func (q *RootScheduler) Submit(queue, id string, run func(ctx context.Context) error) {
+func (q *RootScheduler) Submit(job Job) {
 	q.lock.Lock()
-	q.queue = append(q.queue, queueJob{queue: queue, id: id, run: run})
+	q.queue = append(q.queue, job)
 	q.metrics.queueDepth.Record(context.Background(), int64(len(q.queue)))
 	q.lock.Unlock()
 	q.workAvailable <- true
 }
 
-func (q *RootScheduler) SubmitPeriodicJob(queue, id string, interval time.Duration, run func(ctx context.Context) error) {
-	key := jobKey(queue, id)
+func (q *RootScheduler) SubmitPeriodicJob(job Job, interval time.Duration) {
+	key := jobKey(job.Queue, job.ID)
 	delay := q.periodicDelay(key, interval)
+	origRun := job.Run
 	submit := func() {
-		q.Submit(queue, id, func(ctx context.Context) error {
-			err := run(ctx)
+		job.Run = func(ctx context.Context) error {
+			err := origRun(ctx)
 			if q.store != nil {
 				if storeErr := q.store.SetLastRun(key, time.Now()); storeErr != nil {
 					logging.FromContext(ctx).WarnContext(ctx, "Failed to record job last run", "key", key, "error", storeErr)
@@ -168,10 +185,11 @@ func (q *RootScheduler) SubmitPeriodicJob(queue, id string, interval time.Durati
 			}
 			go func() {
 				time.Sleep(interval)
-				q.SubmitPeriodicJob(queue, id, interval, run)
+				q.SubmitPeriodicJob(job, interval)
 			}()
 			return errors.WithStack(err)
-		})
+		}
+		q.Submit(job)
 	}
 	if delay <= 0 {
 		submit()
@@ -210,7 +228,7 @@ func (q *RootScheduler) worker(ctx context.Context, id int) {
 			if !ok {
 				continue
 			}
-			jobAttrs := attribute.String("job.type", jobType(job.id))
+			jobAttrs := attribute.String("job.type", jobType(job.ID))
 			start := time.Now()
 			logger.InfoContext(ctx, "Starting job", "job", job)
 			err := job.run(ctx)
@@ -225,7 +243,7 @@ func (q *RootScheduler) worker(ctx context.Context, id int) {
 			statusAttr := attribute.String("status", status)
 			q.metrics.jobsTotal.Add(ctx, 1, metric.WithAttributes(jobAttrs, statusAttr))
 			q.metrics.jobDuration.Record(ctx, elapsed.Seconds(), metric.WithAttributes(jobAttrs, statusAttr))
-			q.markQueueInactive(job.queue)
+			q.markQueueInactive(job.Queue)
 			q.workAvailable <- true
 		}
 	}
@@ -252,40 +270,42 @@ func jobType(id string) string {
 func (q *RootScheduler) markQueueInactive(queue string) {
 	q.lock.Lock()
 	defer q.lock.Unlock()
-	if isCloneJob(q.active[queue]) {
+	q.activeCost -= q.activeCosts[queue]
+	delete(q.activeCosts, queue)
+	if q.activeCloneQueues[queue] {
 		q.activeClones--
+		delete(q.activeCloneQueues, queue)
 	}
 	delete(q.active, queue)
 	q.recordGaugesLocked()
 }
 
-// isCloneJob returns true for job IDs that represent long-running clone operations
-// which should be subject to concurrency limits.
-func isCloneJob(id string) bool {
-	return strings.HasSuffix(id, "clone") || strings.HasSuffix(id, "deferred-mirror-restore")
-}
-
-// Take the next job for any queue that is not already running a job.
-func (q *RootScheduler) takeNextJob() (queueJob, bool) {
+func (q *RootScheduler) takeNextJob() (Job, bool) {
 	q.lock.Lock()
 	defer q.lock.Unlock()
 	for i, job := range q.queue {
-		if _, active := q.active[job.queue]; active {
+		if _, active := q.active[job.Queue]; active {
 			continue
 		}
-		if q.maxCloneConcurrency > 0 && isCloneJob(job.id) && q.activeClones >= q.maxCloneConcurrency {
+		if q.activeCost > 0 && q.activeCost+job.Cost > q.maxCost {
+			continue
+		}
+		if job.Clone && q.maxCloneConcurrency > 0 && q.activeClones >= q.maxCloneConcurrency {
 			continue
 		}
 		q.queue = append(q.queue[:i], q.queue[i+1:]...)
 		q.workAvailable <- true
-		q.active[job.queue] = job.id
-		if isCloneJob(job.id) {
+		q.active[job.Queue] = job.ID
+		q.activeCost += job.Cost
+		q.activeCosts[job.Queue] = job.Cost
+		if job.Clone {
 			q.activeClones++
+			q.activeCloneQueues[job.Queue] = true
 		}
 		q.recordGaugesLocked()
 		return job, true
 	}
-	return queueJob{}, false
+	return Job{}, false
 }
 
 // recordGaugesLocked updates gauge metrics. Must be called with q.lock held.
@@ -293,5 +313,6 @@ func (q *RootScheduler) recordGaugesLocked() {
 	ctx := context.Background()
 	q.metrics.queueDepth.Record(ctx, int64(len(q.queue)))
 	q.metrics.activeWorkers.Record(ctx, int64(len(q.active)))
+	q.metrics.activeCost.Record(ctx, int64(q.activeCost))
 	q.metrics.activeClones.Record(ctx, int64(q.activeClones))
 }

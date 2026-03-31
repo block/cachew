@@ -9,6 +9,7 @@ import (
 type schedulerMetrics struct {
 	queueDepth    metric.Int64Gauge
 	activeWorkers metric.Int64Gauge
+	activeCost    metric.Int64Gauge
 	activeClones  metric.Int64Gauge
 	jobsTotal     metric.Int64Counter
 	jobDuration   metric.Float64Histogram
@@ -29,6 +30,12 @@ func newSchedulerMetrics() (*schedulerMetrics, error) {
 		metric.WithDescription("Number of workers currently executing jobs"),
 		metric.WithUnit("{workers}")); err != nil {
 		return nil, errors.Wrap(err, "create active_workers gauge")
+	}
+
+	if m.activeCost, err = meter.Int64Gauge("cachew.scheduler.active_cost",
+		metric.WithDescription("Total cost of currently executing jobs"),
+		metric.WithUnit("{cost}")); err != nil {
+		return nil, errors.Wrap(err, "create active_cost gauge")
 	}
 
 	if m.activeClones, err = meter.Int64Gauge("cachew.scheduler.active_clones",

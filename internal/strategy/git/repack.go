@@ -4,10 +4,11 @@ import (
 	"context"
 
 	"github.com/block/cachew/internal/gitclone"
+	"github.com/block/cachew/internal/jobscheduler"
 )
 
 func (s *Strategy) scheduleRepackJobs(repo *gitclone.Repository) {
-	s.scheduler.SubmitPeriodicJob(repo.UpstreamURL(), "repack-periodic", s.config.RepackInterval, func(ctx context.Context) error {
+	s.scheduler.SubmitPeriodicJob(jobscheduler.Job{Queue: repo.UpstreamURL(), ID: "repack-periodic", Cost: CostRepack, Run: func(ctx context.Context) error {
 		return repo.Repack(ctx)
-	})
+	}}, s.config.RepackInterval)
 }

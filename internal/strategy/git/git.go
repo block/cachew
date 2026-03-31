@@ -28,6 +28,13 @@ import (
 	"github.com/block/cachew/internal/strategy"
 )
 
+const (
+	CostClone    = 4
+	CostSnapshot = 3
+	CostRepack   = 2
+	CostFetch    = 1
+)
+
 func Register(r *strategy.Registry, scheduler jobscheduler.Provider, cloneManagerProvider gitclone.ManagerProvider, tokenManagerProvider githubapp.TokenManagerProvider) {
 	strategy.Register(r, "git", "Caches Git repositories, including tarball snapshots.", func(ctx context.Context, config Config, cache cache.Cache, mux strategy.Mux) (*Strategy, error) {
 		return New(ctx, config, scheduler, cache, mux, cloneManagerProvider, tokenManagerProvider)
@@ -275,9 +282,9 @@ func (s *Strategy) handleRequest(w http.ResponseWriter, r *http.Request) {
 	case gitclone.StateCloning, gitclone.StateEmpty:
 		if state == gitclone.StateEmpty {
 			logger.DebugContext(ctx, "Starting background clone, forwarding to upstream")
-			s.scheduler.Submit(repo.UpstreamURL(), "clone", func(ctx context.Context) error {
+			s.scheduler.Submit(jobscheduler.Job{Queue: repo.UpstreamURL(), ID: "clone", Cost: CostClone, Clone: true, Run: func(ctx context.Context) error {
 				return s.startClone(ctx, repo)
-			})
+			}})
 		}
 		if err := s.serveWithSpool(w, r, host, pathValue, upstreamURL); err != nil {
 			logger.WarnContext(ctx, "Spool failed, forwarding to upstream", "error", err)
@@ -607,9 +614,9 @@ func (s *Strategy) maybeBackgroundFetch(repo *gitclone.Repository) {
 func (s *Strategy) submitFetch(repo *gitclone.Repository) {
 	// Use a separate queue from snapshot/repack so fetches are not serialized
 	// behind long-running jobs on the same upstream URL queue.
-	s.scheduler.Submit(repo.UpstreamURL()+"/fetch", "fetch", func(ctx context.Context) error {
+	s.scheduler.Submit(jobscheduler.Job{Queue: repo.UpstreamURL() + "/fetch", ID: "fetch", Cost: CostFetch, Run: func(ctx context.Context) error {
 		return s.doFetch(ctx, repo)
-	})
+	}})
 }
 
 func (s *Strategy) doFetch(ctx context.Context, repo *gitclone.Repository) error {

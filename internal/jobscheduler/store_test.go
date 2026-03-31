@@ -98,10 +98,10 @@ func TestPeriodicJobDelaysWhenRecentlyRun(t *testing.T) {
 	defer scheduler.Close()
 
 	var executed atomic.Bool
-	scheduler.SubmitPeriodicJob("queue1", "periodic", 5*time.Second, func(_ context.Context) error {
+	scheduler.SubmitPeriodicJob(jobscheduler.Job{Queue: "queue1", ID: "periodic", Cost: 1, Run: func(_ context.Context) error {
 		executed.Store(true)
 		return nil
-	})
+	}}, 5*time.Second)
 
 	// The job should NOT have run within 200ms because interval is 5s and it "just ran".
 	time.Sleep(200 * time.Millisecond)
@@ -119,10 +119,10 @@ func TestPeriodicJobRunsImmediatelyWhenNeverRun(t *testing.T) {
 	defer scheduler.Close()
 
 	var executed atomic.Bool
-	scheduler.SubmitPeriodicJob("queue1", "periodic", 5*time.Second, func(_ context.Context) error {
+	scheduler.SubmitPeriodicJob(jobscheduler.Job{Queue: "queue1", ID: "periodic", Cost: 1, Run: func(_ context.Context) error {
 		executed.Store(true)
 		return nil
-	})
+	}}, 5*time.Second)
 
 	eventually(t, time.Second, executed.Load, "job should run immediately when no prior run recorded")
 }
@@ -145,10 +145,10 @@ func TestPeriodicJobRunsImmediatelyWhenIntervalElapsed(t *testing.T) {
 	defer scheduler.Close()
 
 	var executed atomic.Bool
-	scheduler.SubmitPeriodicJob("queue1", "periodic", 5*time.Second, func(_ context.Context) error {
+	scheduler.SubmitPeriodicJob(jobscheduler.Job{Queue: "queue1", ID: "periodic", Cost: 1, Run: func(_ context.Context) error {
 		executed.Store(true)
 		return nil
-	})
+	}}, 5*time.Second)
 
 	eventually(t, time.Second, executed.Load, "job should run immediately when interval has elapsed")
 }
@@ -164,10 +164,10 @@ func TestPeriodicJobRecordsLastRun(t *testing.T) {
 
 	var executed atomic.Bool
 	before := time.Now()
-	scheduler.SubmitPeriodicJob("queue1", "periodic", 5*time.Second, func(_ context.Context) error {
+	scheduler.SubmitPeriodicJob(jobscheduler.Job{Queue: "queue1", ID: "periodic", Cost: 1, Run: func(_ context.Context) error {
 		executed.Store(true)
 		return nil
-	})
+	}}, 5*time.Second)
 
 	eventually(t, time.Second, executed.Load, "job should execute")
 

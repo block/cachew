@@ -17,6 +17,7 @@ import (
 
 	"github.com/block/cachew/internal/cache"
 	"github.com/block/cachew/internal/gitclone"
+	"github.com/block/cachew/internal/jobscheduler"
 	"github.com/block/cachew/internal/logging"
 	"github.com/block/cachew/internal/snapshot"
 )
@@ -170,16 +171,16 @@ func (s *Strategy) generateAndUploadMirrorSnapshot(ctx context.Context, repo *gi
 }
 
 func (s *Strategy) scheduleSnapshotJobs(repo *gitclone.Repository) {
-	s.scheduler.SubmitPeriodicJob(repo.UpstreamURL(), "snapshot-periodic", s.config.SnapshotInterval, func(ctx context.Context) error {
+	s.scheduler.SubmitPeriodicJob(jobscheduler.Job{Queue: repo.UpstreamURL(), ID: "snapshot-periodic", Cost: CostSnapshot, Run: func(ctx context.Context) error {
 		return s.generateAndUploadSnapshot(ctx, repo)
-	})
+	}}, s.config.SnapshotInterval)
 	mirrorInterval := s.config.MirrorSnapshotInterval
 	if mirrorInterval == 0 {
 		mirrorInterval = s.config.SnapshotInterval
 	}
-	s.scheduler.SubmitPeriodicJob(repo.UpstreamURL(), "mirror-snapshot-periodic", mirrorInterval, func(ctx context.Context) error {
+	s.scheduler.SubmitPeriodicJob(jobscheduler.Job{Queue: repo.UpstreamURL(), ID: "mirror-snapshot-periodic", Cost: CostSnapshot, Run: func(ctx context.Context) error {
 		return s.generateAndUploadMirrorSnapshot(ctx, repo)
-	})
+	}}, mirrorInterval)
 }
 
 func (s *Strategy) snapshotMutexFor(upstreamURL string) *sync.Mutex {
@@ -611,7 +612,7 @@ func (s *Strategy) scheduleDeferredMirrorRestore(ctx context.Context, repo *gitc
 	logger := logging.FromContext(ctx)
 	logger.InfoContext(ctx, "Scheduling deferred mirror restore", "upstream", upstream)
 
-	s.scheduler.Submit(upstream, "deferred-mirror-restore", func(ctx context.Context) error {
+	s.scheduler.Submit(jobscheduler.Job{Queue: upstream, ID: "deferred-mirror-restore", Cost: CostClone, Clone: true, Run: func(ctx context.Context) error {
 		logger := logging.FromContext(ctx)
 		if repo.State() == gitclone.StateReady {
 			logger.InfoContext(ctx, "Mirror already ready, skipping deferred restore", "upstream", upstream)
@@ -652,7 +653,7 @@ func (s *Strategy) scheduleDeferredMirrorRestore(ctx context.Context, repo *gitc
 			s.scheduleRepackJobs(repo)
 		}
 		return nil
-	})
+	}})
 }
 
 // snapshotSpoolEntry holds a spool and a ready channel used to coordinate
