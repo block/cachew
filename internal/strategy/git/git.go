@@ -39,8 +39,9 @@ type Config struct {
 	MirrorSnapshotInterval time.Duration `hcl:"mirror-snapshot-interval,optional" help:"How often to generate mirror snapshots for pod bootstrap. 0 uses snapshot-interval. Defaults to 2h." default:"2h"`
 	RepackInterval         time.Duration `hcl:"repack-interval,optional" help:"How often to run full repack. 0 disables." default:"0"`
 	// ServerURL is embedded as remote.origin.url in snapshots so git pull goes through cachew.
-	ServerURL   string `hcl:"server-url,optional" help:"Base URL of this cachew instance, embedded in snapshot remote URLs." default:"${CACHEW_URL}"`
-	ZstdThreads int    `hcl:"zstd-threads,optional" help:"Threads for zstd compression/decompression (0 = all CPU cores)." default:"0"`
+	ServerURL          string `hcl:"server-url,optional" help:"Base URL of this cachew instance, embedded in snapshot remote URLs." default:"${CACHEW_URL}"`
+	ZstdThreads        int    `hcl:"zstd-threads,optional" help:"Threads for zstd compression/decompression (0 = all CPU cores)." default:"0"`
+	MaxClonesPerClient int    `hcl:"max-clones-per-client,optional" help:"Max concurrent clone triggers per client IP. 0 disables per-client limiting." default:"0"`
 }
 
 type Strategy struct {
@@ -59,6 +60,7 @@ type Strategy struct {
 	coldSnapshotMu      sync.Map // keyed by upstream URL, values are *coldSnapshotEntry
 	deferredRestoreOnce sync.Map // keyed by upstream URL, ensures at most one deferred restore per repo
 	metrics             *gitMetrics
+	cloneTracker        *ClientCloneTracker // nil when per-client limiting is disabled
 }
 
 func New(
@@ -124,6 +126,9 @@ func New(
 		spools:       make(map[string]*RepoSpools),
 		tokenManager: tokenManager,
 		metrics:      m,
+	}
+	if config.MaxClonesPerClient > 0 {
+		s.cloneTracker = NewClientCloneTracker(config.MaxClonesPerClient)
 	}
 	s.config.ServerURL = strings.TrimRight(config.ServerURL, "/")
 
@@ -274,16 +279,45 @@ func (s *Strategy) handleRequest(w http.ResponseWriter, r *http.Request) {
 
 	case gitclone.StateCloning, gitclone.StateEmpty:
 		if state == gitclone.StateEmpty {
-			logger.DebugContext(ctx, "Starting background clone, forwarding to upstream")
-			s.scheduler.Submit(repo.UpstreamURL(), "clone", func(ctx context.Context) error {
-				return s.startClone(ctx, repo)
-			})
+			if rejected := s.submitClone(w, r, repo); rejected {
+				return
+			}
 		}
 		if err := s.serveWithSpool(w, r, host, pathValue, upstreamURL); err != nil {
 			logger.WarnContext(ctx, "Spool failed, forwarding to upstream", "error", err)
 			s.forwardToUpstream(w, r, host, pathValue)
 		}
 	}
+}
+
+// submitClone submits a background clone job for the given repo, applying
+// per-client rate limiting when configured. Returns true if the request was
+// rejected (429 already written to w), false if the clone was submitted.
+func (s *Strategy) submitClone(w http.ResponseWriter, r *http.Request, repo *gitclone.Repository) bool {
+	ctx := r.Context()
+	logger := logging.FromContext(ctx)
+
+	if s.cloneTracker != nil {
+		ip := ClientIP(r)
+		release, ok := s.cloneTracker.TryAcquire(ip)
+		if !ok {
+			logger.WarnContext(ctx, "Per-client clone limit reached", "client", ip, "upstream", repo.UpstreamURL())
+			s.metrics.recordCloneRejection(ctx, ip)
+			w.Header().Set("Retry-After", "30")
+			http.Error(w, "Too many concurrent clone requests", http.StatusTooManyRequests)
+			return true
+		}
+		s.scheduler.Submit(repo.UpstreamURL(), "clone", func(ctx context.Context) error {
+			defer release()
+			return s.startClone(ctx, repo)
+		})
+	} else {
+		s.scheduler.Submit(repo.UpstreamURL(), "clone", func(ctx context.Context) error {
+			return s.startClone(ctx, repo)
+		})
+	}
+	logger.DebugContext(ctx, "Starting background clone, forwarding to upstream")
+	return false
 }
 
 func (s *Strategy) serveReadyRepo(w http.ResponseWriter, r *http.Request, repo *gitclone.Repository, host, pathValue string, isInfoRefs bool) error {

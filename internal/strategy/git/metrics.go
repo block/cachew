@@ -11,9 +11,10 @@ import (
 )
 
 type gitMetrics struct {
-	operationDuration metric.Float64Histogram
-	operationTotal    metric.Int64Counter
-	requestTotal      metric.Int64Counter
+	operationDuration    metric.Float64Histogram
+	operationTotal       metric.Int64Counter
+	requestTotal         metric.Int64Counter
+	cloneRejectionsTotal metric.Int64Counter
 }
 
 func newGitMetrics() (*gitMetrics, error) {
@@ -39,6 +40,12 @@ func newGitMetrics() (*gitMetrics, error) {
 		return nil, errors.Wrap(err, "create requests_total counter")
 	}
 
+	if m.cloneRejectionsTotal, err = meter.Int64Counter("cachew.git.clone_rejections_total",
+		metric.WithDescription("Clone triggers rejected by per-client rate limiting"),
+		metric.WithUnit("{rejections}")); err != nil {
+		return nil, errors.Wrap(err, "create clone_rejections_total counter")
+	}
+
 	return m, nil
 }
 
@@ -54,4 +61,8 @@ func (m *gitMetrics) recordOperation(ctx context.Context, operation, status stri
 
 func (m *gitMetrics) recordRequest(ctx context.Context, requestType string) {
 	m.requestTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("type", requestType)))
+}
+
+func (m *gitMetrics) recordCloneRejection(ctx context.Context, clientIP string) {
+	m.cloneRejectionsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("client", clientIP)))
 }
