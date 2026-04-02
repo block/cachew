@@ -114,10 +114,7 @@ func New(ctx context.Context, config Config) (*RootScheduler, error) {
 		// Default: reserve at least half the workers for non-clone jobs.
 		maxClones = max(1, config.Concurrency/2)
 	}
-	m, err := newSchedulerMetrics()
-	if err != nil {
-		return nil, errors.Wrap(err, "create scheduler metrics")
-	}
+	m := newSchedulerMetrics()
 	q := &RootScheduler{
 		workAvailable:       make(chan bool, 1024),
 		active:              make(map[string]string),

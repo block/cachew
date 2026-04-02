@@ -4,10 +4,11 @@ import (
 	"context"
 	"time"
 
-	"github.com/alecthomas/errors"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
+
+	"github.com/block/cachew/internal/metrics"
 )
 
 type gitMetrics struct {
@@ -16,30 +17,13 @@ type gitMetrics struct {
 	requestTotal      metric.Int64Counter
 }
 
-func newGitMetrics() (*gitMetrics, error) {
+func newGitMetrics() *gitMetrics {
 	meter := otel.Meter("cachew.git")
-	m := &gitMetrics{}
-	var err error
-
-	if m.operationDuration, err = meter.Float64Histogram("cachew.git.operation_duration_seconds",
-		metric.WithDescription("Duration of git operations (clone, fetch, repack, snapshot)"),
-		metric.WithUnit("s")); err != nil {
-		return nil, errors.Wrap(err, "create operation_duration histogram")
+	return &gitMetrics{
+		operationDuration: metrics.NewMetric[metric.Float64Histogram](meter, "cachew.git.operation_duration_seconds", "s", "Duration of git operations (clone, fetch, repack, snapshot)"),
+		operationTotal:    metrics.NewMetric[metric.Int64Counter](meter, "cachew.git.operations_total", "{operations}", "Total number of git operations"),
+		requestTotal:      metrics.NewMetric[metric.Int64Counter](meter, "cachew.git.requests_total", "{requests}", "Total number of git HTTP requests by type"),
 	}
-
-	if m.operationTotal, err = meter.Int64Counter("cachew.git.operations_total",
-		metric.WithDescription("Total number of git operations"),
-		metric.WithUnit("{operations}")); err != nil {
-		return nil, errors.Wrap(err, "create operations_total counter")
-	}
-
-	if m.requestTotal, err = meter.Int64Counter("cachew.git.requests_total",
-		metric.WithDescription("Total number of git HTTP requests by type"),
-		metric.WithUnit("{requests}")); err != nil {
-		return nil, errors.Wrap(err, "create requests_total counter")
-	}
-
-	return m, nil
 }
 
 // recordOperation records the duration and outcome of a git operation (clone, fetch, repack, snapshot).
