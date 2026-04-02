@@ -109,10 +109,7 @@ func New(
 		return nil, errors.Wrap(err, "failed to create scheduler")
 	}
 
-	m, err := newGitMetrics()
-	if err != nil {
-		return nil, errors.Wrap(err, "create git metrics")
-	}
+	m := newGitMetrics()
 
 	s := &Strategy{
 		config:       config,

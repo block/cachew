@@ -1,9 +1,10 @@
 package jobscheduler
 
 import (
-	"github.com/alecthomas/errors"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/metric"
+
+	"github.com/block/cachew/internal/metrics"
 )
 
 type schedulerMetrics struct {
@@ -14,40 +15,13 @@ type schedulerMetrics struct {
 	jobDuration   metric.Float64Histogram
 }
 
-func newSchedulerMetrics() (*schedulerMetrics, error) {
+func newSchedulerMetrics() *schedulerMetrics {
 	meter := otel.Meter("cachew.scheduler")
-	m := &schedulerMetrics{}
-	var err error
-
-	if m.queueDepth, err = meter.Int64Gauge("cachew.scheduler.queue_depth",
-		metric.WithDescription("Number of jobs waiting in the scheduler queue"),
-		metric.WithUnit("{jobs}")); err != nil {
-		return nil, errors.Wrap(err, "create queue_depth gauge")
+	return &schedulerMetrics{
+		queueDepth:    metrics.NewMetric[metric.Int64Gauge](meter, "cachew.scheduler.queue_depth", "{jobs}", "Number of jobs waiting in the scheduler queue"),
+		activeWorkers: metrics.NewMetric[metric.Int64Gauge](meter, "cachew.scheduler.active_workers", "{workers}", "Number of workers currently executing jobs"),
+		activeClones:  metrics.NewMetric[metric.Int64Gauge](meter, "cachew.scheduler.active_clones", "{jobs}", "Number of clone jobs currently executing"),
+		jobsTotal:     metrics.NewMetric[metric.Int64Counter](meter, "cachew.scheduler.jobs_total", "{jobs}", "Total number of completed scheduler jobs"),
+		jobDuration:   metrics.NewMetric[metric.Float64Histogram](meter, "cachew.scheduler.job_duration", "{ms}", "Histogram of job durations"),
 	}
-
-	if m.activeWorkers, err = meter.Int64Gauge("cachew.scheduler.active_workers",
-		metric.WithDescription("Number of workers currently executing jobs"),
-		metric.WithUnit("{workers}")); err != nil {
-		return nil, errors.Wrap(err, "create active_workers gauge")
-	}
-
-	if m.activeClones, err = meter.Int64Gauge("cachew.scheduler.active_clones",
-		metric.WithDescription("Number of clone jobs currently executing"),
-		metric.WithUnit("{jobs}")); err != nil {
-		return nil, errors.Wrap(err, "create active_clones gauge")
-	}
-
-	if m.jobsTotal, err = meter.Int64Counter("cachew.scheduler.jobs_total",
-		metric.WithDescription("Total number of completed scheduler jobs"),
-		metric.WithUnit("{jobs}")); err != nil {
-		return nil, errors.Wrap(err, "create jobs_total counter")
-	}
-
-	if m.jobDuration, err = meter.Float64Histogram("cachew.scheduler.job_duration_seconds",
-		metric.WithDescription("Duration of scheduler jobs in seconds"),
-		metric.WithUnit("s")); err != nil {
-		return nil, errors.Wrap(err, "create job_duration histogram")
-	}
-
-	return m, nil
 }
