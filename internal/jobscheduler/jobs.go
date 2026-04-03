@@ -12,6 +12,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 
+	"github.com/block/cachew/internal/featureflags"
 	"github.com/block/cachew/internal/logging"
 )
 
@@ -39,6 +40,10 @@ func (j *queueJob) Run(ctx context.Context) error { return errors.WithStack(j.ru
 // Its primary role is to rate limit concurrent background tasks so that we don't DoS the host when, for example,
 // generating git snapshots, GCing git repos, etc.
 type Scheduler interface {
+	// Close releases resources held by the scheduler.
+	Close() error
+	// Wait blocks until all background goroutines have exited.
+	Wait()
 	// WithQueuePrefix creates a new Scheduler that prefixes all queue names with the given prefix.
 	//
 	// This is useful to avoid collisions across strategies.
@@ -57,6 +62,9 @@ type prefixedScheduler struct {
 	prefix    string
 	scheduler Scheduler
 }
+
+func (p *prefixedScheduler) Close() error { return errors.WithStack(p.scheduler.Close()) }
+func (p *prefixedScheduler) Wait()        { p.scheduler.Wait() }
 
 func (p *prefixedScheduler) Submit(queue, id string, run func(ctx context.Context) error) {
 	p.scheduler.Submit(queue, p.prefix+id, run)
@@ -88,20 +96,41 @@ type RootScheduler struct {
 
 var _ Scheduler = &RootScheduler{}
 
-type Provider func() (*RootScheduler, error)
+// Provider is a lazy singleton that returns a Scheduler implementation.
+type Provider func() (Scheduler, error)
+
+var newSchedulerFlag = featureflags.New("newscheduler", false) //nolint:gochecknoglobals
 
 // NewProvider returns a scheduler singleton provider function.
 func NewProvider(ctx context.Context, config Config) Provider {
-	return sync.OnceValues(func() (*RootScheduler, error) {
+	return sync.OnceValues(func() (Scheduler, error) {
 		return New(ctx, config)
 	})
 }
 
-// New creates a new JobScheduler.
-func New(ctx context.Context, config Config) (*RootScheduler, error) {
+// New creates a new Scheduler. When the CACHEW_FF_NEWSCHEDULER feature flag is
+// set, it returns the new weighted fair queuing implementation.
+func normaliseConfig(config Config) Config {
 	if config.Concurrency == 0 {
 		config.Concurrency = runtime.NumCPU()
 	}
+	if config.MaxCloneConcurrency == 0 && config.Concurrency > 1 {
+		config.MaxCloneConcurrency = max(1, config.Concurrency/2)
+	}
+	return config
+}
+
+// New creates a new Scheduler. When the CACHEW_FF_NEWSCHEDULER feature flag is
+// set, it returns the new weighted fair queuing implementation.
+func New(ctx context.Context, config Config) (Scheduler, error) {
+	config = normaliseConfig(config)
+	if newSchedulerFlag.Get() {
+		return NewAdapter(ctx, config)
+	}
+	return newRootScheduler(ctx, config)
+}
+
+func newRootScheduler(ctx context.Context, config Config) (*RootScheduler, error) {
 	var store ScheduleStore
 	if config.SchedulerDB != "" {
 		var err error
@@ -110,16 +139,11 @@ func New(ctx context.Context, config Config) (*RootScheduler, error) {
 			return nil, errors.Wrap(err, "create schedule store")
 		}
 	}
-	maxClones := config.MaxCloneConcurrency
-	if maxClones == 0 && config.Concurrency > 1 {
-		// Default: reserve at least half the workers for non-clone jobs.
-		maxClones = max(1, config.Concurrency/2)
-	}
 	m := newSchedulerMetrics()
 	q := &RootScheduler{
 		workAvailable:       make(chan bool, 1024),
 		active:              make(map[string]string),
-		maxCloneConcurrency: maxClones,
+		maxCloneConcurrency: config.MaxCloneConcurrency,
 		store:               store,
 		metrics:             m,
 	}

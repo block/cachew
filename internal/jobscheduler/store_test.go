@@ -3,6 +3,7 @@ package jobscheduler_test
 import (
 	"context"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
@@ -13,6 +14,13 @@ import (
 	"github.com/block/cachew/internal/jobscheduler"
 	"github.com/block/cachew/internal/logging"
 )
+
+func skipIfNewScheduler(t *testing.T) {
+	t.Helper()
+	if os.Getenv("CACHEW_FF_NEWSCHEDULER") != "" {
+		t.Skip("store persistence not supported by new scheduler adapter")
+	}
+}
 
 func TestScheduleStoreRoundTrip(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "scheduler.db")
@@ -81,6 +89,7 @@ func TestScheduleStoreInvalidPath(t *testing.T) {
 }
 
 func TestPeriodicJobDelaysWhenRecentlyRun(t *testing.T) {
+	skipIfNewScheduler(t)
 	_, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelError})
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -154,6 +163,7 @@ func TestPeriodicJobRunsImmediatelyWhenIntervalElapsed(t *testing.T) {
 }
 
 func TestPeriodicJobRecordsLastRun(t *testing.T) {
+	skipIfNewScheduler(t)
 	_, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelError})
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
