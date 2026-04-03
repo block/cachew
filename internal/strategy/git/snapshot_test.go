@@ -16,6 +16,7 @@ import (
 	"github.com/block/cachew/internal/cache"
 	"github.com/block/cachew/internal/gitclone"
 	"github.com/block/cachew/internal/githubapp"
+	"github.com/block/cachew/internal/jobscheduler"
 	"github.com/block/cachew/internal/logging"
 	"github.com/block/cachew/internal/snapshot"
 	"github.com/block/cachew/internal/strategy/git"
@@ -578,15 +579,23 @@ func TestColdSnapshotServesWithoutCommitHeader(t *testing.T) {
 	}
 
 	_, ctx := logging.Configure(context.Background(), logging.Config{})
+	ctx, cancelAll := context.WithCancel(ctx)
 	tmpDir := t.TempDir()
 	mirrorRoot := filepath.Join(tmpDir, "mirrors")
+
+	sched, err := jobscheduler.New(ctx, jobscheduler.Config{})
+	assert.NoError(t, err)
+	// Cancel the context and wait for all scheduler workers to drain before
+	// TempDir cleanup runs, preventing a race with background jobs.
+	t.Cleanup(func() { cancelAll(); sched.Wait() })
 
 	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: time.Hour})
 	assert.NoError(t, err)
 	mux := newTestMux()
 
+	schedProvider := func() (*jobscheduler.RootScheduler, error) { return sched, nil }
 	cm := gitclone.NewManagerProvider(ctx, gitclone.Config{MirrorRoot: mirrorRoot}, nil)
-	_, err = git.New(ctx, git.Config{}, newTestScheduler(ctx, t), memCache, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
+	_, err = git.New(ctx, git.Config{}, schedProvider, memCache, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
 	assert.NoError(t, err)
 
 	// Pre-populate the cache with a fake snapshot that has NO X-Cachew-Snapshot-Commit
@@ -607,16 +616,16 @@ func TestColdSnapshotServesWithoutCommitHeader(t *testing.T) {
 
 	// Use a cancelled context so ensureCloneReady fails quickly and the cold
 	// path returns the cached snapshot.
-	cancelCtx, cancel := context.WithCancel(ctx)
+	reqCtx, cancelReq := context.WithCancel(ctx)
 
 	req := httptest.NewRequest(http.MethodGet, "/git/github.com/org/coldrepo/snapshot.tar.zst", nil)
-	req = req.WithContext(cancelCtx)
+	req = req.WithContext(reqCtx)
 	req.SetPathValue("host", "github.com")
 	req.SetPathValue("path", "org/coldrepo/snapshot.tar.zst")
 	w := httptest.NewRecorder()
 
 	handler.ServeHTTP(w, req)
-	cancel()
+	cancelReq()
 
 	// Cold path should serve the snapshot but without X-Cachew-Snapshot-Commit,
 	// signaling to the client that it needs to freshen.
@@ -633,15 +642,21 @@ func TestDeferredRestoreOnlyScheduledOnce(t *testing.T) {
 	}
 
 	_, ctx := logging.Configure(context.Background(), logging.Config{})
+	ctx, cancelAll := context.WithCancel(ctx)
 	tmpDir := t.TempDir()
 	mirrorRoot := filepath.Join(tmpDir, "mirrors")
+
+	sched, err := jobscheduler.New(ctx, jobscheduler.Config{})
+	assert.NoError(t, err)
+	t.Cleanup(func() { cancelAll(); sched.Wait() })
 
 	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: time.Hour})
 	assert.NoError(t, err)
 	mux := newTestMux()
 
+	schedProvider := func() (*jobscheduler.RootScheduler, error) { return sched, nil }
 	cm := gitclone.NewManagerProvider(ctx, gitclone.Config{MirrorRoot: mirrorRoot}, nil)
-	_, err = git.New(ctx, git.Config{}, newTestScheduler(ctx, t), memCache, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
+	_, err = git.New(ctx, git.Config{}, schedProvider, memCache, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
 	assert.NoError(t, err)
 
 	// Pre-populate cache with a fake snapshot.
@@ -677,9 +692,6 @@ func TestDeferredRestoreOnlyScheduledOnce(t *testing.T) {
 	handler.ServeHTTP(w2, req2)
 	// Second request may be 200 (from local cache) or 503 (clone not ready).
 	// The key assertion is that it doesn't panic from double-scheduling.
-
-	// Allow background goroutines to settle.
-	time.Sleep(time.Second)
 }
 
 func TestSnapshotRemoteURLUsesServerURL(t *testing.T) {
