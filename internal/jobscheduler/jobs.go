@@ -81,6 +81,7 @@ type RootScheduler struct {
 	activeClones        int
 	maxCloneConcurrency int
 	cancel              context.CancelFunc
+	wg                  sync.WaitGroup
 	store               ScheduleStore
 	metrics             *schedulerMetrics
 }
@@ -124,6 +125,7 @@ func New(ctx context.Context, config Config) (*RootScheduler, error) {
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	q.cancel = cancel
+	q.wg.Add(config.Concurrency)
 	for id := range config.Concurrency {
 		go q.worker(ctx, id)
 	}
@@ -194,7 +196,12 @@ func (q *RootScheduler) periodicDelay(key string, interval time.Duration) time.D
 	return 0
 }
 
+// Wait blocks until all worker goroutines have exited. The caller should
+// cancel the context passed to New first, otherwise Wait blocks forever.
+func (q *RootScheduler) Wait() { q.wg.Wait() }
+
 func (q *RootScheduler) worker(ctx context.Context, id int) {
+	defer q.wg.Done()
 	logger := logging.FromContext(ctx).With("scheduler-worker", id)
 	for {
 		select {
