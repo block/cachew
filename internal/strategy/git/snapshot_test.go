@@ -593,7 +593,7 @@ func TestColdSnapshotServesWithoutCommitHeader(t *testing.T) {
 	assert.NoError(t, err)
 	mux := newTestMux()
 
-	schedProvider := func() (*jobscheduler.RootScheduler, error) { return sched, nil }
+	schedProvider := func() (jobscheduler.Scheduler, error) { return sched, nil }
 	cm := gitclone.NewManagerProvider(ctx, gitclone.Config{MirrorRoot: mirrorRoot}, nil)
 	_, err = git.New(ctx, git.Config{}, schedProvider, memCache, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
 	assert.NoError(t, err)
@@ -654,7 +654,7 @@ func TestDeferredRestoreOnlyScheduledOnce(t *testing.T) {
 	assert.NoError(t, err)
 	mux := newTestMux()
 
-	schedProvider := func() (*jobscheduler.RootScheduler, error) { return sched, nil }
+	schedProvider := func() (jobscheduler.Scheduler, error) { return sched, nil }
 	cm := gitclone.NewManagerProvider(ctx, gitclone.Config{MirrorRoot: mirrorRoot}, nil)
 	_, err = git.New(ctx, git.Config{}, schedProvider, memCache, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
 	assert.NoError(t, err)
