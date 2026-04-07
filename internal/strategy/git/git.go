@@ -38,9 +38,7 @@ type Config struct {
 	SnapshotInterval       time.Duration `hcl:"snapshot-interval,optional" help:"How often to generate tar.zstd workstation snapshots. 0 disables snapshots." default:"0"`
 	MirrorSnapshotInterval time.Duration `hcl:"mirror-snapshot-interval,optional" help:"How often to generate mirror snapshots for pod bootstrap. 0 uses snapshot-interval. Defaults to 2h." default:"2h"`
 	RepackInterval         time.Duration `hcl:"repack-interval,optional" help:"How often to run full repack. 0 disables." default:"0"`
-	// ServerURL is embedded as remote.origin.url in snapshots so git pull goes through cachew.
-	ServerURL   string `hcl:"server-url,optional" help:"Base URL of this cachew instance, embedded in snapshot remote URLs." default:"${CACHEW_URL}"`
-	ZstdThreads int    `hcl:"zstd-threads,optional" help:"Threads for zstd compression/decompression (0 = all CPU cores)." default:"0"`
+	ZstdThreads            int           `hcl:"zstd-threads,optional" help:"Threads for zstd compression/decompression (0 = all CPU cores)." default:"0"`
 }
 
 type Strategy struct {
@@ -83,6 +81,10 @@ func New(
 
 	logger := logging.FromContext(ctx)
 
+	if _, err := exec.LookPath("git-lfs"); err != nil {
+		return nil, errors.New("git-lfs is required but not found in PATH")
+	}
+
 	// Get GitHub App token manager if configured
 	tokenManager, err := tokenManagerProvider()
 	if err != nil {
@@ -122,8 +124,6 @@ func New(
 		tokenManager: tokenManager,
 		metrics:      m,
 	}
-	s.config.ServerURL = strings.TrimRight(config.ServerURL, "/")
-
 	if err := s.warmExistingRepos(ctx); err != nil {
 		logger.WarnContext(ctx, "Failed to warm existing repos", "error", err)
 	}
@@ -199,6 +199,7 @@ func (s *Strategy) warmExistingRepos(ctx context.Context) error {
 
 		if s.config.SnapshotInterval > 0 {
 			s.scheduleSnapshotJobs(repo)
+			s.scheduleLFSSnapshotJobs(repo)
 		}
 		if s.config.RepackInterval > 0 {
 			s.scheduleRepackJobs(repo)
@@ -237,6 +238,22 @@ func (s *Strategy) handleRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if strings.HasSuffix(pathValue, "/lfs-snapshot.tar.zst") {
+		s.metrics.recordRequest(ctx, "lfs-snapshot")
+		s.handleLFSSnapshotRequest(w, r, host, pathValue)
+		return
+	}
+
+	// Proxy LFS Batch API requests directly to GitHub. Cachew doesn't cache
+	// individual LFS objects, but it needs to handle these requests because
+	// git's url.*.insteadOf rewrites the LFS endpoint URL to point at cachew.
+	if strings.Contains(pathValue, "/info/lfs/") {
+		s.metrics.recordRequest(ctx, "lfs-api")
+		logger.DebugContext(ctx, "Proxying LFS API request to upstream", "uri", pathValue)
+		s.forwardToUpstream(w, r, host, pathValue)
+		return
+	}
+
 	service := r.URL.Query().Get("service")
 	isReceivePack := service == "git-receive-pack" || strings.HasSuffix(pathValue, "/git-receive-pack")
 
@@ -248,6 +265,12 @@ func (s *Strategy) handleRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.metrics.recordRequest(ctx, "upload-pack")
+	s.handleGitRequest(w, r, host, pathValue)
+}
+
+func (s *Strategy) handleGitRequest(w http.ResponseWriter, r *http.Request, host, pathValue string) {
+	ctx := r.Context()
+	logger := logging.FromContext(ctx)
 
 	repoPath := ExtractRepoPath(pathValue)
 	upstreamURL := "https://" + host + "/" + repoPath
@@ -515,6 +538,7 @@ func (s *Strategy) startClone(ctx context.Context, repo *gitclone.Repository) er
 
 			if s.config.SnapshotInterval > 0 {
 				s.scheduleSnapshotJobs(repo)
+				s.scheduleLFSSnapshotJobs(repo)
 			}
 			if s.config.RepackInterval > 0 {
 				s.scheduleRepackJobs(repo)
@@ -545,6 +569,7 @@ func (s *Strategy) startClone(ctx context.Context, repo *gitclone.Repository) er
 
 	if s.config.SnapshotInterval > 0 {
 		s.scheduleSnapshotJobs(repo)
+		s.scheduleLFSSnapshotJobs(repo)
 	}
 	if s.config.RepackInterval > 0 {
 		s.scheduleRepackJobs(repo)

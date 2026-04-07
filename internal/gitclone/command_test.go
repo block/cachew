@@ -51,7 +51,7 @@ func TestGitCommand(t *testing.T) {
 		credentialProvider: nil,
 	}
 
-	cmd, err := repo.gitCommand(ctx, "version")
+	cmd, err := repo.GitCommand(ctx, "version")
 	assert.NoError(t, err)
 
 	assert.NotZero(t, cmd)
@@ -70,7 +70,7 @@ func TestGitCommandWithEmptyURL(t *testing.T) {
 		credentialProvider: nil,
 	}
 
-	cmd, err := repo.gitCommand(ctx, "version")
+	cmd, err := repo.GitCommand(ctx, "version")
 	assert.NoError(t, err)
 
 	assert.NotZero(t, cmd)
@@ -124,7 +124,7 @@ func TestGitCommandWithCredentialProvider(t *testing.T) {
 				},
 			}
 
-			cmd, err := repo.gitCommand(ctx, "version")
+			cmd, err := repo.GitCommand(ctx, "version")
 			assert.NoError(t, err)
 			assert.NotZero(t, cmd)
 

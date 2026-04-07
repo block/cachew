@@ -504,7 +504,7 @@ func (r *Repository) executeClone(ctx context.Context) error {
 		r.upstreamURL, cloneDest,
 	}
 
-	cmd, err := r.gitCommand(cloneCtx, args...)
+	cmd, err := r.GitCommand(cloneCtx, args...)
 	if err != nil {
 		return errors.Wrap(err, "create git command")
 	}
@@ -582,8 +582,7 @@ func (r *Repository) fetchInternal(ctx context.Context, timeout time.Duration, e
 	}
 	args = append(args, "fetch", "--prune", "--prune-tags")
 
-	// #nosec G204 - r.path is controlled by us
-	cmd, err := r.gitCommand(fetchCtx, args...)
+	cmd, err := r.GitCommand(fetchCtx, args...)
 	if err != nil {
 		return errors.Wrap(err, "create git command")
 	}
@@ -681,7 +680,7 @@ func (r *Repository) GetLocalRefs(ctx context.Context) (map[string]string, error
 
 func (r *Repository) GetUpstreamRefs(ctx context.Context) (map[string]string, error) {
 	// #nosec G204 - r.upstreamURL is controlled by us
-	cmd, err := r.gitCommand(ctx, "ls-remote", r.upstreamURL)
+	cmd, err := r.GitCommand(ctx, "ls-remote", r.upstreamURL)
 	if err != nil {
 		return nil, errors.Wrap(err, "create git command")
 	}

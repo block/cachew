@@ -27,20 +27,42 @@ import (
 // Any extra headers are merged into the cache metadata alongside the default
 // Content-Type and Content-Disposition headers.
 func Create(ctx context.Context, remote cache.Cache, key cache.Key, directory string, ttl time.Duration, excludePatterns []string, threads int, extraHeaders ...http.Header) error {
+	return CreatePaths(ctx, remote, key, directory, filepath.Base(directory), []string{"."}, ttl, excludePatterns, threads, extraHeaders...)
+}
+
+// CreatePaths archives named paths within baseDir using tar with zstd compression,
+// then uploads the resulting archive to the cache.
+//
+// The archive preserves all file permissions, ownership, and symlinks.
+// Each entry in includePaths is archived relative to baseDir and must exist.
+// This allows callers to archive either an entire directory with "." or a
+// specific subtree such as "lfs" while preserving that relative path prefix.
+// Exclude patterns use tar's --exclude syntax.
+// threads controls zstd parallelism; 0 uses all available CPU cores.
+func CreatePaths(ctx context.Context, remote cache.Cache, key cache.Key, baseDir, archiveName string, includePaths []string, ttl time.Duration, excludePatterns []string, threads int, extraHeaders ...http.Header) error {
 	if threads <= 0 {
 		threads = runtime.NumCPU()
 	}
 
-	// Verify directory exists
-	if info, err := os.Stat(directory); err != nil {
-		return errors.Wrap(err, "failed to stat directory")
+	if len(includePaths) == 0 {
+		return errors.New("includePaths must not be empty")
+	}
+
+	if info, err := os.Stat(baseDir); err != nil {
+		return errors.Wrap(err, "failed to stat base directory")
 	} else if !info.IsDir() {
-		return errors.Errorf("not a directory: %s", directory)
+		return errors.Errorf("not a directory: %s", baseDir)
+	}
+	for _, path := range includePaths {
+		targetPath := filepath.Join(baseDir, path)
+		if _, err := os.Stat(targetPath); err != nil {
+			return errors.Wrapf(err, "failed to stat include path %q", path)
+		}
 	}
 
 	headers := make(http.Header)
 	headers.Set("Content-Type", "application/zstd")
-	headers.Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filepath.Base(directory)+".tar.zst"))
+	headers.Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", archiveName+".tar.zst"))
 	for _, eh := range extraHeaders {
 		for k, vals := range eh {
 			for _, v := range vals {
@@ -54,12 +76,22 @@ func Create(ctx context.Context, remote cache.Cache, key cache.Key, directory st
 		return errors.Wrap(err, "failed to create object")
 	}
 
-	tarArgs := []string{"-cpf", "-", "-C", directory}
+	tarArgs := []string{"-cpf", "-", "-C", baseDir}
 	for _, pattern := range excludePatterns {
 		tarArgs = append(tarArgs, "--exclude", pattern)
 	}
-	tarArgs = append(tarArgs, ".")
+	tarArgs = append(tarArgs, "--")
+	tarArgs = append(tarArgs, includePaths...)
 
+	if err := runTarZstdPipeline(ctx, tarArgs, threads, wc); err != nil {
+		return errors.Join(err, wc.Close())
+	}
+	return errors.Wrap(wc.Close(), "failed to close writer")
+}
+
+// runTarZstdPipeline runs tar piped through zstd, writing compressed output to w.
+// The caller is responsible for closing w after this returns.
+func runTarZstdPipeline(ctx context.Context, tarArgs []string, threads int, w io.Writer) error {
 	tarCmd := exec.CommandContext(ctx, "tar", tarArgs...)
 	zstdCmd := exec.CommandContext(ctx, "zstd", "-c", fmt.Sprintf("-T%d", threads)) //nolint:gosec // threads is a validated integer, not user input
 
@@ -68,7 +100,7 @@ func Create(ctx context.Context, remote cache.Cache, key cache.Key, directory st
 	// closing the read end ensures tar receives SIGPIPE instead of blocking.
 	pr, pw, err := os.Pipe()
 	if err != nil {
-		return errors.Join(errors.Wrap(err, "failed to create pipe"), wc.Close())
+		return errors.Wrap(err, "failed to create pipe")
 	}
 
 	var tarStderr, zstdStderr bytes.Buffer
@@ -76,25 +108,24 @@ func Create(ctx context.Context, remote cache.Cache, key cache.Key, directory st
 	tarCmd.Stderr = &tarStderr
 
 	zstdCmd.Stdin = pr
-	zstdCmd.Stdout = wc
+	zstdCmd.Stdout = w
 	zstdCmd.Stderr = &zstdStderr
 
 	if err := tarCmd.Start(); err != nil {
 		pw.Close() //nolint:errcheck,gosec // best-effort cleanup
 		pr.Close() //nolint:errcheck,gosec // best-effort cleanup
-		return errors.Join(errors.Wrap(err, "failed to start tar"), wc.Close())
+		return errors.Wrap(err, "failed to start tar")
 	}
 	pw.Close() //nolint:errcheck,gosec // parent no longer needs write end; tar holds its own copy
 
 	if err := zstdCmd.Start(); err != nil {
 		pr.Close() //nolint:errcheck,gosec // let tar receive SIGPIPE so it exits
-		return errors.Join(errors.Wrap(err, "failed to start zstd"), tarCmd.Wait(), wc.Close())
+		return errors.Join(errors.Wrap(err, "failed to start zstd"), tarCmd.Wait())
 	}
 	pr.Close() //nolint:errcheck,gosec // parent no longer needs read end; if zstd dies, tar gets SIGPIPE
 
 	tarErr := tarCmd.Wait()
 	zstdErr := zstdCmd.Wait()
-	closeErr := wc.Close()
 
 	var errs []error
 	if tarErr != nil {
@@ -103,10 +134,6 @@ func Create(ctx context.Context, remote cache.Cache, key cache.Key, directory st
 	if zstdErr != nil {
 		errs = append(errs, errors.Errorf("zstd failed: %w: %s", zstdErr, zstdStderr.String()))
 	}
-	if closeErr != nil {
-		errs = append(errs, errors.Wrap(closeErr, "failed to close writer"))
-	}
-
 	return errors.Join(errs...)
 }
 
