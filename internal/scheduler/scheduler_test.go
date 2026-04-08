@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -167,11 +168,12 @@ func TestRunSyncContextCancellation(t *testing.T) {
 func TestPriorityOrdering(t *testing.T) {
 	s := newTestScheduler(t)
 	const conflict scheduler.ConflictGroup = "git"
+	s.RegisterType("fgSetup", scheduler.JobTypeConfig{MaxConcurrency: 1, Priority: priFG, ConflictGroup: conflict})
 	s.RegisterType("fg", scheduler.JobTypeConfig{MaxConcurrency: 1, Priority: priFG, ConflictGroup: conflict})
 	s.RegisterType("bg", scheduler.JobTypeConfig{MaxConcurrency: 1, Priority: priBG, ConflictGroup: conflict})
 
 	blocker := newTestJob()
-	s.Submit("fg", "repo1", blocker.fn)
+	s.Submit("fgSetup", "repo1", blocker.fn)
 	blocker.waitStarted(t)
 
 	// Submit bg first, then fg — both on repo1, both blocked by conflict.
@@ -225,6 +227,49 @@ func TestFairness(t *testing.T) {
 	time.Sleep(10 * time.Millisecond)
 
 	// Release blocker — B should go first (lower accumulated cost).
+	blocker.complete()
+	jobB.waitStarted(t)
+	jobA.assertNotStarted(t)
+
+	jobB.complete()
+	jobA.waitStarted(t)
+	jobA.complete()
+	wg.Wait()
+}
+
+func TestAdmissionCostPreventsDoS(t *testing.T) {
+	s := newTestSchedulerWithConfig(t, scheduler.Config{
+		TotalConcurrency: 1,
+		Alpha:            0.3,
+		FairnessTTL:      time.Hour,
+		CostTTL:          time.Hour,
+		CleanupInterval:  time.Hour,
+		AdmissionCost:    5 * time.Second,
+	})
+	s.RegisterType("work", scheduler.JobTypeConfig{MaxConcurrency: 1, Priority: priBG})
+
+	// ClientA submits many cheap jobs, building up accumulated cost via the admission cost floor.
+	for range 5 {
+		err := s.RunSync(testContext(), "work", "cheap", "clientA", func(_ context.Context) error { return nil })
+		assert.NoError(t, err)
+	}
+
+	// Block the scheduler so we can queue both clients.
+	blocker := newTestJob()
+	s.Submit("work", "blocker", blocker.fn)
+	blocker.waitStarted(t)
+
+	// Queue A (arrived first) then B.
+	jobA := newTestJob()
+	jobB := newTestJob()
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); s.RunSync(testContext(), "work", "a1", "clientA", jobA.fn) }() //nolint:errcheck
+	time.Sleep(10 * time.Millisecond)
+	go func() { defer wg.Done(); s.RunSync(testContext(), "work", "b1", "clientB", jobB.fn) }() //nolint:errcheck
+	time.Sleep(10 * time.Millisecond)
+
+	// Release blocker — B should go first because A has high accumulated cost from many admissions.
 	blocker.complete()
 	jobB.waitStarted(t)
 	jobA.assertNotStarted(t)
@@ -395,6 +440,181 @@ func TestCostEstimation(t *testing.T) {
 		return nil
 	})
 	assert.NoError(t, err)
+}
+
+func TestSubmitDedup(t *testing.T) {
+	s := newTestScheduler(t)
+	s.RegisterType("work", scheduler.JobTypeConfig{MaxConcurrency: 1, Priority: priFG})
+
+	var calls atomic.Int32
+	tj := newTestJob()
+	s.Submit("work", "j1", func(ctx context.Context) error {
+		calls.Add(1)
+		return tj.fn(ctx)
+	})
+	tj.waitStarted(t)
+
+	// Second Submit with same (type, id) is silently deduplicated.
+	s.Submit("work", "j1", func(_ context.Context) error {
+		calls.Add(1)
+		return nil
+	})
+
+	tj.complete()
+	time.Sleep(50 * time.Millisecond)
+	assert.Equal(t, int32(1), calls.Load())
+}
+
+func TestRunSyncDedup(t *testing.T) {
+	s := newTestSchedulerWithConfig(t, scheduler.Config{
+		TotalConcurrency: 1,
+		Alpha:            0.3,
+		FairnessTTL:      time.Hour,
+		CostTTL:          time.Hour,
+		CleanupInterval:  time.Hour,
+	})
+	s.RegisterType("work", scheduler.JobTypeConfig{MaxConcurrency: 1, Priority: priFG})
+
+	blocker := newTestJob()
+	s.Submit("work", "blocker", blocker.fn)
+	blocker.waitStarted(t)
+
+	// Two RunSync calls for the same (type, id) coalesce onto one job.
+	var wg sync.WaitGroup
+	errs := make([]error, 2)
+	wg.Add(2)
+	for i := range 2 {
+		go func() {
+			defer wg.Done()
+			errs[i] = s.RunSync(testContext(), "work", "shared", fmt.Sprintf("client%d", i), func(_ context.Context) error {
+				return nil
+			})
+		}()
+	}
+	time.Sleep(50 * time.Millisecond)
+
+	blocker.complete()
+	wg.Wait()
+	for _, err := range errs {
+		assert.NoError(t, err)
+	}
+}
+
+func TestRunSyncDedupCancellation(t *testing.T) {
+	s := newTestSchedulerWithConfig(t, scheduler.Config{
+		TotalConcurrency: 1,
+		Alpha:            0.3,
+		FairnessTTL:      time.Hour,
+		CostTTL:          time.Hour,
+		CleanupInterval:  time.Hour,
+	})
+	s.RegisterType("work", scheduler.JobTypeConfig{MaxConcurrency: 1, Priority: priFG})
+
+	blocker := newTestJob()
+	s.Submit("work", "blocker", blocker.fn)
+	blocker.waitStarted(t)
+
+	// Two RunSync callers for the same job. One cancels, the other completes.
+	ctxA, cancelA := context.WithCancel(testContext())
+	var wg sync.WaitGroup
+	errCh := make(chan error, 2)
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		errCh <- s.RunSync(ctxA, "work", "shared", "clientA", func(_ context.Context) error { return nil })
+	}()
+	go func() {
+		defer wg.Done()
+		errCh <- s.RunSync(testContext(), "work", "shared", "clientB", func(_ context.Context) error { return nil })
+	}()
+	time.Sleep(50 * time.Millisecond)
+
+	cancelA()
+	errA := <-errCh
+	assert.IsError(t, errA, context.Canceled)
+
+	blocker.complete()
+	errB := <-errCh
+	assert.NoError(t, errB)
+	wg.Wait()
+}
+
+func TestSubmitThenRunSyncDedup(t *testing.T) {
+	s := newTestScheduler(t)
+	s.RegisterType("work", scheduler.JobTypeConfig{MaxConcurrency: 1, Priority: priFG})
+
+	tj := newTestJob()
+	s.Submit("work", "j1", tj.fn)
+	tj.waitStarted(t)
+
+	// RunSync coalesces onto the already-running Submit job.
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- s.RunSync(testContext(), "work", "j1", "client", func(_ context.Context) error { return nil })
+	}()
+	time.Sleep(50 * time.Millisecond)
+
+	tj.complete()
+	assert.NoError(t, <-errCh)
+}
+
+func TestRunSyncThenSubmitDedup(t *testing.T) {
+	s := newTestScheduler(t)
+	s.RegisterType("work", scheduler.JobTypeConfig{MaxConcurrency: 1, Priority: priFG})
+
+	tj := newTestJob()
+	go s.RunSync(testContext(), "work", "j1", "client", tj.fn) //nolint:errcheck
+	tj.waitStarted(t)
+
+	// Submit coalesces onto the already-running RunSync job.
+	// The job should survive even if the RunSync caller cancels, since Submit marked it.
+	s.Submit("work", "j1", func(_ context.Context) error { return nil })
+	tj.complete()
+}
+
+func TestRunSyncAllCancelledCancelsJob(t *testing.T) {
+	s := newTestScheduler(t)
+	s.RegisterType("work", scheduler.JobTypeConfig{MaxConcurrency: 1, Priority: priFG})
+
+	fnCtxCancelled := make(chan struct{})
+	blockingFn := func(ctx context.Context) error {
+		<-ctx.Done()
+		close(fnCtxCancelled)
+		return ctx.Err()
+	}
+
+	// Start A first so its fn is stored on the job.
+	ctxA, cancelA := context.WithCancel(testContext())
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		s.RunSync(ctxA, "work", "j1", "clientA", blockingFn) //nolint:errcheck
+	})
+	time.Sleep(50 * time.Millisecond)
+
+	// B coalesces onto A's job.
+	ctxB, cancelB := context.WithCancel(testContext())
+	wg.Go(func() {
+		s.RunSync(ctxB, "work", "j1", "clientB", blockingFn) //nolint:errcheck
+	})
+	time.Sleep(50 * time.Millisecond)
+
+	// Cancel one waiter — job should continue.
+	cancelA()
+	time.Sleep(50 * time.Millisecond)
+	select {
+	case <-fnCtxCancelled:
+		t.Fatal("job cancelled with waiter still active")
+	default:
+	}
+
+	// Cancel the last waiter — job's context should be cancelled.
+	cancelB()
+	select {
+	case <-fnCtxCancelled:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for job fn to be cancelled")
+	}
+	wg.Wait()
 }
 
 func TestBackgroundDoesNotStarveForeground(t *testing.T) {

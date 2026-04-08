@@ -20,7 +20,9 @@ All work — foreground and background — goes through a single scheduler. The 
 
 **Cost**: A `time.Duration` representing the relative system impact of a job. The scheduler automatically learns the cost of each `(job_type, job_id)` pair using an exponential moving average of observed execution time. On first encounter, a small default (1 second) is used. Callers never specify cost explicitly.
 
-**Accumulated cost**: A running total of cost consumed per fairness key. Every time a job is admitted, its estimated cost is added to its fairness key's accumulated cost. The scheduler always picks the job whose fairness key has the lowest accumulated cost — whoever has consumed the least goes next.
+**Admission cost**: A configurable minimum fairness cost charged per job admission (`Config.AdmissionCost`, default 5 seconds). At admission time, the fairness charge is `max(estimated_cost, admission_cost)`. This prevents a client from monopolising the scheduler by submitting many cheap jobs — even a job that completes in 100ms still costs 5 seconds of fairness budget, so mass-submission is expensive in fairness terms without affecting actual execution time.
+
+**Accumulated cost**: A running total of cost consumed per fairness key. Every time a job is admitted, the admission cost (the max of estimated and configured minimum) is added to its fairness key's accumulated cost. The scheduler always picks the job whose fairness key has the lowest accumulated cost — whoever has consumed the least goes next.
 
 **Fairness key**: An opaque string on the job, populated by the caller. For foreground jobs, this is typically the client IP or identity. For background jobs, this is empty. The scheduler doesn't know what it represents — it just uses it for ordering.
 
@@ -159,6 +161,17 @@ scheduler.Submit(
 
 Both enter the same pending queue and the same admission logic. `RunSync` blocks on a completion signal before returning to the caller.
 
+### Deduplication
+
+Jobs are deduplicated by `(job_type, job_id)`. If a job with the same key is already pending or running:
+
+- **`Submit`**: the call is silently dropped. The existing job's `fn` will be used.
+- **`RunSync`**: the caller coalesces onto the existing job and receives its result when it completes. Multiple callers can wait on the same job simultaneously.
+
+Sync and async jobs can be mixed for the same `(job_type, job_id)`. A `RunSync` onto an active `Submit` job attaches a waiter. A `Submit` onto an active `RunSync` job marks it as submitted so it survives waiter cancellation.
+
+This means if ten clients request the same clone concurrently, only one clone runs — all ten callers receive the result. If a coalesced `RunSync` caller's context is cancelled, that caller is detached but the job continues for the remaining waiters. When **all** waiters cancel and no `Submit` created the job, the job itself is cancelled via its context — both pending and running jobs are stopped.
+
 ## Dispatch Algorithm
 
 The entire scheduling algorithm:
@@ -174,7 +187,7 @@ for each job in sorted order:
     if type_running_count >= type_slots → skip
     if any running job has same job_id AND same non-empty conflict_group → skip
     admit job
-    estimated_cost = cost_estimates[(job_type, job_id)] or 1s
+    estimated_cost = max(cost_estimates[(job_type, job_id)] or 1s, config.admission_cost)
     accumulated_cost[fairness_key] += estimated_cost
 ```
 
@@ -194,6 +207,7 @@ Key properties of this algorithm:
 - **Per-type limits**: within a tier, individual job types can be capped to a fraction of the tier's allocation, preventing expensive operations from monopolising the tier.
 - **Fairness**: within a priority level, jobs from the fairness key with the lowest accumulated cost go first. A client that has consumed a lot of capacity yields to one that has consumed little.
 - **Cost-awareness**: expensive jobs advance accumulated cost faster, so they naturally yield to cheaper work from other clients. A `linux.git` clone that takes 60 seconds advances the client's accumulated cost by ~60s, while a `git.git` clone that takes 5 seconds advances it by ~5s.
+- **Volume-awareness**: the admission cost floor ensures that submitting many cheap jobs is still expensive in fairness terms. A client submitting 1000 trivial jobs accumulates at least `1000 * admission_cost`, causing it to yield to clients that have submitted fewer jobs.
 - **Adaptive**: the scheduler automatically learns the cost of each `(job_type, job_id)` pair. No manual cost tuning required. After one execution, estimates are already meaningful.
 - **Conflict safety**: conflicting jobs on the same resource stay in the pending queue, not consuming concurrency slots while they wait.
 - **No head-of-line blocking**: if the next job by ordering is blocked (conflict or concurrency limit), the scheduler skips it and admits the next admissible job.

@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 620" font-family="system-ui, -apple-system, sans-serif" font-size="13">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 690" font-family="system-ui, -apple-system, sans-serif" font-size="13">
   <defs>
     <marker id="arrow" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
       <path d="M 0 0 L 10 5 L 0 10 z" fill="#555"/>
@@ -6,10 +6,13 @@
     <marker id="arrow-red" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
       <path d="M 0 0 L 10 5 L 0 10 z" fill="#c44"/>
     </marker>
+    <marker id="arrow-blue" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#4285f4"/>
+    </marker>
   </defs>
 
   <!-- Background -->
-  <rect width="820" height="620" fill="#fafafa" rx="8"/>
+  <rect width="820" height="690" fill="#fafafa" rx="8"/>
 
   <!-- Title -->
   <text x="410" y="32" text-anchor="middle" font-size="16" font-weight="600" fill="#222">Scheduler: Weighted Fair Queuing with Conflict Exclusion</text>
@@ -21,77 +24,91 @@
   <rect x="280" y="56" width="140" height="40" rx="6" fill="#e8f0fe" stroke="#4285f4" stroke-width="1.5"/>
   <text x="350" y="81" text-anchor="middle" font-weight="500" fill="#1a56db">Submit()</text>
 
-  <!-- Arrows to pending -->
+  <!-- Arrows to merge -->
   <line x1="150" y1="96" x2="150" y2="120" stroke="#555" stroke-width="1.5" marker-end="url(#arrow)"/>
   <line x1="350" y1="96" x2="350" y2="120" stroke="#555" stroke-width="1.5" marker-end="url(#arrow)"/>
 
   <!-- Merge point -->
   <line x1="150" y1="120" x2="250" y2="120" stroke="#555" stroke-width="1.5"/>
   <line x1="350" y1="120" x2="250" y2="120" stroke="#555" stroke-width="1.5"/>
-  <line x1="250" y1="120" x2="250" y2="140" stroke="#555" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="250" y1="120" x2="250" y2="138" stroke="#555" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- Dedup check -->
+  <rect x="130" y="146" width="240" height="40" rx="6" fill="#e8f0fe" stroke="#4285f4" stroke-width="1.5"/>
+  <text x="250" y="163" text-anchor="middle" font-size="12" font-weight="500" fill="#1a56db">Dedup: same (type, id) active?</text>
+  <text x="250" y="179" text-anchor="middle" font-size="10" fill="#1a56db">Submit: drop | RunSync: coalesce onto existing</text>
+
+  <!-- Dedup yes arrow — loops to the right and back to entry -->
+  <path d="M 370 166 L 430 166 L 430 78 L 428 78" fill="none" stroke="#4285f4" stroke-width="1.5" marker-end="url(#arrow-blue)"/>
+  <text x="440" y="130" font-size="11" fill="#4285f4">duplicate</text>
+
+  <!-- Arrow from dedup to pending -->
+  <line x1="250" y1="186" x2="250" y2="210" stroke="#555" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="258" y="204" font-size="10" fill="#555">new</text>
 
   <!-- Pending queue -->
-  <rect x="100" y="148" width="300" height="50" rx="6" fill="#fff3cd" stroke="#f0ad4e" stroke-width="1.5"/>
-  <text x="250" y="170" text-anchor="middle" font-weight="600" fill="#856404">Pending Queue</text>
-  <text x="250" y="188" text-anchor="middle" font-size="11" fill="#856404">sorted by: -priority.level, accumulated cost, arrival</text>
+  <rect x="100" y="218" width="300" height="50" rx="6" fill="#fff3cd" stroke="#f0ad4e" stroke-width="1.5"/>
+  <text x="250" y="240" text-anchor="middle" font-weight="600" fill="#856404">Pending Queue</text>
+  <text x="250" y="258" text-anchor="middle" font-size="11" fill="#856404">sorted by: -priority.level, accumulated cost, arrival</text>
 
   <!-- Arrow to admission -->
-  <line x1="250" y1="198" x2="250" y2="228" stroke="#555" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="250" y1="268" x2="250" y2="298" stroke="#555" stroke-width="1.5" marker-end="url(#arrow)"/>
 
   <!-- Admission gate box -->
-  <rect x="30" y="236" width="440" height="200" rx="8" fill="#f0f0f0" stroke="#999" stroke-width="1" stroke-dasharray="6,3"/>
-  <text x="250" y="258" text-anchor="middle" font-size="14" font-weight="600" fill="#444">Admission Checks</text>
+  <rect x="30" y="306" width="440" height="200" rx="8" fill="#f0f0f0" stroke="#999" stroke-width="1" stroke-dasharray="6,3"/>
+  <text x="250" y="328" text-anchor="middle" font-size="14" font-weight="600" fill="#444">Admission Checks</text>
 
   <!-- Check 1: Total concurrency -->
-  <rect x="60" y="270" width="380" height="32" rx="5" fill="#fff" stroke="#bbb" stroke-width="1"/>
-  <text x="80" y="291" font-size="12" fill="#333">1. Total concurrency</text>
-  <text x="420" y="291" text-anchor="end" font-size="11" fill="#666">running &lt; TotalConcurrency?</text>
+  <rect x="60" y="340" width="380" height="32" rx="5" fill="#fff" stroke="#bbb" stroke-width="1"/>
+  <text x="80" y="361" font-size="12" fill="#333">1. Total concurrency</text>
+  <text x="420" y="361" text-anchor="end" font-size="11" fill="#666">running &lt; TotalConcurrency?</text>
 
   <!-- Check 2: Tier slots -->
-  <rect x="60" y="310" width="380" height="32" rx="5" fill="#fff" stroke="#bbb" stroke-width="1"/>
-  <text x="80" y="331" font-size="12" fill="#333">2. Tier concurrency</text>
-  <text x="420" y="331" text-anchor="end" font-size="11" fill="#666">tier running &lt; weight/sum(weights) * total?</text>
+  <rect x="60" y="380" width="380" height="32" rx="5" fill="#fff" stroke="#bbb" stroke-width="1"/>
+  <text x="80" y="401" font-size="12" fill="#333">2. Tier concurrency</text>
+  <text x="420" y="401" text-anchor="end" font-size="11" fill="#666">tier running &lt; weight/sum(weights) * total?</text>
 
   <!-- Check 3: Type slots -->
-  <rect x="60" y="350" width="380" height="32" rx="5" fill="#fff" stroke="#bbb" stroke-width="1"/>
-  <text x="80" y="371" font-size="12" fill="#333">3. Type concurrency</text>
-  <text x="420" y="371" text-anchor="end" font-size="11" fill="#666">type running &lt; MaxConcurrency * tier slots?</text>
+  <rect x="60" y="420" width="380" height="32" rx="5" fill="#fff" stroke="#bbb" stroke-width="1"/>
+  <text x="80" y="441" font-size="12" fill="#333">3. Type concurrency</text>
+  <text x="420" y="441" text-anchor="end" font-size="11" fill="#666">type running &lt; MaxConcurrency * tier slots?</text>
 
   <!-- Check 4: Conflict -->
-  <rect x="60" y="390" width="380" height="32" rx="5" fill="#fff" stroke="#bbb" stroke-width="1"/>
-  <text x="80" y="411" font-size="12" fill="#333">4. Conflict exclusion</text>
-  <text x="420" y="411" text-anchor="end" font-size="11" fill="#666">no running job with same group + ID?</text>
+  <rect x="60" y="460" width="380" height="32" rx="5" fill="#fff" stroke="#bbb" stroke-width="1"/>
+  <text x="80" y="481" font-size="12" fill="#333">4. Conflict exclusion</text>
+  <text x="420" y="481" text-anchor="end" font-size="11" fill="#666">no running job with same group + ID?</text>
 
   <!-- Skip arrow (any check fails) — loops back to pending queue -->
-  <path d="M 470 336 L 510 336 L 510 165 L 408 165" fill="none" stroke="#c44" stroke-width="1.5" marker-end="url(#arrow-red)"/>
-  <text x="520" y="260" font-size="11" fill="#c44">any check fails:</text>
-  <text x="520" y="275" font-size="11" fill="#c44">skip, try next job</text>
+  <path d="M 470 406 L 510 406 L 510 235 L 408 235" fill="none" stroke="#c44" stroke-width="1.5" marker-end="url(#arrow-red)"/>
+  <text x="520" y="330" font-size="11" fill="#c44">any check fails:</text>
+  <text x="520" y="345" font-size="11" fill="#c44">skip, try next job</text>
 
   <!-- Arrow from admission to running -->
-  <line x1="250" y1="436" x2="250" y2="462" stroke="#555" stroke-width="1.5" marker-end="url(#arrow)"/>
-  <text x="258" y="455" font-size="11" fill="#555">all pass</text>
+  <line x1="250" y1="506" x2="250" y2="532" stroke="#555" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="258" y="525" font-size="11" fill="#555">all pass</text>
 
   <!-- Re-evaluate arrow looping back (rendered first so boxes paint over it) -->
-  <path d="M 480 582 L 790 582 L 790 183 L 408 183" fill="none" stroke="#555" stroke-width="1.5" marker-end="url(#arrow)"/>
-  <text x="800" y="380" font-size="11" fill="#555" transform="rotate(-90, 800, 380)">re-evaluate pending queue</text>
+  <path d="M 480 652 L 790 652 L 790 253 L 408 253" fill="none" stroke="#555" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="800" y="450" font-size="11" fill="#555" transform="rotate(-90, 800, 450)">re-evaluate pending queue</text>
 
   <!-- Running pool -->
-  <rect x="60" y="470" width="420" height="50" rx="6" fill="#d4edda" stroke="#28a745" stroke-width="1.5"/>
-  <text x="270" y="492" text-anchor="middle" font-weight="600" fill="#155724">Running</text>
-  <text x="270" y="510" text-anchor="middle" font-size="11" fill="#155724">job executes fn(ctx)</text>
+  <rect x="60" y="540" width="420" height="50" rx="6" fill="#d4edda" stroke="#28a745" stroke-width="1.5"/>
+  <text x="270" y="562" text-anchor="middle" font-weight="600" fill="#155724">Running</text>
+  <text x="270" y="580" text-anchor="middle" font-size="11" fill="#155724">job executes fn(ctx)</text>
 
   <!-- Fairness update -->
-  <rect x="530" y="470" width="250" height="50" rx="6" fill="#e8f5e9" stroke="#66bb6a" stroke-width="1.5"/>
-  <text x="655" y="492" text-anchor="middle" font-size="12" font-weight="500" fill="#2e7d32">Fairness Update</text>
-  <text x="655" y="510" text-anchor="middle" font-size="11" fill="#2e7d32">accumulated_cost[key] += est_cost</text>
-  <line x1="480" y1="495" x2="522" y2="495" stroke="#555" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <rect x="530" y="532" width="260" height="66" rx="6" fill="#e8f5e9" stroke="#66bb6a" stroke-width="1.5"/>
+  <text x="660" y="554" text-anchor="middle" font-size="12" font-weight="500" fill="#2e7d32">Fairness Update</text>
+  <text x="660" y="570" text-anchor="middle" font-size="11" fill="#2e7d32">cost = max(est_cost, admission_cost)</text>
+  <text x="660" y="588" text-anchor="middle" font-size="11" fill="#2e7d32">accumulated_cost[key] += cost</text>
+  <line x1="480" y1="565" x2="522" y2="565" stroke="#555" stroke-width="1.5" marker-end="url(#arrow)"/>
 
   <!-- Arrow to completion -->
-  <line x1="270" y1="520" x2="270" y2="548" stroke="#555" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="270" y1="590" x2="270" y2="618" stroke="#555" stroke-width="1.5" marker-end="url(#arrow)"/>
 
   <!-- Completion box -->
-  <rect x="60" y="556" width="420" height="52" rx="6" fill="#f3e5f5" stroke="#ab47bc" stroke-width="1.5"/>
-  <text x="270" y="576" text-anchor="middle" font-size="12" font-weight="500" fill="#6a1b9a">Job Complete</text>
-  <text x="270" y="596" text-anchor="middle" font-size="11" fill="#6a1b9a">cost estimate = alpha * elapsed + (1 - alpha) * prev estimate</text>
+  <rect x="60" y="626" width="420" height="52" rx="6" fill="#f3e5f5" stroke="#ab47bc" stroke-width="1.5"/>
+  <text x="270" y="646" text-anchor="middle" font-size="12" font-weight="500" fill="#6a1b9a">Job Complete</text>
+  <text x="270" y="666" text-anchor="middle" font-size="11" fill="#6a1b9a">cost estimate = alpha * elapsed + (1 - alpha) * prev estimate</text>
 
 </svg>

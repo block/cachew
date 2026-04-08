@@ -75,6 +75,15 @@ type Config struct {
 	CostTTL          time.Duration `hcl:"cost-ttl,optional" help:"TTL for cost estimate entries." default:"1h"`
 	FairnessTTL      time.Duration `hcl:"fairness-ttl,optional" help:"TTL for accumulated cost entries." default:"10m"`
 	CleanupInterval  time.Duration `hcl:"cleanup-interval,optional" help:"How often to run TTL cleanup." default:"1m"`
+	// AdmissionCost is the minimum fairness cost charged per job admission, regardless of the
+	// job's estimated duration. This prevents a client from monopolising the scheduler by
+	// submitting many cheap jobs.
+	AdmissionCost time.Duration `hcl:"admission-cost,optional" help:"Minimum fairness cost per job admission." default:"5s"`
+}
+
+type dedupKey struct {
+	jobType JobType
+	jobID   string
 }
 
 type job struct {
@@ -83,7 +92,10 @@ type job struct {
 	fairnessKey string
 	fn          func(ctx context.Context) error
 	arrivalTime time.Time
-	done        chan error // non-nil for RunSync
+	submitted   bool               // true if created or referenced by Submit
+	waiters     []chan error       // RunSync callers waiting for the result
+	ctx         context.Context    // context passed to fn; cancellable for RunSync jobs
+	cancel      context.CancelFunc // non-nil for RunSync jobs
 }
 
 func (j *job) String() string { return j.jobType.String() + ":" + j.jobID }
@@ -115,6 +127,7 @@ type Scheduler struct {
 	types      map[JobType]JobTypeConfig
 	pending    []*job
 	running    []*runningJob
+	active     map[dedupKey]*job // all pending + running jobs for dedup
 	fairness   map[string]*fairnessEntry
 	costs      map[costKey]*costEntry
 	config     Config
@@ -142,6 +155,7 @@ func New(ctx context.Context, config Config, ns *metadatadb.Namespace) (*Schedul
 	s := &Scheduler{
 		priorities:    make(map[Priority]bool),
 		types:         make(map[JobType]JobTypeConfig),
+		active:        make(map[dedupKey]*job),
 		fairness:      make(map[string]*fairnessEntry),
 		costs:         make(map[costKey]*costEntry),
 		lastRunsLocal: make(map[string]time.Time),
@@ -199,55 +213,73 @@ func (s *Scheduler) validateType(jt JobType) {
 }
 
 // Submit queues a background job for async execution. Returns immediately.
+// If a job with the same (type, id) is already pending or running, the
+// submission is silently deduplicated.
 func (s *Scheduler) Submit(jobType JobType, jobID string, fn func(ctx context.Context) error) {
 	s.mu.Lock()
 	s.validateType(jobType)
-	s.pending = append(s.pending, &job{
+	key := dedupKey{jobType, jobID}
+	if existing, ok := s.active[key]; ok {
+		existing.submitted = true
+		s.mu.Unlock()
+		return
+	}
+	j := &job{
 		jobType:     jobType,
 		jobID:       jobID,
 		fn:          fn,
 		arrivalTime: s.now(),
-	})
+		submitted:   true,
+	}
+	s.active[key] = j
+	s.pending = append(s.pending, j)
 	s.mu.Unlock()
 	s.signal()
 }
 
 // RunSync submits a foreground job and blocks until it completes or ctx is
-// cancelled. The fn receives a context that is cancelled when either the
-// caller's ctx or the scheduler's context is done.
+// cancelled. If a job with the same (type, id) is already pending or running,
+// the caller coalesces onto the existing job and receives its result. When all
+// coalesced callers cancel, the job itself is cancelled.
 func (s *Scheduler) RunSync(ctx context.Context, jobType JobType, jobID, fairnessKey string, fn func(ctx context.Context) error) error {
-	jobCtx, jobCancel := context.WithCancel(ctx)
-	stop := context.AfterFunc(s.ctx, jobCancel)
+	done := make(chan error, 1)
 
 	s.mu.Lock()
 	s.validateType(jobType)
-	s.mu.Unlock()
-
-	done := make(chan error, 1)
+	key := dedupKey{jobType, jobID}
+	if existing, ok := s.active[key]; ok {
+		existing.waiters = append(existing.waiters, done)
+		s.mu.Unlock()
+		return s.awaitDone(ctx, existing, done)
+	}
+	jobCtx, jobCancel := context.WithCancel(s.ctx)
 	j := &job{
 		jobType:     jobType,
 		jobID:       jobID,
 		fairnessKey: fairnessKey,
-		fn:          func(_ context.Context) error { return fn(jobCtx) },
+		fn:          fn,
 		arrivalTime: s.now(),
-		done:        done,
+		waiters:     []chan error{done},
+		ctx:         jobCtx,
+		cancel:      jobCancel,
 	}
-	s.mu.Lock()
+	s.active[key] = j
 	s.pending = append(s.pending, j)
 	s.mu.Unlock()
 	s.signal()
 
+	return s.awaitDone(ctx, j, done)
+}
+
+func (s *Scheduler) awaitDone(ctx context.Context, j *job, done chan error) error {
 	select {
 	case err := <-done:
-		stop()
-		jobCancel()
 		return err
 	case <-ctx.Done():
 		s.mu.Lock()
-		s.removePendingLocked(j)
+		s.removeWaiterLocked(j, done)
+		s.maybeRemoveJobLocked(j)
 		s.mu.Unlock()
-		stop()
-		jobCancel()
 		return errors.WithStack(ctx.Err())
 	}
 }
@@ -383,7 +415,11 @@ func (s *Scheduler) tierSlotsLocked(weight float64) int {
 func (s *Scheduler) executeJob(j *job) {
 	start := s.now()
 	s.logger.InfoContext(s.ctx, "Starting job", "job", j)
-	err := j.fn(s.ctx)
+	fnCtx := s.ctx
+	if j.ctx != nil {
+		fnCtx = j.ctx
+	}
+	err := j.fn(fnCtx)
 	elapsed := s.now().Sub(start)
 
 	if err != nil {
@@ -395,11 +431,14 @@ func (s *Scheduler) executeJob(j *job) {
 	s.mu.Lock()
 	s.updateCostEstimateLocked(j.jobType, j.jobID, elapsed)
 	s.removeFromRunningLocked(j)
+	delete(s.active, dedupKey{j.jobType, j.jobID})
+	waiters := j.waiters
+	j.waiters = nil
 	s.recordMetricsLocked()
 	s.mu.Unlock()
 
-	if j.done != nil {
-		j.done <- err
+	for _, w := range waiters {
+		w <- err
 	}
 	s.signal()
 }
@@ -450,10 +489,11 @@ func (s *Scheduler) hasConflictLocked(j *job) bool {
 const defaultCost = time.Second
 
 func (s *Scheduler) estimatedCostLocked(j *job) time.Duration {
+	est := defaultCost
 	if entry, ok := s.costs[costKey{j.jobType, j.jobID}]; ok {
-		return entry.estimate
+		est = entry.estimate
 	}
-	return defaultCost
+	return max(est, s.config.AdmissionCost)
 }
 
 func (s *Scheduler) updateCostEstimateLocked(jt JobType, jobID string, elapsed time.Duration) {
@@ -528,6 +568,37 @@ func (s *Scheduler) removeFromRunningLocked(j *job) {
 
 func (s *Scheduler) removePendingLocked(j *job) {
 	s.pending = slices.DeleteFunc(s.pending, func(pj *job) bool { return pj == j })
+}
+
+func (s *Scheduler) removeWaiterLocked(j *job, done chan error) {
+	j.waiters = slices.DeleteFunc(j.waiters, func(w chan error) bool { return w == done })
+}
+
+func (s *Scheduler) isRunningLocked(j *job) bool {
+	for _, rj := range s.running {
+		if rj.job == j {
+			return true
+		}
+	}
+	return false
+}
+
+// maybeRemoveJobLocked is called when a RunSync waiter is removed. If no
+// waiters remain it cancels the job's context. Pending jobs are also removed
+// from the queue and active map; running jobs are left for executeJob to
+// clean up after the fn returns.
+func (s *Scheduler) maybeRemoveJobLocked(j *job) {
+	if len(j.waiters) > 0 || j.submitted {
+		return
+	}
+	if j.cancel != nil {
+		j.cancel()
+	}
+	if s.isRunningLocked(j) {
+		return
+	}
+	s.removePendingLocked(j)
+	delete(s.active, dedupKey{j.jobType, j.jobID})
 }
 
 // --- TTL cleanup ---

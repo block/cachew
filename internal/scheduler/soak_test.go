@@ -116,9 +116,7 @@ func TestSoak(t *testing.T) {
 					}
 					totalCompleted.Add(1)
 				} else {
-					done := make(chan struct{})
 					s.Submit(jt.name, repo, func(ctx context.Context) error {
-						defer close(done)
 						err := jobFn(ctx)
 						if err != nil {
 							totalErrors.Add(1)
@@ -126,13 +124,9 @@ func TestSoak(t *testing.T) {
 						totalCompleted.Add(1)
 						return err
 					})
-					// Wait for async job so we don't flood the queue unboundedly.
-					select {
-					case <-done:
-					case <-ctx.Done():
-						totalCancelled.Add(1)
-						return
-					}
+					// Dedup keeps the pending queue bounded, so a brief sleep
+					// is enough to avoid busy-spinning.
+					time.Sleep(time.Millisecond)
 				}
 			}
 		})
