@@ -1,0 +1,64 @@
+# Enable verbose mode
+param verbose : bool = false
+
+# Build client and server binaries
+cachew = go.exe {
+  package = "./cmd/cachew"
+  output = "dist/cachew"
+}
+
+cachewd = go.exe {
+  package = "./cmd/cachewd"
+  output = "dist/cachewd"
+}
+
+# Cross-compile Linux binaries for Docker
+cachew-linux = go.exe {
+  package = "./cmd/cachew"
+  output = "dist/cachew-linux-arm64"
+  cgo = false
+  goos = "linux"
+  goarch = "amd64"
+}
+
+cachewd-linux = go.exe {
+  package = "./cmd/cachewd"
+  output = "dist/cachewd-linux-arm64"
+  cgo = false
+  goos = "linux"
+  goarch = "arm64"
+}
+
+# Tests
+test = go.test {
+  package = "./..."
+  flags = ["-timeout", "30s", "-race"]
+  verbose = verbose
+}
+
+# Lint
+lint = go.lint {}
+
+# Docker image
+image = docker.image {
+  tag = "cachew:latest"
+  context = "."
+  dockerfile = "docker/Dockerfile"
+  depends_on = [cachew-linux, cachewd-linux]
+}
+
+container = docker.container {
+  image = image.ref
+  name = "cachew"
+  ports = ["8080:8080"]
+  healthcheck = "curl -sf http://localhost:8080/_readiness"
+}
+
+# Build binaries
+target build = [cachew, cachewd]
+
+# Run tests and linting
+target test = [test, lint]
+
+# Build and run Docker container
+target docker = [container]
