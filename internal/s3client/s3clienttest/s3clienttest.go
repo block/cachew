@@ -121,9 +121,6 @@ func Client(t *testing.T) *minio.Client {
 
 func startContainer(t *testing.T) {
 	t.Helper()
-	// Remove any stale container (e.g. from a previous crashed run) before starting.
-	//nolint:errcheck,gosec // Best-effort removal of a possibly non-existent container.
-	exec.CommandContext(t.Context(), "docker", "rm", "-f", containerName).Run()
 	cmd := exec.CommandContext(t.Context(), "docker", "run", "-d",
 		"--name", containerName,
 		"-p", Port+":9000",
@@ -131,8 +128,16 @@ func startContainer(t *testing.T) {
 		"-e", "MINIO_ROOT_PASSWORD="+Password,
 		"minio/minio", "server", "/data",
 	)
-	if output, err := cmd.CombinedOutput(); err != nil {
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		return
+	}
+	if !strings.Contains(string(output), "already in use") {
 		t.Fatalf("failed to start minio container: %v\n%s", err, output)
+	}
+	// Container exists but may be stopped — try restarting it.
+	if restartOut, restartErr := exec.CommandContext(t.Context(), "docker", "start", containerName).CombinedOutput(); restartErr != nil {
+		t.Fatalf("failed to restart existing minio container: %v\n%s", restartErr, restartOut)
 	}
 }
 
