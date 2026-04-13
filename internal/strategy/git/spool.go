@@ -94,6 +94,13 @@ func (rs *ResponseSpool) MarkError(err error) {
 	rs.cond.Broadcast()
 }
 
+// Written returns the total number of bytes written to the spool.
+func (rs *ResponseSpool) Written() int64 {
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+	return rs.written
+}
+
 func (rs *ResponseSpool) Failed() bool {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()

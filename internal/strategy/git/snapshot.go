@@ -192,6 +192,7 @@ func (s *Strategy) handleSnapshotRequest(w http.ResponseWriter, r *http.Request,
 
 	repoPath := ExtractRepoPath(strings.TrimSuffix(pathValue, "/snapshot.tar.zst"))
 	upstreamURL := "https://" + host + "/" + repoPath
+	repoName := host + "/" + repoPath
 
 	repo, repoErr := s.cloneManager.GetOrCreate(ctx, upstreamURL)
 	if repoErr != nil {
@@ -220,7 +221,9 @@ func (s *Strategy) handleSnapshotRequest(w http.ResponseWriter, r *http.Request,
 				}()
 				logger.InfoContext(ctx, "Serving locally cached snapshot after waiting for in-flight fill", "upstream", upstreamURL)
 				w.Header().Set("Content-Type", "application/zstd")
-				if _, err := io.Copy(w, reader); err != nil {
+				n, err := io.Copy(w, reader)
+				s.metrics.recordSnapshotServe(ctx, "cold_cache", repoName, n)
+				if err != nil {
 					logger.WarnContext(ctx, "Failed to stream locally cached snapshot", "upstream", upstreamURL, "error", err)
 				}
 				return
@@ -234,7 +237,9 @@ func (s *Strategy) handleSnapshotRequest(w http.ResponseWriter, r *http.Request,
 			if openErr == nil && reader != nil {
 				logger.InfoContext(ctx, "Serving cached snapshot while mirror warms up", "upstream", upstreamURL)
 				w.Header().Set("Content-Type", "application/zstd")
-				if _, err := io.Copy(w, reader); err != nil {
+				n, err := io.Copy(w, reader)
+				s.metrics.recordSnapshotServe(ctx, "cold_cache", repoName, n)
+				if err != nil {
 					logger.WarnContext(ctx, "Failed to stream cached snapshot", "upstream", upstreamURL, "error", err)
 				}
 				_ = reader.Close()
@@ -264,14 +269,14 @@ func (s *Strategy) handleSnapshotRequest(w http.ResponseWriter, r *http.Request,
 	}
 
 	if reader == nil {
-		if err := s.serveSnapshotWithSpool(w, r, repo, upstreamURL); err != nil {
+		if err := s.serveSnapshotWithSpool(w, r, repo, upstreamURL, repoName); err != nil {
 			logger.ErrorContext(ctx, "Failed to serve snapshot via spool", "upstream", upstreamURL, "error", err)
 		}
 		return
 	}
 	defer reader.Close()
 
-	if err := s.serveSnapshotWithBundle(ctx, w, reader, headers, repo, upstreamURL); err != nil {
+	if err := s.serveSnapshotWithBundle(ctx, w, reader, headers, repo, upstreamURL, repoName); err != nil {
 		logger.ErrorContext(ctx, "Failed to serve snapshot", "upstream", upstreamURL, "error", err)
 	}
 }
@@ -343,7 +348,7 @@ func (s *Strategy) handleBundleRequest(w http.ResponseWriter, r *http.Request, h
 	}
 }
 
-func (s *Strategy) serveSnapshotWithBundle(ctx context.Context, w http.ResponseWriter, reader io.ReadCloser, headers http.Header, repo *gitclone.Repository, upstreamURL string) error {
+func (s *Strategy) serveSnapshotWithBundle(ctx context.Context, w http.ResponseWriter, reader io.ReadCloser, headers http.Header, repo *gitclone.Repository, upstreamURL, repoName string) error {
 	snapshotCommit := headers.Get("X-Cachew-Snapshot-Commit")
 	mirrorHead := s.getMirrorHead(ctx, repo)
 
@@ -376,7 +381,8 @@ func (s *Strategy) serveSnapshotWithBundle(ctx context.Context, w http.ResponseW
 	}
 
 	w.Header().Set("Content-Type", "application/zstd")
-	_, err := io.Copy(w, reader)
+	n, err := io.Copy(w, reader)
+	s.metrics.recordSnapshotServe(ctx, "cache", repoName, n)
 	return errors.Wrap(err, "stream snapshot")
 }
 
@@ -454,7 +460,7 @@ func (s *Strategy) createBundle(ctx context.Context, repo *gitclone.Repository, 
 // mirror, streams tar+zstd to both the HTTP client and a spool file, then
 // triggers a background cache backfill. Concurrent requests for the same URL
 // become readers that follow the spool, avoiding redundant clone+tar work.
-func (s *Strategy) serveSnapshotWithSpool(w http.ResponseWriter, r *http.Request, repo *gitclone.Repository, upstreamURL string) error {
+func (s *Strategy) serveSnapshotWithSpool(w http.ResponseWriter, r *http.Request, repo *gitclone.Repository, upstreamURL, repoName string) error {
 	ctx := r.Context()
 	logger := logging.FromContext(ctx)
 
@@ -475,13 +481,18 @@ func (s *Strategy) serveSnapshotWithSpool(w http.ResponseWriter, r *http.Request
 				}
 				return errors.Wrap(err, "snapshot spool read")
 			}
+			s.metrics.recordSnapshotServe(ctx, "spool", repoName, spool.Written())
 			return nil
 		}
 		// Writer failed; fall through to generate independently.
 		return s.streamSnapshotDirect(w, r, repo)
 	}
 
-	return s.writeSnapshotSpool(w, r, repo, upstreamURL, entry)
+	err := s.writeSnapshotSpool(w, r, repo, upstreamURL, entry)
+	if err == nil {
+		s.metrics.recordSnapshotServe(ctx, "generated", repoName, entry.spool.Written())
+	}
+	return err
 }
 
 // streamSnapshotDirect streams a snapshot directly to the client without
