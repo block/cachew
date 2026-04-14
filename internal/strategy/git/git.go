@@ -244,16 +244,6 @@ func (s *Strategy) handleRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Proxy LFS Batch API requests directly to GitHub. Cachew doesn't cache
-	// individual LFS objects, but it needs to handle these requests because
-	// git's url.*.insteadOf rewrites the LFS endpoint URL to point at cachew.
-	if strings.Contains(pathValue, "/info/lfs/") {
-		s.metrics.recordRequest(ctx, "lfs-api")
-		logger.DebugContext(ctx, "Proxying LFS API request to upstream", "uri", pathValue)
-		s.forwardToUpstream(w, r, host, pathValue)
-		return
-	}
-
 	service := r.URL.Query().Get("service")
 	isReceivePack := service == "git-receive-pack" || strings.HasSuffix(pathValue, "/git-receive-pack")
 
@@ -264,8 +254,18 @@ func (s *Strategy) handleRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.metrics.recordRequest(ctx, "upload-pack")
-	s.handleGitRequest(w, r, host, pathValue)
+	// Only handle known git smart protocol operations locally (info/refs
+	// discovery and git-upload-pack negotiation). Everything else (LFS API
+	// requests, unknown paths, etc.) is forwarded to upstream so it isn't
+	// mistakenly treated as a clone/fetch.
+	if isGitRequest(pathValue) {
+		s.handleGitRequest(w, r, host, pathValue)
+		return
+	}
+
+	s.metrics.recordRequest(ctx, "forward")
+	logger.DebugContext(ctx, "Forwarding non-git request to upstream", "uri", pathValue)
+	s.forwardToUpstream(w, r, host, pathValue)
 }
 
 func (s *Strategy) handleGitRequest(w http.ResponseWriter, r *http.Request, host, pathValue string) {
@@ -455,6 +455,13 @@ func (s *Strategy) serveWithSpool(w http.ResponseWriter, r *http.Request, host, 
 		return errors.Wrapf(err, "spool read failed mid-stream for key %s", key)
 	}
 	return nil
+}
+
+// isGitRequest reports whether pathValue matches a git smart HTTP protocol
+// endpoint (info/refs discovery or git-upload-pack negotiation).
+func isGitRequest(pathValue string) bool {
+	return strings.HasSuffix(pathValue, "/info/refs") ||
+		strings.HasSuffix(pathValue, "/git-upload-pack")
 }
 
 func ExtractRepoPath(pathValue string) string {
