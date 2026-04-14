@@ -91,6 +91,31 @@ func TestNew(t *testing.T) {
 	}
 }
 
+func TestIsGitRequest(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected bool
+	}{
+		{name: "InfoRefs", input: "org/repo/info/refs", expected: true},
+		{name: "GitUploadPack", input: "org/repo/git-upload-pack", expected: true},
+		{name: "GitReceivePack", input: "org/repo/git-receive-pack", expected: false},
+		{name: "LFSBatchAPI", input: "org/repo.git/info/lfs/objects/batch", expected: false},
+		{name: "LFSObjectDownload", input: "org/repo.git/info/lfs/objects/abc123", expected: false},
+		{name: "PlainRepoPath", input: "org/repo", expected: false},
+		{name: "RandomPath", input: "org/repo/some/random/path", expected: false},
+		{name: "InfoRefsWithGitSuffix", input: "org/repo.git/info/refs", expected: true},
+		{name: "UploadPackWithGitSuffix", input: "org/repo.git/git-upload-pack", expected: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := git.IsGitRequest(tt.input)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
 func TestExtractRepoPath(t *testing.T) {
 	tests := []struct {
 		name     string
