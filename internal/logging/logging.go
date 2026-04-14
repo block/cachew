@@ -4,15 +4,42 @@ package logging
 import (
 	"context"
 	"log/slog"
+	"net/http"
 	"os"
+	"time"
 
 	"github.com/lmittmann/tint"
 )
 
 type Config struct {
-	JSON  bool              `hcl:"json,optional" help:"Enable JSON logging."`
-	Level slog.Level        `hcl:"level" help:"Set the logging level." default:"info"`
-	Remap map[string]string `hcl:"remap,optional" help:"Remap field names from old to new (e.g., msg=message, time=timestamp)."`
+	JSON    bool              `hcl:"json,optional" help:"Enable JSON logging."`
+	Level   slog.Level        `hcl:"level" help:"Set the logging level." default:"info"`
+	Remap   map[string]string `hcl:"remap,optional" help:"Remap field names from old to new (e.g., msg=message, time=timestamp)."`
+	Headers map[string]string `hcl:"headers,optional" help:"Propagate these inbound request headers to the given log attribute."`
+}
+
+// Middleware returns an HTTP middleware that logs incoming requests and attaches
+// any configured headers as log attributes.
+func Middleware(next http.Handler, config Config) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
+		// Propagate attributes tot the handlers.
+		logger := FromContext(ctx).With("method", r.Method, "uri", r.RequestURI)
+		start := time.Now()
+		logger.Debug("Request received")
+		var attrs []any
+		for header, attr := range config.Headers {
+			if h := r.Header.Get(header); h != "" {
+				attrs = append(attrs, slog.String(attr, h))
+			}
+		}
+		if len(attrs) > 0 {
+			logger = logger.With(attrs...)
+			r = r.WithContext(ContextWithLogger(ctx, logger))
+		}
+		next.ServeHTTP(w, r)
+		logger.Debug("Request complete", "elapsed", time.Since(start))
+	})
 }
 
 var levelVar = &slog.LevelVar{} //nolint:gochecknoglobals

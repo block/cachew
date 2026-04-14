@@ -23,7 +23,6 @@ import (
 	"github.com/block/cachew/internal/config"
 	"github.com/block/cachew/internal/gitclone"
 	"github.com/block/cachew/internal/githubapp"
-	"github.com/block/cachew/internal/httputil"
 	"github.com/block/cachew/internal/jobscheduler"
 	"github.com/block/cachew/internal/logging"
 	"github.com/block/cachew/internal/metadatadb"
@@ -108,7 +107,14 @@ func main() {
 
 	logger.InfoContext(ctx, "Starting cachewd", "bind", globalConfig.Bind)
 
-	server, err := newServer(ctx, mux, globalConfig.Bind, globalConfig.MetricsConfig, globalConfig.OPAConfig)
+	server, err := newServer(
+		ctx,
+		mux,
+		globalConfig.Bind,
+		globalConfig.MetricsConfig,
+		globalConfig.OPAConfig,
+		globalConfig.LoggingConfig,
+	)
 	fatalIfError(ctx, logger, err, "Failed to create server")
 
 	err = server.ListenAndServe()
@@ -220,7 +226,14 @@ func extractPathPrefix(path string) string {
 	return prefix
 }
 
-func newServer(ctx context.Context, muxHandler http.Handler, bind string, metricsConfig metrics.Config, opaConfig opa.Config) (*http.Server, error) {
+func newServer(
+	ctx context.Context,
+	muxHandler http.Handler,
+	bind string,
+	metricsConfig metrics.Config,
+	opaConfig opa.Config,
+	logConfig logging.Config,
+) (*http.Server, error) {
 	var handler http.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		labeler, _ := otelhttp.LabelerFromContext(r.Context())
 		labeler.Add(attribute.String("cachew.http.path.prefix", extractPathPrefix(r.URL.Path)))
@@ -238,7 +251,7 @@ func newServer(ctx context.Context, muxHandler http.Handler, bind string, metric
 		otelhttp.WithTracerProvider(otel.GetTracerProvider()),
 	)(handler)
 
-	handler = httputil.LoggingMiddleware(handler)
+	handler = logging.Middleware(handler, logConfig)
 
 	logger := logging.FromContext(ctx)
 	return &http.Server{
