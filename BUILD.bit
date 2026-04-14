@@ -1,5 +1,12 @@
 # Enable verbose mode
-param verbose : bool = false
+param verbose = false
+param version = exec('git describe --tags --always --dirty 2>/dev/null || echo "dev"')
+# Docker Registry to push production image to.
+param registry : string #= "127.0.0.1:5000"
+let git_commit = exec('git rev-parse HEAD')
+let arch = ["amd64", "arm64"]
+let command = ["cachew", "cachewd"]
+
 
 # Build client and server binaries
 cachew = go.exe {
@@ -12,23 +19,6 @@ cachewd = go.exe {
   output = "dist/cachewd"
 }
 
-# Cross-compile Linux binaries for Docker
-cachew-linux = go.exe {
-  package = "./cmd/cachew"
-  output = "dist/cachew-linux-arm64"
-  cgo = false
-  goos = "linux"
-  goarch = "amd64"
-}
-
-cachewd-linux = go.exe {
-  package = "./cmd/cachewd"
-  output = "dist/cachewd-linux-arm64"
-  cgo = false
-  goos = "linux"
-  goarch = "arm64"
-}
-
 # Tests
 test = go.test {
   package = "./..."
@@ -39,12 +29,29 @@ test = go.test {
 # Lint
 lint = go.lint {}
 
+cross-compile[arch, command] = go.exe {
+  package = "./cmd/${command}"
+  output = "dist/${command}-linux-${arch}"
+  cgo = false
+  goos = "linux"
+  goarch = arch
+}
+
 # Docker image
 image = docker.image {
   tag = "cachew:latest"
   context = "."
   dockerfile = "docker/Dockerfile"
-  depends_on = [cachew-linux, cachewd-linux]
+  depends_on = [cross-compile]
+}
+
+# Build production image.
+multi-arch-image = docker.image {
+  tag = "${registry}/cachew:latest"
+  context = "."
+  dockerfile = "docker/Dockerfile"
+  depends_on = [cross-compile]
+  platform = arch | prefix("linux/")
 }
 
 container = docker.container {
@@ -54,11 +61,11 @@ container = docker.container {
   healthcheck = "curl -sf http://localhost:8080/_readiness"
 }
 
-# Build binaries
-target build = [cachew, cachewd]
-
-# Run tests and linting
-target test = [test, lint]
-
 # Build and run Docker container
 target docker = [container]
+
+# Build and push production image
+target push = [multi-arch-image]
+
+# Build default targets
+target default = [cachew, cachewd, test, lint]
