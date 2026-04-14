@@ -10,9 +10,10 @@ import (
 )
 
 type Config struct {
-	JSON  bool              `hcl:"json,optional" help:"Enable JSON logging."`
-	Level slog.Level        `hcl:"level" help:"Set the logging level." default:"info"`
-	Remap map[string]string `hcl:"remap,optional" help:"Remap field names from old to new (e.g., msg=message, time=timestamp)."`
+	JSON        bool              `hcl:"json,optional" help:"Enable JSON logging."`
+	Level       slog.Level        `hcl:"level" help:"Set the logging level." default:"info"`
+	Remap       map[string]string `hcl:"remap,optional" help:"Remap field names from old to new (e.g., msg=message, time=timestamp)."`
+	HeaderAttrs map[string]string `hcl:"header-attrs,optional" help:"Map HTTP header names to log attribute names (e.g., X-Request-Id=request_id)."`
 }
 
 var levelVar = &slog.LevelVar{} //nolint:gochecknoglobals
