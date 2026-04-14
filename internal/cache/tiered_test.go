@@ -1,6 +1,7 @@
 package cache_test
 
 import (
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -12,57 +13,178 @@ import (
 	"github.com/block/cachew/internal/cache"
 	"github.com/block/cachew/internal/cache/cachetest"
 	"github.com/block/cachew/internal/logging"
+	"github.com/block/cachew/internal/s3client"
+	"github.com/block/cachew/internal/s3client/s3clienttest"
 )
 
-func TestTieredCache(t *testing.T) {
-	cachetest.Suite(t, func(t *testing.T) cache.Cache {
-		_, ctx := logging.Configure(t.Context(), logging.Config{})
-		memory, err := cache.NewMemory(ctx, cache.MemoryConfig{LimitMB: 1024, MaxTTL: time.Hour})
-		assert.NoError(t, err)
-		disk, err := cache.NewDisk(ctx, cache.DiskConfig{Root: t.TempDir(), LimitMB: 1024, MaxTTL: time.Hour})
-		assert.NoError(t, err)
-		return cache.MaybeNewTiered(ctx, []cache.Cache{memory, disk})
-	})
+type cacheFactory struct {
+	name string
+	new  func(t *testing.T) cache.Cache
 }
 
-func TestTieredBackfill(t *testing.T) {
-	_, ctx := logging.Configure(t.Context(), logging.Config{})
+func tieredPermutations(t *testing.T) []struct {
+	name    string
+	lower   cacheFactory
+	upper   cacheFactory
+	cleanup func()
+} {
+	t.Helper()
 
-	memory, err := cache.NewMemory(ctx, cache.MemoryConfig{LimitMB: 1024, MaxTTL: time.Hour})
-	assert.NoError(t, err)
-	disk, err := cache.NewDisk(ctx, cache.DiskConfig{Root: t.TempDir(), LimitMB: 1024, MaxTTL: time.Hour})
-	assert.NoError(t, err)
-	tiered := cache.MaybeNewTiered(ctx, []cache.Cache{memory, disk})
+	bucket := s3clienttest.Start(t)
 
-	key := cache.NewKey("backfill-test")
-	content := []byte("hello backfill")
+	newMemory := cacheFactory{"Memory", func(t *testing.T) cache.Cache {
+		t.Helper()
+		_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelDebug})
+		c, err := cache.NewMemory(ctx, cache.MemoryConfig{LimitMB: 1024, MaxTTL: time.Hour})
+		assert.NoError(t, err)
+		return c
+	}}
 
-	// Write only to disk (tier 1), simulating S3 having data but memory/disk-L1 not.
-	w, err := disk.Create(ctx, key, nil, time.Hour)
-	assert.NoError(t, err)
-	_, err = w.Write(content)
-	assert.NoError(t, err)
-	assert.NoError(t, w.Close())
+	newDisk := cacheFactory{"Disk", func(t *testing.T) cache.Cache {
+		t.Helper()
+		_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelDebug})
+		c, err := cache.NewDisk(ctx, cache.DiskConfig{Root: t.TempDir(), LimitMB: 1024, MaxTTL: time.Hour})
+		assert.NoError(t, err)
+		return c
+	}}
 
-	// Verify memory (tier 0) does not have it yet.
-	_, _, err = memory.Open(ctx, key)
-	assert.IsError(t, err, os.ErrNotExist)
+	newS3 := cacheFactory{"S3", func(t *testing.T) cache.Cache {
+		t.Helper()
+		s3clienttest.CleanBucket(t, bucket)
+		_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelDebug})
+		clientProvider := s3client.NewClientProvider(ctx, s3client.Config{
+			Endpoint: s3clienttest.Addr,
+			UseSSL:   false,
+		})
+		c, err := cache.NewS3(ctx, cache.S3Config{
+			Bucket:           bucket,
+			MaxTTL:           100 * time.Millisecond,
+			UploadPartSizeMB: 16,
+		}, clientProvider)
+		assert.NoError(t, err)
+		return c
+	}}
 
-	// Open through tiered — should hit disk and backfill memory.
-	r, _, err := tiered.Open(ctx, key)
-	assert.NoError(t, err)
-	data, err := io.ReadAll(r)
-	assert.NoError(t, err)
-	assert.NoError(t, r.Close())
-	assert.Equal(t, content, data)
+	backends := []cacheFactory{newMemory, newDisk, newS3}
+	var perms []struct {
+		name    string
+		lower   cacheFactory
+		upper   cacheFactory
+		cleanup func()
+	}
+	for _, lower := range backends {
+		for _, upper := range backends {
+			if lower.name == upper.name {
+				continue
+			}
+			perms = append(perms, struct {
+				name    string
+				lower   cacheFactory
+				upper   cacheFactory
+				cleanup func()
+			}{
+				name:  fmt.Sprintf("%s+%s", lower.name, upper.name),
+				lower: lower,
+				upper: upper,
+			})
+		}
+	}
+	return perms
+}
 
-	// Now memory (tier 0) should have the entry.
-	r2, _, err := memory.Open(ctx, key)
-	assert.NoError(t, err)
-	data2, err := io.ReadAll(r2)
-	assert.NoError(t, err)
-	assert.NoError(t, r2.Close())
-	assert.Equal(t, content, data2)
+func TestTieredCachePermutations(t *testing.T) {
+	for _, perm := range tieredPermutations(t) {
+		t.Run(perm.name, func(t *testing.T) {
+			cachetest.Suite(t, func(t *testing.T) cache.Cache {
+				_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelDebug})
+				lower := perm.lower.new(t)
+				upper := perm.upper.new(t)
+				return cache.MaybeNewTiered(ctx, []cache.Cache{lower, upper})
+			})
+		})
+	}
+}
+
+func TestTieredBackfillPermutations(t *testing.T) {
+	for _, perm := range tieredPermutations(t) {
+		t.Run(perm.name, func(t *testing.T) {
+			_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelDebug})
+			lower := perm.lower.new(t)
+			upper := perm.upper.new(t)
+			tiered := cache.MaybeNewTiered(ctx, []cache.Cache{lower, upper})
+			defer tiered.Close()
+
+			key := cache.NewKey("backfill-test")
+			content := []byte("hello backfill")
+
+			// Write only to upper tier, simulating a lower-tier miss.
+			w, err := upper.Create(ctx, key, nil, time.Minute)
+			assert.NoError(t, err)
+			_, err = w.Write(content)
+			assert.NoError(t, err)
+			assert.NoError(t, w.Close())
+
+			// Verify lower tier does not have it.
+			_, _, err = lower.Open(ctx, key)
+			assert.IsError(t, err, os.ErrNotExist)
+
+			// Open through tiered — should hit upper and backfill lower.
+			r, _, err := tiered.Open(ctx, key)
+			assert.NoError(t, err)
+			data, err := io.ReadAll(r)
+			assert.NoError(t, err)
+			assert.NoError(t, r.Close())
+			assert.Equal(t, content, data)
+
+			// Now lower tier should have the entry via backfill.
+			r2, _, err := lower.Open(ctx, key)
+			assert.NoError(t, err)
+			data2, err := io.ReadAll(r2)
+			assert.NoError(t, err)
+			assert.NoError(t, r2.Close())
+			assert.Equal(t, content, data2)
+		})
+	}
+}
+
+func TestTieredDeletePermutations(t *testing.T) {
+	for _, perm := range tieredPermutations(t) {
+		t.Run(perm.name, func(t *testing.T) {
+			_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelDebug})
+			lower := perm.lower.new(t)
+			upper := perm.upper.new(t)
+			tiered := cache.MaybeNewTiered(ctx, []cache.Cache{lower, upper})
+			defer tiered.Close()
+
+			key := cache.NewKey("delete-test")
+			content := []byte("delete me")
+
+			// Write through tiered so both tiers have the entry.
+			w, err := tiered.Create(ctx, key, nil, time.Minute)
+			assert.NoError(t, err)
+			_, err = w.Write(content)
+			assert.NoError(t, err)
+			assert.NoError(t, w.Close())
+
+			// Verify both tiers have it.
+			r, _, err := lower.Open(ctx, key)
+			assert.NoError(t, err)
+			assert.NoError(t, r.Close())
+			r, _, err = upper.Open(ctx, key)
+			assert.NoError(t, err)
+			assert.NoError(t, r.Close())
+
+			// Delete through tiered.
+			err = tiered.Delete(ctx, key)
+			assert.NoError(t, err)
+
+			// Verify both tiers no longer have it.
+			_, _, err = lower.Open(ctx, key)
+			assert.IsError(t, err, os.ErrNotExist)
+			_, _, err = upper.Open(ctx, key)
+			assert.IsError(t, err, os.ErrNotExist)
+		})
+	}
 }
 
 func TestTieredCacheSoak(t *testing.T) {
