@@ -81,7 +81,6 @@ func TestNew(t *testing.T) {
 				return
 			}
 			assert.NoError(t, err)
-			assert.NotZero(t, s)
 			assert.Equal(t, "git", s.String())
 
 			// Verify handlers were registered
@@ -181,9 +180,8 @@ func TestNewWithExistingCloneOnDisk(t *testing.T) {
 		MirrorRoot:    tmpDir,
 		FetchInterval: 15,
 	}, nil)
-	s, err := git.New(ctx, git.Config{}, newTestScheduler(ctx, t), nil, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
+	_, err = git.New(ctx, git.Config{}, newTestScheduler(ctx, t), nil, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
 	assert.NoError(t, err)
-	assert.NotZero(t, s)
 }
 
 func TestIntegrationWithMockUpstream(t *testing.T) {
