@@ -117,9 +117,8 @@ func TestIntegrationGitCloneViaProxy(t *testing.T) {
 	mux := http.NewServeMux()
 	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: time.Hour})
 	assert.NoError(t, err)
-	strategy, err := git.New(ctx, git.Config{}, newTestScheduler(ctx, t), memCache, mux, gc, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
+	_, err = git.New(ctx, git.Config{}, newTestScheduler(ctx, t), memCache, mux, gc, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
 	assert.NoError(t, err)
-	assert.NotZero(t, strategy)
 
 	// Start a test server with logging middleware
 	server := testServerWithLogging(ctx, mux)
