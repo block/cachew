@@ -59,7 +59,7 @@ func NewHermit(ctx context.Context, config HermitConfig, _ jobscheduler.Schedule
 	if config.GitHubBaseURL != "" {
 		isInternalRedirect := config.GitHubBaseURL == defaultGitHubBaseURL
 		s.redirectHandler = s.createRedirectHandler(isInternalRedirect, c)
-		mux.Handle("GET /hermit/github.com/{path...}", s.redirectHandler)
+		mux.Handle("GET /hermit/github.com/{org}/{repo}/releases/download/{path...}", s.redirectHandler)
 		logger.InfoContext(ctx, "Hermit strategy initialized", "github_base_url", config.GitHubBaseURL,
 			"internal_redirect", isInternalRedirect)
 	} else {
@@ -99,12 +99,16 @@ func (s *Hermit) createRedirectHandler(isInternalRedirect bool, c cache.Cache) h
 		})
 }
 
+func (s *Hermit) githubReleasePath(r *http.Request) string {
+	return r.PathValue("org") + "/" + r.PathValue("repo") + "/releases/download/" + r.PathValue("path")
+}
+
 func (s *Hermit) buildGitHubURL(r *http.Request) string {
-	return buildURL("https", "github.com", r.PathValue("path"), r.URL.RawQuery)
+	return buildURL("https", "github.com", s.githubReleasePath(r), r.URL.RawQuery)
 }
 
 func (s *Hermit) buildRedirectRequest(r *http.Request) (*http.Request, error) {
-	path := ensureLeadingSlash(r.PathValue("path"))
+	path := ensureLeadingSlash(s.githubReleasePath(r))
 	redirectURL := s.config.GitHubBaseURL + path
 	if r.URL.RawQuery != "" {
 		redirectURL += "?" + r.URL.RawQuery
