@@ -199,7 +199,6 @@ func (s *Strategy) warmExistingRepos(ctx context.Context) error {
 
 		if s.config.SnapshotInterval > 0 {
 			s.scheduleSnapshotJobs(repo)
-			s.scheduleLFSSnapshotJobs(repo)
 		}
 		if s.config.RepackInterval > 0 {
 			s.scheduleRepackJobs(repo)
@@ -545,7 +544,6 @@ func (s *Strategy) startClone(ctx context.Context, repo *gitclone.Repository) er
 
 			if s.config.SnapshotInterval > 0 {
 				s.scheduleSnapshotJobs(repo)
-				s.scheduleLFSSnapshotJobs(repo)
 			}
 			if s.config.RepackInterval > 0 {
 				s.scheduleRepackJobs(repo)
@@ -576,7 +574,6 @@ func (s *Strategy) startClone(ctx context.Context, repo *gitclone.Repository) er
 
 	if s.config.SnapshotInterval > 0 {
 		s.scheduleSnapshotJobs(repo)
-		s.scheduleLFSSnapshotJobs(repo)
 	}
 	if s.config.RepackInterval > 0 {
 		s.scheduleRepackJobs(repo)
