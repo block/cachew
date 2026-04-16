@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"slices"
+	"strings"
 
 	"github.com/alecthomas/errors"
 
@@ -57,28 +58,37 @@ func NewGitHubReleases(ctx context.Context, config GitHubReleasesConfig, cache c
 		tokenManager: tokenManager,
 	}
 	// eg. https://github.com/alecthomas/chroma/releases/download/v2.21.1/chroma-2.21.1-darwin-amd64.tar.gz
+	// eg. https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize/v5.8.1/kustomize_v5.8.1_linux_amd64.tar.gz
 	h := handler.New(s.client, cache).
 		CacheKey(func(r *http.Request) string {
 			org := r.PathValue("org")
 			repo := r.PathValue("repo")
-			release := r.PathValue("release")
-			file := r.PathValue("file")
-			return fmt.Sprintf("https://github.com/%s/%s/releases/download/%s/%s", org, repo, release, file)
+			rest := r.PathValue("rest")
+			return fmt.Sprintf("https://github.com/%s/%s/releases/download/%s", org, repo, rest)
 		}).
 		Transform(func(r *http.Request) (*http.Request, error) {
 			org := r.PathValue("org")
 			repo := r.PathValue("repo")
-			release := r.PathValue("release")
-			file := r.PathValue("file")
+			release, file := splitReleasePath(r.PathValue("rest"))
 			return s.downloadRelease(r.Context(), org, repo, release, file)
 		})
-	mux.Handle("GET /github.com/{org}/{repo}/releases/download/{release}/{file}", h)
+	mux.Handle("GET /github.com/{org}/{repo}/releases/download/{rest...}", h)
 	return s, nil
 }
 
 var _ Strategy = (*GitHubReleases)(nil)
 
 func (g *GitHubReleases) String() string { return "github-releases" }
+
+// splitReleasePath splits "release-tag/file.tar.gz" into the release tag and filename.
+// Supports release tags with slashes (e.g. "kustomize/v5.8.1/file.tar.gz").
+func splitReleasePath(rest string) (release, file string) {
+	i := strings.LastIndex(rest, "/")
+	if i < 0 {
+		return "", rest
+	}
+	return rest[:i], rest[i+1:]
+}
 
 // newGitHubRequest creates a new HTTP request with GitHub API headers and authentication.
 func (g *GitHubReleases) newGitHubRequest(ctx context.Context, url, accept, org string) (*http.Request, error) {
