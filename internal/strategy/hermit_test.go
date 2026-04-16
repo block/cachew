@@ -184,6 +184,33 @@ func TestHermitDifferentSources(t *testing.T) {
 	}
 }
 
+func TestHermitGitHubArchive(t *testing.T) {
+	httpTransportMutexHermit.Lock()
+	defer httpTransportMutexHermit.Unlock()
+
+	callCount := 0
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		callCount++
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("archive-content"))
+	}))
+	defer backend.Close()
+
+	originalTransport := http.DefaultTransport
+	defer func() { http.DefaultTransport = originalTransport }()                                   //nolint:reassign
+	http.DefaultTransport = &mockTransport{backend: backend, originalTransport: originalTransport} //nolint:reassign
+
+	mux, ctx, _ := setupHermitTest(t)
+
+	req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/hermit/github.com/npryce/adr-tools/archive/refs/tags/3.0.0.tar.gz", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "archive-content", w.Body.String())
+	assert.Equal(t, 1, callCount)
+}
+
 func TestHermitCacheKeyGeneration(t *testing.T) {
 	tests := []struct {
 		name    string
