@@ -172,6 +172,9 @@ func (s *Strategy) scheduleSnapshotJobs(repo *gitclone.Repository) {
 	s.scheduler.SubmitPeriodicJob(repo.UpstreamURL(), "snapshot-periodic", s.config.SnapshotInterval, func(ctx context.Context) error {
 		return s.generateAndUploadSnapshot(ctx, repo)
 	})
+	s.scheduler.SubmitPeriodicJob(repo.UpstreamURL(), "lfs-snapshot-periodic", s.config.SnapshotInterval, func(ctx context.Context) error {
+		return s.generateAndUploadLFSSnapshot(ctx, repo)
+	})
 	mirrorInterval := s.config.MirrorSnapshotInterval
 	if mirrorInterval == 0 {
 		mirrorInterval = s.config.SnapshotInterval
@@ -762,12 +765,6 @@ func (s *Strategy) generateAndUploadLFSSnapshot(ctx context.Context, repo *gitcl
 	s.metrics.recordOperation(ctx, "lfs-snapshot", "success", time.Since(start))
 	logger.InfoContext(ctx, "LFS snapshot generation completed", "upstream", upstream)
 	return nil
-}
-
-func (s *Strategy) scheduleLFSSnapshotJobs(repo *gitclone.Repository) {
-	s.scheduler.SubmitPeriodicJob(repo.UpstreamURL(), "lfs-snapshot-periodic", s.config.SnapshotInterval, func(ctx context.Context) error {
-		return s.generateAndUploadLFSSnapshot(ctx, repo)
-	})
 }
 
 func (s *Strategy) handleLFSSnapshotRequest(w http.ResponseWriter, r *http.Request, host, pathValue string) {
