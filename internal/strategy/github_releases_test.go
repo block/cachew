@@ -33,9 +33,9 @@ type mockGitHubServer struct {
 func newMockGitHubServer() *mockGitHubServer {
 	m := &mockGitHubServer{}
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /repos/{org}/{repo}/releases/tags/{tag}", m.handleAPIRequest)
+	mux.HandleFunc("GET /repos/{org}/{repo}/releases/tags/{tag...}", m.handleAPIRequest)
 	mux.HandleFunc("GET /repos/{org}/{repo}/releases/assets/{assetID}", m.handleAssetDownload)
-	mux.HandleFunc("GET /{org}/{repo}/releases/download/{release}/{file}", m.handlePublicDownload)
+	mux.HandleFunc("GET /{org}/{repo}/releases/download/{rest...}", m.handlePublicDownload)
 	m.server = httptest.NewServer(mux)
 	return m
 }
@@ -153,6 +153,19 @@ func TestGitHubReleasesPublicRepo(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w2.Code)
 	assert.Equal(t, []byte("fake-binary-content"), w2.Body.Bytes())
 	assert.Equal(t, 1, mock.publicCallCount, "second request should be served from cache")
+}
+
+func TestGitHubReleasesSlashedReleaseTag(t *testing.T) {
+	mock, mux, ctx := setupTest(t, strategy.GitHubReleasesConfig{})
+
+	req := httptest.NewRequest(http.MethodGet, "/github.com/kubernetes-sigs/kustomize/releases/download/kustomize/v5.8.1/kustomize_v5.8.1_linux_amd64.tar.gz", nil)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, []byte("fake-binary-content"), w.Body.Bytes())
+	assert.Equal(t, 1, mock.publicCallCount)
 }
 
 func TestGitHubReleasesPrivateRepo(t *testing.T) {
