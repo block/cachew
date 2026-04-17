@@ -3,57 +3,33 @@ package cache
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"io"
 	"net/http"
 	"os"
-	"regexp"
 	"time"
 
 	"github.com/alecthomas/errors"
 	"github.com/alecthomas/hcl/v2"
+
+	"github.com/block/cachew/client"
 )
 
-var namespaceRe = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]*$`)
-
 // Namespace identifies a logical partition within a cache or metadata store.
-// Valid names start with an alphanumeric character and contain only
-// alphanumerics, hyphens, and underscores.
-type Namespace string
+type Namespace = client.Namespace
 
 // ValidateNamespace checks that a namespace name is valid.
-func ValidateNamespace(name string) error {
-	if !namespaceRe.MatchString(name) {
-		return errors.Errorf("invalid namespace %q: must match %s", name, namespaceRe)
-	}
-	return nil
-}
+func ValidateNamespace(name string) error { return errors.WithStack(client.ValidateNamespace(name)) }
 
 // ParseNamespace validates and returns a Namespace from a plain string.
 func ParseNamespace(name string) (Namespace, error) {
-	if err := ValidateNamespace(name); err != nil {
-		return "", err
-	}
-	return Namespace(name), nil
-}
-
-func (n *Namespace) String() string { return string(*n) }
-
-// UnmarshalText implements encoding.TextUnmarshaler with validation.
-func (n *Namespace) UnmarshalText(text []byte) error {
-	if err := ValidateNamespace(string(text)); err != nil {
-		return err
-	}
-	*n = Namespace(text)
-	return nil
+	return errors.WithStack2(client.ParseNamespace(name))
 }
 
 // ErrNotFound is returned when a cache backend is not found.
 var ErrNotFound = errors.New("cache backend not found")
 
 // ErrStatsUnavailable is returned when a cache backend cannot provide statistics.
-var ErrStatsUnavailable = errors.New("stats unavailable")
+var ErrStatsUnavailable = client.ErrStatsUnavailable
 
 type registryEntry struct {
 	schema  *hcl.Block
@@ -130,45 +106,16 @@ func (r *Registry) Create(ctx context.Context, name string, config *hcl.Block, v
 }
 
 // Key represents a unique identifier for a cached object.
-type Key [32]byte
+type Key = client.Key
 
 // ParseKey from its hex-encoded string form.
-func ParseKey(key string) (Key, error) {
-	var k Key
-	return k, k.UnmarshalText([]byte(key))
-}
+func ParseKey(key string) (Key, error) { return errors.WithStack2(client.ParseKey(key)) }
 
-func NewKey(url string) Key { return Key(sha256.Sum256([]byte(url))) }
-
-func (k *Key) String() string { return hex.EncodeToString(k[:]) }
-
-func (k *Key) UnmarshalText(text []byte) error {
-	// Try to decode as SHA256 hex encoded string
-	if len(text) == 64 {
-		bytes, err := hex.DecodeString(string(text))
-		if err == nil && len(bytes) == len(*k) {
-			copy(k[:], bytes)
-			return nil
-		}
-	}
-	// If not valid hex, treat as string and SHA256 it
-	*k = NewKey(string(text))
-	return nil
-}
-
-func (k *Key) MarshalText() ([]byte, error) {
-	return []byte(k.String()), nil
-}
+// NewKey returns the SHA256 of s.
+func NewKey(s string) Key { return client.NewKey(s) }
 
 // Stats contains health and usage statistics for a cache.
-type Stats struct {
-	// Objects is the number of objects currently in the cache.
-	Objects int64 `json:"objects"`
-	// Size is the total size of all objects in the cache in bytes.
-	Size int64 `json:"size"`
-	// Capacity is the maximum size of the cache in bytes (0 if unlimited).
-	Capacity int64 `json:"capacity"`
-}
+type Stats = client.Stats
 
 // A Cache knows how to retrieve, create and delete objects from a cache.
 //

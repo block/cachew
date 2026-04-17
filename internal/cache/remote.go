@@ -2,310 +2,65 @@ package cache
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
 	"io"
-	"maps"
 	"net/http"
-	"os"
 	"time"
 
 	"github.com/alecthomas/errors"
 
-	"github.com/block/cachew/internal/httputil"
+	"github.com/block/cachew/client"
 )
 
-const defaultNamespace Namespace = "default"
+// HeaderFunc returns headers to attach to each outgoing request.
+type HeaderFunc = client.HeaderFunc
 
-// Remote implements Cache as a client for the remote cache server.
+// NewHTTPClient creates an *http.Client that attaches headerFunc headers
+// to every outgoing request.
+func NewHTTPClient(headerFunc HeaderFunc) *http.Client { return client.NewHTTPClient(headerFunc) }
+
+// Remote implements Cache as a client for the remote cache server, wrapping
+// a *client.Client.
 type Remote struct {
-	baseURL   string
-	client    *http.Client
-	namespace Namespace
+	c *client.Client
 }
 
 var _ Cache = (*Remote)(nil)
 
-// HeaderFunc returns headers to attach to each outgoing request.
-type HeaderFunc func() http.Header
-
-// NewHTTPClient creates an *http.Client that attaches headerFunc headers
-// to every outgoing request. Useful for callers that need to talk to
-// non-API endpoints (e.g. /git/) with the same auth as the cache client.
-func NewHTTPClient(headerFunc HeaderFunc) *http.Client {
-	transport := http.DefaultTransport.(*http.Transport).Clone() //nolint:errcheck
-	transport.MaxIdleConns = 100
-	transport.MaxIdleConnsPerHost = 100
-
-	var rt http.RoundTripper = transport
-	if headerFunc != nil {
-		rt = &headerTransport{base: transport, headerFunc: headerFunc}
-	}
-	return &http.Client{Transport: rt}
-}
-
 // NewRemote creates a new remote cache client. If headerFunc is non-nil,
 // its returned headers are added to every outgoing request.
 func NewRemote(baseURL string, headerFunc HeaderFunc) *Remote {
-	return &Remote{
-		baseURL: baseURL + "/api/v1",
-		client:  NewHTTPClient(headerFunc),
-	}
+	return &Remote{c: client.New(baseURL, headerFunc)}
 }
 
-type headerTransport struct {
-	base       http.RoundTripper
-	headerFunc HeaderFunc
+func (r *Remote) String() string { return r.c.String() }
+
+func (r *Remote) Namespace(namespace Namespace) Cache {
+	return &Remote{c: r.c.Namespace(namespace)}
 }
 
-func (t *headerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	for key, values := range t.headerFunc() {
-		for _, value := range values {
-			req.Header.Add(key, value)
-		}
-	}
-	return t.base.RoundTrip(req) //nolint:wrapcheck
+func (r *Remote) Open(ctx context.Context, key Key) (io.ReadCloser, http.Header, error) {
+	rc, h, err := r.c.Open(ctx, key)
+	return rc, h, errors.WithStack(err)
 }
 
-func (c *Remote) String() string { return "remote:" + c.baseURL }
-
-// Open retrieves an object from the remote.
-func (c *Remote) Open(ctx context.Context, key Key) (io.ReadCloser, http.Header, error) {
-	namespace := c.namespace
-	if namespace == "" {
-		namespace = defaultNamespace
-	}
-	url := fmt.Sprintf("%s/object/%s/%s", c.baseURL, namespace, key.String())
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return nil, nil, errors.Wrap(err, "failed to create request")
-	}
-
-	resp, err := c.client.Do(req)
-	if err != nil {
-		return nil, nil, errors.Wrap(err, "failed to execute request")
-	}
-
-	if resp.StatusCode == http.StatusNotFound {
-		_, _ = io.Copy(io.Discard, resp.Body) //nolint:errcheck,gosec
-		return nil, nil, errors.Join(os.ErrNotExist, resp.Body.Close())
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		_, _ = io.Copy(io.Discard, resp.Body) //nolint:errcheck,gosec
-		return nil, nil, errors.Join(errors.Errorf("unexpected status code: %d", resp.StatusCode), resp.Body.Close())
-	}
-
-	// Filter out HTTP transport headers
-	headers := httputil.FilterHeaders(resp.Header, httputil.TransportHeaders...)
-
-	return resp.Body, headers, nil
+func (r *Remote) Stat(ctx context.Context, key Key) (http.Header, error) {
+	return errors.WithStack2(r.c.Stat(ctx, key))
 }
 
-// Stat retrieves headers for an object from the remote.
-func (c *Remote) Stat(ctx context.Context, key Key) (http.Header, error) {
-	namespace := c.namespace
-	if namespace == "" {
-		namespace = defaultNamespace
-	}
-	url := fmt.Sprintf("%s/object/%s/%s", c.baseURL, namespace, key.String())
-	req, err := http.NewRequestWithContext(ctx, http.MethodHead, url, nil)
-	if err != nil {
-		return nil, errors.Wrap(err, "failed to create request")
-	}
-
-	resp, err := c.client.Do(req)
-	if err != nil {
-		return nil, errors.Wrap(err, "failed to execute request")
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == http.StatusNotFound {
-		return nil, os.ErrNotExist
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, errors.Errorf("unexpected status code: %d", resp.StatusCode)
-	}
-
-	// Filter out HTTP transport headers
-	headers := httputil.FilterHeaders(resp.Header, httputil.TransportHeaders...)
-
-	return headers, nil
+func (r *Remote) Create(ctx context.Context, key Key, headers http.Header, ttl time.Duration) (io.WriteCloser, error) {
+	return errors.WithStack2(r.c.Create(ctx, key, headers, ttl))
 }
 
-// Create stores a new object in the remote.
-func (c *Remote) Create(ctx context.Context, key Key, headers http.Header, ttl time.Duration) (io.WriteCloser, error) {
-	pr, pw := io.Pipe()
-
-	namespace := c.namespace
-	if namespace == "" {
-		namespace = defaultNamespace
-	}
-	url := fmt.Sprintf("%s/object/%s/%s", c.baseURL, namespace, key.String())
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, pr)
-	if err != nil {
-		return nil, errors.Join(errors.Wrap(err, "failed to create request"), pr.Close(), pw.Close())
-	}
-
-	maps.Copy(req.Header, headers)
-
-	if ttl > 0 {
-		req.Header.Set("Time-To-Live", ttl.String())
-	}
-
-	wc := &writeCloser{
-		pw:   pw,
-		done: make(chan error, 1),
-		ctx:  ctx,
-	}
-
-	go func() {
-		resp, err := c.client.Do(req)
-		if err != nil {
-			wc.done <- errors.Wrap(err, "failed to execute request")
-			return
-		}
-		_, _ = io.Copy(io.Discard, resp.Body) //nolint:errcheck,gosec
-		_ = resp.Body.Close()                 //nolint:gosec
-
-		if resp.StatusCode != http.StatusOK {
-			wc.done <- errors.Errorf("unexpected status code: %d", resp.StatusCode)
-			return
-		}
-
-		wc.done <- nil
-	}()
-
-	return wc, nil
+func (r *Remote) Delete(ctx context.Context, key Key) error {
+	return errors.WithStack(r.c.Delete(ctx, key))
 }
 
-// Delete removes an object from the remote.
-func (c *Remote) Delete(ctx context.Context, key Key) error {
-	namespace := c.namespace
-	if namespace == "" {
-		namespace = defaultNamespace
-	}
-	url := fmt.Sprintf("%s/object/%s/%s", c.baseURL, namespace, key.String())
-	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, url, nil)
-	if err != nil {
-		return errors.Wrap(err, "failed to create request")
-	}
-
-	resp, err := c.client.Do(req)
-	if err != nil {
-		return errors.Wrap(err, "failed to execute request")
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == http.StatusNotFound {
-		return os.ErrNotExist
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return errors.Errorf("unexpected status code: %d", resp.StatusCode)
-	}
-
-	return nil
+func (r *Remote) Stats(ctx context.Context) (Stats, error) {
+	return errors.WithStack2(r.c.Stats(ctx))
 }
 
-// Close closes the client and releases resources.
-func (c *Remote) Close() error {
-	c.client.CloseIdleConnections()
-	return nil
+func (r *Remote) ListNamespaces(ctx context.Context) ([]string, error) {
+	return errors.WithStack2(r.c.ListNamespaces(ctx))
 }
 
-// Stats retrieves cache statistics from the remote server.
-func (c *Remote) Stats(ctx context.Context) (Stats, error) {
-	url := c.baseURL + "/stats"
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return Stats{}, errors.Wrap(err, "failed to create request")
-	}
-
-	resp, err := c.client.Do(req)
-	if err != nil {
-		return Stats{}, errors.Wrap(err, "failed to execute request")
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == http.StatusNotImplemented {
-		return Stats{}, ErrStatsUnavailable
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return Stats{}, errors.Errorf("unexpected status code: %d", resp.StatusCode)
-	}
-
-	var stats Stats
-	if err := json.NewDecoder(resp.Body).Decode(&stats); err != nil {
-		return Stats{}, errors.Wrap(err, "failed to decode stats response")
-	}
-
-	return stats, nil
-}
-
-// writeCloser wraps a pipe writer and waits for the HTTP request to complete.
-type writeCloser struct {
-	pw   *io.PipeWriter
-	done chan error
-	ctx  context.Context
-}
-
-func (wc *writeCloser) Write(p []byte) (int, error) {
-	n, err := wc.pw.Write(p)
-	return n, errors.WithStack(err)
-}
-
-func (wc *writeCloser) Close() error {
-	if err := wc.ctx.Err(); err != nil {
-		_ = wc.pw.CloseWithError(err)
-		<-wc.done // Wait for goroutine to finish and release connection
-		return errors.Wrap(err, "create operation cancelled")
-	}
-	if err := wc.pw.Close(); err != nil {
-		<-wc.done // Wait for goroutine to finish and release connection
-		return errors.Wrap(err, "failed to close pipe writer")
-	}
-	err := <-wc.done
-	if err != nil {
-		return errors.Wrap(err, "request failed")
-	}
-	return nil
-}
-
-// Namespace creates a namespaced view of the remote cache.
-func (c *Remote) Namespace(namespace Namespace) Cache {
-	return &Remote{
-		baseURL:   c.baseURL,
-		client:    c.client,
-		namespace: namespace,
-	}
-}
-
-// ListNamespaces requests namespace list from the remote server.
-func (c *Remote) ListNamespaces(ctx context.Context) ([]string, error) {
-	url := c.baseURL + "/namespaces"
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return nil, errors.WithStack(err)
-	}
-
-	resp, err := c.client.Do(req)
-	if err != nil {
-		return nil, errors.WithStack(err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body) //nolint:errcheck
-		return nil, errors.Errorf("unexpected status %d: %s", resp.StatusCode, body)
-	}
-
-	var namespaces []string
-	if err := json.NewDecoder(resp.Body).Decode(&namespaces); err != nil {
-		return nil, errors.WithStack(err)
-	}
-
-	return namespaces, nil
-}
+func (r *Remote) Close() error { return errors.WithStack(r.c.Close()) }

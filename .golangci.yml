@@ -483,7 +483,6 @@ linters:
         path: "(internal/cache/disk\\.go|internal/strategy/git/spool\\.go)"
       - text: "G704:"
         linters: [gosec]
-        path: "(internal/cache/(http|remote)\\.go|internal/githubapp/tokens\\.go|internal/strategy/(git/proxy|github_releases|handler/handler)\\.go)"
       - text: "avoid package names that conflict with Go standard library"
         linters: [revive]
         path: "(internal/httputil/|internal/metrics/)"
