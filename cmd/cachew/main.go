@@ -13,9 +13,8 @@ import (
 	"github.com/alecthomas/errors"
 	"github.com/alecthomas/kong"
 
-	"github.com/block/cachew/internal/cache"
+	"github.com/block/cachew/client"
 	"github.com/block/cachew/internal/logging"
-	"github.com/block/cachew/internal/snapshot"
 )
 
 type CLI struct {
@@ -45,33 +44,31 @@ func main() {
 	ctx := context.Background()
 	_, ctx = logging.Configure(ctx, cli.LoggingConfig)
 
-	var headerFunc cache.HeaderFunc
+	var headerFunc client.HeaderFunc
 	if cli.Authorization != "" {
 		headerFunc = func() http.Header {
 			return http.Header{"Authorization": {cli.Authorization}}
 		}
 	}
-	remote := cache.NewRemote(cli.URL, headerFunc)
-	defer remote.Close()
-	httpClient := cache.NewHTTPClient(headerFunc)
+	c := client.New(cli.URL, headerFunc)
+	defer c.Close()
 
 	kctx.BindTo(ctx, (*context.Context)(nil))
-	kctx.BindTo(remote, (*cache.Cache)(nil))
-	kctx.Bind(httpClient)
+	kctx.Bind(c)
+	kctx.Bind(c.HTTP())
 	kctx.FatalIfErrorf(kctx.Run(ctx))
 }
 
 type GetCmd struct {
-	Namespace cache.Namespace `arg:"" help:"Namespace for organizing cache objects."`
-	Key       PlatformKey     `arg:"" help:"Object key (hex or string)."`
-	Output    *os.File        `short:"o" help:"Output file (default: stdout)." default:"-"`
+	Namespace client.Namespace `arg:"" help:"Namespace for organizing cache objects."`
+	Key       PlatformKey      `arg:"" help:"Object key (hex or string)."`
+	Output    *os.File         `short:"o" help:"Output file (default: stdout)." default:"-"`
 }
 
-func (c *GetCmd) Run(ctx context.Context, cache cache.Cache) error {
+func (c *GetCmd) Run(ctx context.Context, api *client.Client) error {
 	defer c.Output.Close()
 
-	namespacedCache := cache.Namespace(c.Namespace)
-	rc, headers, err := namespacedCache.Open(ctx, c.Key.Key())
+	rc, headers, err := api.Namespace(c.Namespace).Open(ctx, c.Key.Key())
 	if err != nil {
 		return errors.Wrap(err, "failed to open object")
 	}
@@ -88,13 +85,12 @@ func (c *GetCmd) Run(ctx context.Context, cache cache.Cache) error {
 }
 
 type StatCmd struct {
-	Namespace cache.Namespace `arg:"" help:"Namespace for organizing cache objects."`
-	Key       PlatformKey     `arg:"" help:"Object key (hex or string)."`
+	Namespace client.Namespace `arg:"" help:"Namespace for organizing cache objects."`
+	Key       PlatformKey      `arg:"" help:"Object key (hex or string)."`
 }
 
-func (c *StatCmd) Run(ctx context.Context, cache cache.Cache) error {
-	namespacedCache := cache.Namespace(c.Namespace)
-	headers, err := namespacedCache.Stat(ctx, c.Key.Key())
+func (c *StatCmd) Run(ctx context.Context, api *client.Client) error {
+	headers, err := api.Namespace(c.Namespace).Stat(ctx, c.Key.Key())
 	if err != nil {
 		return errors.Wrap(err, "failed to stat object")
 	}
@@ -109,14 +105,14 @@ func (c *StatCmd) Run(ctx context.Context, cache cache.Cache) error {
 }
 
 type PutCmd struct {
-	Namespace cache.Namespace   `arg:"" help:"Namespace for organizing cache objects."`
+	Namespace client.Namespace  `arg:"" help:"Namespace for organizing cache objects."`
 	Key       PlatformKey       `arg:"" help:"Object key (hex or string)."`
 	Input     *os.File          `arg:"" help:"Input file (default: stdin)." default:"-"`
 	TTL       time.Duration     `help:"Time to live for the object."`
 	Headers   map[string]string `short:"H" help:"Additional headers (key=value)."`
 }
 
-func (c *PutCmd) Run(ctx context.Context, cache cache.Cache) error {
+func (c *PutCmd) Run(ctx context.Context, api *client.Client) error {
 	defer c.Input.Close()
 
 	headers := make(http.Header)
@@ -128,8 +124,7 @@ func (c *PutCmd) Run(ctx context.Context, cache cache.Cache) error {
 		headers.Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filepath.Base(filename))) //nolint:perfsprint
 	}
 
-	namespacedCache := cache.Namespace(c.Namespace)
-	wc, err := namespacedCache.Create(ctx, c.Key.Key(), headers, c.TTL)
+	wc, err := api.Namespace(c.Namespace).Create(ctx, c.Key.Key(), headers, c.TTL)
 	if err != nil {
 		return errors.Wrap(err, "failed to create object")
 	}
@@ -142,19 +137,18 @@ func (c *PutCmd) Run(ctx context.Context, cache cache.Cache) error {
 }
 
 type DeleteCmd struct {
-	Namespace cache.Namespace `arg:"" help:"Namespace for organizing cache objects."`
-	Key       PlatformKey     `arg:"" help:"Object key (hex or string)."`
+	Namespace client.Namespace `arg:"" help:"Namespace for organizing cache objects."`
+	Key       PlatformKey      `arg:"" help:"Object key (hex or string)."`
 }
 
-func (c *DeleteCmd) Run(ctx context.Context, cache cache.Cache) error {
-	namespacedCache := cache.Namespace(c.Namespace)
-	return errors.Wrap(namespacedCache.Delete(ctx, c.Key.Key()), "failed to delete object")
+func (c *DeleteCmd) Run(ctx context.Context, api *client.Client) error {
+	return errors.Wrap(api.Namespace(c.Namespace).Delete(ctx, c.Key.Key()), "failed to delete object")
 }
 
 type NamespacesCmd struct{}
 
-func (c *NamespacesCmd) Run(ctx context.Context, cache cache.Cache) error {
-	namespaces, err := cache.ListNamespaces(ctx)
+func (c *NamespacesCmd) Run(ctx context.Context, api *client.Client) error {
+	namespaces, err := api.ListNamespaces(ctx)
 	if err != nil {
 		return errors.Wrap(err, "failed to list namespaces")
 	}
@@ -171,18 +165,22 @@ func (c *NamespacesCmd) Run(ctx context.Context, cache cache.Cache) error {
 }
 
 type SnapshotCmd struct {
-	Namespace   cache.Namespace `arg:"" help:"Namespace for organizing cache objects."`
-	Key         PlatformKey     `arg:"" help:"Object key (hex or string)."`
-	Directory   string          `arg:"" help:"Directory to archive." type:"path"`
-	TTL         time.Duration   `help:"Time to live for the object."`
-	Exclude     []string        `help:"Patterns to exclude (tar --exclude syntax)."`
-	ZstdThreads int             `help:"Threads for zstd compression (0 = all CPU cores)." default:"0"`
+	Namespace   client.Namespace `arg:"" help:"Namespace for organizing cache objects."`
+	Key         PlatformKey      `arg:"" help:"Object key (hex or string)."`
+	Directory   string           `arg:"" help:"Directory to archive." type:"path"`
+	TTL         time.Duration    `help:"Time to live for the object."`
+	Exclude     []string         `help:"Patterns to exclude (tar --exclude syntax)."`
+	ZstdThreads int              `help:"Threads for zstd compression (0 = all CPU cores)." default:"0"`
 }
 
-func (c *SnapshotCmd) Run(ctx context.Context, cache cache.Cache) error {
+func (c *SnapshotCmd) Run(ctx context.Context, api *client.Client) error {
 	fmt.Fprintf(os.Stderr, "Archiving %s...\n", c.Directory) //nolint:forbidigo
-	namespacedCache := cache.Namespace(c.Namespace)
-	if err := snapshot.Create(ctx, namespacedCache, c.Key.Key(), c.Directory, c.TTL, c.Exclude, c.ZstdThreads); err != nil {
+	opts := client.SnapshotOptions{
+		TTL:         c.TTL,
+		Exclude:     c.Exclude,
+		ZstdThreads: c.ZstdThreads,
+	}
+	if err := api.Namespace(c.Namespace).Snapshot(ctx, c.Key.Key(), c.Directory, opts); err != nil {
 		return errors.Wrap(err, "failed to create snapshot")
 	}
 
@@ -191,16 +189,16 @@ func (c *SnapshotCmd) Run(ctx context.Context, cache cache.Cache) error {
 }
 
 type RestoreCmd struct {
-	Namespace   cache.Namespace `arg:"" help:"Namespace for organizing cache objects."`
-	Key         PlatformKey     `arg:"" help:"Object key (hex or string)."`
-	Directory   string          `arg:"" help:"Target directory for extraction." type:"path"`
-	ZstdThreads int             `help:"Threads for zstd decompression (0 = all CPU cores)." default:"0"`
+	Namespace   client.Namespace `arg:"" help:"Namespace for organizing cache objects."`
+	Key         PlatformKey      `arg:"" help:"Object key (hex or string)."`
+	Directory   string           `arg:"" help:"Target directory for extraction." type:"path"`
+	ZstdThreads int              `help:"Threads for zstd decompression (0 = all CPU cores)." default:"0"`
 }
 
-func (c *RestoreCmd) Run(ctx context.Context, cache cache.Cache) error {
+func (c *RestoreCmd) Run(ctx context.Context, api *client.Client) error {
 	fmt.Fprintf(os.Stderr, "Restoring to %s...\n", c.Directory) //nolint:forbidigo
-	namespacedCache := cache.Namespace(c.Namespace)
-	if err := snapshot.Restore(ctx, namespacedCache, c.Key.Key(), c.Directory, c.ZstdThreads); err != nil {
+	opts := client.RestoreOptions{ZstdThreads: c.ZstdThreads}
+	if err := api.Namespace(c.Namespace).Restore(ctx, c.Key.Key(), c.Directory, opts); err != nil {
 		return errors.Wrap(err, "failed to restore snapshot")
 	}
 
@@ -221,10 +219,10 @@ func getFilename(f *os.File) string {
 	return f.Name()
 }
 
-// PlatformKey wraps a cache.Key and stores the original input for platform prefixing.
+// PlatformKey wraps a client.Key and stores the original input for platform prefixing.
 type PlatformKey struct {
 	raw string
-	key cache.Key
+	key client.Key
 }
 
 func (pk *PlatformKey) UnmarshalText(text []byte) error {
@@ -232,7 +230,7 @@ func (pk *PlatformKey) UnmarshalText(text []byte) error {
 	return errors.WithStack(pk.key.UnmarshalText(text))
 }
 
-func (pk *PlatformKey) Key() cache.Key {
+func (pk *PlatformKey) Key() client.Key {
 	return pk.key
 }
 
@@ -243,12 +241,10 @@ func (pk *PlatformKey) String() string {
 func (pk *PlatformKey) AfterApply(cli *CLI) error {
 	prefixed := pk.raw
 
-	// Apply platform prefix if enabled
 	if cli.Platform {
 		prefixed = fmt.Sprintf("%s-%s-%s", runtime.GOOS, runtime.GOARCH, prefixed)
 	}
 
-	// Apply time-based prefix if enabled (goes first in final order)
 	now := time.Now()
 	if cli.Hourly {
 		prefixed = now.Format("2006-01-02-15-") + prefixed
