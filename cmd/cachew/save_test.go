@@ -1,6 +1,9 @@
 package main
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -8,6 +11,7 @@ import (
 	"time"
 
 	"github.com/alecthomas/assert/v2"
+	"github.com/alecthomas/errors"
 
 	"github.com/block/cachew/client"
 )
@@ -52,4 +56,22 @@ func TestResolveKey(t *testing.T) {
 func TestResolveKeyHashFilesNoMatch(t *testing.T) {
 	_, _, err := resolveKey(&CLI{}, "", []string{filepath.Join(t.TempDir(), "missing-*")})
 	assert.Error(t, err)
+}
+
+func TestRestoreCacheMiss(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.NotFound(w, nil) //nolint:staticcheck
+	}))
+	defer srv.Close()
+
+	api := client.New(srv.URL, nil)
+	defer api.Close()
+
+	cmd := &RestoreCmd{
+		Namespace: "test",
+		Directory: t.TempDir(),
+		Key:       "absent",
+	}
+	err := cmd.Run(context.Background(), api, &CLI{})
+	assert.True(t, errors.Is(err, errCacheMiss), "expected errCacheMiss sentinel, got %v", err)
 }

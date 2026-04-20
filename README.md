@@ -203,7 +203,7 @@ cachew namespaces
 
 # Directory snapshots
 cachew save <namespace> <directory> [paths...] (--key <key> | -H <glob>) [--ttl 1h] [--exclude pattern]
-cachew restore <namespace> <directory> (--key <key> | -H <glob>)
+cachew restore <namespace> <directory> (--key <key> | -H <glob>)  # exit 0 hit, 2 miss, 1 error
 
 # Git
 cachew git restore <repo-url> <directory> [--no-bundle]
