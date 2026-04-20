@@ -499,6 +499,8 @@ func TestSnapshotServesFreshSnapshotWithCommitHeader(t *testing.T) {
 		"X-Cachew-Snapshot-Commit should be set so client knows snapshot is fresh")
 	assert.Equal(t, "", w.Header().Get("X-Cachew-Bundle-Url"),
 		"no bundle URL when snapshot is already at mirror HEAD")
+	assert.Equal(t, "", w.Header().Get("X-Cachew-Lfs-Snapshot-Url"),
+		"no LFS snapshot URL when repo does not use LFS")
 }
 
 func TestSnapshotServesBundleURLWhenStale(t *testing.T) {
@@ -568,9 +570,56 @@ func TestSnapshotServesBundleURLWhenStale(t *testing.T) {
 		"bundle URL should be set when snapshot is stale")
 	assert.Contains(t, w.Header().Get("X-Cachew-Bundle-Url"), "snapshot.bundle?base=",
 		"bundle URL should include base parameter")
+	assert.Equal(t, "", w.Header().Get("X-Cachew-Lfs-Snapshot-Url"),
+		"no LFS snapshot URL when repo does not use LFS")
 
 	// Allow background bundle generation goroutine to finish.
 	time.Sleep(2 * time.Second)
+}
+
+func TestSnapshotIncludesLFSSnapshotURL(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not found in PATH")
+	}
+
+	_, ctx := logging.Configure(context.Background(), logging.Config{})
+	tmpDir := t.TempDir()
+	mirrorRoot := filepath.Join(tmpDir, "mirrors")
+	upstreamURL := "https://github.com/org/repo"
+	mirrorPath := filepath.Join(mirrorRoot, "github.com", "org", "repo")
+	createTestMirrorRepoWithFiles(t, mirrorPath, map[string]string{
+		"hello.txt":      "hello\n",
+		".gitattributes": "*.bin filter=lfs diff=lfs merge=lfs -text\n",
+	})
+
+	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: time.Hour})
+	assert.NoError(t, err)
+	mux := newTestMux()
+
+	cm := gitclone.NewManagerProvider(ctx, gitclone.Config{MirrorRoot: mirrorRoot}, nil)
+	s, err := git.New(ctx, git.Config{}, newTestScheduler(ctx, t), memCache, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
+	assert.NoError(t, err)
+
+	manager, err := cm()
+	assert.NoError(t, err)
+	repo, err := manager.GetOrCreate(ctx, upstreamURL)
+	assert.NoError(t, err)
+
+	err = s.GenerateAndUploadSnapshot(ctx, repo)
+	assert.NoError(t, err)
+
+	handler := mux.handlers["GET /git/{host}/{path...}"]
+	req := httptest.NewRequest(http.MethodGet, "/git/github.com/org/repo/snapshot.tar.zst", nil)
+	req = req.WithContext(ctx)
+	req.SetPathValue("host", "github.com")
+	req.SetPathValue("path", "org/repo/snapshot.tar.zst")
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	assert.Equal(t, 200, w.Code)
+	assert.Equal(t, "/git/github.com/org/repo/lfs-snapshot.tar.zst",
+		w.Header().Get("X-Cachew-Lfs-Snapshot-Url"))
 }
 
 func TestColdSnapshotServesWithoutCommitHeader(t *testing.T) {

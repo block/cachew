@@ -124,6 +124,13 @@ func (s *Strategy) generateAndUploadSnapshot(ctx context.Context, repo *gitclone
 		}
 		extraHeaders := http.Header{}
 		extraHeaders.Set("X-Cachew-Snapshot-Commit", headSHA)
+		if repoUsesLFS(ctx, workDir) {
+			repoPath, err := gitclone.RepoPathFromURL(upstream)
+			if err != nil {
+				return errors.Wrap(err, "resolve repo path for LFS header")
+			}
+			extraHeaders.Set("X-Cachew-Lfs-Snapshot-Url", fmt.Sprintf("/git/%s/lfs-snapshot.tar.zst", repoPath))
+		}
 
 		return snapshot.Create(ctx, s.cache, cacheKey, workDir, 0, nil, s.config.ZstdThreads, extraHeaders)
 	}); err != nil {
@@ -361,6 +368,8 @@ func (s *Strategy) serveSnapshotWithBundle(ctx context.Context, w http.ResponseW
 		w.Header().Set("X-Cachew-Snapshot-Commit", snapshotCommit)
 	}
 
+	forwardLFSSnapshotHeader(w, headers)
+
 	if snapshotCommit != "" && mirrorHead != "" && snapshotCommit != mirrorHead {
 		repoPath, err := gitclone.RepoPathFromURL(upstreamURL)
 		if err == nil {
@@ -387,6 +396,25 @@ func (s *Strategy) serveSnapshotWithBundle(ctx context.Context, w http.ResponseW
 	n, err := io.Copy(w, reader)
 	s.metrics.recordSnapshotServe(ctx, "cache", repoName, n)
 	return errors.Wrap(err, "stream snapshot")
+}
+
+// forwardLFSSnapshotHeader copies X-Cachew-Lfs-Snapshot-Url from the cached
+// snapshot metadata to the response, if present.
+func forwardLFSSnapshotHeader(w http.ResponseWriter, headers http.Header) {
+	if u := headers.Get("X-Cachew-Lfs-Snapshot-Url"); u != "" {
+		w.Header().Set("X-Cachew-Lfs-Snapshot-Url", u)
+	}
+}
+
+// repoUsesLFS checks whether any .gitattributes in the repo declares filter=lfs.
+// It reads the root .gitattributes first (cheap file read) before falling back
+// to git grep across nested .gitattributes files.
+func repoUsesLFS(ctx context.Context, repoDir string) bool {
+	if data, err := os.ReadFile(filepath.Join(repoDir, ".gitattributes")); err == nil && strings.Contains(string(data), "filter=lfs") {
+		return true
+	}
+	cmd := exec.CommandContext(ctx, "git", "-C", repoDir, "grep", "-q", "--cached", "filter=lfs", "--", "*.gitattributes") //nolint:gosec
+	return cmd.Run() == nil
 }
 
 const bundleCacheTTL = 2 * time.Hour
