@@ -175,12 +175,12 @@ type SnapshotCmd struct {
 
 func (c *SnapshotCmd) Run(ctx context.Context, api *client.Client) error {
 	fmt.Fprintf(os.Stderr, "Archiving %s...\n", c.Directory) //nolint:forbidigo
-	opts := client.SnapshotOptions{
-		TTL:         c.TTL,
-		Exclude:     c.Exclude,
-		ZstdThreads: c.ZstdThreads,
-	}
-	if err := api.Namespace(c.Namespace).Snapshot(ctx, c.Key.Key(), c.Directory, opts); err != nil {
+	err := api.Namespace(c.Namespace).Save(ctx, c.Key.Key(), c.Directory, []string{"."},
+		client.WithTTL(c.TTL),
+		client.WithExclude(c.Exclude...),
+		client.WithZstdThreads(c.ZstdThreads),
+	)
+	if err != nil {
 		return errors.Wrap(err, "failed to create snapshot")
 	}
 
@@ -197,9 +197,13 @@ type RestoreCmd struct {
 
 func (c *RestoreCmd) Run(ctx context.Context, api *client.Client) error {
 	fmt.Fprintf(os.Stderr, "Restoring to %s...\n", c.Directory) //nolint:forbidigo
-	opts := client.RestoreOptions{ZstdThreads: c.ZstdThreads}
-	if err := api.Namespace(c.Namespace).Restore(ctx, c.Key.Key(), c.Directory, opts); err != nil {
+	hit, err := api.Namespace(c.Namespace).Restore(ctx, c.Key.Key(), c.Directory,
+		client.WithZstdThreads(c.ZstdThreads))
+	if err != nil {
 		return errors.Wrap(err, "failed to restore snapshot")
+	}
+	if !hit {
+		return errors.Errorf("cache miss: %s", c.Key.String())
 	}
 
 	fmt.Fprintf(os.Stderr, "Snapshot restored: %s\n", c.Key.String()) //nolint:forbidigo
