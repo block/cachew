@@ -202,8 +202,8 @@ cachew delete <namespace> <key>
 cachew namespaces
 
 # Directory snapshots
-cachew snapshot <namespace> <key> <directory> [--ttl 1h] [--exclude pattern]
-cachew restore <namespace> <key> <directory>
+cachew save <namespace> <directory> [paths...] (--key <key> | -H <glob>) [--ttl 1h] [--exclude pattern]
+cachew restore <namespace> <directory> (--key <key> | -H <glob>)
 
 # Git
 cachew git restore <repo-url> <directory> [--no-bundle]
