@@ -38,7 +38,9 @@ type CLI struct {
 	Git GitCmd `cmd:"" help:"Git-aware operations." group:"Git:"`
 }
 
-func main() {
+func main() { os.Exit(run()) }
+
+func run() int {
 	cli := CLI{}
 	kctx := kong.Parse(&cli, kong.UsageOnError(), kong.HelpOptions{Compact: true}, kong.DefaultEnvars("CACHEW"), kong.Bind(&cli))
 	ctx := context.Background()
@@ -56,8 +58,18 @@ func main() {
 	kctx.BindTo(ctx, (*context.Context)(nil))
 	kctx.Bind(c)
 	kctx.Bind(c.HTTP())
-	kctx.FatalIfErrorf(kctx.Run(ctx))
+	err := kctx.Run(ctx)
+	if errors.Is(err, errCacheMiss) {
+		return 2
+	}
+	kctx.FatalIfErrorf(err)
+	return 0
 }
+
+// errCacheMiss signals that a restore found no object for the requested key.
+// Sentinel so main can exit with code 2 (distinct from generic errors at
+// code 1), matching conventions used by grep/diff.
+var errCacheMiss = errors.New("cache miss")
 
 type GetCmd struct {
 	Namespace client.Namespace `arg:"" help:"Namespace for organizing cache objects."`
@@ -222,7 +234,8 @@ func (c *RestoreCmd) Run(ctx context.Context, api *client.Client, cli *CLI) erro
 		return errors.Wrap(err, "failed to restore")
 	}
 	if !hit {
-		return errors.Errorf("cache miss: %s", display)
+		fmt.Fprintf(os.Stderr, "Cache miss: %s\n", display) //nolint:forbidigo
+		return errCacheMiss
 	}
 
 	fmt.Fprintf(os.Stderr, "Restored: %s\n", display) //nolint:forbidigo
