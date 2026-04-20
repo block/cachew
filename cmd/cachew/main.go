@@ -32,8 +32,8 @@ type CLI struct {
 	Delete     DeleteCmd     `cmd:"" help:"Remove object from cache." group:"Operations:"`
 	Namespaces NamespacesCmd `cmd:"" help:"List available namespaces in cache." group:"Operations:"`
 
-	Snapshot SnapshotCmd `cmd:"" help:"Create compressed archive of directory and upload." group:"Snapshots:"`
-	Restore  RestoreCmd  `cmd:"" help:"Download and extract archive to directory." group:"Snapshots:"`
+	Save    SaveCmd    `cmd:"" help:"Create compressed archive of directory and upload." group:"Snapshots:"`
+	Restore RestoreCmd `cmd:"" help:"Download and extract archive to directory." group:"Snapshots:"`
 
 	Git GitCmd `cmd:"" help:"Git-aware operations." group:"Git:"`
 }
@@ -164,50 +164,104 @@ func (c *NamespacesCmd) Run(ctx context.Context, api *client.Client) error {
 	return nil
 }
 
-type SnapshotCmd struct {
-	Namespace   client.Namespace `arg:"" help:"Namespace for organizing cache objects."`
-	Key         PlatformKey      `arg:"" help:"Object key (hex or string)."`
-	Directory   string           `arg:"" help:"Directory to archive." type:"path"`
-	TTL         time.Duration    `help:"Time to live for the object."`
-	Exclude     []string         `help:"Patterns to exclude (tar --exclude syntax)."`
-	ZstdThreads int              `help:"Threads for zstd compression (0 = all CPU cores)." default:"0"`
+type SaveCmd struct {
+	Namespace client.Namespace `arg:"" help:"Namespace for organizing cache objects."`
+	Directory string           `arg:"" help:"Directory containing paths to archive." type:"path"`
+	Paths     []string         `arg:"" optional:"" help:"Paths within Directory to archive (default: \".\")."`
+
+	Key       string   `help:"Object key (hex or string)." xor:"cache-key" required:""`
+	HashFiles []string `short:"H" help:"Compute key from SHA256 of files matched by doublestar glob patterns (repeatable)." xor:"cache-key" required:""`
+
+	TTL         time.Duration `help:"Time to live for the object."`
+	Exclude     []string      `help:"Patterns to exclude (tar --exclude syntax)."`
+	ZstdThreads int           `help:"Threads for zstd compression (0 = all CPU cores)." default:"0"`
 }
 
-func (c *SnapshotCmd) Run(ctx context.Context, api *client.Client) error {
+func (c *SaveCmd) Run(ctx context.Context, api *client.Client, cli *CLI) error {
+	key, display, err := resolveKey(cli, c.Key, c.HashFiles)
+	if err != nil {
+		return err
+	}
+	paths := c.Paths
+	if len(paths) == 0 {
+		paths = []string{"."}
+	}
 	fmt.Fprintf(os.Stderr, "Archiving %s...\n", c.Directory) //nolint:forbidigo
-	err := api.Namespace(c.Namespace).Save(ctx, c.Key.Key(), c.Directory, []string{"."},
+	err = api.Namespace(c.Namespace).Save(ctx, key, c.Directory, paths,
 		client.WithTTL(c.TTL),
 		client.WithExclude(c.Exclude...),
 		client.WithZstdThreads(c.ZstdThreads),
 	)
 	if err != nil {
-		return errors.Wrap(err, "failed to create snapshot")
+		return errors.Wrap(err, "failed to save")
 	}
 
-	fmt.Fprintf(os.Stderr, "Snapshot uploaded: %s\n", c.Key.String()) //nolint:forbidigo
+	fmt.Fprintf(os.Stderr, "Saved: %s\n", display) //nolint:forbidigo
 	return nil
 }
 
 type RestoreCmd struct {
-	Namespace   client.Namespace `arg:"" help:"Namespace for organizing cache objects."`
-	Key         PlatformKey      `arg:"" help:"Object key (hex or string)."`
-	Directory   string           `arg:"" help:"Target directory for extraction." type:"path"`
-	ZstdThreads int              `help:"Threads for zstd decompression (0 = all CPU cores)." default:"0"`
+	Namespace client.Namespace `arg:"" help:"Namespace for organizing cache objects."`
+	Directory string           `arg:"" help:"Target directory for extraction." type:"path"`
+
+	Key       string   `help:"Object key (hex or string)." xor:"cache-key" required:""`
+	HashFiles []string `short:"H" help:"Compute key from SHA256 of files matched by doublestar glob patterns (repeatable)." xor:"cache-key" required:""`
+
+	ZstdThreads int `help:"Threads for zstd decompression (0 = all CPU cores)." default:"0"`
 }
 
-func (c *RestoreCmd) Run(ctx context.Context, api *client.Client) error {
+func (c *RestoreCmd) Run(ctx context.Context, api *client.Client, cli *CLI) error {
+	key, display, err := resolveKey(cli, c.Key, c.HashFiles)
+	if err != nil {
+		return err
+	}
 	fmt.Fprintf(os.Stderr, "Restoring to %s...\n", c.Directory) //nolint:forbidigo
-	hit, err := api.Namespace(c.Namespace).Restore(ctx, c.Key.Key(), c.Directory,
+	hit, err := api.Namespace(c.Namespace).Restore(ctx, key, c.Directory,
 		client.WithZstdThreads(c.ZstdThreads))
 	if err != nil {
-		return errors.Wrap(err, "failed to restore snapshot")
+		return errors.Wrap(err, "failed to restore")
 	}
 	if !hit {
-		return errors.Errorf("cache miss: %s", c.Key.String())
+		return errors.Errorf("cache miss: %s", display)
 	}
 
-	fmt.Fprintf(os.Stderr, "Snapshot restored: %s\n", c.Key.String()) //nolint:forbidigo
+	fmt.Fprintf(os.Stderr, "Restored: %s\n", display) //nolint:forbidigo
 	return nil
+}
+
+// resolveKey returns the final Key and a human-readable form for logging,
+// using exactly one of key or hashFiles (enforced by kong's xor group), then
+// applying any global --platform / --daily / --hourly prefixes.
+func resolveKey(cli *CLI, key string, hashFiles []string) (client.Key, string, error) {
+	raw := key
+	if len(hashFiles) > 0 {
+		k, err := client.HashFiles(hashFiles...)
+		if err != nil {
+			return client.Key{}, "", errors.Wrap(err, "failed to hash files")
+		}
+		raw = k.String()
+	}
+	prefixed := applyKeyPrefixes(cli, raw)
+	var final client.Key
+	if err := final.UnmarshalText([]byte(prefixed)); err != nil {
+		return client.Key{}, "", errors.WithStack(err)
+	}
+	return final, prefixed, nil
+}
+
+func applyKeyPrefixes(cli *CLI, raw string) string {
+	prefixed := raw
+	if cli.Platform {
+		prefixed = fmt.Sprintf("%s-%s-%s", runtime.GOOS, runtime.GOARCH, prefixed)
+	}
+	now := time.Now()
+	switch {
+	case cli.Hourly:
+		prefixed = now.Format("2006-01-02-15-") + prefixed
+	case cli.Daily:
+		prefixed = now.Format("2006-01-02-") + prefixed
+	}
+	return prefixed
 }
 
 func getFilename(f *os.File) string {
@@ -243,18 +297,5 @@ func (pk *PlatformKey) String() string {
 }
 
 func (pk *PlatformKey) AfterApply(cli *CLI) error {
-	prefixed := pk.raw
-
-	if cli.Platform {
-		prefixed = fmt.Sprintf("%s-%s-%s", runtime.GOOS, runtime.GOARCH, prefixed)
-	}
-
-	now := time.Now()
-	if cli.Hourly {
-		prefixed = now.Format("2006-01-02-15-") + prefixed
-	} else if cli.Daily {
-		prefixed = now.Format("2006-01-02-") + prefixed
-	}
-
-	return errors.WithStack(pk.key.UnmarshalText([]byte(prefixed)))
+	return errors.WithStack(pk.key.UnmarshalText([]byte(applyKeyPrefixes(cli, pk.raw))))
 }
