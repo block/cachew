@@ -7,6 +7,8 @@ let git_commit = exec('git rev-parse HEAD')
 let arch = ["amd64", "arm64"]
 let command = ["cachew", "cachewd"]
 
+# Format all Go files.
+pre fmt = go.fmt {}
 
 # Build client and server binaries
 cachew = go.exe {
@@ -29,7 +31,7 @@ test = go.test {
 # Lint
 lint = go.lint {}
 
-cross-compile[arch, command] = go.exe {
+cross[arch, command] = go.exe {
   package = "./cmd/${command}"
   output = "dist/${command}-linux-${arch}"
   cgo = false
@@ -42,7 +44,7 @@ image = docker.image {
   tag = "cachew:latest"
   context = "."
   dockerfile = "docker/Dockerfile"
-  depends_on = [cross-compile]
+  depends_on = [cross[arm64, cachew], cross[arm64, cachewd]]
 }
 
 # Build production image.
@@ -50,7 +52,7 @@ multi-arch-image = docker.image {
   tag = "${registry}/cachew:latest"
   context = "."
   dockerfile = "docker/Dockerfile"
-  depends_on = [cross-compile]
+  depends_on = [cross]
   platform = arch | prefix("linux/")
 }
 

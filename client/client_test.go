@@ -234,7 +234,7 @@ func TestStatsReturned(t *testing.T) {
 	assert.Equal(t, want, got)
 }
 
-func TestSnapshotRoundTrip(t *testing.T) {
+func TestSaveRestoreRoundTrip(t *testing.T) {
 	srv := newFakeServer(nil)
 	defer srv.Close()
 
@@ -248,10 +248,12 @@ func TestSnapshotRoundTrip(t *testing.T) {
 	assert.NoError(t, os.WriteFile(filepath.Join(src, "sub", "b.txt"), []byte("bravo"), 0o644))
 
 	key := client.NewKey("snapshot")
-	assert.NoError(t, c.Snapshot(ctx, key, src, client.SnapshotOptions{}))
+	assert.NoError(t, c.Save(ctx, key, src, []string{"."}))
 
 	dst := filepath.Join(t.TempDir(), "out")
-	assert.NoError(t, c.Restore(ctx, key, dst, client.RestoreOptions{}))
+	hit, err := c.Restore(ctx, key, dst)
+	assert.NoError(t, err)
+	assert.True(t, hit)
 
 	a, err := os.ReadFile(filepath.Join(dst, "a.txt"))
 	assert.NoError(t, err)
