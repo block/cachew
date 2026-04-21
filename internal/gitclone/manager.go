@@ -431,6 +431,10 @@ func mirrorConfigSettings(packThreads int) [][2]string {
 		{"pack.threads", strconv.Itoa(packThreads)},
 		{"pack.deltaCacheSize", "512m"},
 		{"pack.windowMemory", "1g"},
+		// LFS fetches are I/O-bound; the git-lfs default of 8 is too low.
+		// See git-lfs/git-lfs#6241 for an upstream change (unreleased) that
+		// raises the default to 3×NCPU.
+		{"lfs.concurrenttransfers", "100"},
 	}
 }
 
