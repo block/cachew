@@ -14,6 +14,16 @@ import (
 	"github.com/alecthomas/errors"
 )
 
+// HTTPStatusError is returned when the server responds with an unexpected
+// HTTP status code. Callers can use errors.As to inspect the status code.
+type HTTPStatusError struct {
+	StatusCode int
+}
+
+func (e *HTTPStatusError) Error() string {
+	return fmt.Sprintf("unexpected status code: %d", e.StatusCode)
+}
+
 // transportHeaders are headers added by the HTTP transport layer that should
 // not be surfaced as cached-object metadata on responses.
 var transportHeaders = []string{ //nolint:gochecknoglobals
@@ -135,7 +145,7 @@ func (c *Client) Open(ctx context.Context, key Key) (io.ReadCloser, http.Header,
 
 	if resp.StatusCode != http.StatusOK {
 		_, _ = io.Copy(io.Discard, resp.Body) //nolint:errcheck,gosec
-		return nil, nil, errors.Join(errors.Errorf("unexpected status code: %d", resp.StatusCode), resp.Body.Close())
+		return nil, nil, errors.Join(errors.WithStack(&HTTPStatusError{StatusCode: resp.StatusCode}), resp.Body.Close())
 	}
 
 	return resp.Body, filterHeaders(resp.Header, transportHeaders...), nil
@@ -159,7 +169,7 @@ func (c *Client) Stat(ctx context.Context, key Key) (http.Header, error) {
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, errors.Errorf("unexpected status code: %d", resp.StatusCode)
+		return nil, errors.WithStack(&HTTPStatusError{StatusCode: resp.StatusCode})
 	}
 
 	return filterHeaders(resp.Header, transportHeaders...), nil
@@ -198,7 +208,7 @@ func (c *Client) Create(ctx context.Context, key Key, headers http.Header, ttl t
 		_ = resp.Body.Close()                 //nolint:gosec
 
 		if resp.StatusCode != http.StatusOK {
-			wc.done <- errors.Errorf("unexpected status code: %d", resp.StatusCode)
+			wc.done <- errors.WithStack(&HTTPStatusError{StatusCode: resp.StatusCode})
 			return
 		}
 
@@ -226,7 +236,7 @@ func (c *Client) Delete(ctx context.Context, key Key) error {
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return errors.Errorf("unexpected status code: %d", resp.StatusCode)
+		return errors.WithStack(&HTTPStatusError{StatusCode: resp.StatusCode})
 	}
 
 	return nil
@@ -256,7 +266,7 @@ func (c *Client) Stats(ctx context.Context) (Stats, error) {
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return Stats{}, errors.Errorf("unexpected status code: %d", resp.StatusCode)
+		return Stats{}, errors.WithStack(&HTTPStatusError{StatusCode: resp.StatusCode})
 	}
 
 	var stats Stats
