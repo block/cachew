@@ -36,6 +36,59 @@ func setupHermitTest(t *testing.T) (*http.ServeMux, context.Context, cache.Cache
 	return mux, ctx, memCache
 }
 
+func TestHermitBinaryShortTTL(t *testing.T) {
+	httpTransportMutexHermit.Lock()
+	defer httpTransportMutexHermit.Unlock()
+
+	callCount := 0
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		callCount++
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("hermit-binary"))
+	}))
+	defer backend.Close()
+
+	originalTransport := http.DefaultTransport
+	defer func() { http.DefaultTransport = originalTransport }()                                   //nolint:reassign
+	http.DefaultTransport = &mockTransport{backend: backend, originalTransport: originalTransport} //nolint:reassign
+
+	_, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelError})
+	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: 100 * time.Millisecond})
+	assert.NoError(t, err)
+	t.Cleanup(func() { memCache.Close() })
+
+	mux := http.NewServeMux()
+	_, err = strategy.NewHermit(ctx, strategy.HermitConfig{
+		GitHubBaseURL: "http://localhost:8080",
+		BinaryTTL:     100 * time.Millisecond,
+	}, nil, memCache, mux)
+	assert.NoError(t, err)
+
+	// First request: cache miss
+	req1 := httptest.NewRequestWithContext(ctx, http.MethodGet, "/hermit/example.com/square/hermit-linux-amd64.gz", nil)
+	w1 := httptest.NewRecorder()
+	mux.ServeHTTP(w1, req1)
+	assert.Equal(t, http.StatusOK, w1.Code)
+	assert.Equal(t, 1, callCount)
+
+	// Second request: cache hit
+	req2 := httptest.NewRequestWithContext(ctx, http.MethodGet, "/hermit/example.com/square/hermit-linux-amd64.gz", nil)
+	w2 := httptest.NewRecorder()
+	mux.ServeHTTP(w2, req2)
+	assert.Equal(t, http.StatusOK, w2.Code)
+	assert.Equal(t, 1, callCount, "should be served from cache")
+
+	// Wait for TTL to expire
+	time.Sleep(150 * time.Millisecond)
+
+	// Third request: cache miss after TTL expiry
+	req3 := httptest.NewRequestWithContext(ctx, http.MethodGet, "/hermit/example.com/square/hermit-linux-amd64.gz", nil)
+	w3 := httptest.NewRecorder()
+	mux.ServeHTTP(w3, req3)
+	assert.Equal(t, http.StatusOK, w3.Code)
+	assert.Equal(t, 2, callCount, "should re-fetch after TTL expiry")
+}
+
 func TestHermitNonGitHubCaching(t *testing.T) {
 	httpTransportMutexHermit.Lock()
 	defer httpTransportMutexHermit.Unlock()
