@@ -5,7 +5,9 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
+	"time"
 
 	"github.com/alecthomas/errors"
 
@@ -23,8 +25,14 @@ func RegisterHermit(r *Registry) {
 
 const defaultGitHubBaseURL = "http://127.0.0.1:8080/github.com"
 
+// hermitBinaryPattern matches the Hermit self-update binary (e.g. hermit-linux-amd64.gz).
+// Unlike versioned package downloads, this URL is mutable — the same path serves
+// different versions over time — so it needs a short cache TTL.
+var hermitBinaryPattern = regexp.MustCompile(`/hermit-[a-z]+-[a-z0-9]+\.gz$`)
+
 type HermitConfig struct {
-	GitHubBaseURL string `hcl:"github-base-url" help:"Base URL for GitHub release redirects" default:"http://127.0.0.1:8080/github.com"`
+	GitHubBaseURL string        `hcl:"github-base-url" help:"Base URL for GitHub release redirects" default:"http://127.0.0.1:8080/github.com"`
+	BinaryTTL     time.Duration `hcl:"binary-ttl,optional" help:"Cache TTL for the mutable Hermit self-update binary" default:"1h"`
 }
 
 // Hermit caches Hermit package downloads.
@@ -75,6 +83,12 @@ func (s *Hermit) createDirectHandler(c cache.Cache) http.Handler {
 	return handler.New(s.client, c).
 		CacheKey(func(r *http.Request) string {
 			return s.buildOriginalURL(r)
+		}).
+		TTL(func(r *http.Request) time.Duration {
+			if hermitBinaryPattern.MatchString(r.URL.Path) {
+				return s.config.BinaryTTL
+			}
+			return 0
 		}).
 		Transform(func(r *http.Request) (*http.Request, error) {
 			return s.buildDirectRequest(r)
