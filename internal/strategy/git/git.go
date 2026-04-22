@@ -506,6 +506,13 @@ func (s *Strategy) startClone(ctx context.Context, repo *gitclone.Repository) er
 		return nil
 	}
 
+	// Detach from the caller's context so the clone is not killed when an
+	// HTTP client disconnects. The clone has its own 30-minute timeout
+	// (CloneTimeout) as a safety net. Without this, a client timeout
+	// cancels the request context, which cascades into cmd.Cancel sending
+	// SIGKILL to the git process.
+	ctx = context.WithoutCancel(ctx)
+
 	logger := logging.FromContext(ctx)
 	upstream := repo.UpstreamURL()
 
