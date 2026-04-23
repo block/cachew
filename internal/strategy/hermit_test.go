@@ -60,7 +60,7 @@ func TestHermitBinaryShortTTL(t *testing.T) {
 	mux := http.NewServeMux()
 	_, err = strategy.NewHermit(ctx, strategy.HermitConfig{
 		GitHubBaseURL: "http://localhost:8080",
-		BinaryTTL:     100 * time.Millisecond,
+		BootstrapTTL:  100 * time.Millisecond,
 	}, nil, memCache, mux)
 	assert.NoError(t, err)
 
@@ -262,6 +262,66 @@ func TestHermitGitHubArchive(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code)
 	assert.Equal(t, "archive-content", w.Body.String())
 	assert.Equal(t, 1, callCount)
+}
+
+func TestHermitBootstrapFileExpires(t *testing.T) {
+	httpTransportMutexHermit.Lock()
+	defer httpTransportMutexHermit.Unlock()
+
+	callCount := 0
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		callCount++
+		if callCount == 1 {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("hermit-v0.50.1"))
+		} else {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("hermit-v0.52.1"))
+		}
+	}))
+	defer backend.Close()
+
+	originalTransport := http.DefaultTransport
+	defer func() { http.DefaultTransport = originalTransport }()                                   //nolint:reassign
+	http.DefaultTransport = &mockTransport{backend: backend, originalTransport: originalTransport} //nolint:reassign
+
+	_, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelError})
+	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: time.Hour})
+	assert.NoError(t, err)
+	t.Cleanup(func() { memCache.Close() })
+
+	mux := http.NewServeMux()
+	_, err = strategy.NewHermit(ctx, strategy.HermitConfig{
+		GitHubBaseURL: "http://localhost:8080",
+		BootstrapTTL:  100 * time.Millisecond,
+	}, nil, memCache, mux)
+	assert.NoError(t, err)
+
+	// First request caches the bootstrap binary
+	req1 := httptest.NewRequestWithContext(ctx, http.MethodGet, "/hermit/example.com/stable/hermit-linux-amd64.gz", nil)
+	w1 := httptest.NewRecorder()
+	mux.ServeHTTP(w1, req1)
+	assert.Equal(t, http.StatusOK, w1.Code)
+	assert.Equal(t, "hermit-v0.50.1", w1.Body.String())
+	assert.Equal(t, 1, callCount)
+
+	// Immediate second request should be cached
+	req2 := httptest.NewRequestWithContext(ctx, http.MethodGet, "/hermit/example.com/stable/hermit-linux-amd64.gz", nil)
+	w2 := httptest.NewRecorder()
+	mux.ServeHTTP(w2, req2)
+	assert.Equal(t, "hermit-v0.50.1", w2.Body.String())
+	assert.Equal(t, 1, callCount, "should serve from cache")
+
+	// Wait for TTL to expire
+	time.Sleep(150 * time.Millisecond)
+
+	// Third request should fetch fresh from upstream
+	req3 := httptest.NewRequestWithContext(ctx, http.MethodGet, "/hermit/example.com/stable/hermit-linux-amd64.gz", nil)
+	w3 := httptest.NewRecorder()
+	mux.ServeHTTP(w3, req3)
+	assert.Equal(t, http.StatusOK, w3.Code)
+	assert.Equal(t, "hermit-v0.52.1", w3.Body.String())
+	assert.Equal(t, 2, callCount, "should re-fetch after TTL expires")
 }
 
 func TestHermitCacheKeyGeneration(t *testing.T) {
