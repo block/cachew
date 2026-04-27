@@ -289,3 +289,56 @@ func TestMiddlewareEmptyPolicyDeniesAll(t *testing.T) {
 		assert.Equal(t, http.StatusForbidden, w.Code)
 	}
 }
+
+func TestMiddlewarePrincipalBasedPolicy(t *testing.T) {
+	policy := `package cachew.authz
+default allow := false
+allow if input.principal == "spiffe://cluster.local/ns/blox/sa/cache-warmer"
+`
+	next := http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {})
+	handler, err := opa.Middleware(t.Context(), opa.Config{Policy: policy}, next)
+	assert.NoError(t, err)
+
+	tests := []struct {
+		Name           string
+		XFCC           string
+		ExpectedStatus int
+	}{
+		{
+			Name:           "MatchingPrincipalAllowed",
+			XFCC:           `By=spiffe://cluster.local/ns/cachew/sa/cachew;Hash=abc;Subject="";URI=spiffe://cluster.local/ns/blox/sa/cache-warmer`,
+			ExpectedStatus: http.StatusOK,
+		},
+		{
+			Name:           "DifferentPrincipalDenied",
+			XFCC:           `By=spiffe://cluster.local/ns/cachew/sa/cachew;Hash=abc;URI=spiffe://cluster.local/ns/other/sa/other`,
+			ExpectedStatus: http.StatusForbidden,
+		},
+		{
+			Name:           "NoXFCCDenied",
+			XFCC:           "",
+			ExpectedStatus: http.StatusForbidden,
+		},
+		{
+			Name:           "QuotedURIAllowed",
+			XFCC:           `By=spiffe://cluster.local/ns/cachew/sa/cachew;Hash=abc;URI="spiffe://cluster.local/ns/blox/sa/cache-warmer"`,
+			ExpectedStatus: http.StatusOK,
+		},
+		{
+			Name:           "ChainOnlyChecksFirstEntry",
+			XFCC:           `By=x;URI=spiffe://cluster.local/ns/blox/sa/cache-warmer,By=y;URI=spiffe://cluster.local/ns/other/sa/other`,
+			ExpectedStatus: http.StatusOK,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.Name, func(t *testing.T) {
+			r := newRequest(http.MethodPost, "/api/v1/object/brew/key")
+			if test.XFCC != "" {
+				r.Header.Set("X-Forwarded-Client-Cert", test.XFCC)
+			}
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, r)
+			assert.Equal(t, test.ExpectedStatus, w.Code)
+		})
+	}
+}
