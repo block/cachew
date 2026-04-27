@@ -164,5 +164,34 @@ func buildInput(r *http.Request) map[string]any {
 		"path":        path,
 		"headers":     headers,
 		"remote_addr": r.RemoteAddr,
+		"principal":   parsePrincipal(r.Header.Get("X-Forwarded-Client-Cert")),
 	}
+}
+
+// parsePrincipal extracts the caller's SPIFFE identity from the X-Forwarded-Client-Cert
+// header set by an upstream Envoy/Istio sidecar. Returns an empty string if the header
+// is missing or the URI field is absent.
+//
+// The XFCC header format is described in
+// https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_conn_man/headers#x-forwarded-client-cert.
+// Multiple certificates are separated by commas; within each entry, fields are
+// separated by semicolons. We only inspect the first (caller's) entry and return
+// the URI subject alternative name.
+func parsePrincipal(xfcc string) string {
+	if xfcc == "" {
+		return ""
+	}
+	first, _, _ := strings.Cut(xfcc, ",")
+	for field := range strings.SplitSeq(first, ";") {
+		key, value, ok := strings.Cut(field, "=")
+		if !ok {
+			continue
+		}
+		if !strings.EqualFold(strings.TrimSpace(key), "URI") {
+			continue
+		}
+		// URI values may be quoted per RFC; strip surrounding quotes if present.
+		return strings.Trim(strings.TrimSpace(value), `"`)
+	}
+	return ""
 }
