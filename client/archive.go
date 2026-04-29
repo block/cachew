@@ -19,7 +19,7 @@ import (
 // cores.
 func Archive(ctx context.Context, w io.Writer, baseDir string, includePaths []string, excludePatterns []string, threads int) error {
 	if threads <= 0 {
-		threads = runtime.NumCPU()
+		threads = runtime.GOMAXPROCS(0)
 	}
 
 	if len(includePaths) == 0 {
@@ -54,7 +54,7 @@ func Archive(ctx context.Context, w io.Writer, baseDir string, includePaths []st
 // parallelism; 0 uses all CPU cores.
 func Extract(ctx context.Context, r io.Reader, directory string, threads int) error {
 	if threads <= 0 {
-		threads = runtime.NumCPU()
+		threads = runtime.GOMAXPROCS(0)
 	}
 
 	if err := os.MkdirAll(directory, 0o750); err != nil {

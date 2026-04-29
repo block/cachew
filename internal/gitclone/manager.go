@@ -121,7 +121,7 @@ func NewManager(ctx context.Context, config Config, credentialProvider Credentia
 	}
 
 	if config.PackThreads <= 0 {
-		config.PackThreads = runtime.NumCPU()
+		config.PackThreads = runtime.GOMAXPROCS(0)
 	}
 
 	if err := os.MkdirAll(config.MirrorRoot, 0o750); err != nil {
