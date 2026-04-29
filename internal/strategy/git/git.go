@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/alecthomas/errors"
@@ -57,6 +58,7 @@ type Strategy struct {
 	coldSnapshotMu      sync.Map // keyed by upstream URL, values are *coldSnapshotEntry
 	deferredRestoreOnce sync.Map // keyed by upstream URL, ensures at most one deferred restore per repo
 	metrics             *gitMetrics
+	ready               atomic.Bool
 }
 
 func New(
@@ -124,9 +126,17 @@ func New(
 		tokenManager: tokenManager,
 		metrics:      m,
 	}
-	if err := s.warmExistingRepos(ctx); err != nil {
-		logger.WarnContext(ctx, "Failed to warm existing repos", "error", err)
-	}
+	// Run startup fetches in the background so the HTTP listener (and
+	// /_liveness) come up immediately. /_readiness gates on Ready() so the
+	// Service load balancer holds traffic until warming completes.
+	go func() {
+		warmCtx := context.WithoutCancel(ctx)
+		if err := s.warmExistingRepos(warmCtx); err != nil {
+			logger.WarnContext(warmCtx, "Failed to warm existing repos", "error", err)
+		}
+		s.ready.Store(true)
+		logger.InfoContext(warmCtx, "Git strategy ready")
+	}()
 
 	s.proxy = &httputil.ReverseProxy{
 		Director: func(req *http.Request) {
@@ -166,6 +176,12 @@ func New(
 }
 
 var _ strategy.Strategy = (*Strategy)(nil)
+var _ strategy.Readier = (*Strategy)(nil)
+
+// Ready reports whether startup warm-up has completed.
+func (s *Strategy) Ready() bool {
+	return s.ready.Load()
+}
 
 func (s *Strategy) warmExistingRepos(ctx context.Context) error {
 	logger := logging.FromContext(ctx)

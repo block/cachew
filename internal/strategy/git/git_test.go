@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+	"time"
 
 	"github.com/alecthomas/assert/v2"
 
@@ -37,6 +38,20 @@ func (m *testMux) HandleFunc(pattern string, handler func(http.ResponseWriter, *
 func newTestScheduler(ctx context.Context, t *testing.T) jobscheduler.Provider {
 	t.Helper()
 	return jobscheduler.NewProvider(ctx, jobscheduler.Config{})
+}
+
+// waitForReady blocks until the strategy reports Ready() — used by tests that
+// operate directly on the mirror directory to avoid racing with the background
+// warm-up goroutine started in git.New.
+func waitForReady(t *testing.T, s *git.Strategy) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !s.Ready() && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !s.Ready() {
+		t.Fatal("strategy never became ready")
+	}
 }
 
 func TestNew(t *testing.T) {
@@ -182,6 +197,28 @@ func TestNewWithExistingCloneOnDisk(t *testing.T) {
 	}, nil)
 	_, err = git.New(ctx, git.Config{}, newTestScheduler(ctx, t), nil, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
 	assert.NoError(t, err)
+}
+
+// TestNewIsReadyAfterWarm verifies that startup warm-up runs in the background
+// (so the HTTP listener can bind immediately) and that Ready() flips to true
+// once warming completes.
+func TestNewIsReadyAfterWarm(t *testing.T) {
+	_, ctx := logging.Configure(context.Background(), logging.Config{})
+	tmpDir := t.TempDir()
+
+	mux := newTestMux()
+	cm := gitclone.NewManagerProvider(ctx, gitclone.Config{
+		MirrorRoot:    tmpDir,
+		FetchInterval: 15,
+	}, nil)
+	s, err := git.New(ctx, git.Config{}, newTestScheduler(ctx, t), nil, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
+	assert.NoError(t, err)
+
+	deadline := time.Now().Add(5 * time.Second)
+	for !s.Ready() && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	assert.True(t, s.Ready(), "strategy should be ready after warm-up completes")
 }
 
 func TestIntegrationWithMockUpstream(t *testing.T) {

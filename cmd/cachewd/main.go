@@ -174,7 +174,17 @@ func newMux(ctx context.Context, cr *cache.Registry, mr *metadatadb.Registry, sr
 		_, _ = w.Write([]byte("OK")) //nolint:errcheck
 	})
 
+	// readiers is populated by config.Load below. The /_readiness handler
+	// reads it through this closure so the slice is in scope before the
+	// HTTP server starts accepting connections.
+	var readiers []strategy.Readier
 	mux.HandleFunc("GET /_readiness", func(w http.ResponseWriter, _ *http.Request) {
+		for _, r := range readiers {
+			if !r.Ready() {
+				http.Error(w, "warming up", http.StatusServiceUnavailable)
+				return
+			}
+		}
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("OK")) //nolint:errcheck
 	})
@@ -199,10 +209,11 @@ func newMux(ctx context.Context, cr *cache.Registry, mr *metadatadb.Registry, sr
 		http.DefaultServeMux.ServeHTTP(w, r)
 	}))
 
-	handler, _, err := config.Load(ctx, cr, mr, sr, providersConfigHCL, mux, vars)
+	handler, _, loaded, err := config.Load(ctx, cr, mr, sr, providersConfigHCL, mux, vars)
 	if err != nil {
 		return nil, errors.Errorf("load config: %w", err)
 	}
+	readiers = loaded
 
 	return handler, nil
 }

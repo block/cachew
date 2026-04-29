@@ -154,41 +154,41 @@ func Load(
 	ast *hcl.AST,
 	mux *http.ServeMux,
 	vars map[string]string,
-) (http.Handler, metadatadb.Backend, error) {
+) (http.Handler, metadatadb.Backend, []strategy.Readier, error) {
 	logger := logging.FromContext(ctx)
 	expandVars(ast, vars)
 
 	classified, err := classifyBlocks(ast)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	var caches []cache.Cache
 	for _, block := range classified.caches {
 		name, inner, err := unwrapBlock(block)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		c, err := cr.Create(ctx, name, inner, vars)
 		if err != nil {
-			return nil, nil, errors.Errorf("%s: %w", block.Pos, err)
+			return nil, nil, nil, errors.Errorf("%s: %w", block.Pos, err)
 		}
 		caches = append(caches, c)
 	}
 	if len(caches) == 0 {
-		return nil, nil, errors.Errorf("%s: expected at least one cache backend", ast.Pos)
+		return nil, nil, nil, errors.Errorf("%s: expected at least one cache backend", ast.Pos)
 	}
 
 	if classified.metadata == nil {
-		return nil, nil, errors.Errorf("%s: expected a metadata backend", ast.Pos)
+		return nil, nil, nil, errors.Errorf("%s: expected a metadata backend", ast.Pos)
 	}
 	metaName, metaInner, err := unwrapBlock(classified.metadata)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	metadata, err := mr.Create(ctx, metaName, metaInner, vars)
 	if err != nil {
-		return nil, nil, errors.Errorf("%s: %w", classified.metadata.Pos, err)
+		return nil, nil, nil, errors.Errorf("%s: %w", classified.metadata.Pos, err)
 	}
 
 	cache := cache.MaybeNewTiered(ctx, caches)
@@ -197,18 +197,23 @@ func Load(
 
 	// Second pass, instantiate strategies and bind them to the mux.
 	// Collect strategies that implement Interceptor separately — they need
-	// to run before ServeMux route matching, not as mux routes.
+	// to run before ServeMux route matching, not as mux routes. Strategies
+	// that implement Readier are tracked so /_readiness can gate on warm-up.
 	var interceptors []strategy.Interceptor
+	var readiers []strategy.Readier
 	for _, block := range classified.strategies {
 		name := block.Name
 		slogger := logger.With("strategy", name)
 		mlog := &loggingMux{logger: slogger, mux: mux}
 		s, err := sr.Create(ctx, name, block, cache, mlog, vars)
 		if err != nil {
-			return nil, nil, errors.Errorf("%s: %w", block.Pos, err)
+			return nil, nil, nil, errors.Errorf("%s: %w", block.Pos, err)
 		}
 		if interceptor, ok := s.(strategy.Interceptor); ok {
 			interceptors = append(interceptors, interceptor)
+		}
+		if readier, ok := s.(strategy.Readier); ok {
+			readiers = append(readiers, readier)
 		}
 	}
 
@@ -218,7 +223,7 @@ func Load(
 	for i := len(interceptors) - 1; i >= 0; i-- {
 		h = interceptors[i].Intercept(h)
 	}
-	return h, metadata, nil
+	return h, metadata, readiers, nil
 }
 
 // ExpandVars expands environment variable references in HCL strings and heredocs.
