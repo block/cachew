@@ -120,3 +120,13 @@ type Interceptor interface {
 	// requests and delegates all others to next.
 	Intercept(next http.Handler) http.Handler
 }
+
+// Readier is an optional interface a Strategy may implement to gate the
+// /_readiness probe on background warm-up completing. The HTTP listener and
+// /_liveness come up immediately so the kubelet doesn't restart the pod, but
+// the Service load balancer holds traffic until every Readier reports true.
+type Readier interface {
+	Strategy
+	// Ready reports whether the strategy is ready to serve traffic.
+	Ready() bool
+}
