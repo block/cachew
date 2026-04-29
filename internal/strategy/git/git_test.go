@@ -40,6 +40,20 @@ func newTestScheduler(ctx context.Context, t *testing.T) jobscheduler.Provider {
 	return jobscheduler.NewProvider(ctx, jobscheduler.Config{})
 }
 
+// waitForReady blocks until the strategy reports Ready() — used by tests that
+// operate directly on the mirror directory to avoid racing with the background
+// warm-up goroutine started in git.New.
+func waitForReady(t *testing.T, s *git.Strategy) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !s.Ready() && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !s.Ready() {
+		t.Fatal("strategy never became ready")
+	}
+}
+
 func TestNew(t *testing.T) {
 	_, ctx := logging.Configure(context.Background(), logging.Config{})
 	tmpDir := t.TempDir()

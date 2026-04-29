@@ -201,6 +201,7 @@ func TestSnapshotGenerationViaLocalClone(t *testing.T) {
 	assert.Equal(t, gitclone.StateReady, repo.State())
 
 	// Generate the snapshot.
+	waitForReady(t, s)
 	err = s.GenerateAndUploadSnapshot(ctx, repo)
 	assert.NoError(t, err)
 
@@ -267,6 +268,7 @@ func TestSnapshotGenerationIncludesTrackedLockFiles(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, gitclone.StateReady, repo.State())
 
+	waitForReady(t, s)
 	err = s.GenerateAndUploadSnapshot(ctx, repo)
 	assert.NoError(t, err)
 
@@ -311,6 +313,7 @@ func TestMirrorSnapshotRestoreDirectly(t *testing.T) {
 	repo, err := manager.GetOrCreate(ctx, upstreamURL)
 	assert.NoError(t, err)
 
+	waitForReady(t, s)
 	err = s.GenerateAndUploadMirrorSnapshot(ctx, repo)
 	assert.NoError(t, err)
 
@@ -386,6 +389,7 @@ func TestMirrorSnapshotWithMultipleBranches(t *testing.T) {
 	repo, err := manager.GetOrCreate(ctx, upstreamURL)
 	assert.NoError(t, err)
 
+	waitForReady(t, s)
 	err = s.GenerateAndUploadMirrorSnapshot(ctx, repo)
 	assert.NoError(t, err)
 
@@ -477,6 +481,7 @@ func TestSnapshotServesFreshSnapshotWithCommitHeader(t *testing.T) {
 	assert.NoError(t, err)
 
 	// Generate a snapshot — it will embed the mirror's HEAD as X-Cachew-Snapshot-Commit.
+	waitForReady(t, s)
 	err = s.GenerateAndUploadSnapshot(ctx, repo)
 	assert.NoError(t, err)
 
@@ -527,6 +532,7 @@ func TestSnapshotServesBundleURLWhenStale(t *testing.T) {
 	assert.NoError(t, err)
 
 	// Generate a snapshot at the current HEAD.
+	waitForReady(t, s)
 	err = s.GenerateAndUploadSnapshot(ctx, repo)
 	assert.NoError(t, err)
 
@@ -720,6 +726,7 @@ func TestSnapshotRemoteURLUsesUpstreamURL(t *testing.T) {
 	repo, err := manager.GetOrCreate(ctx, upstreamURL)
 	assert.NoError(t, err)
 
+	waitForReady(t, s)
 	err = s.GenerateAndUploadSnapshot(ctx, repo)
 	assert.NoError(t, err)
 
