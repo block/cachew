@@ -721,6 +721,14 @@ func (r *Repository) Repack(ctx context.Context) error {
 	}
 	output, err := cmd.CombinedOutput()
 	if err != nil {
+		// When git repack is killed (e.g. by our timeout), it cannot clean up
+		// the multi-pack-index.lock it holds. A stale lock blocks all future
+		// repacks, causing pack fragmentation that eventually degrades snapshot
+		// serving performance. Remove it so the next attempt can proceed.
+		lockPath := filepath.Join(r.path, "objects", "pack", "multi-pack-index.lock")
+		if rmErr := os.Remove(lockPath); rmErr == nil {
+			logger.WarnContext(ctx, "Removed stale multi-pack-index.lock after repack failure", "upstream", r.upstreamURL)
+		}
 		return errors.Wrapf(err, "git repack: %s", string(output))
 	}
 

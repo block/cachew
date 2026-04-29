@@ -401,6 +401,36 @@ func TestRepository_Repack(t *testing.T) {
 	assert.NoError(t, err)
 }
 
+func TestRepository_Repack_CleansUpStaleLockOnFailure(t *testing.T) {
+	_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelError})
+	tmpDir := t.TempDir()
+	upstreamPath := createBareRepo(t, tmpDir)
+
+	clonePath := filepath.Join(tmpDir, "mirror")
+	cmd := exec.Command("git", "clone", "--mirror", upstreamPath, clonePath)
+	assert.NoError(t, cmd.Run())
+
+	repo := &Repository{
+		state:       StateReady,
+		path:        clonePath,
+		upstreamURL: upstreamPath,
+		fetchSem:    make(chan struct{}, 1),
+	}
+	repo.fetchSem <- struct{}{}
+
+	// Place a stale lock file simulating a killed repack.
+	lockPath := filepath.Join(clonePath, "objects", "pack", "multi-pack-index.lock")
+	assert.NoError(t, os.WriteFile(lockPath, []byte("stale"), 0o644))
+
+	// Repack should fail because of the lock, but should clean it up.
+	err := repo.Repack(ctx)
+	assert.Error(t, err)
+
+	// The stale lock should have been removed.
+	_, statErr := os.Stat(lockPath)
+	assert.True(t, os.IsNotExist(statErr), "expected multi-pack-index.lock to be removed after failed repack")
+}
+
 func TestRepository_HasCommit(t *testing.T) {
 	ctx := context.Background()
 	tmpDir := t.TempDir()
