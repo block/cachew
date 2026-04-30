@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -74,4 +75,37 @@ func TestRestoreCacheMiss(t *testing.T) {
 	}
 	err := cmd.Run(context.Background(), api, &CLI{})
 	assert.True(t, errors.Is(err, errCacheMiss), "expected errCacheMiss sentinel, got %v", err)
+}
+
+func TestPutCmdCancelOnCopyFailure(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			_, _ = io.Copy(io.Discard, r.Body)
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		http.NotFound(w, nil)
+	}))
+	defer srv.Close()
+
+	api := client.New(srv.URL, nil)
+	defer api.Close()
+
+	// This mirrors what PutCmd.Run does internally:
+	// create with a cancellable context, write partial data, then cancel
+	// before closing — simulating an io.Copy error.
+	key := client.NewKey("put-cancel-test")
+	createCtx, cancel := context.WithCancelCause(t.Context())
+	defer cancel(nil)
+
+	wc, err := api.Namespace("test").Create(createCtx, key, nil, 0)
+	assert.NoError(t, err)
+
+	_, _ = wc.Write([]byte("partial"))
+
+	// Simulate the cancel-before-close pattern from PutCmd.Run
+	cancel(errors.New("copy failed"))
+	err = wc.Close()
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "cancelled")
 }
