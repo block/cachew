@@ -16,7 +16,6 @@ import (
 	"github.com/block/cachew/internal/cache"
 	"github.com/block/cachew/internal/gitclone"
 	"github.com/block/cachew/internal/githubapp"
-	"github.com/block/cachew/internal/jobscheduler"
 	"github.com/block/cachew/internal/logging"
 	"github.com/block/cachew/internal/snapshot"
 	"github.com/block/cachew/internal/strategy/git"
@@ -42,8 +41,11 @@ func TestSnapshotHTTPEndpoint(t *testing.T) {
 	}, nil)
 	// SnapshotInterval=0 disables periodic snapshot jobs so they don't
 	// overwrite the fake cached snapshot we insert below.
-	_, err = git.New(ctx, git.Config{}, newTestScheduler(ctx, t), memCache, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
+	s, err := git.New(ctx, git.Config{}, newTestScheduler(ctx, t), memCache, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
 	assert.NoError(t, err)
+	// The warm-up goroutine uses context.WithoutCancel so it survives
+	// t.Context() cancellation. Wait for it before TempDir cleanup.
+	t.Cleanup(func() { waitForReady(t, s) })
 
 	// Create a fake snapshot in the cache with a Last-Modified after the
 	// mirror's last fetch so the endpoint considers it fresh.
@@ -585,23 +587,15 @@ func TestColdSnapshotServesWithoutCommitHeader(t *testing.T) {
 	}
 
 	_, ctx := logging.Configure(context.Background(), logging.Config{})
-	ctx, cancelAll := context.WithCancel(ctx)
 	tmpDir := t.TempDir()
 	mirrorRoot := filepath.Join(tmpDir, "mirrors")
-
-	sched, err := jobscheduler.New(ctx, jobscheduler.Config{})
-	assert.NoError(t, err)
-	// Cancel the context and wait for all scheduler workers to drain before
-	// TempDir cleanup runs, preventing a race with background jobs.
-	t.Cleanup(func() { cancelAll(); sched.Wait() })
 
 	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: time.Hour})
 	assert.NoError(t, err)
 	mux := newTestMux()
 
-	schedProvider := func() (*jobscheduler.RootScheduler, error) { return sched, nil }
 	cm := gitclone.NewManagerProvider(ctx, gitclone.Config{MirrorRoot: mirrorRoot}, nil)
-	_, err = git.New(ctx, git.Config{}, schedProvider, memCache, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
+	_, err = git.New(ctx, git.Config{}, newTestScheduler(ctx, t), memCache, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
 	assert.NoError(t, err)
 
 	// Pre-populate the cache with a fake snapshot that has NO X-Cachew-Snapshot-Commit
@@ -648,21 +642,15 @@ func TestDeferredRestoreOnlyScheduledOnce(t *testing.T) {
 	}
 
 	_, ctx := logging.Configure(context.Background(), logging.Config{})
-	ctx, cancelAll := context.WithCancel(ctx)
 	tmpDir := t.TempDir()
 	mirrorRoot := filepath.Join(tmpDir, "mirrors")
-
-	sched, err := jobscheduler.New(ctx, jobscheduler.Config{})
-	assert.NoError(t, err)
-	t.Cleanup(func() { cancelAll(); sched.Wait() })
 
 	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: time.Hour})
 	assert.NoError(t, err)
 	mux := newTestMux()
 
-	schedProvider := func() (*jobscheduler.RootScheduler, error) { return sched, nil }
 	cm := gitclone.NewManagerProvider(ctx, gitclone.Config{MirrorRoot: mirrorRoot}, nil)
-	_, err = git.New(ctx, git.Config{}, schedProvider, memCache, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
+	_, err = git.New(ctx, git.Config{}, newTestScheduler(ctx, t), memCache, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
 	assert.NoError(t, err)
 
 	// Pre-populate cache with a fake snapshot.
