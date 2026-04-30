@@ -131,14 +131,19 @@ func (d *APIV1) putObject(w http.ResponseWriter, r *http.Request) {
 	// Extract and filter headers from request
 	headers := httputil.FilterHeaders(r.Header, httputil.TransportHeaders...)
 
+	createCtx, cancelCreate := context.WithCancelCause(r.Context())
+	defer cancelCreate(nil)
+
 	namespacedCache := d.cache.Namespace(namespace)
-	cw, err := namespacedCache.Create(r.Context(), key, headers, ttl)
+	cw, err := namespacedCache.Create(createCtx, key, headers, ttl)
 	if err != nil {
 		d.httpError(w, http.StatusInternalServerError, err, "Failed to create cache writer", "key", key)
 		return
 	}
 
 	if _, err := io.Copy(cw, r.Body); err != nil {
+		cancelCreate(err)
+		_ = cw.Close()
 		d.httpError(w, http.StatusInternalServerError, err, "Failed to copy request body to cache writer")
 		return
 	}

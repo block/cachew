@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -366,6 +367,38 @@ func TestHandlerMethodChaining(t *testing.T) {
 		TTL(func(_ *http.Request) time.Duration { return time.Hour })
 
 	assert.Equal(t, h, result, "methods should return the same handler instance")
+}
+
+func TestStreamAndCacheAbortsOnUpstreamError(t *testing.T) {
+	// Backend that sends partial data then abruptly closes.
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("partial"))
+		if hj, ok := w.(http.Hijacker); ok {
+			conn, _, _ := hj.Hijack()
+			_ = conn.Close()
+		}
+	}))
+	defer backend.Close()
+
+	c := mustNewMemoryCache()
+	ctx := logging.ContextWithLogger(context.Background(), slog.Default())
+
+	h := handler.New(http.DefaultClient, c).
+		Transform(func(r *http.Request) (*http.Request, error) {
+			return http.NewRequestWithContext(r.Context(), http.MethodGet, backend.URL+"/fail", nil)
+		})
+
+	r := httptest.NewRequest(http.MethodGet, "http://example.com/test", nil)
+	r = r.WithContext(ctx)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+
+	// The partial response must not be cached.
+	key := cache.NewKey("http://example.com/test")
+	_, _, err := c.Open(ctx, key)
+	assert.IsError(t, err, os.ErrNotExist)
 }
 
 func mustNewMemoryCache() cache.Cache {

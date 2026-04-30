@@ -136,12 +136,16 @@ func (c *PutCmd) Run(ctx context.Context, api *client.Client) error {
 		headers.Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filepath.Base(filename))) //nolint:perfsprint
 	}
 
-	wc, err := api.Namespace(c.Namespace).Create(ctx, c.Key.Key(), headers, c.TTL)
+	createCtx, cancelCreate := context.WithCancelCause(ctx)
+	defer cancelCreate(nil)
+
+	wc, err := api.Namespace(c.Namespace).Create(createCtx, c.Key.Key(), headers, c.TTL)
 	if err != nil {
 		return errors.Wrap(err, "failed to create object")
 	}
 
 	if _, err := io.Copy(wc, c.Input); err != nil {
+		cancelCreate(err)
 		return errors.Join(errors.Wrap(err, "failed to copy data"), wc.Close())
 	}
 

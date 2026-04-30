@@ -120,6 +120,24 @@ func TestHashFilesSkipsDirectories(t *testing.T) {
 	assert.Equal(t, h1, h2, "directories should be skipped, not cause errors")
 }
 
+func TestSaveAbortOnArchiveFailure(t *testing.T) {
+	srv := newFakeServer(nil)
+	defer srv.Close()
+
+	c := client.New(srv.URL, nil).Namespace("test")
+	defer c.Close()
+
+	key := client.NewKey("should-not-exist")
+
+	// Save from a nonexistent directory — Archive will fail.
+	err := c.Save(t.Context(), key, "/nonexistent/path", []string{"."})
+	assert.Error(t, err)
+
+	// The object must not have been persisted.
+	_, _, err = c.Open(t.Context(), key)
+	assert.IsError(t, err, os.ErrNotExist)
+}
+
 func TestHashKeySaveRestore(t *testing.T) {
 	srv := newFakeServer(nil)
 	defer srv.Close()
