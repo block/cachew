@@ -300,6 +300,9 @@ func TestJobSchedulerMultipleQueues(t *testing.T) {
 
 	for _, queue := range queues {
 		queueExecutions[queue] = false
+	}
+
+	for _, queue := range queues {
 		jobID := "job1"
 		scheduler.Submit(queue, jobID, func(_ context.Context) error {
 			mu.Lock()
