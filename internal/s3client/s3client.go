@@ -86,9 +86,10 @@ func NewClient(ctx context.Context, config Config) (*minio.Client, error) {
 		})
 
 	options := &minio.Options{
-		Creds:  creds,
-		Secure: config.UseSSL,
-		Region: config.Region,
+		Creds:           creds,
+		Secure:          config.UseSSL,
+		Region:          config.Region,
+		TrailingHeaders: true,
 	}
 
 	if transport != nil {

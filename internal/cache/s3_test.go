@@ -15,29 +15,29 @@ import (
 	"github.com/block/cachew/internal/s3client/s3clienttest"
 )
 
+func newS3Cache(t *testing.T, bucket string) cache.Cache {
+	t.Helper()
+	s3clienttest.CleanBucket(t, bucket)
+	_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelDebug})
+
+	clientProvider := s3client.NewClientProvider(ctx, s3client.Config{
+		Endpoint: s3clienttest.Addr,
+		UseSSL:   false,
+	})
+
+	c, err := cache.NewS3(ctx, cache.S3Config{
+		Bucket:           bucket,
+		MaxTTL:           500 * time.Millisecond,
+		UploadPartSizeMB: 16,
+	}, clientProvider)
+	assert.NoError(t, err)
+	return c
+}
+
 // TestS3Cache tests the S3 cache implementation using MinIO in Docker.
 func TestS3Cache(t *testing.T) {
 	bucket := s3clienttest.Start(t)
-
-	cachetest.Suite(t, func(t *testing.T) cache.Cache {
-		s3clienttest.CleanBucket(t, bucket)
-		_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelDebug})
-
-		clientProvider := s3client.NewClientProvider(ctx, s3client.Config{
-			Endpoint:      s3clienttest.Addr,
-			Region:        "",
-			UseSSL:        false,
-			SkipSSLVerify: false,
-		})
-
-		c, err := cache.NewS3(ctx, cache.S3Config{
-			Bucket:           bucket,
-			MaxTTL:           500 * time.Millisecond,
-			UploadPartSizeMB: 16,
-		}, clientProvider)
-		assert.NoError(t, err)
-		return c
-	})
+	cachetest.Suite(t, func(t *testing.T) cache.Cache { return newS3Cache(t, bucket) })
 }
 
 func TestS3CacheSoak(t *testing.T) {
@@ -46,14 +46,12 @@ func TestS3CacheSoak(t *testing.T) {
 	}
 
 	bucket := s3clienttest.Start(t)
-
-	_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelError})
+	s3clienttest.CleanBucket(t, bucket)
+	_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelDebug})
 
 	clientProvider := s3client.NewClientProvider(ctx, s3client.Config{
-		Endpoint:      s3clienttest.Addr,
-		Region:        "",
-		UseSSL:        false,
-		SkipSSLVerify: false,
+		Endpoint: s3clienttest.Addr,
+		UseSSL:   false,
 	})
 
 	c, err := cache.NewS3(ctx, cache.S3Config{
