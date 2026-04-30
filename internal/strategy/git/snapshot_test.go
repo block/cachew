@@ -2,6 +2,7 @@ package git_test
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -686,6 +687,68 @@ func TestDeferredRestoreOnlyScheduledOnce(t *testing.T) {
 	handler.ServeHTTP(w2, req2)
 	// Second request may be 200 (from local cache) or 503 (clone not ready).
 	// The key assertion is that it doesn't panic from double-scheduling.
+}
+
+func TestCacheBundleSyncAbortsOnWriteFailure(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not found in PATH")
+	}
+
+	_, ctx := logging.Configure(context.Background(), logging.Config{})
+	tmpDir := t.TempDir()
+	mirrorRoot := filepath.Join(tmpDir, "mirrors")
+
+	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: time.Hour})
+	assert.NoError(t, err)
+
+	// Wrap cache so Create returns a writer that fails on Write.
+	failCache := &failWriteCache{Cache: memCache}
+
+	mux := newTestMux()
+	cm := gitclone.NewManagerProvider(ctx, gitclone.Config{MirrorRoot: mirrorRoot}, nil)
+	s, err := git.New(ctx, git.Config{}, newTestScheduler(ctx, t), failCache, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
+	assert.NoError(t, err)
+	waitForReady(t, s)
+
+	key := cache.NewKey("test-bundle-abort")
+	data := []byte("bundle data that should not persist")
+
+	err = s.CacheBundleSync(ctx, key, data)
+	assert.Error(t, err)
+
+	// Verify nothing was persisted — check underlying memCache, not failCache.
+	_, _, err = memCache.Open(ctx, key)
+	assert.IsError(t, err, os.ErrNotExist)
+}
+
+// failWriteCache wraps a cache.Cache and makes Create return a writer that
+// always fails on Write.
+type failWriteCache struct {
+	cache.Cache
+}
+
+func (f *failWriteCache) Create(ctx context.Context, key cache.Key, headers http.Header, ttl time.Duration) (io.WriteCloser, error) {
+	wc, err := f.Cache.Create(ctx, key, headers, ttl)
+	if err != nil {
+		return nil, err
+	}
+	return &failWriter{inner: wc}, nil
+}
+
+func (f *failWriteCache) Namespace(ns cache.Namespace) cache.Cache {
+	return &failWriteCache{Cache: f.Cache.Namespace(ns)}
+}
+
+type failWriter struct {
+	inner io.WriteCloser
+}
+
+func (w *failWriter) Write(_ []byte) (int, error) {
+	return 0, io.ErrShortWrite
+}
+
+func (w *failWriter) Close() error {
+	return w.inner.Close()
 }
 
 func TestSnapshotRemoteURLUsesUpstreamURL(t *testing.T) {

@@ -3,6 +3,7 @@ package git
 import (
 	"context"
 
+	"github.com/block/cachew/internal/cache"
 	"github.com/block/cachew/internal/gitclone"
 )
 
@@ -16,4 +17,9 @@ func (s *Strategy) GenerateAndUploadSnapshot(ctx context.Context, repo *gitclone
 
 func (s *Strategy) GenerateAndUploadMirrorSnapshot(ctx context.Context, repo *gitclone.Repository) error {
 	return s.generateAndUploadMirrorSnapshot(ctx, repo)
+}
+
+// CacheBundleSync exports cacheBundleSync for testing.
+func (s *Strategy) CacheBundleSync(ctx context.Context, key cache.Key, data []byte) error {
+	return s.cacheBundleSync(ctx, key, data)
 }
