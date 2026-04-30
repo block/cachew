@@ -418,9 +418,11 @@ func (w *s3Writer) upload(pr *io.PipeReader, r io.Reader) {
 		userMetadata["Headers"] = string(headersJSON)
 	}
 
-	// Configure upload options
+	// Configure upload options. CRC64-NVME is computed as data streams through and sent as a
+	// trailing header so S3 validates integrity server-side, preventing corrupt or truncated uploads.
 	opts := minio.PutObjectOptions{
 		UserMetadata: userMetadata,
+		AutoChecksum: minio.ChecksumCRC64NVME,
 	}
 
 	// Enable concurrent streaming for multi-part uploads if configured
