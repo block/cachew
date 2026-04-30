@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
 	"time"
 
@@ -82,4 +83,40 @@ func TestCachedFetchNonOKStatus(t *testing.T) {
 	assert.NoError(t, err)
 	assert.NoError(t, resp.Body.Close())
 	assert.Equal(t, "not found", string(body))
+}
+
+func TestFetchDirectAbortsOnPartialResponse(t *testing.T) {
+	_, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelError})
+	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: time.Hour})
+	assert.NoError(t, err)
+	defer memCache.Close()
+
+	// Backend that sends partial data then closes the connection.
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("partial"))
+		// Hijack the connection to simulate a mid-stream failure.
+		if hj, ok := w.(http.Hijacker); ok {
+			conn, _, _ := hj.Hijack()
+			_ = conn.Close()
+		}
+	}))
+	defer backend.Close()
+
+	client := &http.Client{}
+	key := cache.NewKey(backend.URL + "/fail")
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, backend.URL+"/fail", nil)
+	assert.NoError(t, err)
+
+	resp, err := cache.FetchDirect(client, req, memCache, key)
+	assert.NoError(t, err)
+	// Read the body — the copy goroutine will encounter the connection reset.
+	_, _ = io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+
+	// The partial response must not be cached.
+	_, _, err = memCache.Open(ctx, key)
+	assert.IsError(t, err, os.ErrNotExist)
 }
