@@ -37,7 +37,16 @@ func (m *testMux) HandleFunc(pattern string, handler func(http.ResponseWriter, *
 
 func newTestScheduler(ctx context.Context, t *testing.T) jobscheduler.Provider {
 	t.Helper()
-	return jobscheduler.NewProvider(ctx, jobscheduler.Config{})
+	// Derive a context that carries the caller's logger but cancels when the
+	// test ends (via t.Context()). This ensures scheduler workers shut down
+	// before TempDir cleanup without needing an explicit context.WithCancel.
+	schedCtx := logging.ContextWithLogger(t.Context(), logging.FromContext(ctx))
+	sched, err := jobscheduler.New(schedCtx, jobscheduler.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { sched.Wait() })
+	return func() (*jobscheduler.RootScheduler, error) { return sched, nil }
 }
 
 // waitForReady blocks until the strategy reports Ready() — used by tests that
