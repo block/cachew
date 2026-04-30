@@ -95,11 +95,15 @@ func (c *Client) Save(ctx context.Context, key Key, baseDir string, paths []stri
 		}
 	}
 
-	wc, err := c.Create(ctx, key, headers, cfg.ttl)
+	createCtx, cancelCreate := context.WithCancelCause(ctx)
+	defer cancelCreate(nil)
+
+	wc, err := c.Create(createCtx, key, headers, cfg.ttl)
 	if err != nil {
 		return errors.Wrap(err, "failed to create object")
 	}
 	if err := Archive(ctx, wc, baseDir, paths, cfg.exclude, cfg.zstdThreads); err != nil {
+		cancelCreate(err)
 		return errors.Join(err, wc.Close())
 	}
 	return errors.Wrap(wc.Close(), "failed to close writer")
