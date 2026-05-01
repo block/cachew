@@ -184,6 +184,39 @@ git-clone {
 	}
 }
 
+func TestExpandVars(t *testing.T) {
+	const input = `
+bind = "${CACHEW_BIND}"
+
+opa {
+  policy = <<EOF
+  allow if caller_principal == "${CACHEW_WARMER_PRINCIPAL}"
+  EOF
+}
+
+unset = "${CACHEW_NOT_SET}"
+`
+	ast, err := hcl.Parse(strings.NewReader(input))
+	assert.NoError(t, err)
+
+	ExpandVars(ast, map[string]string{
+		"CACHEW_BIND":             "0.0.0.0:9090",
+		"CACHEW_WARMER_PRINCIPAL": "spiffe://example/ns/warm/sa/x",
+	})
+
+	got, err := hcl.MarshalAST(ast)
+	assert.NoError(t, err)
+	out := string(got)
+
+	// Both *hcl.String and *hcl.Heredoc attribute values are expanded.
+	assert.Contains(t, out, `bind = "0.0.0.0:9090"`)
+	assert.Contains(t, out, `caller_principal == "spiffe://example/ns/warm/sa/x"`)
+	// Unset placeholders collapse to empty string (os.Expand semantics).
+	assert.Contains(t, out, `unset = ""`)
+	// No literal placeholder remains.
+	assert.Equal(t, false, strings.Contains(out, "${CACHEW_"))
+}
+
 func TestLoadRequiresMetadataBackend(t *testing.T) {
 	cr := cache.NewRegistry()
 	cache.RegisterMemory(cr)

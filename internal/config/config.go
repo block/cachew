@@ -156,7 +156,7 @@ func Load(
 	vars map[string]string,
 ) (http.Handler, metadatadb.Backend, []strategy.Readier, error) {
 	logger := logging.FromContext(ctx)
-	expandVars(ast, vars)
+	ExpandVars(ast, vars)
 
 	classified, err := classifyBlocks(ast)
 	if err != nil {
@@ -226,8 +226,16 @@ func Load(
 	return h, metadata, readiers, nil
 }
 
-// ExpandVars expands environment variable references in HCL strings and heredocs.
-func expandVars(ast *hcl.AST, vars map[string]string) {
+// ExpandVars expands environment variable references in HCL strings and
+// heredocs in-place. It is exported so callers that unmarshal a sub-AST
+// directly (e.g. cmd/cachewd's loadGlobalConfig, which decodes the global
+// blocks via hcl.UnmarshalAST rather than the strategy/cache/metadata
+// pipeline in Load) can apply the same expansion. Without this, heredoc
+// values inside global blocks like `opa { policy = <<EOF ... EOF }` reach
+// downstream consumers with `${VAR}` placeholders intact, since
+// hcl.WithDefaultTransformer only runs against struct-tag default values
+// and not against live AST node strings.
+func ExpandVars(ast *hcl.AST, vars map[string]string) {
 	_ = hcl.Visit(ast, func(node hcl.Node, next func() error) error { //nolint:errcheck
 		attr, ok := node.(*hcl.Attribute)
 		if ok {
