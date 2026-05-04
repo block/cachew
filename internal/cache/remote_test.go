@@ -21,7 +21,7 @@ func TestRemoteCache(t *testing.T) {
 		ctx := t.Context()
 		_, ctx = logging.Configure(ctx, logging.Config{Level: slog.LevelError})
 		memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{
-			MaxTTL: 100 * time.Millisecond,
+			MaxTTL: 3 * time.Second,
 		})
 		assert.NoError(t, err)
 		t.Cleanup(func() { memCache.Close() })

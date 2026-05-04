@@ -16,7 +16,7 @@ import (
 func TestMemoryCache(t *testing.T) {
 	cachetest.Suite(t, func(t *testing.T) cache.Cache {
 		_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelError})
-		c, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: 100 * time.Millisecond})
+		c, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: 3 * time.Second})
 		assert.NoError(t, err)
 		return c
 	})

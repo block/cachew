@@ -19,7 +19,7 @@ func TestDiskCache(t *testing.T) {
 		_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelDebug})
 		c, err := cache.NewDisk(ctx, cache.DiskConfig{
 			Root:   dir,
-			MaxTTL: 100 * time.Millisecond,
+			MaxTTL: 3 * time.Second,
 		})
 		assert.NoError(t, err)
 		return c

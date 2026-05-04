@@ -29,7 +29,7 @@ func newS3Cache(t *testing.T, bucket string) cache.Cache {
 
 	c, err := cache.NewS3(ctx, cache.S3Config{
 		Bucket:           bucket,
-		MaxTTL:           500 * time.Millisecond,
+		MaxTTL:           3 * time.Second,
 		UploadPartSizeMB: 16,
 	}, clientProvider)
 	assert.NoError(t, err)
