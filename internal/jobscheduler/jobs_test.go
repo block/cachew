@@ -298,8 +298,16 @@ func TestJobSchedulerMultipleQueues(t *testing.T) {
 		queueExecutions = make(map[string]bool)
 	)
 
+	// Pre-populate the map before any Submit so the worker goroutines that
+	// later write to it under mu don't race with the main goroutine on map
+	// writes. scheduler.Submit synchronises internally (sync.Cond+sync.Mutex),
+	// which establishes happens-before from these writes to the eventual
+	// worker reads/writes.
 	for _, queue := range queues {
 		queueExecutions[queue] = false
+	}
+
+	for _, queue := range queues {
 		jobID := "job1"
 		scheduler.Submit(queue, jobID, func(_ context.Context) error {
 			mu.Lock()
