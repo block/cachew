@@ -473,9 +473,10 @@ func configureMirror(ctx context.Context, repoPath string, packThreads int) erro
 }
 
 // CloneTimeout bounds `git clone --mirror` so a stuck clone cannot block
-// the repo indefinitely. This is deliberately generous: large repos may
-// take 10-20 minutes for GitHub to compute the server-side pack.
-const CloneTimeout = 30 * time.Minute
+// the repo indefinitely. This is deliberately generous: very large repos
+// can take 30+ minutes for the upstream to compute the server-side pack
+// and stream it.
+const CloneTimeout = 1 * time.Hour
 
 func (r *Repository) executeClone(ctx context.Context) error {
 	parentDir := filepath.Dir(r.path)
