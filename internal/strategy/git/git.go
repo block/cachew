@@ -40,6 +40,7 @@ type Config struct {
 	MirrorSnapshotInterval time.Duration `hcl:"mirror-snapshot-interval,optional" help:"How often to generate mirror snapshots for pod bootstrap. 0 uses snapshot-interval. Defaults to 2h." default:"2h"`
 	RepackInterval         time.Duration `hcl:"repack-interval,optional" help:"How often to run full repack. 0 disables." default:"0"`
 	ZstdThreads            int           `hcl:"zstd-threads,optional" help:"Threads for zstd compression/decompression (0 = all CPU cores)." default:"0"`
+	BundleCacheTTL         time.Duration `hcl:"bundle-cache-ttl,optional" help:"TTL of cached server-side git bundles." default:"2h"`
 }
 
 type Strategy struct {
@@ -72,6 +73,9 @@ func New(
 ) (*Strategy, error) {
 	if _, err := exec.LookPath("git"); err != nil {
 		return nil, errors.New("git is required but not found in PATH")
+	}
+	if config.BundleCacheTTL == 0 {
+		config.BundleCacheTTL = 2 * time.Hour
 	}
 	if config.SnapshotInterval > 0 {
 		for _, bin := range []string{"tar", "zstd"} {
@@ -198,7 +202,7 @@ func (s *Strategy) warmExistingRepos(ctx context.Context) error {
 		}
 
 		start := time.Now()
-		if err := repo.FetchLenient(ctx, gitclone.CloneTimeout); err != nil {
+		if err := repo.FetchLenient(ctx, s.cloneManager.Config().CloneTimeout); err != nil {
 			logger.ErrorContext(ctx, "Startup fetch failed for existing repo", "upstream", repo.UpstreamURL(), "error", err,
 				"duration", time.Since(start))
 			continue
@@ -540,7 +544,7 @@ func (s *Strategy) startClone(ctx context.Context, repo *gitclone.Repository) er
 		// State remains StateCloning until fetch succeeds so that
 		// concurrent requests (via ensureCloneReady) block rather than
 		// serving from a potentially empty or stale mirror.
-		if err := repo.FetchLenient(ctx, gitclone.CloneTimeout); err != nil {
+		if err := repo.FetchLenient(ctx, s.cloneManager.Config().CloneTimeout); err != nil {
 			logger.WarnContext(ctx, "Post-restore fetch failed, discarding snapshot and falling back to clone",
 				"upstream", upstream, "error", err)
 			// The restored snapshot may be corrupt or empty. Remove it and

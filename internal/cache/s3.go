@@ -38,10 +38,12 @@ func RegisterS3(r *Registry, clientProvider s3client.ClientProvider) {
 // (endpoint, region, SSL, credentials) are provided by the global
 // s3client.Config block and shared via the s3client.ClientProvider.
 type S3Config struct {
-	Bucket            string        `hcl:"bucket" help:"S3 bucket name."`
-	MaxTTL            time.Duration `hcl:"max-ttl,optional" help:"Maximum time-to-live for entries in the S3 cache (defaults to 1 hour)." default:"1h"`
-	UploadConcurrency uint          `hcl:"upload-concurrency,optional" help:"Number of concurrent workers for multi-part uploads (0 = use all CPU cores, defaults to 1)." default:"1"`
-	UploadPartSizeMB  uint          `hcl:"upload-part-size-mb,optional" help:"Size of each part for multi-part uploads in megabytes (defaults to 16MB, minimum 5MB)." default:"16"`
+	Bucket              string        `hcl:"bucket" help:"S3 bucket name."`
+	MaxTTL              time.Duration `hcl:"max-ttl,optional" help:"Maximum time-to-live for entries in the S3 cache (defaults to 1 hour)." default:"1h"`
+	UploadConcurrency   uint          `hcl:"upload-concurrency,optional" help:"Number of concurrent workers for multi-part uploads (0 = use all CPU cores, defaults to 1)." default:"1"`
+	UploadPartSizeMB    uint          `hcl:"upload-part-size-mb,optional" help:"Size of each part for multi-part uploads in megabytes (defaults to 16MB, minimum 5MB)." default:"16"`
+	DownloadConcurrency uint          `hcl:"download-concurrency,optional" help:"Number of concurrent range-GET workers for downloads (defaults to 8)." default:"8"`
+	DownloadPartSizeMB  uint          `hcl:"download-part-size-mb,optional" help:"Size of each parallel range-GET request in megabytes (defaults to 32MB)." default:"32"`
 }
 
 type S3 struct {
@@ -73,6 +75,14 @@ func NewS3(ctx context.Context, config S3Config, clientProvider s3client.ClientP
 		return nil, errors.New("upload-part-size-mb must be at least 5MB (S3 minimum part size)")
 	}
 
+	if config.DownloadConcurrency == 0 {
+		config.DownloadConcurrency = 8
+	}
+
+	if config.DownloadPartSizeMB == 0 {
+		config.DownloadPartSizeMB = 32
+	}
+
 	client, err := clientProvider()
 	if err != nil {
 		return nil, errors.Errorf("failed to obtain shared S3 client: %w", err)
@@ -81,7 +91,8 @@ func NewS3(ctx context.Context, config S3Config, clientProvider s3client.ClientP
 	logging.FromContext(ctx).InfoContext(ctx, "Constructing S3 cache",
 		"endpoint", client.EndpointURL(), "bucket", config.Bucket,
 		"max-ttl", config.MaxTTL,
-		"upload-concurrency", config.UploadConcurrency, "upload-part-size-mb", config.UploadPartSizeMB)
+		"upload-concurrency", config.UploadConcurrency, "upload-part-size-mb", config.UploadPartSizeMB,
+		"download-concurrency", config.DownloadConcurrency, "download-part-size-mb", config.DownloadPartSizeMB)
 
 	// Verify bucket exists
 	exists, err := client.BucketExists(ctx, config.Bucket)

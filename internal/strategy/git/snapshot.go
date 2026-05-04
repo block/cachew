@@ -389,8 +389,6 @@ func (s *Strategy) serveSnapshotWithBundle(ctx context.Context, w http.ResponseW
 	return errors.Wrap(err, "stream snapshot")
 }
 
-const bundleCacheTTL = 2 * time.Hour
-
 func (s *Strategy) cacheBundleAsync(ctx context.Context, key cache.Key, data []byte) {
 	go func() {
 		bgCtx := context.WithoutCancel(ctx)
@@ -402,7 +400,7 @@ func (s *Strategy) cacheBundleAsync(ctx context.Context, key cache.Key, data []b
 
 func (s *Strategy) cacheBundleSync(ctx context.Context, key cache.Key, data []byte) error {
 	headers := http.Header{"Content-Type": {"application/x-git-bundle"}}
-	wc, err := s.cache.Create(ctx, key, headers, bundleCacheTTL)
+	wc, err := s.cache.Create(ctx, key, headers, s.config.BundleCacheTTL)
 	if err != nil {
 		return errors.Wrap(err, "create cache entry")
 	}
@@ -653,7 +651,7 @@ func (s *Strategy) scheduleDeferredMirrorRestore(ctx context.Context, repo *gitc
 			return nil
 		}
 
-		if err := repo.FetchLenient(ctx, gitclone.CloneTimeout); err != nil {
+		if err := repo.FetchLenient(ctx, s.cloneManager.Config().CloneTimeout); err != nil {
 			logger.WarnContext(ctx, "Deferred mirror post-restore fetch failed", "upstream", upstream, "error", err)
 			repo.ResetToEmpty()
 			if rmErr := os.RemoveAll(repo.Path()); rmErr != nil {

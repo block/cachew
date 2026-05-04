@@ -60,6 +60,10 @@ type Config struct {
 	RefCheckInterval time.Duration `hcl:"ref-check-interval,optional" help:"How long to cache ref checks." default:"10s"`
 	Maintenance      bool          `hcl:"maintenance,optional" help:"Enable git maintenance scheduling for mirror repos." default:"false"`
 	PackThreads      int           `hcl:"pack-threads,optional" help:"Threads for git pack operations (0 = all CPU cores)." default:"0"`
+	CloneTimeout     time.Duration `hcl:"clone-timeout,optional" help:"Upper bound for 'git clone --mirror'. Generous by default since large repos can take 30+ minutes." default:"1h"`
+	FetchTimeout     time.Duration `hcl:"fetch-timeout,optional" help:"Upper bound for 'git fetch' so a slow upstream cannot block the fetch path indefinitely." default:"5m"`
+	LsRemoteTimeout  time.Duration `hcl:"ls-remote-timeout,optional" help:"Upper bound for 'git ls-remote' so a slow upstream cannot block the request path indefinitely." default:"1m"`
+	RepackTimeout    time.Duration `hcl:"repack-timeout,optional" help:"Upper bound for 'git repack' so a slow repack on a large repository cannot block the scheduler queue indefinitely." default:"10m"`
 }
 
 // CredentialProvider provides credentials for git operations.
@@ -122,6 +126,22 @@ func NewManager(ctx context.Context, config Config, credentialProvider Credentia
 
 	if config.PackThreads <= 0 {
 		config.PackThreads = runtime.GOMAXPROCS(0)
+	}
+
+	if config.CloneTimeout == 0 {
+		config.CloneTimeout = 1 * time.Hour
+	}
+
+	if config.FetchTimeout == 0 {
+		config.FetchTimeout = 5 * time.Minute
+	}
+
+	if config.LsRemoteTimeout == 0 {
+		config.LsRemoteTimeout = 60 * time.Second
+	}
+
+	if config.RepackTimeout == 0 {
+		config.RepackTimeout = 10 * time.Minute
 	}
 
 	if err := os.MkdirAll(config.MirrorRoot, 0o750); err != nil {
@@ -472,12 +492,6 @@ func configureMirror(ctx context.Context, repoPath string, packThreads int) erro
 	return nil
 }
 
-// CloneTimeout bounds `git clone --mirror` so a stuck clone cannot block
-// the repo indefinitely. This is deliberately generous: very large repos
-// can take 30+ minutes for the upstream to compute the server-side pack
-// and stream it.
-const CloneTimeout = 1 * time.Hour
-
 func (r *Repository) executeClone(ctx context.Context) error {
 	parentDir := filepath.Dir(r.path)
 	if err := os.MkdirAll(parentDir, 0o750); err != nil {
@@ -494,7 +508,7 @@ func (r *Repository) executeClone(ctx context.Context) error {
 	// known subdirectory so we can rename it atomically afterwards.
 	cloneDest := filepath.Join(tmpDir, "repo")
 
-	cloneCtx, cancel := context.WithTimeout(ctx, CloneTimeout)
+	cloneCtx, cancel := context.WithTimeout(ctx, r.config.CloneTimeout)
 	defer cancel()
 
 	config := DefaultGitTuningConfig()
@@ -533,12 +547,12 @@ func (r *Repository) executeClone(ctx context.Context) error {
 }
 
 func (r *Repository) Fetch(ctx context.Context) error {
-	return r.FetchWithTimeout(ctx, fetchTimeout)
+	return r.FetchWithTimeout(ctx, r.config.FetchTimeout)
 }
 
 // FetchWithTimeout fetches from upstream with a configurable timeout. Use this
 // for catch-up fetches after snapshot restore where the delta may be large and
-// the default fetchTimeout is too short.
+// the default Config.FetchTimeout is too short.
 func (r *Repository) FetchWithTimeout(ctx context.Context, timeout time.Duration) error {
 	return r.fetchInternal(ctx, timeout, true)
 }
@@ -609,14 +623,6 @@ func (r *Repository) fetchInternal(ctx context.Context, timeout time.Duration, e
 	return nil
 }
 
-// fetchTimeout bounds `git fetch` so a slow or unresponsive upstream
-// cannot block the fetch path indefinitely.
-const fetchTimeout = 5 * time.Minute
-
-// lsRemoteTimeout bounds `git ls-remote` so a slow or unresponsive upstream
-// cannot block the request path indefinitely.
-const lsRemoteTimeout = 60 * time.Second
-
 // EnsureRefsUpToDate checks whether the local mirror's refs match upstream.
 // If refs are stale it returns NeedsFetch=true so the caller can schedule a
 // background fetch via the job scheduler, rather than fetching synchronously
@@ -636,7 +642,7 @@ func (r *Repository) EnsureRefsUpToDate(ctx context.Context) (needsFetch bool, e
 		return false, errors.Wrap(err, "get local refs")
 	}
 
-	lsCtx, cancel := context.WithTimeout(ctx, lsRemoteTimeout)
+	lsCtx, cancel := context.WithTimeout(ctx, r.config.LsRemoteTimeout)
 	defer cancel()
 
 	upstreamRefs, err := r.GetUpstreamRefs(lsCtx)
@@ -697,10 +703,6 @@ func (r *Repository) GetUpstreamRefs(ctx context.Context) (map[string]string, er
 	return ParseGitRefs(output), nil
 }
 
-// repackTimeout bounds `git repack` so a slow repack on a large repository
-// cannot block the scheduler queue indefinitely.
-const repackTimeout = 10 * time.Minute
-
 // Repack consolidates pack files using geometric repacking. Unlike a full
 // repack (-a), geometric repacking only merges packs when there is significant
 // fragmentation (many small packs), making it orders of magnitude faster on
@@ -711,7 +713,7 @@ func (r *Repository) Repack(ctx context.Context) error {
 	logger := logging.FromContext(ctx)
 	logger.InfoContext(ctx, "Geometric repack started", "upstream", r.upstreamURL)
 
-	repackCtx, cancel := context.WithTimeout(ctx, repackTimeout)
+	repackCtx, cancel := context.WithTimeout(ctx, r.config.RepackTimeout)
 	defer cancel()
 
 	// #nosec G204 - r.path is controlled by us
