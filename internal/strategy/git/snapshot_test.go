@@ -727,7 +727,7 @@ type failWriteCache struct {
 	cache.Cache
 }
 
-func (f *failWriteCache) Create(ctx context.Context, key cache.Key, headers http.Header, ttl time.Duration) (io.WriteCloser, error) {
+func (f *failWriteCache) Create(ctx context.Context, key cache.Key, headers http.Header, ttl time.Duration) (cache.Writer, error) {
 	wc, err := f.Cache.Create(ctx, key, headers, ttl)
 	if err != nil {
 		return nil, err
@@ -740,7 +740,7 @@ func (f *failWriteCache) Namespace(ns cache.Namespace) cache.Cache {
 }
 
 type failWriter struct {
-	inner io.WriteCloser
+	inner cache.Writer
 }
 
 func (w *failWriter) Write(_ []byte) (int, error) {
@@ -749,6 +749,10 @@ func (w *failWriter) Write(_ []byte) (int, error) {
 
 func (w *failWriter) Close() error {
 	return w.inner.Close()
+}
+
+func (w *failWriter) Abort(err error) error {
+	return w.inner.Abort(err)
 }
 
 func TestSnapshotRemoteURLUsesUpstreamURL(t *testing.T) {

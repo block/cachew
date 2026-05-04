@@ -1,7 +1,6 @@
 package cache
 
 import (
-	"context"
 	"io"
 	"maps"
 	"net/http"
@@ -54,10 +53,8 @@ func FetchDirect(client *http.Client, r *http.Request, c Cache, key Key) (*http.
 	}
 
 	responseHeaders := maps.Clone(resp.Header)
-	createCtx, cancelCreate := context.WithCancelCause(r.Context())
-	cw, err := c.Create(createCtx, key, responseHeaders, 0)
+	cw, err := c.Create(r.Context(), key, responseHeaders, 0)
 	if err != nil {
-		cancelCreate(nil)
 		_ = resp.Body.Close()
 		return nil, httputil.Errorf(http.StatusInternalServerError, "failed to create cache entry: %w", err)
 	}
@@ -65,13 +62,14 @@ func FetchDirect(client *http.Client, r *http.Request, c Cache, key Key) (*http.
 	originalBody := resp.Body
 	pr, pw := io.Pipe()
 	go func() {
-		defer cancelCreate(nil)
 		mw := io.MultiWriter(pw, cw)
 		_, copyErr := io.Copy(mw, originalBody)
+		var closeErr error
 		if copyErr != nil {
-			cancelCreate(copyErr)
+			closeErr = errors.Join(cw.Abort(copyErr), originalBody.Close())
+		} else {
+			closeErr = errors.Join(cw.Close(), originalBody.Close())
 		}
-		closeErr := errors.Join(cw.Close(), originalBody.Close())
 		pw.CloseWithError(errors.Join(copyErr, closeErr))
 	}()
 

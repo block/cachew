@@ -153,7 +153,7 @@ func (d *Disk) Stats(_ context.Context) (Stats, error) {
 	}, nil
 }
 
-func (d *Disk) Create(ctx context.Context, key Key, headers http.Header, ttl time.Duration) (io.WriteCloser, error) {
+func (d *Disk) Create(ctx context.Context, key Key, headers http.Header, ttl time.Duration) (Writer, error) {
 	if ttl > d.config.MaxTTL || ttl == 0 {
 		ttl = d.config.MaxTTL
 	}
@@ -181,6 +181,8 @@ func (d *Disk) Create(ctx context.Context, key Key, headers http.Header, ttl tim
 
 	expiresAt := now.Add(ttl)
 
+	ctx, cancel := context.WithCancelCause(ctx)
+
 	return &diskWriter{
 		disk:      d,
 		file:      f,
@@ -191,6 +193,7 @@ func (d *Disk) Create(ctx context.Context, key Key, headers http.Header, ttl tim
 		expiresAt: expiresAt,
 		headers:   clonedHeaders,
 		ctx:       ctx,
+		cancel:    cancel,
 	}, nil
 }
 
@@ -428,6 +431,8 @@ type diskWriter struct {
 	headers   http.Header
 	size      int64
 	ctx       context.Context
+	cancel    context.CancelCauseFunc
+	closed    bool
 }
 
 func (w *diskWriter) Write(p []byte) (int, error) {
@@ -436,7 +441,17 @@ func (w *diskWriter) Write(p []byte) (int, error) {
 	return n, errors.WithStack(err)
 }
 
+func (w *diskWriter) Abort(err error) error {
+	w.cancel(err)
+	return w.Close()
+}
+
 func (w *diskWriter) Close() error {
+	if w.closed {
+		return nil
+	}
+	w.closed = true
+
 	if err := w.file.Close(); err != nil {
 		return errors.Errorf("failed to close file: %w", err)
 	}

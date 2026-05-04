@@ -33,24 +33,17 @@ func (g *goproxyCacher) Put(ctx context.Context, name string, content io.ReadSee
 
 	key := cache.NewKey(name)
 
-	createCtx, cancelCreate := context.WithCancelCause(ctx)
-	defer cancelCreate(nil)
-
-	wc, err := g.cache.Create(createCtx, key, nil, 0)
+	wc, err := g.cache.Create(ctx, key, nil, 0)
 	if err != nil {
 		return errors.Errorf("create cache entry: %w", err)
 	}
 
 	if _, err := content.Seek(0, io.SeekStart); err != nil {
-		cancelCreate(err)
-		_ = wc.Close()
-		return errors.Errorf("seek to start: %w", err)
+		return errors.Join(errors.Errorf("seek to start: %w", err), wc.Abort(err))
 	}
 
 	if _, err := io.Copy(wc, content); err != nil {
-		cancelCreate(err)
-		_ = wc.Close()
-		return errors.Errorf("write to cache: %w", err)
+		return errors.Join(errors.Errorf("write to cache: %w", err), wc.Abort(err))
 	}
 
 	if err := wc.Close(); err != nil {

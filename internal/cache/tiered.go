@@ -51,11 +51,11 @@ func (t Tiered) Close() error {
 }
 
 // Create a new object. All underlying caches will be written to in sequence.
-func (t Tiered) Create(ctx context.Context, key Key, headers http.Header, ttl time.Duration) (io.WriteCloser, error) {
+func (t Tiered) Create(ctx context.Context, key Key, headers http.Header, ttl time.Duration) (Writer, error) {
 	// The first error will cancel all outstanding writes.
 	ctx, cancel := context.WithCancelCause(ctx)
 
-	tw := tieredWriter{make([]io.WriteCloser, len(t.caches)), cancel}
+	tw := &tieredWriter{writers: make([]Writer, len(t.caches)), cancel: cancel}
 	// Note: we can't use errgroup here because we do not want to cancel the context on Wait().
 	wg := sync.WaitGroup{}
 	for i, cache := range t.caches {
@@ -269,14 +269,25 @@ func (t Tiered) Stats(ctx context.Context) (Stats, error) {
 }
 
 type tieredWriter struct {
-	writers []io.WriteCloser
+	writers []Writer
 	cancel  context.CancelCauseFunc
+	closed  bool
 }
 
-var _ io.WriteCloser = (*tieredWriter)(nil)
+var _ Writer = (*tieredWriter)(nil)
+
+func (t *tieredWriter) Abort(err error) error {
+	t.cancel(err)
+	return t.Close()
+}
 
 // Close all writers and return all errors.
-func (t tieredWriter) Close() error {
+func (t *tieredWriter) Close() error {
+	if t.closed {
+		return nil
+	}
+	t.closed = true
+
 	wg := sync.WaitGroup{}
 	errs := make([]error, len(t.writers))
 	for i, cache := range t.writers {
@@ -286,7 +297,7 @@ func (t tieredWriter) Close() error {
 	return errors.Join(errs...)
 }
 
-func (t tieredWriter) Write(p []byte) (n int, err error) {
+func (t *tieredWriter) Write(p []byte) (n int, err error) {
 	for _, cache := range t.writers {
 		n, err = cache.Write(p)
 		if err != nil {
