@@ -58,7 +58,7 @@ func tieredPermutations(t *testing.T) []struct {
 		})
 		c, err := cache.NewS3(ctx, cache.S3Config{
 			Bucket:           bucket,
-			MaxTTL:           100 * time.Millisecond,
+			MaxTTL:           3 * time.Second,
 			UploadPartSizeMB: 16,
 		}, clientProvider)
 		assert.NoError(t, err)

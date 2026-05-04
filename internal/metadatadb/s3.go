@@ -194,9 +194,7 @@ func (s *S3Backend) lockNamespace(ctx context.Context, namespace string) error {
 	key := s.lockKey(namespace)
 	for {
 		opts := minio.PutObjectOptions{
-			UserMetadata: map[string]string{
-				"Expires-At": time.Now().Add(s.lockTTL).Format(time.RFC3339),
-			},
+			Expires: time.Now().Add(s.lockTTL),
 		}
 		opts.SetMatchETagExcept("*")
 
@@ -235,11 +233,7 @@ func (s *S3Backend) tryExpireStaleLock(ctx context.Context, key string) error {
 	if err != nil {
 		return errors.Wrap(err, "stat lock")
 	}
-	expiresAt, err := time.Parse(time.RFC3339, info.UserMetadata["Expires-At"])
-	if err != nil {
-		return errors.Wrap(err, "parse lock expiry")
-	}
-	if time.Now().Before(expiresAt) {
+	if info.Expires.IsZero() || time.Now().Before(info.Expires) {
 		return errors.New("lock not expired")
 	}
 	return errors.Wrap(

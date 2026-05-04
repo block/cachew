@@ -119,109 +119,68 @@ func (s *S3) keyToPath(namespace Namespace, key Key) string {
 	return prefix + hexKey[:2] + "/" + hexKey
 }
 
-func (s *S3) Stat(ctx context.Context, key Key) (http.Header, error) {
+// statAndHeaders retrieves object metadata, checks expiry, and returns parsed headers.
+func (s *S3) statAndHeaders(ctx context.Context, key Key) (minio.ObjectInfo, http.Header, error) {
 	objectName := s.keyToPath(s.namespace, key)
 
-	// Get object info to check metadata
 	objInfo, err := s.client.StatObject(ctx, s.config.Bucket, objectName, minio.StatObjectOptions{})
 	if err != nil {
 		errResponse := minio.ToErrorResponse(err)
 		if errResponse.Code == s3ErrNoSuchKey {
-			return nil, os.ErrNotExist
+			return minio.ObjectInfo{}, nil, os.ErrNotExist
 		}
-		return nil, errors.Errorf("failed to stat object: %w", err)
+		return minio.ObjectInfo{}, nil, errors.Errorf("failed to stat object: %w", err)
 	}
 
-	// Check if object has expired
-	// Note: UserMetadata keys are returned WITHOUT the "X-Amz-Meta-" prefix by minio-go
-	expiresAtStr := objInfo.UserMetadata["Expires-At"]
-	if expiresAtStr != "" {
-		var expiresAt time.Time
-		if err := expiresAt.UnmarshalText([]byte(expiresAtStr)); err == nil {
-			if time.Now().After(expiresAt) {
-				// Object expired, delete it and return not found
-				return nil, errors.Join(os.ErrNotExist, s.Delete(ctx, key))
-			}
-		}
+	if !objInfo.Expires.IsZero() && time.Now().After(objInfo.Expires) {
+		return minio.ObjectInfo{}, nil, errors.Join(os.ErrNotExist, s.Delete(ctx, key))
 	}
 
-	// Retrieve headers from metadata
-	// Note: UserMetadata keys are returned WITHOUT the "X-Amz-Meta-" prefix by minio-go
 	headers := make(http.Header)
 	if headersJSON := objInfo.UserMetadata["Headers"]; headersJSON != "" {
 		if err := json.Unmarshal([]byte(headersJSON), &headers); err != nil {
-			return nil, errors.Errorf("failed to unmarshal headers: %w", err)
+			return minio.ObjectInfo{}, nil, errors.Errorf("failed to unmarshal headers: %w", err)
 		}
 	}
 
-	// Add Last-Modified header from S3 object metadata if not already present
 	if headers.Get("Last-Modified") == "" && !objInfo.LastModified.IsZero() {
 		headers.Set("Last-Modified", objInfo.LastModified.UTC().Format(http.TimeFormat))
 	}
 
-	return headers, nil
+	return objInfo, headers, nil
+}
+
+func (s *S3) Stat(ctx context.Context, key Key) (http.Header, error) {
+	_, headers, err := s.statAndHeaders(ctx, key)
+	return headers, err
 }
 
 func (s *S3) Open(ctx context.Context, key Key) (io.ReadCloser, http.Header, error) {
-	objectName := s.keyToPath(s.namespace, key)
-
-	// Get object info to retrieve metadata and check expiration
-	objInfo, err := s.client.StatObject(ctx, s.config.Bucket, objectName, minio.StatObjectOptions{})
+	objInfo, headers, err := s.statAndHeaders(ctx, key)
 	if err != nil {
-		errResponse := minio.ToErrorResponse(err)
-		if errResponse.Code == s3ErrNoSuchKey {
-			return nil, nil, os.ErrNotExist
-		}
-		return nil, nil, errors.Errorf("failed to stat object: %w", err)
-	}
-
-	// Check if object has expired
-	expiresAtStr := objInfo.UserMetadata["Expires-At"]
-	if expiresAtStr != "" {
-		var expiresAt time.Time
-		if err := expiresAt.UnmarshalText([]byte(expiresAtStr)); err == nil {
-			if time.Now().After(expiresAt) {
-				return nil, nil, errors.Join(os.ErrNotExist, s.Delete(ctx, key))
-			}
-		}
-	}
-
-	// Retrieve headers from metadata
-	headers := make(http.Header)
-	if headersJSON := objInfo.UserMetadata["Headers"]; headersJSON != "" {
-		if err := json.Unmarshal([]byte(headersJSON), &headers); err != nil {
-			return nil, nil, errors.Errorf("failed to unmarshal headers: %w", err)
-		}
-	}
-
-	// Add Last-Modified header from S3 object metadata if not already present
-	if headers.Get("Last-Modified") == "" && !objInfo.LastModified.IsZero() {
-		headers.Set("Last-Modified", objInfo.LastModified.UTC().Format(http.TimeFormat))
+		return nil, nil, err
 	}
 
 	headers.Set("Content-Length", strconv.FormatInt(objInfo.Size, 10))
 
+	objectName := s.keyToPath(s.namespace, key)
+
 	// Reset expiration time to implement LRU (same as disk cache).
 	// Only refresh when remaining TTL is below 50% of max to avoid a
 	// server-side copy on every read.
-	now := time.Now()
-	if expiresAtStr != "" {
-		var expiresAt time.Time
-		if err := expiresAt.UnmarshalText([]byte(expiresAtStr)); err == nil {
-			remaining := expiresAt.Sub(now)
-			if remaining < s.config.MaxTTL/2 {
-				newExpiresAt := now.Add(s.config.MaxTTL)
-				go func() {
-					bgCtx := context.WithoutCancel(ctx)
-					if err := s.refreshExpiration(bgCtx, objectName, objInfo, newExpiresAt); err != nil {
-						s.logger.WarnContext(bgCtx, "Failed to refresh S3 expiration", "object", objectName, "error", err)
-					}
-				}()
-			}
+	if !objInfo.Expires.IsZero() {
+		now := time.Now()
+		if objInfo.Expires.Sub(now) < s.config.MaxTTL/2 {
+			newExpiresAt := ceilSecond(now.Add(s.config.MaxTTL))
+			go func() {
+				bgCtx := context.WithoutCancel(ctx)
+				if err := s.refreshExpiration(bgCtx, objectName, objInfo, newExpiresAt); err != nil {
+					s.logger.WarnContext(bgCtx, "Failed to refresh S3 expiration", "object", objectName, "error", err)
+				}
+			}()
 		}
 	}
 
-	// Download object using parallel range-GET for large objects.
 	reader, err := s.parallelGetReader(ctx, s.config.Bucket, objectName, objInfo.Size, objInfo.ETag)
 	if err != nil {
 		return nil, nil, err
@@ -230,20 +189,10 @@ func (s *S3) Open(ctx context.Context, key Key) (io.ReadCloser, http.Header, err
 	return reader, headers, nil
 }
 
-// refreshExpiration updates the Expires-At metadata on an S3 object using
+// refreshExpiration updates the Expires header on an S3 object using
 // server-side copy-to-self with metadata replacement. This avoids re-uploading
 // the object data.
 func (s *S3) refreshExpiration(ctx context.Context, objectName string, objInfo minio.ObjectInfo, newExpiresAt time.Time) error {
-	newExpiresAtBytes, err := newExpiresAt.MarshalText()
-	if err != nil {
-		return errors.Wrap(err, "marshal expiration time")
-	}
-
-	// Rebuild user metadata with updated expiration
-	newMetadata := make(map[string]string)
-	maps.Copy(newMetadata, objInfo.UserMetadata)
-	newMetadata["Expires-At"] = string(newExpiresAtBytes)
-
 	src := minio.CopySrcOptions{
 		Bucket: s.config.Bucket,
 		Object: objectName,
@@ -251,13 +200,24 @@ func (s *S3) refreshExpiration(ctx context.Context, objectName string, objInfo m
 	dst := minio.CopyDestOptions{
 		Bucket:          s.config.Bucket,
 		Object:          objectName,
-		UserMetadata:    newMetadata,
+		UserMetadata:    objInfo.UserMetadata,
 		ReplaceMetadata: true,
+		Expires:         newExpiresAt,
 	}
 	if _, err := s.client.CopyObject(ctx, dst, src); err != nil {
 		return errors.Wrap(err, "copy object")
 	}
 	return nil
+}
+
+// ceilSecond rounds a time up to the next whole second. S3's Expires header
+// uses HTTP-date format (second precision), so sub-second components would be
+// silently truncated, potentially causing premature expiry.
+func ceilSecond(t time.Time) time.Time {
+	if t.Nanosecond() == 0 {
+		return t
+	}
+	return t.Truncate(time.Second).Add(time.Second)
 }
 
 const s3ErrNoSuchKey = "NoSuchKey"
@@ -293,7 +253,7 @@ func (s *S3) Create(ctx context.Context, key Key, headers http.Header, ttl time.
 	clonedHeaders := make(http.Header)
 	maps.Copy(clonedHeaders, headers)
 
-	expiresAt := time.Now().Add(ttl)
+	expiresAt := ceilSecond(time.Now().Add(ttl))
 
 	ctx, cancel := context.WithCancelCause(ctx)
 
@@ -410,19 +370,7 @@ func (w *s3Writer) upload(pr *io.PipeReader, r io.Reader) {
 
 	objectName := w.s3.keyToPath(w.namespace, w.key)
 
-	// Prepare user metadata
 	userMetadata := make(map[string]string)
-
-	// Store expiration time
-	expiresAtBytes, err := w.expiresAt.MarshalText()
-	if err != nil {
-		uploadErr = errors.Errorf("failed to marshal expiration time: %w", err)
-		w.errCh <- uploadErr
-		return
-	}
-	userMetadata["Expires-At"] = string(expiresAtBytes)
-
-	// Store headers as JSON
 	if len(w.headers) > 0 {
 		headersJSON, err := json.Marshal(w.headers)
 		if err != nil {
@@ -438,6 +386,7 @@ func (w *s3Writer) upload(pr *io.PipeReader, r io.Reader) {
 	opts := minio.PutObjectOptions{
 		UserMetadata: userMetadata,
 		AutoChecksum: minio.ChecksumCRC64NVME,
+		Expires:      w.expiresAt,
 	}
 
 	// Enable concurrent streaming for multi-part uploads if configured
@@ -448,7 +397,7 @@ func (w *s3Writer) upload(pr *io.PipeReader, r io.Reader) {
 	}
 
 	// Upload object with streaming (size -1 means unknown size, will use chunked encoding)
-	_, err = w.s3.client.PutObject(
+	_, err := w.s3.client.PutObject(
 		w.ctx,
 		w.s3.config.Bucket,
 		objectName,
