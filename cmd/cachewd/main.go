@@ -292,13 +292,6 @@ func loadGlobalConfig(ast *hcl.AST) (GlobalConfig, map[string]string, error) {
 	envars := parseEnvars()
 	config.InjectEnvars(schema, ast, "CACHEW", envars)
 
-	// Expand ${VAR} references inside heredoc and string AST nodes (e.g. the
-	// OPA policy heredoc). hcl.WithDefaultTransformer below only runs against
-	// struct-tag default values, not against live AST node strings, so without
-	// this pass `opa { policy = <<EOF ... ${CACHEW_X} ... EOF }` would reach
-	// the OPA compiler with the placeholder intact.
-	config.ExpandVars(ast, envars)
-
 	// First pass: preserve unknown ${VAR} references so we can extract "state".
 	preserving := hcl.WithDefaultTransformer(func(s string) string {
 		return os.Expand(s, func(key string) string {

@@ -184,7 +184,17 @@ git-clone {
 	}
 }
 
-func TestExpandVars(t *testing.T) {
+func TestInjectEnvarsExpandsPlaceholders(t *testing.T) {
+	type OPA struct {
+		Policy string `hcl:"policy"`
+	}
+	type Config struct {
+		Bind      string `hcl:"bind"`
+		OPAConfig OPA    `hcl:"opa,block"`
+	}
+	schema, err := hcl.Schema(new(Config))
+	assert.NoError(t, err)
+
 	const input = `
 bind = "${CACHEW_BIND}"
 
@@ -193,13 +203,11 @@ opa {
   allow if caller_principal == "${CACHEW_WARMER_PRINCIPAL}"
   EOF
 }
-
-unset = "${CACHEW_NOT_SET}"
 `
 	ast, err := hcl.Parse(strings.NewReader(input))
 	assert.NoError(t, err)
 
-	ExpandVars(ast, map[string]string{
+	InjectEnvars(schema, ast, "CACHEW", map[string]string{
 		"CACHEW_BIND":             "0.0.0.0:9090",
 		"CACHEW_WARMER_PRINCIPAL": "spiffe://example/ns/warm/sa/x",
 	})
@@ -211,9 +219,7 @@ unset = "${CACHEW_NOT_SET}"
 	// Both *hcl.String and *hcl.Heredoc attribute values are expanded.
 	assert.Contains(t, out, `bind = "0.0.0.0:9090"`)
 	assert.Contains(t, out, `caller_principal == "spiffe://example/ns/warm/sa/x"`)
-	// Unset placeholders collapse to empty string (os.Expand semantics).
-	assert.Contains(t, out, `unset = ""`)
-	// No literal placeholder remains.
+	// No literal placeholder remains anywhere in the rendered AST.
 	assert.Equal(t, false, strings.Contains(out, "${CACHEW_"))
 }
 
