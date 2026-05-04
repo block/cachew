@@ -184,6 +184,45 @@ git-clone {
 	}
 }
 
+func TestInjectEnvarsExpandsPlaceholders(t *testing.T) {
+	type OPA struct {
+		Policy string `hcl:"policy"`
+	}
+	type Config struct {
+		Bind      string `hcl:"bind"`
+		OPAConfig OPA    `hcl:"opa,block"`
+	}
+	schema, err := hcl.Schema(new(Config))
+	assert.NoError(t, err)
+
+	const input = `
+bind = "${CACHEW_BIND}"
+
+opa {
+  policy = <<EOF
+  allow if caller_principal == "${CACHEW_WARMER_PRINCIPAL}"
+  EOF
+}
+`
+	ast, err := hcl.Parse(strings.NewReader(input))
+	assert.NoError(t, err)
+
+	InjectEnvars(schema, ast, "CACHEW", map[string]string{
+		"CACHEW_BIND":             "0.0.0.0:9090",
+		"CACHEW_WARMER_PRINCIPAL": "spiffe://example/ns/warm/sa/x",
+	})
+
+	got, err := hcl.MarshalAST(ast)
+	assert.NoError(t, err)
+	out := string(got)
+
+	// Both *hcl.String and *hcl.Heredoc attribute values are expanded.
+	assert.Contains(t, out, `bind = "0.0.0.0:9090"`)
+	assert.Contains(t, out, `caller_principal == "spiffe://example/ns/warm/sa/x"`)
+	// No literal placeholder remains anywhere in the rendered AST.
+	assert.Equal(t, false, strings.Contains(out, "${CACHEW_"))
+}
+
 func TestLoadRequiresMetadataBackend(t *testing.T) {
 	cr := cache.NewRegistry()
 	cache.RegisterMemory(cr)

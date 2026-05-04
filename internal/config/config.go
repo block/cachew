@@ -226,7 +226,17 @@ func Load(
 	return h, metadata, readiers, nil
 }
 
-// ExpandVars expands environment variable references in HCL strings and heredocs.
+// expandVars expands environment variable references in HCL `*hcl.String`
+// and `*hcl.Heredoc` attribute values in-place. It is a low-level helper;
+// most callers should go through `InjectEnvars`, which performs both
+// schema-driven attribute injection for absent attributes AND placeholder
+// expansion in attribute values that the operator wrote with `${VAR}`.
+//
+// Heredoc handling is required so that templated policy text inside global
+// blocks (e.g. `opa { policy = <<EOF ... ${MY_PRINCIPAL} ... EOF }`) reaches
+// downstream consumers with placeholders substituted. The native
+// `hcl.WithDefaultTransformer` only runs against struct-tag default values
+// in `valueFromTag`, never against live AST node strings.
 func expandVars(ast *hcl.AST, vars map[string]string) {
 	_ = hcl.Visit(ast, func(node hcl.Node, next func() error) error { //nolint:errcheck
 		attr, ok := node.(*hcl.Attribute)
@@ -242,15 +252,29 @@ func expandVars(ast *hcl.AST, vars map[string]string) {
 	})
 }
 
-// InjectEnvars walks the schema and for each attribute not present in the config,
-// checks for a corresponding environment variable and injects it.
+// InjectEnvars resolves environment variables against the config AST in two
+// passes:
 //
-// Environment variable names are derived from the path to the attribute:
-// prefix + block names + attr name, joined with "_", uppercased, hyphens replaced with "_".
-// e.g. prefix="CACHEW", path=["scheduler", "concurrency"] -> "CACHEW_SCHEDULER_CONCURRENCY".
+//  1. Schema-driven injection: walks the schema and for each attribute not
+//     already present in the config, checks for a corresponding environment
+//     variable and inserts it as a new attribute. Environment variable names
+//     are derived from the path to the attribute: prefix + block names +
+//     attribute name, joined with "_", uppercased, hyphens replaced with "_".
+//     E.g. prefix="CACHEW", path=["scheduler", "concurrency"] resolves to
+//     "CACHEW_SCHEDULER_CONCURRENCY".
+//  2. Placeholder expansion: walks the resulting AST and substitutes `${VAR}`
+//     references inside `*hcl.String` and `*hcl.Heredoc` attribute values
+//     using `os.Expand` semantics (unset names collapse to empty). This
+//     covers placeholders the operator wrote into the config file directly,
+//     including those inside heredocs (e.g. an OPA policy block).
+//
+// Both passes operate on the same `vars` map. Pass (1) only ever inserts
+// attributes that were absent, so it cannot overwrite operator-written values
+// that pass (2) then expands.
 func InjectEnvars(schema *hcl.AST, config *hcl.AST, prefix string, vars map[string]string) {
 	container := &entryContainer{ast: config}
 	injectEntries(schema.Entries, container, []string{prefix}, vars)
+	expandVars(config, vars)
 	_ = hcl.AddParentRefs(config) //nolint:errcheck
 }
 
