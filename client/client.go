@@ -35,6 +35,20 @@ var transportHeaders = []string{ //nolint:gochecknoglobals
 	"Time-To-Live",
 }
 
+// CacheWriter extends io.WriteCloser with the ability to abort an in-progress
+// cache write. Exactly one of Close or Abort must be called.
+//
+// Close commits the data to the cache. Abort discards the in-progress write,
+// ensuring the object is never made visible in the cache. Both methods are
+// idempotent after the first call.
+type CacheWriter interface {
+	io.WriteCloser
+	// Abort discards the in-progress write and releases resources.
+	// The provided error is recorded as the cause of cancellation.
+	// The object MUST NOT be made available in the cache after Abort.
+	Abort(err error) error
+}
+
 // HeaderFunc returns headers to attach to each outgoing request.
 type HeaderFunc func() http.Header
 
@@ -175,14 +189,16 @@ func (c *Client) Stat(ctx context.Context, key Key) (http.Header, error) {
 	return filterHeaders(resp.Header, transportHeaders...), nil
 }
 
-// Create stores a new object in the cache server. The returned io.WriteCloser
-// must be closed to complete the upload; if the context is cancelled before
-// Close returns, the object is not made available in the cache.
-func (c *Client) Create(ctx context.Context, key Key, headers http.Header, ttl time.Duration) (io.WriteCloser, error) {
+// Create stores a new object in the cache server. The returned CacheWriter
+// must be closed to commit the upload. Call Abort instead of Close to discard
+// the in-progress write and ensure the object is never made visible.
+func (c *Client) Create(ctx context.Context, key Key, headers http.Header, ttl time.Duration) (CacheWriter, error) {
+	ctx, cancel := context.WithCancelCause(ctx)
 	pr, pw := io.Pipe()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.objectURL(key), pr)
 	if err != nil {
+		cancel(err)
 		return nil, errors.Join(errors.Wrap(err, "failed to create request"), pr.Close(), pw.Close())
 	}
 
@@ -193,9 +209,10 @@ func (c *Client) Create(ctx context.Context, key Key, headers http.Header, ttl t
 	}
 
 	wc := &writeCloser{
-		pw:   pw,
-		done: make(chan error, 1),
-		ctx:  ctx,
+		pw:     pw,
+		done:   make(chan error, 1),
+		ctx:    ctx,
+		cancel: cancel,
 	}
 
 	go func() {
@@ -321,9 +338,11 @@ func filterHeaders(headers http.Header, skip ...string) http.Header {
 
 // writeCloser wraps a pipe writer and waits for the HTTP request to complete.
 type writeCloser struct {
-	pw   *io.PipeWriter
-	done chan error
-	ctx  context.Context
+	pw     *io.PipeWriter
+	done   chan error
+	ctx    context.Context
+	cancel context.CancelCauseFunc
+	closed bool
 }
 
 func (wc *writeCloser) Write(p []byte) (int, error) {
@@ -331,7 +350,16 @@ func (wc *writeCloser) Write(p []byte) (int, error) {
 	return n, errors.WithStack(err)
 }
 
+func (wc *writeCloser) Abort(err error) error {
+	wc.cancel(err)
+	return wc.Close()
+}
+
 func (wc *writeCloser) Close() error {
+	if wc.closed {
+		return nil
+	}
+	wc.closed = true
 	if err := wc.ctx.Err(); err != nil {
 		_ = wc.pw.CloseWithError(err)
 		<-wc.done

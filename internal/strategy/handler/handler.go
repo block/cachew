@@ -1,7 +1,6 @@
 package handler
 
 import (
-	"context"
 	"io"
 	"maps"
 	"net/http"
@@ -180,23 +179,22 @@ func (h *Handler) streamNonOKResponse(w http.ResponseWriter, resp *http.Response
 func (h *Handler) streamAndCache(w http.ResponseWriter, r *http.Request, key cache.Key, resp *http.Response) error {
 	ttl := h.ttlFunc(r)
 	responseHeaders := maps.Clone(resp.Header)
-	createCtx, cancelCreate := context.WithCancelCause(r.Context())
-	cw, err := h.cache.Create(createCtx, key, responseHeaders, ttl)
+	cw, err := h.cache.Create(r.Context(), key, responseHeaders, ttl)
 	if err != nil {
-		cancelCreate(nil)
 		h.errorHandler(httputil.Errorf(http.StatusInternalServerError, "failed to create cache entry: %w", err), w, r)
 		return nil
 	}
 
 	pr, pw := io.Pipe()
 	go func() {
-		defer cancelCreate(nil)
 		mw := io.MultiWriter(pw, cw)
 		_, copyErr := io.Copy(mw, resp.Body)
+		var closeErr error
 		if copyErr != nil {
-			cancelCreate(copyErr)
+			closeErr = cw.Abort(copyErr)
+		} else {
+			closeErr = cw.Close()
 		}
-		closeErr := cw.Close()
 		pw.CloseWithError(errors.Join(copyErr, closeErr))
 	}()
 

@@ -284,7 +284,7 @@ func (r *s3Reader) Close() error {
 	return errors.WithStack(r.obj.Close())
 }
 
-func (s *S3) Create(ctx context.Context, key Key, headers http.Header, ttl time.Duration) (io.WriteCloser, error) {
+func (s *S3) Create(ctx context.Context, key Key, headers http.Header, ttl time.Duration) (Writer, error) {
 	if ttl > s.config.MaxTTL || ttl == 0 {
 		ttl = s.config.MaxTTL
 	}
@@ -294,6 +294,8 @@ func (s *S3) Create(ctx context.Context, key Key, headers http.Header, ttl time.
 	maps.Copy(clonedHeaders, headers)
 
 	expiresAt := time.Now().Add(ttl)
+
+	ctx, cancel := context.WithCancelCause(ctx)
 
 	pr, pw := io.Pipe()
 
@@ -305,6 +307,7 @@ func (s *S3) Create(ctx context.Context, key Key, headers http.Header, ttl time.
 		expiresAt: expiresAt,
 		headers:   clonedHeaders,
 		ctx:       ctx,
+		cancel:    cancel,
 		errCh:     make(chan error, 1),
 	}
 
@@ -345,8 +348,10 @@ type s3Writer struct {
 	expiresAt time.Time
 	headers   http.Header
 	ctx       context.Context
+	cancel    context.CancelCauseFunc
 	errCh     chan error
 	uploadErr error
+	closed    bool
 }
 
 func (w *s3Writer) Write(p []byte) (int, error) {
@@ -366,7 +371,17 @@ func (w *s3Writer) Write(p []byte) (int, error) {
 	return n, nil
 }
 
+func (w *s3Writer) Abort(err error) error {
+	w.cancel(err)
+	return w.Close()
+}
+
 func (w *s3Writer) Close() error {
+	if w.closed {
+		return nil
+	}
+	w.closed = true
+
 	// Close the pipe writer to signal EOF to the reader
 	if err := w.pipe.Close(); err != nil {
 		return errors.Wrap(err, "failed to close pipe")

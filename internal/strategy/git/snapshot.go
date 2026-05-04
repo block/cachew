@@ -401,18 +401,13 @@ func (s *Strategy) cacheBundleAsync(ctx context.Context, key cache.Key, data []b
 }
 
 func (s *Strategy) cacheBundleSync(ctx context.Context, key cache.Key, data []byte) error {
-	createCtx, cancelCreate := context.WithCancelCause(ctx)
-	defer cancelCreate(nil)
-
 	headers := http.Header{"Content-Type": {"application/x-git-bundle"}}
-	wc, err := s.cache.Create(createCtx, key, headers, bundleCacheTTL)
+	wc, err := s.cache.Create(ctx, key, headers, bundleCacheTTL)
 	if err != nil {
 		return errors.Wrap(err, "create cache entry")
 	}
 	if _, err := wc.Write(data); err != nil {
-		cancelCreate(err)
-		_ = wc.Close()
-		return errors.Wrap(err, "write bundle to cache")
+		return errors.Join(errors.Wrap(err, "write bundle to cache"), wc.Abort(err))
 	}
 	return errors.Wrap(wc.Close(), "close bundle cache writer")
 }

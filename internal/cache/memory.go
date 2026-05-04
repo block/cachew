@@ -99,7 +99,7 @@ func (m *Memory) Open(_ context.Context, key Key) (io.ReadCloser, http.Header, e
 	return io.NopCloser(bytes.NewReader(entry.data)), entry.headers, nil
 }
 
-func (m *Memory) Create(ctx context.Context, key Key, headers http.Header, ttl time.Duration) (io.WriteCloser, error) {
+func (m *Memory) Create(ctx context.Context, key Key, headers http.Header, ttl time.Duration) (Writer, error) {
 	if ttl == 0 {
 		ttl = m.config.MaxTTL
 	}
@@ -112,6 +112,8 @@ func (m *Memory) Create(ctx context.Context, key Key, headers http.Header, ttl t
 		clonedHeaders.Set("Last-Modified", now.UTC().Format(http.TimeFormat))
 	}
 
+	ctx, cancel := context.WithCancelCause(ctx)
+
 	writer := &memoryWriter{
 		cache:     m,
 		namespace: m.namespace,
@@ -120,6 +122,7 @@ func (m *Memory) Create(ctx context.Context, key Key, headers http.Header, ttl t
 		expiresAt: now.Add(ttl),
 		headers:   clonedHeaders,
 		ctx:       ctx,
+		cancel:    cancel,
 	}
 
 	return writer, nil
@@ -216,6 +219,7 @@ type memoryWriter struct {
 	headers   http.Header
 	closed    bool
 	ctx       context.Context
+	cancel    context.CancelCauseFunc
 }
 
 func (w *memoryWriter) Write(p []byte) (int, error) {
@@ -223,6 +227,11 @@ func (w *memoryWriter) Write(p []byte) (int, error) {
 		return 0, errors.New("writer closed")
 	}
 	return errors.WithStack2(w.buf.Write(p))
+}
+
+func (w *memoryWriter) Abort(err error) error {
+	w.cancel(err)
+	return w.Close()
 }
 
 func (w *memoryWriter) Close() error {

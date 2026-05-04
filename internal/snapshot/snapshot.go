@@ -46,19 +46,13 @@ func CreatePaths(ctx context.Context, remote cache.Cache, key cache.Key, baseDir
 		}
 	}
 
-	// Wrap the context so we can cancel the upload on archive failure,
-	// preventing partial data from being persisted.
-	createCtx, cancelCreate := context.WithCancelCause(ctx)
-	defer cancelCreate(nil)
-
-	wc, err := remote.Create(createCtx, key, headers, ttl)
+	wc, err := remote.Create(ctx, key, headers, ttl)
 	if err != nil {
 		return errors.Wrap(err, "failed to create object")
 	}
 
 	if err := client.Archive(ctx, wc, baseDir, includePaths, excludePatterns, threads); err != nil {
-		cancelCreate(err)
-		return errors.Join(err, wc.Close())
+		return errors.Join(err, wc.Abort(err))
 	}
 	return errors.Wrap(wc.Close(), "failed to close writer")
 }

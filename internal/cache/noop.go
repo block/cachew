@@ -30,7 +30,7 @@ func (n *noOpCache) Open(_ context.Context, _ Key) (io.ReadCloser, http.Header, 
 	return nil, nil, os.ErrNotExist
 }
 
-func (n *noOpCache) Create(_ context.Context, _ Key, _ http.Header, _ time.Duration) (io.WriteCloser, error) {
+func (n *noOpCache) Create(_ context.Context, _ Key, _ http.Header, _ time.Duration) (Writer, error) {
 	// Return a discard writer that does nothing
 	return &noOpWriter{}, nil
 }
@@ -58,8 +58,12 @@ func (n *noOpWriter) Close() error {
 	return nil
 }
 
+func (n *noOpWriter) Abort(_ error) error {
+	return nil
+}
+
 var _ Cache = (*noOpCache)(nil)
-var _ io.WriteCloser = (*noOpWriter)(nil)
+var _ Writer = (*noOpWriter)(nil)
 
 // Namespace creates a namespaced view (no-op for noop cache).
 func (n *noOpCache) Namespace(_ Namespace) Cache {

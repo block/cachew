@@ -25,6 +25,9 @@ func ParseNamespace(name string) (Namespace, error) {
 	return errors.WithStack2(client.ParseNamespace(name))
 }
 
+// Writer extends io.WriteCloser with abort semantics for cache writes.
+type Writer = client.CacheWriter
+
 // ErrNotFound is returned when a cache backend is not found.
 var ErrNotFound = errors.New("cache backend not found")
 
@@ -144,7 +147,7 @@ type Cache interface {
 	// The file MUST NOT be available for read until completely written and closed.
 	//
 	// If the context is cancelled the object MUST NOT be made available in the cache.
-	Create(ctx context.Context, key Key, headers http.Header, ttl time.Duration) (io.WriteCloser, error)
+	Create(ctx context.Context, key Key, headers http.Header, ttl time.Duration) (Writer, error)
 	// Delete a file from the cache.
 	//
 	// MUST be atomic.
@@ -155,4 +158,18 @@ type Cache interface {
 	ListNamespaces(ctx context.Context) ([]string, error)
 	// Close the Cache.
 	Close() error
+}
+
+// WriteFunc is a convenience wrapper around Cache.Create that handles aborting
+// the write on error. The provided function receives a writer; if it returns an
+// error the cache entry is discarded. On success the entry is committed.
+func WriteFunc(ctx context.Context, c Cache, key Key, headers http.Header, ttl time.Duration, fn func(w io.Writer) error) error {
+	w, err := c.Create(ctx, key, headers, ttl)
+	if err != nil {
+		return errors.WithStack(err)
+	}
+	if err := fn(w); err != nil {
+		return errors.Join(err, w.Abort(err))
+	}
+	return errors.WithStack(w.Close())
 }
