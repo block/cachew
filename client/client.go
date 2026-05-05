@@ -9,6 +9,7 @@ import (
 	"maps"
 	"net/http"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/alecthomas/errors"
@@ -338,11 +339,12 @@ func filterHeaders(headers http.Header, skip ...string) http.Header {
 
 // writeCloser wraps a pipe writer and waits for the HTTP request to complete.
 type writeCloser struct {
-	pw     *io.PipeWriter
-	done   chan error
-	ctx    context.Context
-	cancel context.CancelCauseFunc
-	closed bool
+	pw       *io.PipeWriter
+	done     chan error
+	ctx      context.Context
+	cancel   context.CancelCauseFunc
+	once     sync.Once
+	closeErr error
 }
 
 func (wc *writeCloser) Write(p []byte) (int, error) {
@@ -355,23 +357,58 @@ func (wc *writeCloser) Abort(err error) error {
 	return wc.Close()
 }
 
+// Close is safe to call multiple times and from multiple goroutines (e.g. a
+// deferred Close racing an explicit Abort): the underlying close-and-wait
+// runs at most once, so the second caller will not deadlock waiting on a
+// drained <-wc.done channel.
 func (wc *writeCloser) Close() error {
-	if wc.closed {
-		return nil
+	wc.once.Do(func() {
+		wc.closeErr = wc.doClose()
+	})
+	return wc.closeErr
+}
+
+func (wc *writeCloser) doClose() error {
+	// Close the upload pipe so the goroutine driving c.http.Do can finish.
+	// If the caller's ctx is cancelled or the upload was Abort'd, propagate
+	// the cause via CloseWithError so any in-flight Write returns the cause
+	// rather than EOF; otherwise do a clean Close. context.Cause is
+	// preferred over ctx.Err so an Abort(cause) propagates the caller's
+	// reason rather than a generic context.Canceled — when the parent
+	// context cancels independently, Cause falls back to ctx.Err so
+	// behaviour matches the previous code in that path.
+	ctxCause := context.Cause(wc.ctx)
+	var pipeCloseErr error
+	if ctxCause != nil {
+		_ = wc.pw.CloseWithError(ctxCause)
+	} else {
+		pipeCloseErr = wc.pw.Close()
 	}
-	wc.closed = true
-	if err := wc.ctx.Err(); err != nil {
-		_ = wc.pw.CloseWithError(err)
-		<-wc.done
-		return errors.Wrap(err, "create operation cancelled")
+
+	// Always wait for the request goroutine to finish so connection
+	// resources are released and we can inspect the server's response.
+	serverErr := <-wc.done
+
+	// Prefer the server's typed *HTTPStatusError when present. The server
+	// can respond with an authoritative status (e.g. 403) before the local
+	// ctx is cancelled or the pipe is torn down — that response is more
+	// meaningful to the caller than the local symptom (a downstream
+	// "broken pipe" or context cancellation can fire as a consequence of
+	// the server closing the connection after writing its response).
+	// Without this preference, callers that match on *HTTPStatusError to
+	// classify e.g. "save not authorized" lose the signal entirely.
+	var statusErr *HTTPStatusError
+	if errors.As(serverErr, &statusErr) {
+		return errors.Wrap(serverErr, "request failed")
 	}
-	if err := wc.pw.Close(); err != nil {
-		<-wc.done
-		return errors.Wrap(err, "failed to close pipe writer")
+	if ctxCause != nil {
+		return errors.Wrap(ctxCause, "create operation cancelled")
 	}
-	err := <-wc.done
-	if err != nil {
-		return errors.Wrap(err, "request failed")
+	if pipeCloseErr != nil {
+		return errors.Wrap(pipeCloseErr, "failed to close pipe writer")
+	}
+	if serverErr != nil {
+		return errors.Wrap(serverErr, "request failed")
 	}
 	return nil
 }
