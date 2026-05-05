@@ -2,6 +2,7 @@ package client_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"maps"
@@ -14,8 +15,10 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/alecthomas/assert/v2"
+	"github.com/alecthomas/errors"
 
 	"github.com/block/cachew/client"
 )
@@ -307,4 +310,102 @@ func keyHex(k client.Key) string { return (&k).String() }
 func TestParseNamespaceInvalid(t *testing.T) {
 	_, err := client.ParseNamespace("_bad")
 	assert.Error(t, err)
+}
+
+// roundTripperFunc adapts a function to http.RoundTripper for tests.
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// TestCreateClosePreservesStatusErrorOnCancelledCtx exercises the
+// masked-403 race in writeCloser.Close: the server has responded with
+// 403 (so wc.done holds *HTTPStatusError) but ctx is cancelled before
+// Close runs. The fix prefers the typed status error over the local
+// ctx-cancelled error so callers can still classify the failure as a
+// permission denial.
+func TestCreateClosePreservesStatusErrorOnCancelledCtx(t *testing.T) {
+	// Controlled transport: signals via responseDone after the response
+	// has been delivered to the client, so the test can cancel ctx with
+	// a deterministic happens-before relative to wc.done being filled.
+	responseDone := make(chan struct{})
+	httpClient := &http.Client{
+		Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			// Respond 403 without reading the request body. The body is the
+			// io.Pipe reader from Create; reading it would deadlock because
+			// nothing writes to it until Close, and Close is blocked on
+			// wc.done. The real cachew server's behaviour on auth-denial is
+			// equivalent: it can write the response before/without consuming
+			// the body — that's exactly what produces the broken-pipe
+			// symptom in production.
+			resp := &http.Response{
+				StatusCode: http.StatusForbidden,
+				Body:       io.NopCloser(strings.NewReader("")),
+				Header:     http.Header{},
+				Request:    r,
+			}
+			close(responseDone)
+			return resp, nil
+		}),
+	}
+	c := client.NewWithHTTPClient("http://example.invalid", httpClient).Namespace("test")
+	defer c.Close()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	wc, err := c.Create(ctx, client.NewKey("k"), nil, 0)
+	assert.NoError(t, err)
+
+	// Wait until the transport has produced the 403 response. After this
+	// point the goroutine inside Create has run io.Copy + Body.Close +
+	// `wc.done <- &HTTPStatusError{403}`. Cancelling ctx now puts us in
+	// exactly the state the masked-403 bug requires: ctx.Err() != nil at
+	// Close time, *and* a typed status error sitting on wc.done.
+	<-responseDone
+	cancel()
+
+	closeErr := wc.Close()
+	var statusErr *client.HTTPStatusError
+	assert.True(t, errors.As(closeErr, &statusErr),
+		"Close error must contain *HTTPStatusError, got: %v", closeErr)
+	assert.Equal(t, http.StatusForbidden, statusErr.StatusCode)
+}
+
+// TestCreateCloseIdempotent verifies that a second Close call (e.g. a
+// deferred Close after an explicit Abort or a parallel cleanup goroutine)
+// does not deadlock on the drained wc.done channel and returns the same
+// error as the first.
+func TestCreateCloseIdempotent(t *testing.T) {
+	httpClient := &http.Client{
+		Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader("")),
+				Header:     http.Header{},
+				Request:    r,
+			}, nil
+		}),
+	}
+	c := client.NewWithHTTPClient("http://example.invalid", httpClient).Namespace("test")
+	defer c.Close()
+
+	wc, err := c.Create(t.Context(), client.NewKey("k"), nil, 0)
+	assert.NoError(t, err)
+
+	first := wc.Close()
+	assert.NoError(t, first)
+
+	// Second Close must return immediately. Run it in a goroutine with a
+	// generous bound so a regression manifests as a clear timeout failure
+	// rather than hanging the suite — without sync.Once the second caller
+	// would block forever on <-wc.done after the channel was drained by
+	// the first call.
+	done := make(chan error, 1)
+	go func() { done <- wc.Close() }()
+	select {
+	case second := <-done:
+		assert.Equal(t, first, second, "second Close must return the same error as the first")
+	case <-time.After(2 * time.Second):
+		t.Fatal("second Close blocked; expected idempotent return")
+	}
 }
