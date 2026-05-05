@@ -9,22 +9,14 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-const (
-	// s3DownloadChunkSize is the size of each parallel range-GET request.
-	// 32 MiB matches the gradle-cache-tool's benchmarked default.
-	s3DownloadChunkSize = 32 << 20
-	// s3DownloadWorkers is the number of concurrent range-GET requests.
-	// 8 workers should be enough to saturate the host's network connection.
-	s3DownloadWorkers = 8
-)
-
 // parallelGetReader returns an io.ReadCloser that downloads the S3 object
 // using parallel range-GET requests and reassembles chunks in order.
 // For objects smaller than one chunk, it falls back to a single GetObject.
 // The etag pins all chunk requests to one object revision, preventing
 // corruption if the key is overwritten during a large read.
 func (s *S3) parallelGetReader(ctx context.Context, bucket, objectName string, size int64, etag string) (io.ReadCloser, error) {
-	if size <= s3DownloadChunkSize {
+	chunkSize := int64(s.config.DownloadPartSizeMB) << 20 // #nosec G115 -- DownloadPartSizeMB is a small operator-supplied tuning value.
+	if size <= chunkSize {
 		// Small object: single stream.
 		obj, err := s.client.GetObject(ctx, bucket, objectName, minio.GetObjectOptions{})
 		if err != nil {
@@ -64,8 +56,9 @@ func (c *cancelReadCloser) Close() error {
 // All chunk requests are pinned to the given etag to ensure consistency.
 // An errgroup cancels all workers on the first error from any goroutine.
 func (s *S3) parallelGet(ctx context.Context, bucket, objectName string, size int64, etag string, w io.Writer) error {
-	numChunks := int((size + s3DownloadChunkSize - 1) / s3DownloadChunkSize)
-	numWorkers := min(s3DownloadWorkers, numChunks)
+	chunkSize := int64(s.config.DownloadPartSizeMB) << 20 // #nosec G115 -- DownloadPartSizeMB is a small operator-supplied tuning value.
+	numChunks := int((size + chunkSize - 1) / chunkSize)
+	numWorkers := min(int(s.config.DownloadConcurrency), numChunks) // #nosec G115 -- DownloadConcurrency is a small operator-supplied tuning value.
 
 	// One buffered channel per chunk so workers never block after sending.
 	results := make([]chan []byte, numChunks)
@@ -91,8 +84,8 @@ func (s *S3) parallelGet(ctx context.Context, bucket, objectName string, size in
 					return egCtx.Err()
 				}
 
-				start := int64(seq) * s3DownloadChunkSize
-				end := min(start+s3DownloadChunkSize-1, size-1)
+				start := int64(seq) * chunkSize
+				end := min(start+chunkSize-1, size-1)
 
 				opts := minio.GetObjectOptions{}
 				if err := opts.SetRange(start, end); err != nil {

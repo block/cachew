@@ -16,6 +16,17 @@ import (
 	"github.com/block/cachew/internal/logging"
 )
 
+// testRepoConfig returns a Config with timeouts populated, suitable for
+// constructing Repository values directly in tests that bypass NewManager.
+func testRepoConfig() Config {
+	return Config{
+		CloneTimeout:    1 * time.Hour,
+		FetchTimeout:    5 * time.Minute,
+		LsRemoteTimeout: 60 * time.Second,
+		RepackTimeout:   10 * time.Minute,
+	}
+}
+
 // createBareRepo creates a bare git repository at the given path, suitable for
 // use as an upstream or as a mirror clone target.
 func createBareRepo(t *testing.T, dir string) string {
@@ -267,6 +278,7 @@ func TestRepository_Clone_StateVisibleDuringClone(t *testing.T) {
 	clonePath := filepath.Join(tmpDir, "clone")
 	repo := &Repository{
 		state:       StateEmpty,
+		config:      testRepoConfig(),
 		path:        clonePath,
 		upstreamURL: upstreamPath,
 		fetchSem:    make(chan struct{}, 1),
@@ -306,9 +318,11 @@ func TestRepository_CloneSetsMirrorConfig(t *testing.T) {
 	upstreamPath := createBareRepo(t, tmpDir)
 
 	clonePath := filepath.Join(tmpDir, "clone")
+	cfg := testRepoConfig()
+	cfg.PackThreads = 4
 	repo := &Repository{
 		state:       StateEmpty,
-		config:      Config{PackThreads: 4},
+		config:      cfg,
 		path:        clonePath,
 		upstreamURL: upstreamPath,
 		fetchSem:    make(chan struct{}, 1),
@@ -333,6 +347,7 @@ func TestRepository_CloneFailedLeavesNoDebris(t *testing.T) {
 	clonePath := filepath.Join(tmpDir, "mirrors", "github.com", "owner", "repo")
 	repo := &Repository{
 		state:       StateEmpty,
+		config:      testRepoConfig(),
 		path:        clonePath,
 		upstreamURL: "https://github.com/nonexistent-owner-abc123/nonexistent-repo-abc123",
 		fetchSem:    make(chan struct{}, 1),
@@ -359,6 +374,7 @@ func TestRepository_CloneDoesNotClobberSiblings(t *testing.T) {
 	clonePath := filepath.Join(mirrorRoot, "github.com")
 	repo := &Repository{
 		state:       StateEmpty,
+		config:      testRepoConfig(),
 		path:        clonePath,
 		upstreamURL: "https://github.com/",
 		fetchSem:    make(chan struct{}, 1),
@@ -383,6 +399,7 @@ func TestRepository_Repack(t *testing.T) {
 
 	repo := &Repository{
 		state:       StateReady,
+		config:      testRepoConfig(),
 		path:        clonePath,
 		upstreamURL: upstreamPath,
 		fetchSem:    make(chan struct{}, 1),
@@ -412,6 +429,7 @@ func TestRepository_Repack_CleansUpStaleLockOnFailure(t *testing.T) {
 
 	repo := &Repository{
 		state:       StateReady,
+		config:      testRepoConfig(),
 		path:        clonePath,
 		upstreamURL: upstreamPath,
 		fetchSem:    make(chan struct{}, 1),
