@@ -25,6 +25,7 @@ import (
 	"github.com/block/cachew/internal/githubapp"
 	"github.com/block/cachew/internal/jobscheduler"
 	"github.com/block/cachew/internal/logging"
+	"github.com/block/cachew/internal/metadatadb"
 	"github.com/block/cachew/internal/snapshot"
 	"github.com/block/cachew/internal/strategy"
 )
@@ -59,6 +60,7 @@ type Strategy struct {
 	coldSnapshotMu      sync.Map // keyed by upstream URL, values are *coldSnapshotEntry
 	deferredRestoreOnce sync.Map // keyed by upstream URL, ensures at most one deferred restore per repo
 	metrics             *gitMetrics
+	repoCounts          *RepoCounts
 	ready               atomic.Bool
 }
 
@@ -181,10 +183,28 @@ func New(
 
 var _ strategy.Strategy = (*Strategy)(nil)
 var _ strategy.Readier = (*Strategy)(nil)
+var _ strategy.MetadataConsumer = (*Strategy)(nil)
 
 // Ready reports whether startup warm-up has completed.
 func (s *Strategy) Ready() bool {
 	return s.ready.Load()
+}
+
+// SetMetadataStore enables the per-repo clone histogram and schedules its
+// daily reaper. Called by config.Load after the metadata backend is built.
+func (s *Strategy) SetMetadataStore(store *metadatadb.Store) {
+	if store == nil {
+		return
+	}
+	s.repoCounts = NewRepoCounts(store.Namespace("git"))
+	logging.FromContext(s.ctx).InfoContext(s.ctx, "Per-repo clone histogram enabled",
+		"retention_days", s.repoCounts.retentionDays)
+	s.scheduler.SubmitPeriodicJob("repo-counts-reaper", "reap-repo-counts", defaultRepoCountsReapInterval, func(ctx context.Context) error {
+		if deleted := s.repoCounts.Reap(); deleted > 0 {
+			logging.FromContext(ctx).InfoContext(ctx, "Reaped stale repo clone counts", "deleted", deleted)
+		}
+		return nil
+	})
 }
 
 func (s *Strategy) warmExistingRepos(ctx context.Context) error {
@@ -299,6 +319,13 @@ func (s *Strategy) handleGitRequest(w http.ResponseWriter, r *http.Request, host
 		logger.ErrorContext(ctx, "Failed to get or create clone", "error", err)
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
+	}
+
+	// Increment after GetOrCreate so unvalidated URLs can't bloat the keyspace.
+	if isClone, cerr := RequestIsClone(pathValue, r); cerr != nil {
+		logger.WarnContext(ctx, "Failed to inspect upload-pack body for clone counting", "error", cerr)
+	} else if isClone {
+		s.repoCounts.IncrementClone(upstreamURL)
 	}
 
 	state := repo.State()

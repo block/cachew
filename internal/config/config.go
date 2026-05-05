@@ -154,46 +154,48 @@ func Load(
 	ast *hcl.AST,
 	mux *http.ServeMux,
 	vars map[string]string,
-) (http.Handler, metadatadb.Backend, []strategy.Readier, error) {
+) (http.Handler, []strategy.Readier, error) {
 	logger := logging.FromContext(ctx)
 	expandVars(ast, vars)
 
 	classified, err := classifyBlocks(ast)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
 
 	var caches []cache.Cache
 	for _, block := range classified.caches {
 		name, inner, err := unwrapBlock(block)
 		if err != nil {
-			return nil, nil, nil, err
+			return nil, nil, err
 		}
 		c, err := cr.Create(ctx, name, inner, vars)
 		if err != nil {
-			return nil, nil, nil, errors.Errorf("%s: %w", block.Pos, err)
+			return nil, nil, errors.Errorf("%s: %w", block.Pos, err)
 		}
 		caches = append(caches, c)
 	}
 	if len(caches) == 0 {
-		return nil, nil, nil, errors.Errorf("%s: expected at least one cache backend", ast.Pos)
+		return nil, nil, errors.Errorf("%s: expected at least one cache backend", ast.Pos)
 	}
 
 	if classified.metadata == nil {
-		return nil, nil, nil, errors.Errorf("%s: expected a metadata backend", ast.Pos)
+		return nil, nil, errors.Errorf("%s: expected a metadata backend", ast.Pos)
 	}
 	metaName, metaInner, err := unwrapBlock(classified.metadata)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
 	metadata, err := mr.Create(ctx, metaName, metaInner, vars)
 	if err != nil {
-		return nil, nil, nil, errors.Errorf("%s: %w", classified.metadata.Pos, err)
+		return nil, nil, errors.Errorf("%s: %w", classified.metadata.Pos, err)
 	}
 
 	cache := cache.MaybeNewTiered(ctx, caches)
 
 	logger.DebugContext(ctx, "Cache backend", "cache", cache)
+
+	metadataStore := metadatadb.New(ctx, metadata)
 
 	// Second pass, instantiate strategies and bind them to the mux.
 	// Collect strategies that implement Interceptor separately — they need
@@ -207,7 +209,10 @@ func Load(
 		mlog := &loggingMux{logger: slogger, mux: mux}
 		s, err := sr.Create(ctx, name, block, cache, mlog, vars)
 		if err != nil {
-			return nil, nil, nil, errors.Errorf("%s: %w", block.Pos, err)
+			return nil, nil, errors.Errorf("%s: %w", block.Pos, err)
+		}
+		if mc, ok := s.(strategy.MetadataConsumer); ok {
+			mc.SetMetadataStore(metadataStore)
 		}
 		if interceptor, ok := s.(strategy.Interceptor); ok {
 			interceptors = append(interceptors, interceptor)
@@ -223,7 +228,7 @@ func Load(
 	for i := len(interceptors) - 1; i >= 0; i-- {
 		h = interceptors[i].Intercept(h)
 	}
-	return h, metadata, readiers, nil
+	return h, readiers, nil
 }
 
 // expandVars expands environment variable references in HCL `*hcl.String`

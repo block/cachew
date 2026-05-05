@@ -16,6 +16,7 @@ import (
 	"github.com/block/cachew/internal/githubapp"
 	"github.com/block/cachew/internal/jobscheduler"
 	"github.com/block/cachew/internal/logging"
+	"github.com/block/cachew/internal/metadatadb"
 	"github.com/block/cachew/internal/strategy/git"
 )
 
@@ -322,6 +323,25 @@ func TestNewMissingSnapshotBinaries(t *testing.T) {
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "zstd")
 	})
+}
+
+// TestSetMetadataStore verifies that wiring a metadata store after construction
+// enables the per-repo histogram. The behaviour of the resulting RepoCounts is
+// covered in repocounts_test.go.
+func TestSetMetadataStore(t *testing.T) {
+	_, ctx := logging.Configure(context.Background(), logging.Config{})
+
+	mux := newTestMux()
+	cm := gitclone.NewManagerProvider(ctx, gitclone.Config{
+		MirrorRoot:    filepath.Join(t.TempDir(), "clones"),
+		FetchInterval: 15,
+	}, nil)
+	s, err := git.New(ctx, git.Config{}, newTestScheduler(ctx, t), nil, mux, cm,
+		func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
+	assert.NoError(t, err)
+
+	store := metadatadb.New(ctx, metadatadb.NewMemoryBackend())
+	s.SetMetadataStore(store)
 }
 
 func TestParseGitRefs(t *testing.T) {
