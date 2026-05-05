@@ -103,11 +103,11 @@ func Extract(ctx context.Context, r io.Reader, directory string, threads int) er
 	return errors.Join(errs...)
 }
 
-// runTarZstdPipeline runs tar piped through zstd, writing compressed output
+// runTarZstdPipeline runs tar piped through pzstd, writing compressed output
 // to w. The caller is responsible for closing w after this returns.
 func runTarZstdPipeline(ctx context.Context, tarArgs []string, threads int, w io.Writer) error {
 	tarCmd := exec.CommandContext(ctx, "tar", tarArgs...)
-	zstdCmd := exec.CommandContext(ctx, "zstd", "-c", fmt.Sprintf("-T%d", threads)) //nolint:gosec
+	zstdCmd := exec.CommandContext(ctx, "pzstd", "-c", fmt.Sprintf("-p%d", threads)) //nolint:gosec
 
 	// Manual pipe so we can close both ends in the parent after starting
 	// children. Prevents deadlock if zstd exits while tar is still writing:
