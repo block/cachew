@@ -78,7 +78,7 @@ func New(
 		config.BundleCacheTTL = 2 * time.Hour
 	}
 	if config.SnapshotInterval > 0 {
-		for _, bin := range []string{"tar", "zstd"} {
+		for _, bin := range []string{"tar", "pzstd"} {
 			if _, err := exec.LookPath(bin); err != nil {
 				return nil, errors.Errorf("%s is required for snapshots (snapshot-interval > 0) but not found in PATH", bin)
 			}
