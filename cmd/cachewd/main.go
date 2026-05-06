@@ -28,6 +28,7 @@ import (
 	"github.com/block/cachew/internal/metadatadb"
 	"github.com/block/cachew/internal/metrics"
 	"github.com/block/cachew/internal/opa"
+	"github.com/block/cachew/internal/profiling"
 	"github.com/block/cachew/internal/reaper"
 	"github.com/block/cachew/internal/s3client"
 	"github.com/block/cachew/internal/strategy"
@@ -52,6 +53,8 @@ type CLI struct {
 	Schema bool `help:"Print the configuration file schema." xor:"command"`
 
 	Config *os.File `hcl:"-" help:"Configuration file path." required:"" default:"cachew.hcl"`
+
+	DDProfilingEnabled bool `help:"Enable the Datadog continuous profiler." env:"DD_PROFILING_ENABLED"`
 }
 
 func main() {
@@ -69,6 +72,14 @@ func main() {
 
 	ctx := context.Background()
 	logger, ctx := logging.Configure(ctx, globalConfig.LoggingConfig)
+
+	// Start the Datadog continuous profiler when enabled. The DD_*
+	// env vars (DD_AGENT_HOST/SERVICE/ENV/VERSION) are read by the
+	// dd-trace-go library directly and are wired in by the deployment
+	// manifest.
+	stopProfiler, err := profiling.Start(ctx, cli.DDProfilingEnabled)
+	fatalIfError(ctx, logger, err, "Failed to start Datadog profiler")
+	defer stopProfiler()
 
 	reaper.Start(ctx)
 
