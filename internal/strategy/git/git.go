@@ -19,6 +19,10 @@ import (
 	"time"
 
 	"github.com/alecthomas/errors"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/block/cachew/internal/cache"
 	"github.com/block/cachew/internal/gitclone"
@@ -29,6 +33,9 @@ import (
 	"github.com/block/cachew/internal/snapshot"
 	"github.com/block/cachew/internal/strategy"
 )
+
+//nolint:gochecknoglobals // OTel tracer instances are package-scoped by convention
+var tracer = otel.Tracer("github.com/block/cachew/internal/strategy/git")
 
 func Register(r *strategy.Registry, scheduler jobscheduler.Provider, cloneManagerProvider gitclone.ManagerProvider, tokenManagerProvider githubapp.TokenManagerProvider) {
 	strategy.Register(r, "git", "Caches Git repositories, including tarball snapshots.", func(ctx context.Context, config Config, cache cache.Cache, mux strategy.Mux) (*Strategy, error) {
@@ -544,7 +551,7 @@ func (s *Strategy) ensureCloneReady(ctx context.Context, repo *gitclone.Reposito
 	return nil
 }
 
-func (s *Strategy) startClone(ctx context.Context, repo *gitclone.Repository) error {
+func (s *Strategy) startClone(ctx context.Context, repo *gitclone.Repository) (returnErr error) {
 	// Atomically claim the clone so only one goroutine performs the restore
 	// or clone. Without this gate, concurrent snapshot requests each call
 	// startClone and extract tarballs over the same directory, corrupting
@@ -552,6 +559,20 @@ func (s *Strategy) startClone(ctx context.Context, repo *gitclone.Repository) er
 	if !repo.TryStartCloning() {
 		return nil
 	}
+
+	ctx, span := tracer.Start(ctx, "git.start_clone",
+		trace.WithAttributes(
+			attribute.String("cachew.operation", "clone"),
+			attribute.String("cachew.upstream", repo.UpstreamURL()),
+		),
+	)
+	defer func() {
+		if returnErr != nil {
+			span.RecordError(returnErr)
+			span.SetStatus(codes.Error, returnErr.Error())
+		}
+		span.End()
+	}()
 
 	logger := logging.FromContext(ctx)
 	upstream := repo.UpstreamURL()
@@ -633,7 +654,21 @@ func (s *Strategy) startClone(ctx context.Context, repo *gitclone.Repository) er
 // without any conversion. The snapshot is extracted into a temporary directory
 // and renamed into place only on success, so a failure can never delete an
 // existing mirror directory.
-func (s *Strategy) tryRestoreSnapshot(ctx context.Context, repo *gitclone.Repository) error {
+func (s *Strategy) tryRestoreSnapshot(ctx context.Context, repo *gitclone.Repository) (returnErr error) {
+	ctx, span := tracer.Start(ctx, "git.restore_snapshot",
+		trace.WithAttributes(
+			attribute.String("cachew.operation", "restore"),
+			attribute.String("cachew.upstream", repo.UpstreamURL()),
+		),
+	)
+	defer func() {
+		if returnErr != nil {
+			span.RecordError(returnErr)
+			span.SetStatus(codes.Error, returnErr.Error())
+		}
+		span.End()
+	}()
+
 	cacheKey := mirrorSnapshotCacheKey(repo.UpstreamURL())
 
 	parentDir := filepath.Dir(repo.Path())
@@ -685,7 +720,21 @@ func (s *Strategy) submitFetch(repo *gitclone.Repository) {
 	})
 }
 
-func (s *Strategy) doFetch(ctx context.Context, repo *gitclone.Repository) error {
+func (s *Strategy) doFetch(ctx context.Context, repo *gitclone.Repository) (returnErr error) {
+	ctx, span := tracer.Start(ctx, "git.fetch",
+		trace.WithAttributes(
+			attribute.String("cachew.operation", "fetch"),
+			attribute.String("cachew.upstream", repo.UpstreamURL()),
+		),
+	)
+	defer func() {
+		if returnErr != nil {
+			span.RecordError(returnErr)
+			span.SetStatus(codes.Error, returnErr.Error())
+		}
+		span.End()
+	}()
+
 	logger := logging.FromContext(ctx)
 	logger.InfoContext(ctx, "Fetching updates", "upstream", repo.UpstreamURL(), "path", repo.Path())
 
