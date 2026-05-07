@@ -234,7 +234,7 @@ func TestLoadRequiresMetadataBackend(t *testing.T) {
 	assert.NoError(t, err)
 
 	ctx := logging.ContextWithLogger(context.Background(), slog.Default())
-	_, _, _, err = Load(ctx, cr, mr, sr, ast, http.NewServeMux(), nil)
+	_, _, err = Load(ctx, cr, mr, sr, ast, http.NewServeMux(), nil)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "expected a metadata backend")
 }

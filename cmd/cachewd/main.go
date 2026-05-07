@@ -220,7 +220,7 @@ func newMux(ctx context.Context, cr *cache.Registry, mr *metadatadb.Registry, sr
 		http.DefaultServeMux.ServeHTTP(w, r)
 	}))
 
-	handler, _, loaded, err := config.Load(ctx, cr, mr, sr, providersConfigHCL, mux, vars)
+	handler, loaded, err := config.Load(ctx, cr, mr, sr, providersConfigHCL, mux, vars)
 	if err != nil {
 		return nil, errors.Errorf("load config: %w", err)
 	}

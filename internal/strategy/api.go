@@ -10,6 +10,7 @@ import (
 	"github.com/alecthomas/hcl/v2"
 
 	"github.com/block/cachew/internal/cache"
+	"github.com/block/cachew/internal/metadatadb"
 )
 
 // ErrNotFound is returned when a strategy is not found.
@@ -119,6 +120,16 @@ type Interceptor interface {
 	// Intercept wraps next, returning a handler that intercepts matching
 	// requests and delegates all others to next.
 	Intercept(next http.Handler) http.Handler
+}
+
+// MetadataConsumer is an optional interface a Strategy may implement to receive
+// the metadata store after construction. config.Load invokes SetMetadataStore
+// on each consumer once the metadata backend has been built. This avoids the
+// construction-order cycle where strategies are built inside config.Load but
+// the metadata backend is also created there.
+type MetadataConsumer interface {
+	Strategy
+	SetMetadataStore(*metadatadb.Store)
 }
 
 // Readier is an optional interface a Strategy may implement to gate the
