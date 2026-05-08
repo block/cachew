@@ -434,6 +434,73 @@ func TestIntegrationSpoolReusesDuringClone(t *testing.T) {
 	assert.Equal(t, firstCloneCount, totalCount, "second clone should not have made additional upstream upload-pack requests")
 }
 
+// TestIntegrationCloneSurvivesClientDisconnect verifies that when an HTTP client
+// disconnects (cancels the request context) while a clone is in progress, the
+// clone still runs to completion. Without context.WithoutCancel in startClone,
+// the cancelled request context cascades into exec.CommandContext, which sends
+// SIGKILL to the git process, leaving an orphaned temp directory.
+func TestIntegrationCloneSurvivesClientDisconnect(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not found in PATH")
+	}
+
+	_, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelDebug})
+	tmpDir := t.TempDir()
+	clonesDir := filepath.Join(tmpDir, "clones")
+
+	mux := http.NewServeMux()
+	gc := gitclone.NewManagerProvider(ctx, gitclone.Config{
+		MirrorRoot:    clonesDir,
+		FetchInterval: 24 * time.Hour,
+	}, nil)
+	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: time.Hour})
+	assert.NoError(t, err)
+	_, err = git.New(ctx, git.Config{}, newTestScheduler(ctx, t), memCache, mux, gc,
+		func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
+	assert.NoError(t, err)
+
+	server := testServerWithLogging(ctx, mux)
+	defer server.Close()
+
+	// Make a snapshot request that triggers a clone, then cancel it to
+	// simulate a client disconnect. The clone should still finish.
+	cancelCtx, cancel := context.WithCancel(ctx)
+	req, err := http.NewRequestWithContext(cancelCtx, http.MethodGet,
+		server.URL+"/git/github.com/octocat/Hello-World/snapshot.tar.zst", nil)
+	assert.NoError(t, err)
+
+	errCh := make(chan error, 1)
+	go func() {
+		resp, doErr := http.DefaultClient.Do(req)
+		if resp != nil {
+			_ = resp.Body.Close()
+		}
+		errCh <- doErr
+	}()
+
+	// Give the server time to start processing, then cancel the request.
+	time.Sleep(500 * time.Millisecond)
+	cancel()
+
+	// The HTTP client should return an error (context cancelled).
+	<-errCh
+
+	// The clone should still complete despite the cancelled request.
+	clonePath := filepath.Join(clonesDir, "github.com", "octocat", "Hello-World")
+	deadline := time.Now().Add(60 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, statErr := os.Stat(filepath.Join(clonePath, "HEAD")); statErr == nil {
+			t.Log("Clone completed successfully after client disconnect")
+			return
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	t.Fatal("clone did not complete within 60s after client disconnect")
+}
+
 // TestIntegrationNotOurRefFallsBackToUpstream reproduces the force-push race
 // condition that causes "not our ref" errors and verifies that cachew falls back
 // to upstream rather than returning the git protocol error to the client.
