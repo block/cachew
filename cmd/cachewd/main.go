@@ -82,9 +82,8 @@ func main() {
 	fatalIfError(ctx, logger, err, "Failed to start Datadog profiler")
 	defer stopProfiler()
 
-	// Register the OpenTelemetry tracer provider. Backed by dd-trace-go,
-	// which ships spans to the local Datadog Agent on port 8126. Gated
-	// on the same flag as the profiler since both rely on the agent.
+	// Register the OpenTelemetry tracer provider. Gated on the same flag
+	// as the profiler so the full DD telemetry stack toggles together.
 	stopTracing, err := tracing.New(ctx, tracing.Config{Enabled: cli.DDProfilingEnabled})
 	fatalIfError(ctx, logger, err, "Failed to start tracer")
 	defer stopTracing()
