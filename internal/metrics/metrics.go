@@ -9,6 +9,7 @@ import (
 	"github.com/alecthomas/errors"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	otelruntime "go.opentelemetry.io/contrib/instrumentation/runtime"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp"
@@ -113,6 +114,12 @@ func New(ctx context.Context, cfg Config) (*Client, error) {
 
 	provider := sdkmetric.NewMeterProvider(providerOpts...)
 	otel.SetMeterProvider(provider)
+
+	// Emit Go runtime metrics (runtime.go.*) on the configured meter
+	// provider. Replaces the dd-trace-go tracer's WithRuntimeMetrics().
+	if err := otelruntime.Start(otelruntime.WithMinimumReadMemStatsInterval(time.Second)); err != nil {
+		return nil, errors.Errorf("starting OTel runtime instrumentation: %w", err)
+	}
 
 	client := &Client{
 		provider:          provider,

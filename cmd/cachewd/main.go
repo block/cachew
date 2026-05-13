@@ -8,6 +8,7 @@ import (
 	"net/http"
 	_ "net/http/pprof" //nolint:gosec
 	"os"
+	"runtime"
 	"strings"
 	"time"
 
@@ -28,7 +29,6 @@ import (
 	"github.com/block/cachew/internal/metadatadb"
 	"github.com/block/cachew/internal/metrics"
 	"github.com/block/cachew/internal/opa"
-	"github.com/block/cachew/internal/profiling"
 	"github.com/block/cachew/internal/reaper"
 	"github.com/block/cachew/internal/s3client"
 	"github.com/block/cachew/internal/strategy"
@@ -55,7 +55,11 @@ type CLI struct {
 
 	Config *os.File `hcl:"-" help:"Configuration file path." required:"" default:"cachew.hcl"`
 
-	DDProfilingEnabled bool `help:"Enable the Datadog continuous profiler." env:"DD_PROFILING_ENABLED"`
+	// MutexProfileFraction sets the runtime mutex contention sample rate
+	// (1/N events captured) so /debug/pprof/mutex returns useful data.
+	// Set to 0 to disable mutex profiling. The /admin/pprof/* endpoints
+	// are always mounted via net/http/pprof; this only controls sampling.
+	MutexProfileFraction int `help:"Mutex contention profile sample rate (1/N events). 0 disables mutex profiling." env:"MUTEX_PROFILE_FRACTION" default:"100"`
 }
 
 func main() {
@@ -74,17 +78,16 @@ func main() {
 	ctx := context.Background()
 	logger, ctx := logging.Configure(ctx, globalConfig.LoggingConfig)
 
-	// Start the Datadog continuous profiler when enabled. The DD_*
-	// env vars (DD_AGENT_HOST/SERVICE/ENV/VERSION) are read by the
-	// dd-trace-go library directly and are wired in by the deployment
-	// manifest.
-	stopProfiler, err := profiling.Start(ctx, cli.DDProfilingEnabled)
-	fatalIfError(ctx, logger, err, "Failed to start Datadog profiler")
-	defer stopProfiler()
+	// Enable mutex contention sampling so /admin/pprof/mutex returns
+	// useful data. The pprof endpoints themselves are mounted on the
+	// main HTTP listener under /admin/pprof/* via the net/http/pprof
+	// side-effect import; OPA gates external access.
+	runtime.SetMutexProfileFraction(cli.MutexProfileFraction)
 
-	// Register the OpenTelemetry tracer provider. Gated on the same flag
-	// as the profiler so the full DD telemetry stack toggles together.
-	stopTracing, err := tracing.New(ctx, tracing.Config{Enabled: cli.DDProfilingEnabled})
+	// Register the OpenTelemetry tracer provider. tracing.New is a
+	// no-op when OTEL_EXPORTER_OTLP_ENDPOINT is unset, so deployments
+	// without an OTLP collector wired up are safe.
+	stopTracing, err := tracing.New(ctx, tracing.Config{Enabled: true})
 	fatalIfError(ctx, logger, err, "Failed to start tracer")
 	defer stopTracing()
 
