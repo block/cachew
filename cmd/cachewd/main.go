@@ -34,6 +34,7 @@ import (
 	"github.com/block/cachew/internal/strategy"
 	"github.com/block/cachew/internal/strategy/git"
 	"github.com/block/cachew/internal/strategy/gomod"
+	"github.com/block/cachew/internal/tracing"
 )
 
 type GlobalConfig struct {
@@ -80,6 +81,12 @@ func main() {
 	stopProfiler, err := profiling.Start(ctx, cli.DDProfilingEnabled)
 	fatalIfError(ctx, logger, err, "Failed to start Datadog profiler")
 	defer stopProfiler()
+
+	// Register the OpenTelemetry tracer provider. Gated on the same flag
+	// as the profiler so the full DD telemetry stack toggles together.
+	stopTracing, err := tracing.New(ctx, tracing.Config{Enabled: cli.DDProfilingEnabled})
+	fatalIfError(ctx, logger, err, "Failed to start tracer")
+	defer stopTracing()
 
 	reaper.Start(ctx)
 

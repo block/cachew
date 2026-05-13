@@ -10,7 +10,6 @@ import (
 	"os"
 
 	"github.com/alecthomas/errors"
-	"gopkg.in/DataDog/dd-trace-go.v1/ddtrace/tracer"
 	ddprofiler "gopkg.in/DataDog/dd-trace-go.v1/profiler"
 
 	"github.com/block/cachew/internal/logging"
@@ -27,17 +26,11 @@ func Start(ctx context.Context, enabled bool) (stop func(), err error) {
 	}
 
 	logger := logging.FromContext(ctx)
-	logger.InfoContext(ctx, "Starting Datadog continuous profiler and tracer",
+	logger.InfoContext(ctx, "Starting Datadog continuous profiler",
 		"dd_service", os.Getenv("DD_SERVICE"),
 		"dd_env", os.Getenv("DD_ENV"),
 		"dd_version", os.Getenv("DD_VERSION"),
 	)
-
-	// Start the tracer with runtime metrics enabled so Go runtime metrics
-	// (runtime.go.*) are emitted to DogStatsD. The profiler alone does
-	// not emit these. Without contrib instrumentation imports the tracer
-	// produces no spans, so this is essentially free.
-	tracer.Start(tracer.WithRuntimeMetrics())
 
 	// BlockProfile is intentionally omitted: per DD's docs it can add
 	// noticeable CPU overhead and should be opt-in for targeted
@@ -50,12 +43,10 @@ func Start(ctx context.Context, enabled bool) (stop func(), err error) {
 			ddprofiler.MutexProfile,
 		),
 	); err != nil {
-		tracer.Stop()
 		return func() {}, errors.Errorf("start datadog profiler: %w", err)
 	}
 
 	return func() {
 		ddprofiler.Stop()
-		tracer.Stop()
 	}, nil
 }
