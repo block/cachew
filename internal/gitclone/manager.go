@@ -64,6 +64,7 @@ type Config struct {
 	FetchTimeout     time.Duration `hcl:"fetch-timeout,optional" help:"Upper bound for 'git fetch' so a slow upstream cannot block the fetch path indefinitely." default:"5m"`
 	LsRemoteTimeout  time.Duration `hcl:"ls-remote-timeout,optional" help:"Upper bound for 'git ls-remote' so a slow upstream cannot block the request path indefinitely." default:"1m"`
 	RepackTimeout    time.Duration `hcl:"repack-timeout,optional" help:"Upper bound for 'git repack' so a slow repack on a large repository cannot block the scheduler queue indefinitely." default:"10m"`
+	RepackThreads    int           `hcl:"repack-threads,optional" help:"Threads for git repack operations. Limits memory since windowMemory and deltaCacheSize are per-thread. 0 = pack-threads." default:"4"`
 }
 
 // CredentialProvider provides credentials for git operations.
@@ -716,8 +717,21 @@ func (r *Repository) Repack(ctx context.Context) error {
 	repackCtx, cancel := context.WithTimeout(ctx, r.config.RepackTimeout)
 	defer cancel()
 
+	threads := r.config.RepackThreads
+	if threads <= 0 {
+		threads = r.config.PackThreads
+	}
+
+	// Override pack settings for repack to bound memory usage. The repo-level
+	// config uses high values (512m deltaCacheSize, 1g windowMemory) tuned for
+	// serving performance with many threads. Repack is a background task that
+	// can afford to be slower in exchange for bounded memory.
 	// #nosec G204 - r.path is controlled by us
-	cmd := exec.CommandContext(repackCtx, "git", "-C", r.path, "repack", "-d", "--geometric=2", "--write-midx", "--write-bitmap-index")
+	cmd := exec.CommandContext(repackCtx, "git", "-C", r.path,
+		"-c", "pack.threads="+strconv.Itoa(threads),
+		"-c", "pack.windowMemory=256m",
+		"-c", "pack.deltaCacheSize=128m",
+		"repack", "-d", "--geometric=2", "--write-midx", "--write-bitmap-index")
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error {
 		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
