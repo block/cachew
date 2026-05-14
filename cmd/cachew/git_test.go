@@ -3,15 +3,20 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/alecthomas/assert/v2"
+
+	"github.com/block/cachew/client"
 )
 
 func initGitRepo(t *testing.T, dir string, files map[string]string) {
@@ -99,8 +104,8 @@ func TestGitRestoreSnapshot(t *testing.T) {
 		RepoURL:   "https://github.com/test/repo",
 		Directory: dstDir,
 	}
-	cli := &CLI{URL: srv.URL}
-	err := cmd.Run(context.Background(), cli, srv.Client())
+	api := client.NewWithHTTPClient(srv.URL, srv.Client())
+	err := cmd.Run(context.Background(), api)
 	assert.NoError(t, err)
 
 	content, err := os.ReadFile(filepath.Join(dstDir, "hello.txt"))
@@ -159,8 +164,8 @@ func TestGitRestoreWithBundle(t *testing.T) {
 		RepoURL:   "https://github.com/test/repo",
 		Directory: dstDir,
 	}
-	cli := &CLI{URL: srv.URL}
-	err = restoreCmd.Run(context.Background(), cli, srv.Client())
+	api := client.NewWithHTTPClient(srv.URL, srv.Client())
+	err = restoreCmd.Run(context.Background(), api)
 	assert.NoError(t, err)
 
 	content, err := os.ReadFile(filepath.Join(dstDir, "file.txt"))
@@ -202,8 +207,8 @@ func TestGitRestoreNoBundle(t *testing.T) {
 		Directory: dstDir,
 		NoBundle:  true,
 	}
-	cli := &CLI{URL: srv.URL}
-	err := restoreCmd.Run(context.Background(), cli, srv.Client())
+	api := client.NewWithHTTPClient(srv.URL, srv.Client())
+	err := restoreCmd.Run(context.Background(), api)
 	assert.NoError(t, err)
 	assert.False(t, bundleRequested)
 
@@ -223,10 +228,136 @@ func TestGitRestoreSnapshotNotFound(t *testing.T) {
 		RepoURL:   "https://github.com/test/repo",
 		Directory: dstDir,
 	}
-	cli := &CLI{URL: srv.URL}
-	err := restoreCmd.Run(context.Background(), cli, srv.Client())
+	api := client.NewWithHTTPClient(srv.URL, srv.Client())
+	err := restoreCmd.Run(context.Background(), api)
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "status 404")
+	assert.Contains(t, err.Error(), "no snapshot available")
+}
+
+func TestGitRestoreWithRef(t *testing.T) {
+	srcDir := t.TempDir()
+	initGitRepo(t, srcDir, map[string]string{"file.txt": "v1"})
+	snapshotData := createTarZst(t, srcDir)
+
+	var ensureCalled atomic.Bool
+	var snapshotServedAt atomic.Int64
+	var ensurePayload map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/snapshot.tar.zst"):
+			snapshotServedAt.Store(time.Now().UnixNano())
+			w.Header().Set("Content-Type", "application/zstd")
+			w.Write(snapshotData) //nolint:errcheck
+
+		case strings.HasSuffix(r.URL.Path, "/ensure-refs"):
+			ensureCalled.Store(true)
+			if snapshotServedAt.Load() == 0 {
+				t.Error("ensure-refs must run after snapshot")
+			}
+			if r.Method != http.MethodPost {
+				t.Errorf("ensure-refs: want POST, got %s", r.Method)
+			}
+			if err := json.NewDecoder(r.Body).Decode(&ensurePayload); err != nil {
+				t.Errorf("decode ensure-refs body: %v", err)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+				"refs":    map[string]string{"refs/heads/main": "abc123"},
+				"fetched": true,
+			})
+
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	dstDir := filepath.Join(t.TempDir(), "restored")
+	restoreCmd := &GitRestoreCmd{
+		RepoURL:   "https://github.com/test/repo",
+		Directory: dstDir,
+		Ref:       map[string]string{"refs/heads/main": "abc123"},
+		NoBundle:  true,
+	}
+	api := client.NewWithHTTPClient(srv.URL, srv.Client())
+	// The restored snapshot has no origin remote, so the post-pull will fail.
+	// That's expected; we just want to verify ensure-refs ran after snapshot.
+	err := restoreCmd.Run(context.Background(), api)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "git pull")
+	assert.True(t, ensureCalled.Load())
+
+	refs, ok := ensurePayload["refs"].(map[string]any)
+	assert.True(t, ok)
+	assert.Equal(t, "abc123", refs["refs/heads/main"])
+}
+
+func TestGitRestorePullsFromOrigin(t *testing.T) {
+	// Build an "upstream" repo whose snapshot we serve, plus a bare clone of
+	// it that the working tree's origin will point at after restore. The
+	// upstream then gets an extra commit so we can verify that the post-
+	// restore `git pull` picks it up.
+	tmpDir := t.TempDir()
+	workDir := filepath.Join(tmpDir, "work")
+	assert.NoError(t, os.MkdirAll(workDir, 0o755))
+	initGitRepo(t, workDir, map[string]string{"file.txt": "v1"})
+
+	bareDir := filepath.Join(tmpDir, "origin.git")
+	runGit := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		out, err := cmd.CombinedOutput()
+		assert.NoError(t, err, string(out))
+	}
+	runGit("clone", "--bare", workDir, bareDir)
+
+	// Add an origin pointing at the bare clone so the post-restore pull has
+	// somewhere to fetch from.
+	runGit("-C", workDir, "remote", "add", "origin", bareDir)
+	// Track origin/main so `git pull` knows what to merge.
+	runGit("-C", workDir, "fetch", "origin")
+	runGit("-C", workDir, "branch", "--set-upstream-to=origin/main", "main")
+
+	snapshotData := createTarZst(t, workDir)
+
+	// Add a commit upstream that the snapshot doesn't have.
+	workDir2 := filepath.Join(tmpDir, "work2")
+	runGit("clone", bareDir, workDir2)
+	assert.NoError(t, os.WriteFile(filepath.Join(workDir2, "new.txt"), []byte("added"), 0o644))
+	runGit("-C", workDir2, "add", "-A")
+	runGit("-C", workDir2, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "add")
+	runGit("-C", workDir2, "push", "origin", "main")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/snapshot.tar.zst"):
+			w.Header().Set("Content-Type", "application/zstd")
+			w.Write(snapshotData) //nolint:errcheck
+		case strings.HasSuffix(r.URL.Path, "/ensure-refs"):
+			w.Header().Set("Content-Type", "application/json")
+			assert.NoError(t, json.NewEncoder(w).Encode(map[string]any{
+				"refs": map[string]string{}, "fetched": false,
+			}))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	dstDir := filepath.Join(t.TempDir(), "restored")
+	restoreCmd := &GitRestoreCmd{
+		RepoURL:   "https://github.com/test/repo",
+		Directory: dstDir,
+		Ref:       map[string]string{"refs/heads/main": ""},
+	}
+	api := client.NewWithHTTPClient(srv.URL, srv.Client())
+	assert.NoError(t, restoreCmd.Run(context.Background(), api))
+
+	// The post-restore pull from origin (= the bare repo) should have brought
+	// in the new.txt commit.
+	content, err := os.ReadFile(filepath.Join(dstDir, "new.txt"))
+	assert.NoError(t, err)
+	assert.Equal(t, "added", string(content))
 }
 
 func TestGitRestoreBundleFailureNonFatal(t *testing.T) {
@@ -256,8 +387,8 @@ func TestGitRestoreBundleFailureNonFatal(t *testing.T) {
 		RepoURL:   "https://github.com/test/repo",
 		Directory: dstDir,
 	}
-	cli := &CLI{URL: srv.URL}
-	err := restoreCmd.Run(context.Background(), cli, srv.Client())
+	api := client.NewWithHTTPClient(srv.URL, srv.Client())
+	err := restoreCmd.Run(context.Background(), api)
 	assert.NoError(t, err)
 
 	content, err := os.ReadFile(filepath.Join(dstDir, "file.txt"))

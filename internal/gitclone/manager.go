@@ -672,6 +672,65 @@ func (r *Repository) EnsureRefsUpToDate(ctx context.Context) (needsFetch bool, e
 	return false, nil
 }
 
+// EnsureRefs guarantees the local mirror contains each ref in expect at the
+// given SHA. If a SHA is empty, it only requires the ref to exist. When a
+// requested ref does not match the local mirror, EnsureRefs synchronously
+// fetches from upstream once and then re-checks. The returned map contains
+// the resulting local SHAs for the requested refs (empty string if still
+// missing after fetch).
+//
+// This bypasses RefCheckInterval because callers are explicitly asserting
+// they require these refs to be fresh right now.
+func (r *Repository) EnsureRefs(ctx context.Context, expect map[string]string) (resolved map[string]string, fetched bool, err error) {
+	localRefs, err := r.GetLocalRefs(ctx)
+	if err != nil {
+		return nil, false, errors.Wrap(err, "get local refs")
+	}
+
+	if refsSatisfied(localRefs, expect) {
+		return resolvedRefs(localRefs, expect), false, nil
+	}
+
+	if err := r.FetchWithTimeout(ctx, r.config.FetchTimeout); err != nil {
+		return nil, false, errors.Wrap(err, "fetch upstream")
+	}
+
+	// Invalidate the cached ref-check so the normal transparent path also
+	// re-evaluates after our forced fetch.
+	r.mu.Lock()
+	r.refCheckValid = false
+	r.mu.Unlock()
+
+	localRefs, err = r.GetLocalRefs(ctx)
+	if err != nil {
+		return nil, true, errors.Wrap(err, "get local refs after fetch")
+	}
+	return resolvedRefs(localRefs, expect), true, nil
+}
+
+// refsSatisfied reports whether every ref in expect is present in localRefs at
+// the expected SHA (or at any SHA when the expected SHA is empty).
+func refsSatisfied(localRefs, expect map[string]string) bool {
+	for ref, wantSHA := range expect {
+		localSHA, ok := localRefs[ref]
+		if !ok {
+			return false
+		}
+		if wantSHA != "" && localSHA != wantSHA {
+			return false
+		}
+	}
+	return true
+}
+
+func resolvedRefs(localRefs, expect map[string]string) map[string]string {
+	out := make(map[string]string, len(expect))
+	for ref := range expect {
+		out[ref] = localRefs[ref]
+	}
+	return out
+}
+
 func (r *Repository) GetLocalRefs(ctx context.Context) (map[string]string, error) {
 	var output []byte
 	var err error

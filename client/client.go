@@ -9,6 +9,7 @@ import (
 	"maps"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -96,7 +97,7 @@ type Client struct {
 // request.
 func New(baseURL string, headerFunc HeaderFunc) *Client {
 	return &Client{
-		baseURL: baseURL + "/api/v1",
+		baseURL: strings.TrimRight(baseURL, "/"),
 		http:    NewHTTPClient(headerFunc),
 	}
 }
@@ -106,7 +107,7 @@ func New(baseURL string, headerFunc HeaderFunc) *Client {
 // the supplied client (e.g. via a custom RoundTripper).
 func NewWithHTTPClient(baseURL string, httpClient *http.Client) *Client {
 	return &Client{
-		baseURL: baseURL + "/api/v1",
+		baseURL: strings.TrimRight(baseURL, "/"),
 		http:    httpClient,
 	}
 }
@@ -115,7 +116,7 @@ func NewWithHTTPClient(baseURL string, httpClient *http.Client) *Client {
 // non-API endpoints with the same auth configuration.
 func (c *Client) HTTP() *http.Client { return c.http }
 
-// BaseURL returns the /api/v1 base URL this client targets.
+// BaseURL returns the cachew server root URL this client targets.
 func (c *Client) BaseURL() string { return c.baseURL }
 
 // String describes the client.
@@ -138,7 +139,7 @@ func (c *Client) resolvedNamespace() Namespace {
 }
 
 func (c *Client) objectURL(key Key) string {
-	return fmt.Sprintf("%s/object/%s/%s", c.baseURL, c.resolvedNamespace(), key.String())
+	return fmt.Sprintf("%s/api/v1/object/%s/%s", c.baseURL, c.resolvedNamespace(), key.String())
 }
 
 // Open retrieves an object from the cache server.
@@ -268,7 +269,7 @@ func (c *Client) Close() error {
 
 // Stats retrieves cache statistics from the server.
 func (c *Client) Stats(ctx context.Context) (Stats, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/stats", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/api/v1/stats", nil)
 	if err != nil {
 		return Stats{}, errors.Wrap(err, "failed to create request")
 	}
@@ -297,7 +298,7 @@ func (c *Client) Stats(ctx context.Context) (Stats, error) {
 
 // ListNamespaces requests the namespace list from the server.
 func (c *Client) ListNamespaces(ctx context.Context) ([]string, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/namespaces", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/api/v1/namespaces", nil)
 	if err != nil {
 		return nil, errors.WithStack(err)
 	}

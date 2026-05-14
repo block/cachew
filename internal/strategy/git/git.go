@@ -272,6 +272,11 @@ func (s *Strategy) handleRequest(w http.ResponseWriter, r *http.Request) {
 
 	logger.DebugContext(ctx, "Git request", "method", r.Method, "host", host, "path", pathValue)
 
+	if strings.HasSuffix(pathValue, EnsureRefsPath) {
+		s.handleEnsureRefs(w, r, host, pathValue)
+		return
+	}
+
 	if strings.HasSuffix(pathValue, "/snapshot.tar.zst") {
 		s.metrics.recordRequest(ctx, "snapshot")
 		s.handleSnapshotRequest(w, r, host, pathValue)
