@@ -62,24 +62,75 @@ func (c *GitRestoreCmd) Run(ctx context.Context, api *client.Client) error {
 	// Snapshot + bundle leave the working tree at whatever the mirror had
 	// when the bundle was last generated, which may be arbitrarily old. If
 	// the caller asked for specific refs to be fresh, freshen the mirror
-	// and then pull from origin to catch the working tree up.
+	// (if needed) and pull from origin (if needed) to catch up.
 	if len(c.Ref) > 0 {
-		fmt.Fprintf(os.Stderr, "Ensuring %d ref(s) are fresh for %s\n", len(c.Ref), c.RepoURL) //nolint:forbidigo
-		resp, err := api.EnsureGitRefs(ctx, c.RepoURL, c.Ref)
-		if err != nil {
-			return errors.Wrap(err, "ensure refs")
-		}
-		if resp.Fetched {
-			fmt.Fprintf(os.Stderr, "Server fetched fresh refs from upstream\n") //nolint:forbidigo
-		}
-
-		fmt.Fprintf(os.Stderr, "Pulling from origin...\n") //nolint:forbidigo
-		if err := gitPullOrigin(ctx, c.Directory); err != nil {
-			return errors.Wrap(err, "git pull from origin")
+		if err := c.satisfyRefs(ctx, api); err != nil {
+			return err
 		}
 	}
 
 	return nil
+}
+
+// satisfyRefs ensures the working tree contains every requested ref. It
+// short-circuits whenever the local clone already has what was asked for,
+// avoiding both /ensure-refs and git pull when the snapshot+bundle already
+// brought down the requested SHAs.
+func (c *GitRestoreCmd) satisfyRefs(ctx context.Context, api *client.Client) error {
+	// Fast path: if every ref is pinned to a specific SHA and the local
+	// clone already has all those commits, we're done.
+	if allPinned(c.Ref) && localHasAllCommits(ctx, c.Directory, c.Ref) {
+		fmt.Fprintf(os.Stderr, "All requested refs already present locally\n") //nolint:forbidigo
+		return nil
+	}
+
+	fmt.Fprintf(os.Stderr, "Ensuring %d ref(s) are fresh for %s\n", len(c.Ref), c.RepoURL) //nolint:forbidigo
+	resp, err := api.EnsureGitRefs(ctx, c.RepoURL, c.Ref)
+	if err != nil {
+		return errors.Wrap(err, "ensure refs")
+	}
+	if resp.Fetched {
+		fmt.Fprintf(os.Stderr, "Server fetched fresh refs from upstream\n") //nolint:forbidigo
+	}
+
+	// If the server's resolved SHAs are already in our local clone (e.g.
+	// the bundle brought them in), there's nothing new to pull.
+	if len(resp.Refs) > 0 && localHasAllCommits(ctx, c.Directory, resp.Refs) {
+		fmt.Fprintf(os.Stderr, "Local clone already contains the server's resolved refs\n") //nolint:forbidigo
+		return nil
+	}
+
+	fmt.Fprintf(os.Stderr, "Pulling from origin...\n") //nolint:forbidigo
+	if err := gitPullOrigin(ctx, c.Directory); err != nil {
+		return errors.Wrap(err, "git pull from origin")
+	}
+	return nil
+}
+
+// allPinned reports whether every entry in refs has a non-empty SHA.
+func allPinned(refs map[string]string) bool {
+	for _, sha := range refs {
+		if sha == "" {
+			return false
+		}
+	}
+	return true
+}
+
+// localHasAllCommits reports whether every non-empty SHA in refs exists in
+// the working clone's object database. Refs with empty SHAs cause it to
+// return false, since there's no SHA to look for.
+func localHasAllCommits(ctx context.Context, directory string, refs map[string]string) bool {
+	for _, sha := range refs {
+		if sha == "" {
+			return false
+		}
+		// #nosec G204 - directory and sha are controlled by us
+		if err := exec.CommandContext(ctx, "git", "-C", directory, "cat-file", "-e", sha).Run(); err != nil {
+			return false
+		}
+	}
+	return true
 }
 
 func applyBundle(ctx context.Context, api *client.Client, bundleURL, directory string) error {
