@@ -60,7 +60,7 @@ func createTarZst(t *testing.T, dir string) []byte {
 	return buf.Bytes()
 }
 
-func gitRevParse(t *testing.T, dir, ref string) string {
+func gitRevParse(t *testing.T, dir, ref string) string { //nolint:unparam // helper accepts any ref
 	t.Helper()
 	out, err := exec.Command("git", "-C", dir, "rev-parse", ref).Output() //nolint:gosec
 	assert.NoError(t, err)
@@ -326,6 +326,80 @@ func TestGitRestoreSkipsEnsureRefsWhenLocalHasSHA(t *testing.T) {
 	api := client.NewWithHTTPClient(srv.URL, srv.Client())
 	assert.NoError(t, restoreCmd.Run(context.Background(), api))
 	assert.False(t, ensureCalled.Load(), "ensure-refs should be skipped when local clone has the requested SHA")
+}
+
+func TestGitRestoreSkipsEnsureRefsWhenLocalHasCommit(t *testing.T) {
+	srcDir := t.TempDir()
+	initGitRepo(t, srcDir, map[string]string{"file.txt": "v1"})
+	localSHA := gitRevParse(t, srcDir, "HEAD")
+
+	snapshotData := createTarZst(t, srcDir)
+
+	var ensureCalled atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/snapshot.tar.zst"):
+			w.Header().Set("Content-Type", "application/zstd")
+			w.Write(snapshotData) //nolint:errcheck
+
+		case strings.HasSuffix(r.URL.Path, "/ensure-refs"):
+			ensureCalled.Store(true)
+			http.Error(w, "should not be called", http.StatusInternalServerError)
+
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	dstDir := filepath.Join(t.TempDir(), "restored")
+	restoreCmd := &GitRestoreCmd{
+		RepoURL:   "https://github.com/test/repo",
+		Directory: dstDir,
+		Commit:    []string{localSHA},
+		NoBundle:  true,
+	}
+	api := client.NewWithHTTPClient(srv.URL, srv.Client())
+	assert.NoError(t, restoreCmd.Run(context.Background(), api))
+	assert.False(t, ensureCalled.Load(), "ensure-refs should be skipped when local clone has the requested commit")
+}
+
+func TestGitRestoreCommitMissingAfterFetchIsFatal(t *testing.T) {
+	srcDir := t.TempDir()
+	initGitRepo(t, srcDir, map[string]string{"file.txt": "v1"})
+	snapshotData := createTarZst(t, srcDir)
+	missingSHA := "0000000000000000000000000000000000000000"
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/snapshot.tar.zst"):
+			w.Header().Set("Content-Type", "application/zstd")
+			w.Write(snapshotData) //nolint:errcheck
+
+		case strings.HasSuffix(r.URL.Path, "/ensure-refs"):
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+				"missing_commits": []string{missingSHA},
+				"fetched":         true,
+			})
+
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	dstDir := filepath.Join(t.TempDir(), "restored")
+	restoreCmd := &GitRestoreCmd{
+		RepoURL:   "https://github.com/test/repo",
+		Directory: dstDir,
+		Commit:    []string{missingSHA},
+		NoBundle:  true,
+	}
+	api := client.NewWithHTTPClient(srv.URL, srv.Client())
+	err := restoreCmd.Run(context.Background(), api)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "server is missing")
 }
 
 func TestGitRestoreSkipsPullWhenLocalHasResolvedSHA(t *testing.T) {

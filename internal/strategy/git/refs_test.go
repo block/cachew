@@ -68,11 +68,11 @@ func TestEnsureRefsHandler(t *testing.T) {
 	handler := mux.handlers["POST /git/{host}/{path...}"]
 	assert.NotZero(t, handler)
 
-	doRequest := func(refs map[string]string) (*httptest.ResponseRecorder, git.EnsureRefsResponse) {
-		body, err := json.Marshal(map[string]any{"refs": refs})
+	doRequest := func(body map[string]any) (*httptest.ResponseRecorder, git.EnsureRefsResponse) {
+		raw, err := json.Marshal(body)
 		assert.NoError(t, err)
 		req := httptest.NewRequestWithContext(ctx, http.MethodPost,
-			"/git/local/repo/ensure-refs", bytes.NewReader(body))
+			"/git/local/repo/ensure-refs", bytes.NewReader(raw))
 		req.SetPathValue("host", "local")
 		req.SetPathValue("path", "repo/ensure-refs")
 		w := httptest.NewRecorder()
@@ -84,11 +84,21 @@ func TestEnsureRefsHandler(t *testing.T) {
 		return w, resp
 	}
 
+	initialSHAOut, err := exec.Command("git", "-C", workPath, "rev-parse", "HEAD").Output()
+	assert.NoError(t, err)
+	initialSHA := strings.TrimSpace(string(initialSHAOut))
+
 	// Fresh mirror already has main → no fetch.
-	w, resp := doRequest(map[string]string{"refs/heads/main": ""})
+	w, resp := doRequest(map[string]any{"refs": map[string]string{"refs/heads/main": ""}})
 	assert.Equal(t, http.StatusOK, w.Code)
 	assert.False(t, resp.Fetched)
 	assert.NotEqual(t, "", resp.Refs["refs/heads/main"])
+
+	// Commit-only request for an already-present commit → no fetch.
+	w, resp = doRequest(map[string]any{"commits": []string{initialSHA}})
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.False(t, resp.Fetched)
+	assert.Equal(t, 0, len(resp.MissingCommits))
 
 	// Push a new commit upstream to make the mirror stale.
 	assert.NoError(t, os.WriteFile(filepath.Join(workPath, "f.txt"), []byte("v2"), 0o644))
@@ -102,13 +112,18 @@ func TestEnsureRefsHandler(t *testing.T) {
 	assert.NoError(t, err)
 	newSHA := strings.TrimSpace(string(newSHAOut))
 
-	// Asking for the new SHA forces a fetch and returns the fresh value.
-	w, resp = doRequest(map[string]string{"refs/heads/main": newSHA})
+	// Commit-only request for a commit only present upstream → fetch and find it.
+	w, resp = doRequest(map[string]any{"commits": []string{newSHA}})
 	assert.Equal(t, http.StatusOK, w.Code)
 	assert.True(t, resp.Fetched)
+	assert.Equal(t, 0, len(resp.MissingCommits))
+
+	// Asking for the new SHA forces a fetch and returns the fresh value.
+	w, resp = doRequest(map[string]any{"refs": map[string]string{"refs/heads/main": newSHA}})
+	assert.Equal(t, http.StatusOK, w.Code)
 	assert.Equal(t, newSHA, resp.Refs["refs/heads/main"])
 
-	// Empty refs map → 400.
-	w, _ = doRequest(map[string]string{})
+	// Empty body → 400.
+	w, _ = doRequest(map[string]any{})
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 }

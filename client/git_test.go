@@ -24,8 +24,9 @@ func TestEnsureGitRefs(t *testing.T) {
 		assert.NoError(t, json.NewDecoder(r.Body).Decode(&receivedBody))
 		w.Header().Set("Content-Type", "application/json")
 		assert.NoError(t, json.NewEncoder(w).Encode(map[string]any{
-			"refs":    map[string]string{"refs/heads/main": "abc123"},
-			"fetched": true,
+			"refs":            map[string]string{"refs/heads/main": "abc123"},
+			"missing_commits": []string{"deadbeef"},
+			"fetched":         true,
 		}))
 	}))
 	defer srv.Close()
@@ -33,14 +34,45 @@ func TestEnsureGitRefs(t *testing.T) {
 	api := client.NewWithHTTPClient(srv.URL, srv.Client())
 	resp, err := api.EnsureGitRefs(context.Background(),
 		"https://github.com/org/repo",
-		map[string]string{"refs/heads/main": ""})
+		client.EnsureGitRefsRequest{
+			Refs:    map[string]string{"refs/heads/main": ""},
+			Commits: []string{"abc", "deadbeef"},
+		})
 	assert.NoError(t, err)
 	assert.True(t, resp.Fetched)
 	assert.Equal(t, "abc123", resp.Refs["refs/heads/main"])
+	assert.Equal(t, []string{"deadbeef"}, resp.MissingCommits)
 
 	refs, ok := receivedBody["refs"].(map[string]any)
 	assert.True(t, ok)
 	assert.Equal(t, "", refs["refs/heads/main"])
+
+	commits, ok := receivedBody["commits"].([]any)
+	assert.True(t, ok)
+	assert.Equal(t, 2, len(commits))
+}
+
+func TestEnsureGitRefsCommitsOnly(t *testing.T) {
+	var receivedBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.NoError(t, json.NewDecoder(r.Body).Decode(&receivedBody))
+		w.Header().Set("Content-Type", "application/json")
+		assert.NoError(t, json.NewEncoder(w).Encode(map[string]any{
+			"fetched": false,
+		}))
+	}))
+	defer srv.Close()
+
+	api := client.NewWithHTTPClient(srv.URL, srv.Client())
+	resp, err := api.EnsureGitRefs(context.Background(),
+		"https://github.com/org/repo",
+		client.EnsureGitRefsRequest{Commits: []string{"abc"}})
+	assert.NoError(t, err)
+	assert.False(t, resp.Fetched)
+	assert.Equal(t, 0, len(resp.MissingCommits))
+
+	_, ok := receivedBody["refs"]
+	assert.False(t, ok, "refs field should be omitted when empty")
 }
 
 func TestEnsureGitRefsServerError(t *testing.T) {
@@ -52,7 +84,7 @@ func TestEnsureGitRefsServerError(t *testing.T) {
 	api := client.NewWithHTTPClient(srv.URL, srv.Client())
 	_, err := api.EnsureGitRefs(context.Background(),
 		"https://github.com/org/repo",
-		map[string]string{"refs/heads/main": ""})
+		client.EnsureGitRefsRequest{Refs: map[string]string{"refs/heads/main": ""}})
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "status 400")
 }
@@ -60,10 +92,10 @@ func TestEnsureGitRefsServerError(t *testing.T) {
 func TestEnsureGitRefsInvalidRepoURL(t *testing.T) {
 	api := client.New("http://example.com", nil)
 
-	_, err := api.EnsureGitRefs(context.Background(), "not-a-url", nil)
+	_, err := api.EnsureGitRefs(context.Background(), "not-a-url", client.EnsureGitRefsRequest{})
 	assert.Error(t, err)
 
-	_, err = api.EnsureGitRefs(context.Background(), "https://github.com/", nil)
+	_, err = api.EnsureGitRefs(context.Background(), "https://github.com/", client.EnsureGitRefsRequest{})
 	assert.Error(t, err)
 }
 
