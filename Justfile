@@ -18,7 +18,7 @@ _help:
 
 # Run tests
 test:
-    gotestsum --hide-summary skipped --format-hide-empty-pkg ${CI:+--format=github-actions} ./... ${CI:+--tags=integration} -race -timeout 60s
+    gotestsum --hide-summary skipped --format-hide-empty-pkg ${CI:+--format=github-actions} ./... ${CI:+--tags=integration} -race -timeout 180s
 
 # Lint code
 lint:

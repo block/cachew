@@ -292,6 +292,83 @@ func TestGitRestoreWithRef(t *testing.T) {
 	assert.Equal(t, "abc123", refs["refs/heads/main"])
 }
 
+func TestGitRestoreSkipsEnsureRefsWhenLocalHasSHA(t *testing.T) {
+	srcDir := t.TempDir()
+	initGitRepo(t, srcDir, map[string]string{"file.txt": "v1"})
+	localSHA := gitRevParse(t, srcDir, "HEAD")
+
+	snapshotData := createTarZst(t, srcDir)
+
+	var ensureCalled atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/snapshot.tar.zst"):
+			w.Header().Set("Content-Type", "application/zstd")
+			w.Write(snapshotData) //nolint:errcheck
+
+		case strings.HasSuffix(r.URL.Path, "/ensure-refs"):
+			ensureCalled.Store(true)
+			http.Error(w, "should not be called", http.StatusInternalServerError)
+
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	dstDir := filepath.Join(t.TempDir(), "restored")
+	restoreCmd := &GitRestoreCmd{
+		RepoURL:   "https://github.com/test/repo",
+		Directory: dstDir,
+		Ref:       map[string]string{"refs/heads/main": localSHA},
+		NoBundle:  true,
+	}
+	api := client.NewWithHTTPClient(srv.URL, srv.Client())
+	assert.NoError(t, restoreCmd.Run(context.Background(), api))
+	assert.False(t, ensureCalled.Load(), "ensure-refs should be skipped when local clone has the requested SHA")
+}
+
+func TestGitRestoreSkipsPullWhenLocalHasResolvedSHA(t *testing.T) {
+	srcDir := t.TempDir()
+	initGitRepo(t, srcDir, map[string]string{"file.txt": "v1"})
+	localSHA := gitRevParse(t, srcDir, "HEAD")
+
+	snapshotData := createTarZst(t, srcDir)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/snapshot.tar.zst"):
+			w.Header().Set("Content-Type", "application/zstd")
+			w.Write(snapshotData) //nolint:errcheck
+
+		case strings.HasSuffix(r.URL.Path, "/ensure-refs"):
+			// Resolve the unpinned ref to the SHA the local clone already has.
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+				"refs":    map[string]string{"refs/heads/main": localSHA},
+				"fetched": false,
+			})
+
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	dstDir := filepath.Join(t.TempDir(), "restored")
+	restoreCmd := &GitRestoreCmd{
+		RepoURL:   "https://github.com/test/repo",
+		Directory: dstDir,
+		Ref:       map[string]string{"refs/heads/main": ""}, // unpinned
+		NoBundle:  true,
+	}
+	api := client.NewWithHTTPClient(srv.URL, srv.Client())
+	// The snapshot has no origin remote, so a real pull would fail. The test
+	// passes only if pull is skipped because the server's resolved SHA is
+	// already in the local clone.
+	assert.NoError(t, restoreCmd.Run(context.Background(), api))
+}
+
 func TestGitRestorePullsFromOrigin(t *testing.T) {
 	// Build an "upstream" repo whose snapshot we serve, plus a bare clone of
 	// it that the working tree's origin will point at after restore. The
