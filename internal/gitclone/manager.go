@@ -672,27 +672,36 @@ func (r *Repository) EnsureRefsUpToDate(ctx context.Context) (needsFetch bool, e
 	return false, nil
 }
 
-// EnsureRefs guarantees the local mirror contains each ref in expect at the
-// given SHA. If a SHA is empty, it only requires the ref to exist. When a
-// requested ref does not match the local mirror, EnsureRefs synchronously
-// fetches from upstream once and then re-checks. The returned map contains
-// the resulting local SHAs for the requested refs (empty string if still
-// missing after fetch).
+// EnsureRefs guarantees the local mirror satisfies the caller's freshness
+// requirements. A ref entry is satisfied when the local mirror has the ref
+// at the given SHA (or any SHA, if the value is empty). A commit entry is
+// satisfied when the commit exists in the local object database, regardless
+// of which ref points at it. If anything is unsatisfied, EnsureRefs
+// synchronously fetches from upstream once and then re-checks.
+//
+// Resolved maps each requested ref to its current local SHA (empty if the
+// ref is still missing after the fetch). MissingCommits lists requested
+// commits that still are not present locally after the fetch.
 //
 // This bypasses RefCheckInterval because callers are explicitly asserting
-// they require these refs to be fresh right now.
-func (r *Repository) EnsureRefs(ctx context.Context, expect map[string]string) (resolved map[string]string, fetched bool, err error) {
+// they require these refs/commits to be fresh right now.
+func (r *Repository) EnsureRefs(
+	ctx context.Context, refs map[string]string, commits []string,
+) (resolved map[string]string, missingCommits []string, fetched bool, err error) {
 	localRefs, err := r.GetLocalRefs(ctx)
 	if err != nil {
-		return nil, false, errors.Wrap(err, "get local refs")
+		return nil, nil, false, errors.Wrap(err, "get local refs")
 	}
 
-	if refsSatisfied(localRefs, expect) {
-		return resolvedRefs(localRefs, expect), false, nil
+	if refsSatisfied(localRefs, refs) {
+		missing := r.missingCommitsLocked(ctx, commits)
+		if len(missing) == 0 {
+			return resolvedRefs(localRefs, refs), nil, false, nil
+		}
 	}
 
 	if err := r.FetchWithTimeout(ctx, r.config.FetchTimeout); err != nil {
-		return nil, false, errors.Wrap(err, "fetch upstream")
+		return nil, nil, false, errors.Wrap(err, "fetch upstream")
 	}
 
 	// Invalidate the cached ref-check so the normal transparent path also
@@ -703,9 +712,32 @@ func (r *Repository) EnsureRefs(ctx context.Context, expect map[string]string) (
 
 	localRefs, err = r.GetLocalRefs(ctx)
 	if err != nil {
-		return nil, true, errors.Wrap(err, "get local refs after fetch")
+		return nil, nil, true, errors.Wrap(err, "get local refs after fetch")
 	}
-	return resolvedRefs(localRefs, expect), true, nil
+	return resolvedRefs(localRefs, refs), r.missingCommitsLocked(ctx, commits), true, nil
+}
+
+// missingCommitsLocked returns the subset of commits that are absent from
+// the local object database. It takes the repository's read lock to stay
+// consistent with concurrent fetches.
+func (r *Repository) missingCommitsLocked(ctx context.Context, commits []string) []string {
+	if len(commits) == 0 {
+		return nil
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	var missing []string
+	for _, sha := range commits {
+		if sha == "" {
+			continue
+		}
+		// #nosec G204 - r.path and sha are controlled by us
+		cmd := exec.CommandContext(ctx, "git", "-C", r.path, "cat-file", "-e", sha)
+		if err := cmd.Run(); err != nil {
+			missing = append(missing, sha)
+		}
+	}
+	return missing
 }
 
 // refsSatisfied reports whether every ref in expect is present in localRefs at
@@ -724,6 +756,9 @@ func refsSatisfied(localRefs, expect map[string]string) bool {
 }
 
 func resolvedRefs(localRefs, expect map[string]string) map[string]string {
+	if len(expect) == 0 {
+		return nil
+	}
 	out := make(map[string]string, len(expect))
 	for ref := range expect {
 		out[ref] = localRefs[ref]

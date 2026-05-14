@@ -519,9 +519,10 @@ func TestRepository_EnsureRefs(t *testing.T) {
 	}
 
 	// Mirror already satisfies the request → no fetch.
-	resolved, fetched, err := repo.EnsureRefs(ctx, map[string]string{head: mainSHA})
+	resolved, missing, fetched, err := repo.EnsureRefs(ctx, map[string]string{head: mainSHA}, nil)
 	assert.NoError(t, err)
 	assert.False(t, fetched)
+	assert.Equal(t, 0, len(missing))
 	assert.Equal(t, mainSHA, resolved[head])
 
 	// Add a new commit to upstream so the mirror is now behind.
@@ -540,22 +541,46 @@ func TestRepository_EnsureRefs(t *testing.T) {
 	assert.NotEqual(t, mainSHA, newSHA)
 
 	// Asking for the new SHA triggers a fetch and the mirror catches up.
-	resolved, fetched, err = repo.EnsureRefs(ctx, map[string]string{head: newSHA})
+	resolved, missing, fetched, err = repo.EnsureRefs(ctx, map[string]string{head: newSHA}, nil)
 	assert.NoError(t, err)
 	assert.True(t, fetched)
+	assert.Equal(t, 0, len(missing))
 	assert.Equal(t, newSHA, resolved[head])
 
 	// Empty SHA means "any": already satisfied without fetching.
-	resolved, fetched, err = repo.EnsureRefs(ctx, map[string]string{head: ""})
+	resolved, _, fetched, err = repo.EnsureRefs(ctx, map[string]string{head: ""}, nil)
 	assert.NoError(t, err)
 	assert.False(t, fetched)
 	assert.Equal(t, newSHA, resolved[head])
 
 	// Missing ref: fetch runs but ref remains missing → empty resolved SHA.
-	resolved, fetched, err = repo.EnsureRefs(ctx, map[string]string{"refs/heads/does-not-exist": ""})
+	resolved, _, fetched, err = repo.EnsureRefs(ctx, map[string]string{"refs/heads/does-not-exist": ""}, nil)
 	assert.NoError(t, err)
 	assert.True(t, fetched)
 	assert.Equal(t, "", resolved["refs/heads/does-not-exist"])
+
+	// Commit-only request that's already present → no fetch.
+	resolved, missing, fetched, err = repo.EnsureRefs(ctx, nil, []string{newSHA})
+	assert.NoError(t, err)
+	assert.False(t, fetched)
+	assert.Equal(t, 0, len(missing))
+	assert.Equal(t, 0, len(resolved))
+
+	// Commit-only request that's missing → fetch runs and commit is reported missing.
+	resolved, missing, fetched, err = repo.EnsureRefs(ctx, nil,
+		[]string{"0000000000000000000000000000000000000000"})
+	assert.NoError(t, err)
+	assert.True(t, fetched)
+	assert.Equal(t, []string{"0000000000000000000000000000000000000000"}, missing)
+	assert.Equal(t, 0, len(resolved))
+
+	// Mixed request, both already satisfied.
+	resolved, missing, fetched, err = repo.EnsureRefs(ctx,
+		map[string]string{head: newSHA}, []string{newSHA})
+	assert.NoError(t, err)
+	assert.False(t, fetched)
+	assert.Equal(t, 0, len(missing))
+	assert.Equal(t, newSHA, resolved[head])
 }
 
 // TestMirrorConfigAllowsUnreachableSHA verifies that the mirror config lets

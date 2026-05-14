@@ -25,33 +25,45 @@ const SnapshotCommitHeader = "X-Cachew-Snapshot-Commit"
 // mirror's current HEAD.
 const BundleURLHeader = "X-Cachew-Bundle-Url"
 
+// EnsureGitRefsRequest specifies what the caller wants present on the
+// server's mirror. At least one of Refs or Commits must be non-empty.
+//
+// Refs maps each required ref (e.g. "refs/heads/main") to the expected SHA;
+// an empty SHA means "require the ref to exist at any SHA". Commits lists
+// individual commit SHAs that must exist in the mirror's object database,
+// regardless of which ref points at them.
+type EnsureGitRefsRequest struct {
+	Refs    map[string]string `json:"refs,omitempty"`
+	Commits []string          `json:"commits,omitempty"`
+}
+
 // EnsureGitRefsResponse is the response returned by EnsureGitRefs.
 //
 // Refs contains the resolved local SHA for each requested ref (empty if the
-// ref is still missing on the server after the fetch). Fetched reports
-// whether the server performed an upstream fetch to satisfy the request.
+// ref is still missing on the server after the fetch). MissingCommits lists
+// the requested commits that are still absent from the server's object
+// database. Fetched reports whether the server performed an upstream fetch.
 type EnsureGitRefsResponse struct {
-	Refs    map[string]string `json:"refs"`
-	Fetched bool              `json:"fetched"`
+	Refs           map[string]string `json:"refs,omitempty"`
+	MissingCommits []string          `json:"missing_commits,omitempty"`
+	Fetched        bool              `json:"fetched"`
 }
 
 // EnsureGitRefs asks the cachew server to ensure its local mirror of repoURL
-// contains the listed refs at the given SHAs before the caller fetches. An
-// empty SHA means "require the ref to exist, at any SHA". The server will
-// synchronously fetch from upstream if any requested ref is missing or stale.
+// satisfies the request before the caller fetches. The server synchronously
+// fetches from upstream if any requested ref is missing/stale or any
+// requested commit is absent from its object database.
 //
 // Use this before issuing a git fetch/clone against cachew when fresh refs
-// are required and the default ref-check rate-limit window would otherwise
-// allow stale refs to be served.
-func (c *Client) EnsureGitRefs(ctx context.Context, repoURL string, refs map[string]string) (EnsureGitRefsResponse, error) {
+// or specific commits are required and the default ref-check rate-limit
+// window would otherwise allow stale data to be served.
+func (c *Client) EnsureGitRefs(ctx context.Context, repoURL string, request EnsureGitRefsRequest) (EnsureGitRefsResponse, error) {
 	endpoint, err := gitEndpointURL(c.baseURL, repoURL, "ensure-refs")
 	if err != nil {
 		return EnsureGitRefsResponse{}, err
 	}
 
-	body, err := json.Marshal(struct {
-		Refs map[string]string `json:"refs"`
-	}{Refs: refs})
+	body, err := json.Marshal(request)
 	if err != nil {
 		return EnsureGitRefsResponse{}, errors.Wrap(err, "encode request")
 	}
