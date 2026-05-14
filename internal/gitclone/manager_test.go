@@ -489,6 +489,75 @@ func TestRepository_HasCommit(t *testing.T) {
 	assert.False(t, repo.HasCommit(ctx, "v9.9.9"))
 }
 
+func TestRepository_EnsureRefs(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+	upstreamPath := createBareRepo(t, tmpDir)
+
+	clonePath := filepath.Join(tmpDir, "clone")
+	repo := &Repository{
+		state:       StateEmpty,
+		config:      testRepoConfig(),
+		path:        clonePath,
+		upstreamURL: upstreamPath,
+		fetchSem:    make(chan struct{}, 1),
+	}
+	repo.fetchSem <- struct{}{}
+	assert.NoError(t, repo.Clone(ctx))
+
+	local, err := repo.GetLocalRefs(ctx)
+	assert.NoError(t, err)
+	mainSHA, ok := local["refs/heads/main"]
+	if !ok {
+		mainSHA = local["refs/heads/master"]
+	}
+	assert.NotEqual(t, "", mainSHA)
+
+	head := "refs/heads/main"
+	if !ok {
+		head = "refs/heads/master"
+	}
+
+	// Mirror already satisfies the request → no fetch.
+	resolved, fetched, err := repo.EnsureRefs(ctx, map[string]string{head: mainSHA})
+	assert.NoError(t, err)
+	assert.False(t, fetched)
+	assert.Equal(t, mainSHA, resolved[head])
+
+	// Add a new commit to upstream so the mirror is now behind.
+	workPath := filepath.Join(tmpDir, "work")
+	assert.NoError(t, os.WriteFile(filepath.Join(workPath, "f.txt"), []byte("y"), 0o644))
+	for _, args := range [][]string{
+		{"git", "-C", workPath, "commit", "-am", "update"},
+		{"git", "-C", workPath, "push", upstreamPath, "HEAD:" + strings.TrimPrefix(head, "refs/heads/")},
+	} {
+		assert.NoError(t, exec.Command(args[0], args[1:]...).Run())
+	}
+
+	newSHAOut, err := exec.Command("git", "-C", workPath, "rev-parse", "HEAD").Output()
+	assert.NoError(t, err)
+	newSHA := strings.TrimSpace(string(newSHAOut))
+	assert.NotEqual(t, mainSHA, newSHA)
+
+	// Asking for the new SHA triggers a fetch and the mirror catches up.
+	resolved, fetched, err = repo.EnsureRefs(ctx, map[string]string{head: newSHA})
+	assert.NoError(t, err)
+	assert.True(t, fetched)
+	assert.Equal(t, newSHA, resolved[head])
+
+	// Empty SHA means "any": already satisfied without fetching.
+	resolved, fetched, err = repo.EnsureRefs(ctx, map[string]string{head: ""})
+	assert.NoError(t, err)
+	assert.False(t, fetched)
+	assert.Equal(t, newSHA, resolved[head])
+
+	// Missing ref: fetch runs but ref remains missing → empty resolved SHA.
+	resolved, fetched, err = repo.EnsureRefs(ctx, map[string]string{"refs/heads/does-not-exist": ""})
+	assert.NoError(t, err)
+	assert.True(t, fetched)
+	assert.Equal(t, "", resolved["refs/heads/does-not-exist"])
+}
+
 // TestMirrorConfigAllowsUnreachableSHA verifies that the mirror config lets
 // git upload-pack serve objects that are present in the ODB but unreachable
 // from any ref (e.g. after a force-push orphans a commit).
