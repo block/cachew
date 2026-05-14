@@ -8,8 +8,11 @@ import (
 	"net/http"
 	_ "net/http/pprof" //nolint:gosec
 	"os"
+	"os/signal"
 	"runtime"
 	"strings"
+	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/alecthomas/chroma/v2/quick"
@@ -38,9 +41,13 @@ import (
 )
 
 type GlobalConfig struct {
-	State            string              `hcl:"state" default:"./state" help:"Base directory for all state (git mirrors, cache, etc.)."`
-	Bind             string              `hcl:"bind" default:"127.0.0.1:8080" help:"Bind address for the server."`
-	URL              string              `hcl:"url" default:"http://127.0.0.1:8080/" help:"Base URL for cachewd."`
+	State                  string        `hcl:"state" default:"./state" help:"Base directory for all state (git mirrors, cache, etc.)."`
+	Bind                   string        `hcl:"bind" default:"127.0.0.1:8080" help:"Bind address for the server."`
+	URL                    string        `hcl:"url" default:"http://127.0.0.1:8080/" help:"Base URL for cachewd."`
+	ShutdownReadinessDelay time.Duration `hcl:"shutdown-readiness-delay,optional" default:"5s" help:"Delay between flipping readiness to 503 on SIGTERM and starting graceful shutdown."`
+	// ShutdownTimeout must be less than the pod's terminationGracePeriodSeconds
+	// (minus ShutdownReadinessDelay) or the kubelet will SIGKILL before Shutdown returns.
+	ShutdownTimeout  time.Duration       `hcl:"shutdown-timeout,optional" default:"150s" help:"Maximum time to wait for in-flight requests to drain on graceful shutdown."`
 	SchedulerConfig  jobscheduler.Config `hcl:"scheduler,block"`
 	LoggingConfig    logging.Config      `hcl:"log,block"`
 	MetricsConfig    metrics.Config      `hcl:"metrics,block"`
@@ -75,8 +82,12 @@ func main() {
 	globalConfig, envars, err := loadGlobalConfig(globalConfigHCL)
 	kctx.FatalIfErrorf(err)
 
-	ctx := context.Background()
+	ctx, stopSignals := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stopSignals()
 	logger, ctx := logging.Configure(ctx, globalConfig.LoggingConfig)
+
+	// Flipped on SIGTERM so /_readiness fails before the listener closes.
+	var shuttingDown atomic.Bool
 
 	// Enable mutex contention sampling so /admin/pprof/mutex returns
 	// useful data. The pprof endpoints themselves are mounted on the
@@ -111,7 +122,7 @@ func main() {
 		return
 	}
 
-	mux, err := newMux(ctx, cr, mr, sr, providersConfigHCL, envars)
+	mux, err := newMux(ctx, &shuttingDown, cr, mr, sr, providersConfigHCL, envars)
 	fatalIfError(ctx, logger, err, "Failed to load config")
 
 	metricsClient, err := metrics.New(ctx, globalConfig.MetricsConfig)
@@ -138,8 +149,46 @@ func main() {
 	)
 	fatalIfError(ctx, logger, err, "Failed to create server")
 
-	err = server.ListenAndServe()
-	fatalIfError(ctx, logger, err, "Server stopped")
+	serverErr := make(chan error, 1)
+	go func() {
+		serverErr <- server.ListenAndServe()
+	}()
+
+	select {
+	case err := <-serverErr:
+		fatalIfError(ctx, logger, err, "Server stopped")
+	case <-ctx.Done():
+		// Restore default signal handling so a second signal force-exits.
+		stopSignals()
+	}
+
+	gracefulShutdown(ctx, logger, server, &shuttingDown, globalConfig.ShutdownReadinessDelay, globalConfig.ShutdownTimeout)
+}
+
+// gracefulShutdown fails readiness, waits readinessDelay for load balancers
+// to drain, then runs http.Server.Shutdown bounded by shutdownTimeout.
+func gracefulShutdown(
+	ctx context.Context,
+	logger *slog.Logger,
+	server *http.Server,
+	shuttingDown *atomic.Bool,
+	readinessDelay time.Duration,
+	shutdownTimeout time.Duration,
+) {
+	logger.InfoContext(ctx, "Shutdown signal received, draining",
+		"readiness_delay", readinessDelay,
+		"shutdown_timeout", shutdownTimeout)
+
+	shuttingDown.Store(true)
+	time.Sleep(readinessDelay)
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer cancel()
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		logger.ErrorContext(shutdownCtx, "Server shutdown error", "error", err)
+	} else {
+		logger.InfoContext(shutdownCtx, "Server shut down cleanly")
+	}
 }
 
 func newRegistries(
@@ -187,7 +236,7 @@ func printSchema(kctx *kong.Context, cr *cache.Registry, mr *metadatadb.Registry
 	}
 }
 
-func newMux(ctx context.Context, cr *cache.Registry, mr *metadatadb.Registry, sr *strategy.Registry, providersConfigHCL *hcl.AST, vars map[string]string) (http.Handler, error) {
+func newMux(ctx context.Context, shuttingDown *atomic.Bool, cr *cache.Registry, mr *metadatadb.Registry, sr *strategy.Registry, providersConfigHCL *hcl.AST, vars map[string]string) (http.Handler, error) {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /_liveness", func(w http.ResponseWriter, _ *http.Request) {
@@ -200,6 +249,10 @@ func newMux(ctx context.Context, cr *cache.Registry, mr *metadatadb.Registry, sr
 	// HTTP server starts accepting connections.
 	var readiers []strategy.Readier
 	mux.HandleFunc("GET /_readiness", func(w http.ResponseWriter, _ *http.Request) {
+		if shuttingDown.Load() {
+			http.Error(w, "shutting down", http.StatusServiceUnavailable)
+			return
+		}
 		for _, r := range readiers {
 			if !r.Ready() {
 				http.Error(w, "warming up", http.StatusServiceUnavailable)
@@ -286,6 +339,9 @@ func newServer(
 	handler = logging.Middleware(handler, logConfig)
 
 	logger := logging.FromContext(ctx)
+	// Strip cancellation so SIGTERM doesn't abort in-flight handlers via
+	// r.Context(); Server.Shutdown is what waits for them to finish.
+	baseCtx := context.WithoutCancel(ctx)
 	return &http.Server{
 		Addr:              bind,
 		Handler:           handler,
@@ -293,7 +349,7 @@ func newServer(
 		WriteTimeout:      30 * time.Minute,
 		ReadHeaderTimeout: 30 * time.Second,
 		BaseContext: func(net.Listener) context.Context {
-			return ctx
+			return baseCtx
 		},
 		ConnContext: func(ctx context.Context, c net.Conn) context.Context {
 			return logging.ContextWithLogger(ctx, logger.With("client", c.RemoteAddr().String()))
