@@ -245,7 +245,10 @@ func (q *RootScheduler) waitForJob() (queueJob, bool) {
 func (q *RootScheduler) runJob(ctx context.Context, logger *slog.Logger, job queueJob) {
 	defer q.markQueueInactive(job.queue)
 
-	jobAttrs := attribute.String("job.type", jobType(job.id))
+	jobAttrs := []attribute.KeyValue{
+		attribute.String("job.type", jobType(job.id)),
+		attribute.String("job.queue", job.queue),
+	}
 	start := time.Now()
 	logger.InfoContext(ctx, "Starting job", "job", job)
 
@@ -269,9 +272,9 @@ func (q *RootScheduler) runJob(ctx context.Context, logger *slog.Logger, job que
 	} else {
 		logger.InfoContext(ctx, "Job completed", "job", job, "elapsed", elapsed)
 	}
-	statusAttr := attribute.String("status", status)
-	q.metrics.jobsTotal.Add(ctx, 1, metric.WithAttributes(jobAttrs, statusAttr))
-	q.metrics.jobDuration.Record(ctx, elapsed.Seconds(), metric.WithAttributes(jobAttrs, statusAttr))
+	jobAttrs = append(jobAttrs, attribute.String("status", status))
+	q.metrics.jobsTotal.Add(ctx, 1, metric.WithAttributes(jobAttrs...))
+	q.metrics.jobDuration.Record(ctx, elapsed.Seconds(), metric.WithAttributes(jobAttrs...))
 }
 
 // jobType extracts a normalised job type from the job ID for metric labels.
