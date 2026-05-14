@@ -1,6 +1,7 @@
 package git_test
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"net/http"
@@ -689,7 +690,7 @@ func TestDeferredRestoreOnlyScheduledOnce(t *testing.T) {
 	// The key assertion is that it doesn't panic from double-scheduling.
 }
 
-func TestCacheBundleSyncAbortsOnWriteFailure(t *testing.T) {
+func TestCacheBundleAbortsOnWriteFailure(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not found in PATH")
 	}
@@ -713,7 +714,7 @@ func TestCacheBundleSyncAbortsOnWriteFailure(t *testing.T) {
 	key := cache.NewKey("test-bundle-abort")
 	data := []byte("bundle data that should not persist")
 
-	err = s.CacheBundleSync(ctx, key, data)
+	err = s.CacheBundle(ctx, key, bytes.NewReader(data))
 	assert.Error(t, err)
 
 	// Verify nothing was persisted — check underlying memCache, not failCache.
