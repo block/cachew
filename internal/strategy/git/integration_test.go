@@ -524,6 +524,9 @@ func TestIntegrationNotOurRefFallsBackToUpstream(t *testing.T) {
 	strategy, err := git.New(ctx, git.Config{}, newTestScheduler(ctx, t), memCache, mux, gc,
 		func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
 	assert.NoError(t, err)
+	// The warm-up goroutine uses context.WithoutCancel so it survives
+	// t.Context() cancellation. Wait for it before TempDir cleanup.
+	t.Cleanup(func() { waitForReady(t, strategy) })
 
 	// Redirect all upstream proxy requests to the mock server.
 	var redirectHits atomic.Int32
