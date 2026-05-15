@@ -331,6 +331,43 @@ func TestHeaderForwarding(t *testing.T) {
 		assert.Equal(t, "", receivedHeaders.Get("Keep-Alive"))
 	})
 
+	t.Run("AcceptEncodingVariesCacheKey", func(t *testing.T) {
+		callCount := 0
+		varyUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			callCount++
+			w.Header().Set("Vary", "Accept-Encoding")
+			_, _ = fmt.Fprintf(w, "call %d ae=%s", callCount, r.Header.Get("Accept-Encoding"))
+		}))
+		defer varyUpstream.Close()
+
+		varyCache := mustNewMemoryCache()
+		h := handler.New(http.DefaultClient, varyCache).
+			Transform(func(r *http.Request) (*http.Request, error) {
+				return http.NewRequestWithContext(r.Context(), http.MethodGet, varyUpstream.URL+"/file.zip", nil)
+			})
+
+		// Request without Accept-Encoding
+		r1 := httptest.NewRequest(http.MethodGet, "http://example.com/file.zip", nil)
+		r1 = r1.WithContext(ctx)
+		w1 := httptest.NewRecorder()
+		h.ServeHTTP(w1, r1)
+		assert.Equal(t, http.StatusOK, w1.Code)
+		body1 := w1.Body.String()
+
+		// Request with Accept-Encoding: gzip — should be a separate cache entry
+		r2 := httptest.NewRequest(http.MethodGet, "http://example.com/file.zip", nil)
+		r2 = r2.WithContext(ctx)
+		r2.Header.Set("Accept-Encoding", "gzip")
+		w2 := httptest.NewRecorder()
+		h.ServeHTTP(w2, r2)
+		assert.Equal(t, http.StatusOK, w2.Code)
+		body2 := w2.Body.String()
+
+		// Both should have hit upstream (different cache keys)
+		assert.Equal(t, 2, callCount)
+		assert.NotEqual(t, body1, body2)
+	})
+
 	t.Run("TransformHeadersTakePrecedence", func(t *testing.T) {
 		h := handler.New(http.DefaultClient, c).
 			CacheKey(func(_ *http.Request) string { return "fwd-test-3" }).

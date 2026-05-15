@@ -5,6 +5,8 @@ import (
 	"maps"
 	"net/http"
 	"os"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/alecthomas/errors"
@@ -13,6 +15,38 @@ import (
 	"github.com/block/cachew/internal/httputil"
 	"github.com/block/cachew/internal/logging"
 )
+
+// CacheKeyParts holds the components used to build a cache key. Path is the
+// primary identifier (typically the upstream URL) and Vary captures
+// request-derived dimensions like Accept-Encoding.
+type CacheKeyParts struct {
+	Path string
+	Vary map[string]string
+}
+
+func NewCacheKeyParts(path string) CacheKeyParts {
+	return CacheKeyParts{Path: path, Vary: make(map[string]string)}
+}
+
+func (p CacheKeyParts) Key() cache.Key {
+	if len(p.Vary) == 0 {
+		return cache.NewKey(p.Path)
+	}
+	keys := make([]string, 0, len(p.Vary))
+	for k := range p.Vary {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var b strings.Builder
+	b.WriteString(p.Path)
+	for _, k := range keys {
+		b.WriteByte('\n')
+		b.WriteString(k)
+		b.WriteByte('=')
+		b.WriteString(p.Vary[k])
+	}
+	return cache.NewKey(b.String())
+}
 
 // Handler provides a fluent API for creating cache-backed HTTP handlers.
 //
@@ -29,7 +63,7 @@ import (
 type Handler struct {
 	client        *http.Client
 	cache         cache.Cache
-	cacheKeyFunc  func(*http.Request) string
+	cacheKeyFunc  func(*http.Request) CacheKeyParts
 	transformFunc func(*http.Request) (*http.Request, error)
 	errorHandler  func(error, http.ResponseWriter, *http.Request)
 	ttlFunc       func(*http.Request) time.Duration
@@ -44,8 +78,8 @@ func New(client *http.Client, c cache.Cache) *Handler {
 	return &Handler{
 		client: client,
 		cache:  c,
-		cacheKeyFunc: func(r *http.Request) string {
-			return r.URL.String()
+		cacheKeyFunc: func(r *http.Request) CacheKeyParts {
+			return NewCacheKeyParts(r.URL.String())
 		},
 		transformFunc: func(r *http.Request) (*http.Request, error) {
 			return r, nil
@@ -60,7 +94,9 @@ func New(client *http.Client, c cache.Cache) *Handler {
 // CacheKey sets the function used to determine the cache key for a request.
 // The function receives the original incoming request.
 func (h *Handler) CacheKey(f func(*http.Request) string) *Handler {
-	h.cacheKeyFunc = f
+	h.cacheKeyFunc = func(r *http.Request) CacheKeyParts {
+		return NewCacheKeyParts(f(r))
+	}
 	return h
 }
 
@@ -100,10 +136,16 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	logger := logging.FromContext(ctx)
 
-	cacheKeyStr := h.cacheKeyFunc(r)
-	key := cache.NewKey(cacheKeyStr)
+	parts := h.cacheKeyFunc(r)
+	// Upstreams may return different content based on Accept-Encoding (e.g.
+	// gzip-compressed vs uncompressed). Without this, the first variant cached
+	// is served to all clients, breaking those that expect the other encoding.
+	if ae := r.Header.Get("Accept-Encoding"); ae != "" {
+		parts.Vary["Accept-Encoding"] = ae
+	}
+	key := parts.Key()
 
-	logger.DebugContext(ctx, "Processing request", "cache_key", cacheKeyStr)
+	logger.DebugContext(ctx, "Processing request", "cache_key", parts.Path)
 
 	served, err := h.serveCached(w, r, key)
 	if err != nil {
