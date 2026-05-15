@@ -335,6 +335,57 @@ func TestJobSchedulerSubmitDroppedAfterShutdown(t *testing.T) {
 	assert.False(t, executed.Load(), "submissions after shutdown should be dropped")
 }
 
+// TestJobSchedulerSurvivesParentCancel verifies the shutdown ordering fix:
+// when the scheduler is created with context.WithoutCancel, cancelling the
+// parent (simulating SIGTERM) does NOT kill workers. Jobs submitted after the
+// parent cancel still execute. Only cancelling the scheduler's own context
+// stops the workers.
+func TestJobSchedulerSurvivesParentCancel(t *testing.T) {
+	_, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelError})
+	parentCtx, cancelParent := context.WithCancel(ctx)
+
+	// Simulate the production fix: scheduler gets context.WithoutCancel so
+	// it is decoupled from the signal context.
+	schedulerCtx, cancelScheduler := context.WithCancel(context.WithoutCancel(parentCtx))
+	defer cancelScheduler()
+
+	scheduler := newTestScheduler(schedulerCtx, t, jobscheduler.Config{Concurrency: 2})
+
+	// Submit a job and confirm it runs.
+	var firstJob atomic.Bool
+	scheduler.Submit("q1", "before-sigterm", func(_ context.Context) error {
+		firstJob.Store(true)
+		return nil
+	})
+	eventually(t, time.Second, firstJob.Load, "job before parent cancel should run")
+
+	// Cancel the parent context (simulates SIGTERM arriving).
+	cancelParent()
+	time.Sleep(50 * time.Millisecond)
+
+	// Workers should still be alive — submit another job and verify it runs.
+	var afterCancel atomic.Bool
+	scheduler.Submit("q2", "after-sigterm", func(_ context.Context) error {
+		afterCancel.Store(true)
+		return nil
+	})
+	eventually(t, time.Second, afterCancel.Load,
+		"job submitted after parent cancel should still execute")
+
+	// Now cancel the scheduler's own context (simulates post-Shutdown teardown).
+	cancelScheduler()
+	time.Sleep(50 * time.Millisecond)
+
+	var postShutdown atomic.Bool
+	scheduler.Submit("q3", "post-shutdown", func(_ context.Context) error {
+		postShutdown.Store(true)
+		return nil
+	})
+	time.Sleep(100 * time.Millisecond)
+	assert.False(t, postShutdown.Load(),
+		"job submitted after scheduler cancel should be dropped")
+}
+
 func TestJobSchedulerMultipleQueues(t *testing.T) {
 	_, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelError})
 	ctx, cancel := context.WithCancel(ctx)
