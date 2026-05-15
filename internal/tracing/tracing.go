@@ -13,6 +13,7 @@ import (
 	"github.com/alecthomas/errors"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
+	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/trace"
 )
 
@@ -40,6 +41,14 @@ func New(ctx context.Context, cfg Config) (stop func(), err error) {
 
 	provider := trace.NewTracerProvider(trace.WithBatcher(exporter))
 	otel.SetTracerProvider(provider)
+
+	// Register a W3C trace context + baggage propagator so trace IDs
+	// flow across HTTP boundaries (otelhttp/otelconnect use the global
+	// propagator). Without this, every service starts a new trace.
+	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
+		propagation.TraceContext{},
+		propagation.Baggage{},
+	))
 
 	return func() {
 		_ = provider.Shutdown(context.Background()) //nolint:errcheck // shutdown errors are not actionable
