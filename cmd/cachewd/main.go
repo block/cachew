@@ -111,7 +111,11 @@ func main() {
 	})
 	s3ClientProvider := s3client.NewClientProvider(ctx, globalConfig.S3Config)
 
-	schedulerProvider := jobscheduler.NewProvider(ctx, globalConfig.SchedulerConfig)
+	// The scheduler gets its own context so workers keep running during
+	// graceful shutdown while in-flight HTTP handlers drain. We cancel it
+	// explicitly after server.Shutdown completes.
+	schedulerCtx, cancelScheduler := context.WithCancel(context.WithoutCancel(ctx))
+	schedulerProvider := jobscheduler.NewProvider(schedulerCtx, globalConfig.SchedulerConfig)
 
 	cr, mr, sr := newRegistries(schedulerProvider, gitManagerProvider, tokenManagerProvider, s3ClientProvider)
 
@@ -163,6 +167,9 @@ func main() {
 	}
 
 	gracefulShutdown(ctx, logger, server, &shuttingDown, globalConfig.ShutdownReadinessDelay, globalConfig.ShutdownTimeout)
+
+	cancelScheduler()
+	drainScheduler(ctx, logger, schedulerProvider)
 }
 
 // gracefulShutdown fails readiness, waits readinessDelay for load balancers
@@ -188,6 +195,26 @@ func gracefulShutdown(
 		logger.ErrorContext(shutdownCtx, "Server shutdown error", "error", err)
 	} else {
 		logger.InfoContext(shutdownCtx, "Server shut down cleanly")
+	}
+}
+
+const schedulerDrainTimeout = 10 * time.Second
+
+func drainScheduler(ctx context.Context, logger *slog.Logger, provider jobscheduler.Provider) {
+	scheduler, err := provider()
+	if err != nil {
+		return
+	}
+	done := make(chan struct{})
+	go func() {
+		scheduler.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		logger.InfoContext(ctx, "Scheduler drained cleanly")
+	case <-time.After(schedulerDrainTimeout):
+		logger.WarnContext(ctx, "Scheduler drain timed out, exiting with in-flight jobs")
 	}
 }
 
