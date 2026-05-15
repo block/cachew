@@ -282,6 +282,59 @@ func TestJobSchedulerPeriodicJobWithError(t *testing.T) {
 	}, "periodic job should continue executing even after errors")
 }
 
+// TestJobSchedulerPeriodicJobStopsOnCancel verifies that the periodic re-arm
+// goroutine exits cleanly when the scheduler's context is cancelled. Without
+// this, a SIGTERM would leave the re-arm goroutine to wake and submit to a
+// dead scheduler — and on a real pod that goroutine dies with the process,
+// causing the periodic job to skip a full interval after every restart.
+func TestJobSchedulerPeriodicJobStopsOnCancel(t *testing.T) {
+	_, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelError})
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	scheduler := newTestScheduler(ctx, t, jobscheduler.Config{Concurrency: 2})
+
+	var executions atomic.Int32
+	scheduler.SubmitPeriodicJob("queue1", "periodic", 50*time.Millisecond, func(_ context.Context) error {
+		executions.Add(1)
+		return nil
+	})
+
+	eventually(t, time.Second, func() bool { return executions.Load() >= 2 },
+		"periodic job should fire at least twice before cancel")
+
+	cancel()
+	// Give workers and the re-arm goroutine time to observe the cancel.
+	time.Sleep(150 * time.Millisecond)
+	before := executions.Load()
+	// Wait several intervals; no further executions should occur.
+	time.Sleep(300 * time.Millisecond)
+	assert.Equal(t, before, executions.Load(),
+		"periodic job should not fire after scheduler context is cancelled")
+}
+
+// TestJobSchedulerSubmitDroppedAfterShutdown verifies that submissions made
+// after the scheduler has been shut down are silently dropped rather than
+// accumulating in the queue (which would leak the closure capture forever).
+func TestJobSchedulerSubmitDroppedAfterShutdown(t *testing.T) {
+	_, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelError})
+	ctx, cancel := context.WithCancel(ctx)
+
+	scheduler := newTestScheduler(ctx, t, jobscheduler.Config{Concurrency: 2})
+
+	cancel()
+	// Wait for the scheduler to observe the cancel and set q.done.
+	time.Sleep(50 * time.Millisecond)
+
+	var executed atomic.Bool
+	scheduler.Submit("queue1", "post-shutdown", func(_ context.Context) error {
+		executed.Store(true)
+		return nil
+	})
+	time.Sleep(100 * time.Millisecond)
+	assert.False(t, executed.Load(), "submissions after shutdown should be dropped")
+}
+
 func TestJobSchedulerMultipleQueues(t *testing.T) {
 	_, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelError})
 	ctx, cancel := context.WithCancel(ctx)
