@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -353,20 +352,36 @@ func (s *Strategy) handleBundleRequest(w http.ResponseWriter, r *http.Request, h
 		return
 	}
 
-	bundleData, err := s.createBundle(ctx, repo, base)
+	bundleFile, err := s.createBundle(ctx, repo, base)
 	if err != nil {
 		logger.WarnContext(ctx, "Failed to create bundle", "upstream", upstreamURL, "base", base, "error", err)
 		http.Error(w, "Bundle not available", http.StatusNotFound)
 		return
 	}
-
-	// Cache for future requests from any pod.
-	s.cacheBundleAsync(ctx, bKey, bundleData)
+	defer bundleFile.Close()
 
 	w.Header().Set("Content-Type", "application/x-git-bundle")
-	w.Header().Set("Content-Length", strconv.Itoa(len(bundleData)))
-	if _, err := w.Write(bundleData); err != nil { //nolint:gosec // bundleData is a git bundle generated from a trusted local mirror
-		logger.WarnContext(ctx, "Failed to write bundle response", "upstream", upstreamURL, "error", err)
+
+	// Stream to client and cache simultaneously so the bundle never has to be
+	// buffered in memory. If creating the cache writer fails we still serve
+	// the client.
+	wc, cacheErr := s.cache.Create(ctx, bKey, http.Header{"Content-Type": {"application/x-git-bundle"}}, s.config.BundleCacheTTL)
+	if cacheErr != nil {
+		logger.WarnContext(ctx, "Failed to create bundle cache writer", "upstream", upstreamURL, "error", cacheErr)
+		if _, err := io.Copy(w, bundleFile); err != nil {
+			logger.WarnContext(ctx, "Failed to stream bundle", "upstream", upstreamURL, "error", err)
+		}
+		return
+	}
+	if _, err := io.Copy(io.MultiWriter(w, wc), bundleFile); err != nil {
+		logger.WarnContext(ctx, "Failed to stream bundle", "upstream", upstreamURL, "error", err)
+		if abortErr := wc.Abort(err); abortErr != nil {
+			logger.WarnContext(ctx, "Failed to abort bundle cache writer", "upstream", upstreamURL, "error", abortErr)
+		}
+		return
+	}
+	if err := wc.Close(); err != nil {
+		logger.WarnContext(ctx, "Failed to close bundle cache writer", "upstream", upstreamURL, "error", err)
 	}
 }
 
@@ -391,12 +406,13 @@ func (s *Strategy) serveSnapshotWithBundle(ctx context.Context, w http.ResponseW
 		go func() {
 			bgCtx := context.WithoutCancel(ctx)
 			logger := logging.FromContext(bgCtx)
-			bundleData, err := s.createBundle(bgCtx, repo, snapshotCommit)
+			bundleFile, err := s.createBundle(bgCtx, repo, snapshotCommit)
 			if err != nil {
 				logger.WarnContext(bgCtx, "Failed to pre-generate bundle", "upstream", upstreamURL, "error", err)
 				return
 			}
-			if err := s.cacheBundleSync(bgCtx, bundleCacheKey(upstreamURL, snapshotCommit), bundleData); err != nil {
+			defer bundleFile.Close()
+			if err := s.cacheBundle(bgCtx, bundleCacheKey(upstreamURL, snapshotCommit), bundleFile); err != nil {
 				logger.WarnContext(bgCtx, "Failed to cache bundle", "upstream", upstreamURL, "error", err)
 			}
 		}()
@@ -408,22 +424,15 @@ func (s *Strategy) serveSnapshotWithBundle(ctx context.Context, w http.ResponseW
 	return errors.Wrap(err, "stream snapshot")
 }
 
-func (s *Strategy) cacheBundleAsync(ctx context.Context, key cache.Key, data []byte) {
-	go func() {
-		bgCtx := context.WithoutCancel(ctx)
-		if err := s.cacheBundleSync(bgCtx, key, data); err != nil {
-			logging.FromContext(bgCtx).WarnContext(bgCtx, "Failed to cache bundle", "error", err)
-		}
-	}()
-}
-
-func (s *Strategy) cacheBundleSync(ctx context.Context, key cache.Key, data []byte) error {
+// cacheBundle streams r into the cache under key. Used by the bundle
+// pre-generation path; handleBundleRequest caches inline via io.MultiWriter.
+func (s *Strategy) cacheBundle(ctx context.Context, key cache.Key, r io.Reader) error {
 	headers := http.Header{"Content-Type": {"application/x-git-bundle"}}
 	wc, err := s.cache.Create(ctx, key, headers, s.config.BundleCacheTTL)
 	if err != nil {
 		return errors.Wrap(err, "create cache entry")
 	}
-	if _, err := wc.Write(data); err != nil {
+	if _, err := io.Copy(wc, r); err != nil {
 		return errors.Join(errors.Wrap(err, "write bundle to cache"), wc.Abort(err))
 	}
 	return errors.Wrap(wc.Close(), "close bundle cache writer")
@@ -443,7 +452,12 @@ func (s *Strategy) getMirrorHead(ctx context.Context, repo *gitclone.Repository)
 	return head
 }
 
-func (s *Strategy) createBundle(ctx context.Context, repo *gitclone.Repository, baseCommit string) ([]byte, error) {
+// createBundle generates a git bundle for the commits between baseCommit and
+// the mirror's HEAD, writing it to a temp file. It returns an open *os.File
+// to that temp file; the file has already been removed from the filesystem,
+// so the open file descriptor is what keeps the data alive. The caller must
+// Close() the returned file.
+func (s *Strategy) createBundle(ctx context.Context, repo *gitclone.Repository, baseCommit string) (*os.File, error) {
 	// No read lock needed: git bundle create reads objects through git's own
 	// file-level locking, safe to run concurrently with fetches.
 	headRef := "HEAD"
@@ -456,22 +470,29 @@ func (s *Strategy) createBundle(ctx context.Context, repo *gitclone.Repository, 
 		return nil, errors.Wrap(err, "create bundle temp file")
 	}
 	bundlePath := tmpFile.Name()
-	defer os.Remove(bundlePath) //nolint:errcheck
 	if err := tmpFile.Close(); err != nil {
+		_ = os.Remove(bundlePath) //nolint:gosec // bundlePath is from os.CreateTemp
 		return nil, errors.Wrap(err, "close bundle temp file")
 	}
 
 	cmd := exec.CommandContext(ctx, "git", "-C", repo.Path(), "bundle", "create", //nolint:gosec // baseCommit is a SHA string from rev-parse
 		bundlePath, headRef, "^"+baseCommit)
 	if output, err := cmd.CombinedOutput(); err != nil {
+		_ = os.Remove(bundlePath) //nolint:gosec // bundlePath is from os.CreateTemp
 		return nil, errors.Wrapf(err, "git bundle create: %s", string(output))
 	}
 
-	data, err := os.ReadFile(bundlePath) //nolint:gosec // bundlePath is a temp file we created
+	f, err := os.Open(bundlePath) //nolint:gosec // bundlePath is from os.CreateTemp
 	if err != nil {
-		return nil, errors.Wrap(err, "read bundle file")
+		_ = os.Remove(bundlePath) //nolint:gosec // bundlePath is from os.CreateTemp
+		return nil, errors.Wrap(err, "open bundle file")
 	}
-	return data, nil
+	// Unlink immediately; the open fd keeps the data alive until f.Close().
+	if err := os.Remove(bundlePath); err != nil { //nolint:gosec // bundlePath is from os.CreateTemp
+		_ = f.Close()
+		return nil, errors.Wrap(err, "remove bundle temp file")
+	}
+	return f, nil
 }
 
 // serveSnapshotWithSpool handles snapshot cache misses using the spool pattern.
