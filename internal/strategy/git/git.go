@@ -49,6 +49,7 @@ type Config struct {
 	RepackInterval         time.Duration `hcl:"repack-interval,optional" help:"How often to run full repack. 0 disables." default:"0"`
 	ZstdThreads            int           `hcl:"zstd-threads,optional" help:"Threads for zstd compression/decompression. 0 = all CPU cores; useful for short-lived CLI invocations but risky on a long-running server where multiple snapshot/restore operations can run concurrently." default:"4"`
 	BundleCacheTTL         time.Duration `hcl:"bundle-cache-ttl,optional" help:"TTL of cached server-side git bundles." default:"2h"`
+	IdleTimeout            time.Duration `hcl:"idle-timeout,optional" help:"Stop periodic jobs for repos with no client requests for this duration. 0 disables." default:"72h"`
 }
 
 type Strategy struct {
@@ -197,6 +198,11 @@ func (s *Strategy) Ready() bool {
 	return s.ready.Load()
 }
 
+func (s *Strategy) touchRepo(repo *gitclone.Repository) {
+	repo.TouchAccessed()
+	s.scheduler.Touch(repo.UpstreamURL())
+}
+
 // SetMetadataStore enables the per-repo clone histogram and schedules its
 // daily reaper. Called by config.Load after the metadata backend is built.
 func (s *Strategy) SetMetadataStore(store *metadatadb.Store) {
@@ -332,6 +338,7 @@ func (s *Strategy) handleGitRequest(w http.ResponseWriter, r *http.Request, host
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
+	s.touchRepo(repo)
 
 	// Increment after GetOrCreate so unvalidated URLs can't bloat the keyspace.
 	if isClone, cerr := RequestIsClone(pathValue, r); cerr != nil {

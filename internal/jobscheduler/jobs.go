@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/alecthomas/errors"
@@ -20,6 +21,16 @@ type Config struct {
 	Concurrency         int    `hcl:"concurrency" help:"The maximum number of concurrent jobs to run (0 means number of cores)." default:"4"`
 	MaxCloneConcurrency int    `hcl:"max-clone-concurrency" help:"Maximum number of concurrent clone jobs. Remaining worker slots are reserved for fetch/repack/snapshot jobs. 0 means no limit." default:"0"`
 	SchedulerDB         string `hcl:"scheduler-db" help:"Path to the scheduler state database." default:"${CACHEW_STATE}/scheduler.db"`
+}
+
+// idledPeriodicJob stores enough information to re-arm a periodic job that was
+// stopped due to queue inactivity.
+type idledPeriodicJob struct {
+	queue       string
+	id          string
+	interval    time.Duration
+	run         func(ctx context.Context) error
+	idleTimeout time.Duration
 }
 
 type queueJob struct {
@@ -49,9 +60,14 @@ type Scheduler interface {
 	// Jobs run concurrently across queues, but never within a queue.
 	Submit(queue, id string, run func(ctx context.Context) error)
 	// SubmitPeriodicJob submits a job to the queue that runs immediately, and then periodically after the interval.
+	// If idleTimeout is provided, the job stops re-arming when the queue has not been touched (via Touch) for
+	// longer than the timeout. Calling Touch on an idle queue re-arms all its stopped periodic jobs.
 	//
 	// Jobs run concurrently across queues, but never within a queue.
-	SubmitPeriodicJob(queue, id string, interval time.Duration, run func(ctx context.Context) error)
+	SubmitPeriodicJob(queue, id string, interval time.Duration, run func(ctx context.Context) error, idleTimeout ...time.Duration)
+	// Touch records activity for a queue, resetting its idle timer. If the queue had periodic jobs that were
+	// stopped due to inactivity, they are re-scheduled.
+	Touch(queue string)
 }
 
 type prefixedScheduler struct {
@@ -63,8 +79,12 @@ func (p *prefixedScheduler) Submit(queue, id string, run func(ctx context.Contex
 	p.scheduler.Submit(queue, p.prefix+id, run)
 }
 
-func (p *prefixedScheduler) SubmitPeriodicJob(queue, id string, interval time.Duration, run func(ctx context.Context) error) {
-	p.scheduler.SubmitPeriodicJob(queue, p.prefix+id, interval, run)
+func (p *prefixedScheduler) SubmitPeriodicJob(queue, id string, interval time.Duration, run func(ctx context.Context) error, idleTimeout ...time.Duration) {
+	p.scheduler.SubmitPeriodicJob(queue, p.prefix+id, interval, run, idleTimeout...)
+}
+
+func (p *prefixedScheduler) Touch(queue string) {
+	p.scheduler.Touch(queue)
 }
 
 func (p *prefixedScheduler) WithQueuePrefix(prefix string) Scheduler {
@@ -85,11 +105,13 @@ type RootScheduler struct {
 	// ctx is cancelled when the scheduler is shutting down. Periodic re-arm
 	// goroutines select on it so they exit cleanly instead of submitting to a
 	// dead scheduler.
-	ctx     context.Context //nolint:containedctx
-	cancel  context.CancelFunc
-	wg      sync.WaitGroup
-	store   ScheduleStore
-	metrics *schedulerMetrics
+	ctx         context.Context //nolint:containedctx
+	cancel      context.CancelFunc
+	wg          sync.WaitGroup
+	store       ScheduleStore
+	metrics     *schedulerMetrics
+	lastTouched sync.Map // queue -> *atomic.Int64 (unix nanos)
+	idledJobs   sync.Map // jobKey -> *idledPeriodicJob
 }
 
 var _ Scheduler = &RootScheduler{}
@@ -173,7 +195,18 @@ func (q *RootScheduler) Submit(queue, id string, run func(ctx context.Context) e
 	q.cond.Signal()
 }
 
-func (q *RootScheduler) SubmitPeriodicJob(queue, id string, interval time.Duration, run func(ctx context.Context) error) {
+func (q *RootScheduler) SubmitPeriodicJob(queue, id string, interval time.Duration, run func(ctx context.Context) error, idleTimeout ...time.Duration) {
+	var timeout time.Duration
+	if len(idleTimeout) > 0 {
+		timeout = idleTimeout[0]
+	}
+	if timeout > 0 {
+		q.touchQueue(queue)
+	}
+	q.submitPeriodicJob(queue, id, interval, run, timeout)
+}
+
+func (q *RootScheduler) submitPeriodicJob(queue, id string, interval time.Duration, run func(ctx context.Context) error, idleTimeout time.Duration) {
 	if q.ctx.Err() != nil {
 		return
 	}
@@ -192,7 +225,14 @@ func (q *RootScheduler) SubmitPeriodicJob(queue, id string, interval time.Durati
 			// to wake and submit to a dead scheduler. The new pod's
 			// warmExistingRepos re-registers periodic jobs on startup.
 			go q.sleepThenSubmit(interval, func() {
-				q.SubmitPeriodicJob(queue, id, interval, run)
+				if idleTimeout > 0 && q.isQueueIdle(queue, idleTimeout) {
+					logging.FromContext(ctx).InfoContext(ctx, "Periodic job idled out", "queue", queue, "job", id)
+					q.idledJobs.Store(key, &idledPeriodicJob{
+						queue: queue, id: id, interval: interval, run: run, idleTimeout: idleTimeout,
+					})
+					return
+				}
+				q.submitPeriodicJob(queue, id, interval, run, idleTimeout)
 			})
 			return errors.WithStack(err)
 		})
@@ -202,6 +242,33 @@ func (q *RootScheduler) SubmitPeriodicJob(queue, id string, interval time.Durati
 		return
 	}
 	go q.sleepThenSubmit(delay, submit)
+}
+
+// Touch records activity for a queue, resetting its idle timer. If the queue
+// had periodic jobs that were stopped due to inactivity, they are re-scheduled.
+func (q *RootScheduler) Touch(queue string) {
+	q.touchQueue(queue)
+	q.idledJobs.Range(func(key, value any) bool {
+		job := value.(*idledPeriodicJob)
+		if job.queue == queue {
+			q.idledJobs.Delete(key)
+			q.submitPeriodicJob(job.queue, job.id, job.interval, job.run, job.idleTimeout)
+		}
+		return true
+	})
+}
+
+func (q *RootScheduler) touchQueue(queue string) {
+	val, _ := q.lastTouched.LoadOrStore(queue, &atomic.Int64{})
+	val.(*atomic.Int64).Store(time.Now().UnixNano())
+}
+
+func (q *RootScheduler) isQueueIdle(queue string, timeout time.Duration) bool {
+	val, ok := q.lastTouched.Load(queue)
+	if !ok {
+		return true
+	}
+	return time.Since(time.Unix(0, val.(*atomic.Int64).Load())) > timeout
 }
 
 // sleepThenSubmit waits for d, then runs fn — unless the scheduler is

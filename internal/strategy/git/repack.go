@@ -19,5 +19,5 @@ func (s *Strategy) scheduleRepackJobs(repo *gitclone.Repository) {
 		}
 		s.metrics.recordOperation(ctx, "repack", status, time.Since(start))
 		return errors.Wrap(err, "repack")
-	})
+	}, s.config.IdleTimeout)
 }

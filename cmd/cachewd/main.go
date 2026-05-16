@@ -327,15 +327,25 @@ func fatalIfError(ctx context.Context, logger *slog.Logger, err error, msg strin
 	os.Exit(1)
 }
 
-// extractPathPrefix extracts the strategy name, path prefix from a request path.
-// Examples: /git/... -> "git", /gomod/... -> "gomod", /api/v1/... -> "api".
+// extractPathPrefix returns the first path segment, or the first two
+// non-version segments for /api/ so that object/stats/namespaces aren't
+// lumped together (e.g. /api/v1/object/... -> "api/object").
 func extractPathPrefix(path string) string {
-	if path == "" || path == "/" {
+	parts := strings.SplitN(strings.Trim(path, "/"), "/", 4)
+	if len(parts) == 0 || parts[0] == "" {
 		return ""
 	}
-	trimmed := strings.TrimPrefix(path, "/")
-	prefix, _, _ := strings.Cut(trimmed, "/")
-	return prefix
+	if parts[0] != "api" || len(parts) < 2 {
+		return parts[0]
+	}
+	i := 1
+	if i < len(parts) && len(parts[i]) > 0 && parts[i][0] == 'v' {
+		i++
+	}
+	if i < len(parts) {
+		return "api/" + parts[i]
+	}
+	return "api"
 }
 
 func newServer(
