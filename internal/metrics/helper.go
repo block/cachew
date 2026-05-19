@@ -56,6 +56,15 @@ func SmallCountBuckets() []float64 {
 	}
 }
 
+// BandwidthMbpsBuckets is for per-request throughput in MiB/s, covering
+// everything from slow long-tail clients (a few MiB/s) up through saturated
+// 10 GbE links (~1.2 GiB/s) and the parallel-stream-on-localhost ceiling.
+func BandwidthMbpsBuckets() []float64 {
+	return []float64{
+		1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000,
+	}
+}
+
 // NewHistogram creates a Float64Histogram with explicit bucket boundaries.
 // Prefer this over NewMetric for histograms: the OTel SDK default boundaries
 // only go up to 10 seconds, which is far too narrow for most cachew metrics.

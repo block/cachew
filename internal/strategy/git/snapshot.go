@@ -871,12 +871,24 @@ func (s *Strategy) generateAndUploadLFSSnapshot(ctx context.Context, repo *gitcl
 	// Check if any .gitattributes file at HEAD declares filter=lfs. This searches
 	// the root and all nested .gitattributes, avoiding false negatives for repos
 	// that only configure LFS in subdirectories.
+	discoverStart := time.Now()
 	repoPath := repo.Path()
 	grepCmd := exec.CommandContext(ctx, "git", "-C", repoPath, "grep", "-q", "filter=lfs", "HEAD", "--", "*.gitattributes") //nolint:gosec
 	if err := grepCmd.Run(); err != nil {
-		logger.DebugContext(ctx, "No LFS filter in any .gitattributes, skipping LFS snapshot", "upstream", upstream)
-		return nil
+		// git grep exits 1 for "no match" (legitimate "no LFS in this repo");
+		// any other non-zero exit (invalid HEAD, repo corruption, command
+		// failure) is a real error that should propagate so we don't silently
+		// skip LFS snapshot generation for repos that actually use LFS.
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+			s.metrics.recordLFSPhase(ctx, upstream, "discover", "skipped", time.Since(discoverStart))
+			logger.DebugContext(ctx, "No LFS filter in any .gitattributes, skipping LFS snapshot", "upstream", upstream)
+			return nil
+		}
+		s.metrics.recordLFSPhase(ctx, upstream, "discover", "error", time.Since(discoverStart))
+		return errors.Wrap(err, "git grep for LFS filter")
 	}
+	s.metrics.recordLFSPhase(ctx, upstream, "discover", "success", time.Since(discoverStart))
 
 	start := time.Now()
 	logger.InfoContext(ctx, "LFS snapshot generation started", "upstream", upstream)
@@ -887,7 +899,12 @@ func (s *Strategy) generateAndUploadLFSSnapshot(ctx context.Context, repo *gitcl
 
 	cacheKey := lfsSnapshotCacheKey(upstream)
 	excludePatterns := []string{"*.lock"}
+	cloneStart := time.Now()
+	cloneRecorded := false
 	if err := s.withSnapshotClone(ctx, repo, "lfs", func(workDir string) error {
+		s.metrics.recordLFSPhase(ctx, upstream, "clone", "success", time.Since(cloneStart))
+		cloneRecorded = true
+
 		// Set up LFS in the snapshot clone. cloneForSnapshot already restores
 		// remote.origin.url to the upstream URL, so LFS will fetch from GitHub.
 		// #nosec G204
@@ -898,23 +915,43 @@ func (s *Strategy) generateAndUploadLFSSnapshot(ctx context.Context, repo *gitcl
 		}
 
 		// Fetch only the LFS objects referenced by HEAD (the default branch).
+		fetchStart := time.Now()
 		fetchCmd, err := repo.GitCommand(ctx, "-C", workDir, "lfs", "fetch", "origin", "HEAD")
 		if err != nil {
+			s.metrics.recordLFSPhase(ctx, upstream, "fetch", "error", time.Since(fetchStart))
 			return errors.Wrap(err, "create git lfs fetch command")
 		}
 		if output, err := fetchCmd.CombinedOutput(); err != nil {
+			s.metrics.recordLFSPhase(ctx, upstream, "fetch", "error", time.Since(fetchStart))
 			return errors.Wrapf(err, "git lfs fetch: %s", string(output))
 		}
+		s.metrics.recordLFSPhase(ctx, upstream, "fetch", "success", time.Since(fetchStart))
 
 		lfsDir := filepath.Join(workDir, ".git", "lfs")
 		if _, err := os.Stat(lfsDir); os.IsNotExist(err) {
 			logger.InfoContext(ctx, "No LFS objects in repository, skipping LFS snapshot", "upstream", upstream)
 			return nil
 		}
+		// Record .git/lfs size as a proxy for "bytes fetched". Best-effort:
+		// surface 0 on error so we don't fail the snapshot for a stat walk.
+		if size, walkErr := dirSizeBytes(lfsDir); walkErr == nil {
+			s.metrics.recordLFSPhaseBytes(ctx, upstream, "fetch", size)
+		} else {
+			logger.DebugContext(ctx, "Failed to size .git/lfs after fetch", "upstream", upstream, "error", walkErr)
+		}
 
 		gitDir := filepath.Join(workDir, ".git")
-		return snapshot.CreatePaths(ctx, s.cache, cacheKey, gitDir, "lfs", []string{"lfs"}, 0, excludePatterns, s.config.ZstdThreads)
+		archiveStart := time.Now()
+		if err := snapshot.CreatePaths(ctx, s.cache, cacheKey, gitDir, "lfs", []string{"lfs"}, 0, excludePatterns, s.config.ZstdThreads); err != nil {
+			s.metrics.recordLFSPhase(ctx, upstream, "archive_upload", "error", time.Since(archiveStart))
+			return err //nolint:wrapcheck // wrapped by caller
+		}
+		s.metrics.recordLFSPhase(ctx, upstream, "archive_upload", "success", time.Since(archiveStart))
+		return nil
 	}); err != nil {
+		if !cloneRecorded {
+			s.metrics.recordLFSPhase(ctx, upstream, "clone", "error", time.Since(cloneStart))
+		}
 		s.metrics.recordOperation(ctx, "lfs-snapshot", "error", time.Since(start))
 		return errors.Wrap(err, "create LFS snapshot")
 	}
@@ -922,6 +959,31 @@ func (s *Strategy) generateAndUploadLFSSnapshot(ctx context.Context, repo *gitcl
 	s.metrics.recordOperation(ctx, "lfs-snapshot", "success", time.Since(start))
 	logger.InfoContext(ctx, "LFS snapshot generation completed", "upstream", upstream)
 	return nil
+}
+
+// dirSizeBytes returns the total size in bytes of regular files under root.
+// Per-entry stat or walk errors are deliberately swallowed so a transient
+// failure (e.g. a file removed mid-walk during snapshot prep) doesn't fail
+// the surrounding snapshot operation; the returned sum is best-effort.
+func dirSizeBytes(root string) (int64, error) {
+	var total int64
+	err := filepath.WalkDir(root, func(_ string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil //nolint:nilerr // best-effort: skip unreadable entries
+		}
+		// Stat first so we don't drop files on filesystems where DirEntry.Type()
+		// reports "unknown" (e.g. some NFS/FUSE setups) and IsRegular() returns false.
+		info, infoErr := d.Info()
+		if infoErr != nil {
+			return nil //nolint:nilerr // best-effort: skip un-stat-able entries
+		}
+		if !info.Mode().IsRegular() {
+			return nil
+		}
+		total += info.Size()
+		return nil
+	})
+	return total, errors.WithStack(err)
 }
 
 func (s *Strategy) handleLFSSnapshotRequest(w http.ResponseWriter, r *http.Request, host, pathValue string) {
