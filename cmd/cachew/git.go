@@ -309,15 +309,28 @@ func applyBundle(ctx context.Context, api *client.Client, bundleURL, directory s
 	branch := strings.TrimSpace(string(branchOut))
 	span.SetAttributes(attribute.String("cachew.branch", branch))
 
-	// Pull the bundle's branch into the working tree via fast-forward.
-	applyStart := time.Now()
-	cmd := exec.CommandContext(ctx, "git", "-C", directory, "pull", "--ff-only", tmpFile.Name(), branch) //nolint:gosec
-	if output, err := cmd.CombinedOutput(); err != nil {
+	// Apply the bundle as two explicit steps instead of `git pull --ff-only`.
+	// `git pull` runs an implicit connectivity check (`git rev-list --objects
+	// --stdin --not --exclude-hidden=fetch --all`) and `git maintenance run
+	// --auto` after the fetch, which together add real wall-clock time on
+	// large repos and have no value for a one-shot ff-only bundle apply.
+	fetchStart := time.Now()
+	fetchCmd := exec.CommandContext(ctx, "git", "-C", directory, "fetch", "--no-tags", tmpFile.Name(), branch) //nolint:gosec
+	if output, err := fetchCmd.CombinedOutput(); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
-		return errors.Wrapf(err, "git pull from bundle: %s", string(output))
+		return errors.Wrapf(err, "git fetch from bundle: %s", string(output))
 	}
-	span.SetAttributes(attribute.Float64("cachew.git_pull_seconds", time.Since(applyStart).Seconds()))
+	span.SetAttributes(attribute.Float64("cachew.git_fetch_seconds", time.Since(fetchStart).Seconds()))
+
+	mergeStart := time.Now()
+	mergeCmd := exec.CommandContext(ctx, "git", "-C", directory, "merge", "--ff-only", "FETCH_HEAD") //nolint:gosec
+	if output, err := mergeCmd.CombinedOutput(); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return errors.Wrapf(err, "git merge --ff-only FETCH_HEAD: %s", string(output))
+	}
+	span.SetAttributes(attribute.Float64("cachew.git_merge_seconds", time.Since(mergeStart).Seconds()))
 
 	return nil
 }
