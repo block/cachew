@@ -15,6 +15,7 @@ import (
 
 	"github.com/block/cachew/client"
 	"github.com/block/cachew/internal/logging"
+	"github.com/block/cachew/internal/tracing"
 )
 
 type CLI struct {
@@ -46,6 +47,16 @@ func run() int {
 	ctx := context.Background()
 	_, ctx = logging.Configure(ctx, cli.LoggingConfig)
 
+	// Wire up tracing for the short-lived CLI. tracing.New is env-driven:
+	// it only installs an exporter when OTEL_EXPORTER_OTLP_ENDPOINT is set,
+	// so this is a no-op for users who haven't opted in.
+	stopTracing, err := tracing.New(ctx, tracing.Config{Enabled: true})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to initialize tracing: %v\n", err) //nolint:forbidigo
+	} else {
+		defer stopTracing()
+	}
+
 	var headerFunc client.HeaderFunc
 	if cli.Authorization != "" {
 		headerFunc = func() http.Header {
@@ -58,7 +69,7 @@ func run() int {
 	kctx.BindTo(ctx, (*context.Context)(nil))
 	kctx.Bind(c)
 	kctx.Bind(c.HTTP())
-	err := kctx.Run(ctx)
+	err = kctx.Run(ctx)
 	if errors.Is(err, errCacheMiss) {
 		return 2
 	}

@@ -7,12 +7,33 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/alecthomas/errors"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/block/cachew/client"
 	"github.com/block/cachew/internal/snapshot"
 )
+
+//nolint:gochecknoglobals // OTel tracer instances are package-scoped by convention
+var tracer = otel.Tracer("github.com/block/cachew/cmd/cachew")
+
+// inSpan runs fn inside a named child span and records the error returned by
+// fn on the span before propagating it.
+func inSpan(ctx context.Context, name string, attrs []attribute.KeyValue, fn func(ctx context.Context) error) error {
+	ctx, span := tracer.Start(ctx, name, trace.WithAttributes(attrs...))
+	defer span.End()
+	if err := fn(ctx); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return err
+	}
+	return nil
+}
 
 // GitCmd groups git-aware subcommands that talk directly to cachew's
 // /git/ strategy endpoints (not the generic object-store API).
@@ -34,29 +55,77 @@ type GitRestoreCmd struct {
 }
 
 func (c *GitRestoreCmd) Run(ctx context.Context, api *client.Client) error {
+	ctx, span := tracer.Start(ctx, "cachew.git_restore",
+		trace.WithAttributes(
+			attribute.String("cachew.repo_url", c.RepoURL),
+			attribute.String("cachew.directory", c.Directory),
+			attribute.Bool("cachew.no_bundle", c.NoBundle),
+			attribute.Int("cachew.zstd_threads", c.ZstdThreads),
+		),
+	)
+	defer span.End()
+
+	totalStart := time.Now()
+	defer func() {
+		fmt.Fprintf(os.Stderr, "cachew git restore total elapsed=%s\n", time.Since(totalStart)) //nolint:forbidigo
+	}()
+
 	fmt.Fprintf(os.Stderr, "Fetching snapshot for %s\n", c.RepoURL) //nolint:forbidigo
 
-	snap, err := api.OpenGitSnapshot(ctx, c.RepoURL)
-	if err != nil {
+	var snap *client.GitSnapshot
+	if err := inSpan(ctx, "cachew.download_snapshot",
+		[]attribute.KeyValue{attribute.String("cachew.repo_url", c.RepoURL)},
+		func(ctx context.Context) error {
+			downloadStart := time.Now()
+			s, err := api.OpenGitSnapshot(ctx, c.RepoURL)
+			if err != nil {
+				return err //nolint:wrapcheck // wrapped by caller
+			}
+			snap = s
+			trace.SpanFromContext(ctx).SetAttributes(
+				attribute.String("cachew.snapshot_commit", s.Commit),
+				attribute.String("cachew.bundle_url", s.BundleURL),
+				attribute.Float64("cachew.elapsed_seconds", time.Since(downloadStart).Seconds()),
+			)
+			return nil
+		}); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return errors.Errorf("no snapshot available for %s", c.RepoURL)
 		}
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return errors.Wrap(err, "fetch snapshot")
 	}
 	defer snap.Close()
+	span.SetAttributes(attribute.String("cachew.snapshot_commit", snap.Commit))
 
 	fmt.Fprintf(os.Stderr, "Extracting to %s...\n", c.Directory) //nolint:forbidigo
-	if err := snapshot.Extract(ctx, snap.Body, c.Directory, c.ZstdThreads); err != nil {
+	if err := inSpan(ctx, "cachew.extract",
+		[]attribute.KeyValue{attribute.String("cachew.directory", c.Directory)},
+		func(ctx context.Context) error {
+			extractStart := time.Now()
+			if err := snapshot.Extract(ctx, snap.Body, c.Directory, c.ZstdThreads); err != nil {
+				return err //nolint:wrapcheck // wrapped by caller
+			}
+			elapsed := time.Since(extractStart)
+			trace.SpanFromContext(ctx).SetAttributes(attribute.Float64("cachew.elapsed_seconds", elapsed.Seconds()))
+			fmt.Fprintf(os.Stderr, "Snapshot extracted in %s\n", elapsed) //nolint:forbidigo
+			return nil
+		}); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return errors.Wrap(err, "extract snapshot")
 	}
 	fmt.Fprintf(os.Stderr, "Snapshot restored to %s\n", c.Directory) //nolint:forbidigo
 
 	if snap.BundleURL != "" && !c.NoBundle {
 		fmt.Fprintf(os.Stderr, "Applying delta bundle...\n") //nolint:forbidigo
+		bundleStart := time.Now()
 		if err := applyBundle(ctx, api, snap.BundleURL, c.Directory); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: failed to apply delta bundle: %v\n", err) //nolint:forbidigo
+			span.RecordError(err)
 		} else {
-			fmt.Fprintf(os.Stderr, "Delta bundle applied\n") //nolint:forbidigo
+			fmt.Fprintf(os.Stderr, "Delta bundle applied in %s\n", time.Since(bundleStart)) //nolint:forbidigo
 		}
 	}
 
@@ -66,6 +135,8 @@ func (c *GitRestoreCmd) Run(ctx context.Context, api *client.Client) error {
 	// the mirror (if needed) and pull from origin (if needed) to catch up.
 	if len(c.Ref) > 0 || len(c.Commit) > 0 {
 		if err := c.satisfyRefs(ctx, api); err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
 			return err
 		}
 	}
@@ -78,22 +149,44 @@ func (c *GitRestoreCmd) Run(ctx context.Context, api *client.Client) error {
 // asked for, avoiding both /ensure-refs and git pull when the snapshot+bundle
 // already brought down the required SHAs.
 func (c *GitRestoreCmd) satisfyRefs(ctx context.Context, api *client.Client) error {
+	ctx, span := tracer.Start(ctx, "cachew.satisfy_refs",
+		trace.WithAttributes(
+			attribute.Int("cachew.requested_refs", len(c.Ref)),
+			attribute.Int("cachew.requested_commits", len(c.Commit)),
+		),
+	)
+	defer span.End()
+
 	// Fast path: if every ref is pinned and the local clone has every ref
 	// SHA and every requested commit, we're done.
 	if allPinned(c.Ref) &&
 		localHasAllRefSHAs(ctx, c.Directory, c.Ref) &&
 		localHasAllSHAs(ctx, c.Directory, c.Commit) {
 		fmt.Fprintf(os.Stderr, "All requested refs/commits already present locally\n") //nolint:forbidigo
+		span.SetAttributes(attribute.String("cachew.result", "local_hit"))
 		return nil
 	}
 
 	fmt.Fprintf(os.Stderr, "Ensuring %d ref(s) and %d commit(s) are fresh for %s\n", //nolint:forbidigo
 		len(c.Ref), len(c.Commit), c.RepoURL)
-	resp, err := api.EnsureGitRefs(ctx, c.RepoURL, client.EnsureGitRefsRequest{
-		Refs:    c.Ref,
-		Commits: c.Commit,
-	})
-	if err != nil {
+	var resp client.EnsureGitRefsResponse
+	if err := inSpan(ctx, "cachew.ensure_refs", nil, func(ctx context.Context) error {
+		r, err := api.EnsureGitRefs(ctx, c.RepoURL, client.EnsureGitRefsRequest{
+			Refs:    c.Ref,
+			Commits: c.Commit,
+		})
+		if err != nil {
+			return err //nolint:wrapcheck // wrapped by caller
+		}
+		resp = r
+		trace.SpanFromContext(ctx).SetAttributes(
+			attribute.Bool("cachew.fetched", r.Fetched),
+			attribute.Int("cachew.missing_commits", len(r.MissingCommits)),
+		)
+		return nil
+	}); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return errors.Wrap(err, "ensure refs")
 	}
 	if resp.Fetched {
@@ -167,23 +260,42 @@ func localHasSHA(ctx context.Context, directory, sha string) bool {
 }
 
 func applyBundle(ctx context.Context, api *client.Client, bundleURL, directory string) error {
+	ctx, span := tracer.Start(ctx, "cachew.apply_bundle",
+		trace.WithAttributes(
+			attribute.String("cachew.bundle_url", bundleURL),
+			attribute.String("cachew.directory", directory),
+		),
+	)
+	defer span.End()
+
 	body, err := api.OpenGitBundle(ctx, bundleURL)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return errors.Wrap(err, "fetch bundle")
 	}
 	defer body.Close()
 
 	tmpFile, err := os.CreateTemp("", "cachew-bundle-*.bundle")
 	if err != nil {
+		span.RecordError(err)
 		return errors.Wrap(err, "create temp bundle file")
 	}
 	defer os.Remove(tmpFile.Name()) //nolint:errcheck
 
-	if _, err := io.Copy(tmpFile, body); err != nil {
+	downloadStart := time.Now()
+	bytes, err := io.Copy(tmpFile, body)
+	if err != nil {
 		_ = tmpFile.Close()
+		span.RecordError(err)
 		return errors.Wrap(err, "download bundle")
 	}
+	span.SetAttributes(
+		attribute.Int64("cachew.bundle_bytes", bytes),
+		attribute.Float64("cachew.download_seconds", time.Since(downloadStart).Seconds()),
+	)
 	if err := tmpFile.Close(); err != nil {
+		span.RecordError(err)
 		return errors.Wrap(err, "close temp bundle file")
 	}
 
@@ -191,15 +303,21 @@ func applyBundle(ctx context.Context, api *client.Client, bundleURL, directory s
 	branchCmd := exec.CommandContext(ctx, "git", "-C", directory, "symbolic-ref", "--short", "HEAD") //nolint:gosec
 	branchOut, err := branchCmd.Output()
 	if err != nil {
+		span.RecordError(err)
 		return errors.Wrap(err, "determine current branch")
 	}
 	branch := strings.TrimSpace(string(branchOut))
+	span.SetAttributes(attribute.String("cachew.branch", branch))
 
 	// Pull the bundle's branch into the working tree via fast-forward.
+	applyStart := time.Now()
 	cmd := exec.CommandContext(ctx, "git", "-C", directory, "pull", "--ff-only", tmpFile.Name(), branch) //nolint:gosec
 	if output, err := cmd.CombinedOutput(); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return errors.Wrapf(err, "git pull from bundle: %s", string(output))
 	}
+	span.SetAttributes(attribute.Float64("cachew.git_pull_seconds", time.Since(applyStart).Seconds()))
 
 	return nil
 }
@@ -209,9 +327,17 @@ func applyBundle(ctx context.Context, api *client.Client, bundleURL, directory s
 // after the bundle was generated. The clone's origin is the upstream URL,
 // so this respects the user's git insteadOf config to route through cachew.
 func gitPullOrigin(ctx context.Context, directory string) error {
+	ctx, span := tracer.Start(ctx, "cachew.pull_origin",
+		trace.WithAttributes(attribute.String("cachew.directory", directory)),
+	)
+	defer span.End()
+	start := time.Now()
 	cmd := exec.CommandContext(ctx, "git", "-C", directory, "pull", "--ff-only") //nolint:gosec
 	if output, err := cmd.CombinedOutput(); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return errors.Wrapf(err, "git pull: %s", string(output))
 	}
+	span.SetAttributes(attribute.Float64("cachew.elapsed_seconds", time.Since(start).Seconds()))
 	return nil
 }

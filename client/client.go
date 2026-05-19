@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/alecthomas/errors"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
 // HTTPStatusError is returned when the server responds with an unexpected
@@ -57,14 +58,19 @@ type HeaderFunc func() http.Header
 // NewHTTPClient creates an *http.Client that attaches headerFunc headers
 // to every outgoing request. Useful for callers that need to talk to
 // non-API endpoints (e.g. /git/) with the same auth as the cache client.
+//
+// The returned client is instrumented with otelhttp so each outgoing request
+// produces a child span and propagates the W3C traceparent header. When no
+// tracer provider is configured, otelhttp falls back to a no-op tracer, so
+// this is cost-free for callers that have not opted in to tracing.
 func NewHTTPClient(headerFunc HeaderFunc) *http.Client {
 	transport := http.DefaultTransport.(*http.Transport).Clone() //nolint:errcheck
 	transport.MaxIdleConns = 100
 	transport.MaxIdleConnsPerHost = 100
 
-	var rt http.RoundTripper = transport
+	var rt http.RoundTripper = otelhttp.NewTransport(transport)
 	if headerFunc != nil {
-		rt = &headerTransport{base: transport, headerFunc: headerFunc}
+		rt = &headerTransport{base: rt, headerFunc: headerFunc}
 	}
 	return &http.Client{Transport: rt}
 }
