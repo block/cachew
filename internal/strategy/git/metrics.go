@@ -27,6 +27,9 @@ type gitMetrics struct {
 	spoolFollowerWaitTotal metric.Int64Counter
 	spoolFollowerWait      metric.Float64Histogram
 	repackPackCount        metric.Float64Histogram
+	prewarmRepoDuration    metric.Float64Histogram
+	prewarmPassDuration    metric.Float64Histogram
+	prewarmPassTotal       metric.Int64Counter
 }
 
 func newGitMetrics() *gitMetrics {
@@ -47,6 +50,9 @@ func newGitMetrics() *gitMetrics {
 		spoolFollowerWaitTotal: metrics.NewMetric[metric.Int64Counter](meter, "cachew.git.spool_follower_waits_total", "{waits}", "Snapshot spool follower events, by outcome (served, writer_failed)"),
 		spoolFollowerWait:      metrics.NewHistogram(meter, "cachew.git.spool_follower_wait_seconds", "s", "Time a snapshot spool follower spent waiting for the writer to publish headers", metrics.FastLatencyBuckets()),
 		repackPackCount:        metrics.NewHistogram(meter, "cachew.git.repack_pack_count", "{packs}", "Pack file count observed before and after repack, by stage (before, after)", metrics.SmallCountBuckets()),
+		prewarmRepoDuration:    metrics.NewHistogram(meter, "cachew.git.prewarm_repo_duration_seconds", "s", "Duration of per-repo background prewarm, by path (fetch, restore) and status", metrics.LatencyBuckets()),
+		prewarmPassDuration:    metrics.NewHistogram(meter, "cachew.git.prewarm_pass_duration_seconds", "s", "Total duration of the background prewarm pass, by outcome", metrics.LatencyBuckets()),
+		prewarmPassTotal:       metrics.NewMetric[metric.Int64Counter](meter, "cachew.git.prewarm_passes_total", "{passes}", "Background prewarm passes completed, by outcome (complete, empty_histogram)"),
 	}
 }
 
@@ -136,4 +142,23 @@ func (m *gitMetrics) recordRepackPackCount(ctx context.Context, repo, stage stri
 		attribute.String("repository", repo),
 		attribute.String("stage", stage),
 	))
+}
+
+// recordPrewarmRepo records the wall-clock cost of warming a single repo
+// during the background prewarm pass. path is "fetch" (mirror already on
+// disk) or "restore" (mirror snapshot pulled from S3 or full clone). status
+// is "success" or "error".
+func (m *gitMetrics) recordPrewarmRepo(ctx context.Context, path, status string, duration time.Duration) {
+	m.prewarmRepoDuration.Record(ctx, duration.Seconds(), metric.WithAttributes(
+		attribute.String("path", path),
+		attribute.String("status", status),
+	))
+}
+
+// recordPrewarmPass records the total prewarm-pass wall time and completion
+// outcome. outcome is "complete" or "empty_histogram".
+func (m *gitMetrics) recordPrewarmPass(ctx context.Context, outcome string, duration time.Duration) {
+	attrs := metric.WithAttributes(attribute.String("outcome", outcome))
+	m.prewarmPassTotal.Add(ctx, 1, attrs)
+	m.prewarmPassDuration.Record(ctx, duration.Seconds(), attrs)
 }
