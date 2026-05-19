@@ -10,10 +10,17 @@ import (
 	"time"
 
 	"github.com/alecthomas/errors"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/block/cachew/client"
 	"github.com/block/cachew/internal/cache"
 )
+
+//nolint:gochecknoglobals // OTel tracer instances are package-scoped by convention
+var tracer = otel.Tracer("github.com/block/cachew/internal/snapshot")
 
 // Create archives a directory using tar with zstd compression, then uploads to the cache.
 //
@@ -34,7 +41,24 @@ func Create(ctx context.Context, remote cache.Cache, key cache.Key, directory st
 // Each entry in includePaths is archived relative to baseDir and must exist.
 // Exclude patterns use tar's --exclude syntax.
 // threads controls zstd parallelism; 0 uses all available CPU cores.
-func CreatePaths(ctx context.Context, remote cache.Cache, key cache.Key, baseDir, archiveName string, includePaths []string, ttl time.Duration, excludePatterns []string, threads int, extraHeaders ...http.Header) error {
+func CreatePaths(ctx context.Context, remote cache.Cache, key cache.Key, baseDir, archiveName string, includePaths []string, ttl time.Duration, excludePatterns []string, threads int, extraHeaders ...http.Header) (returnErr error) {
+	ctx, span := tracer.Start(ctx, "cachew.snapshot.create_and_upload",
+		trace.WithAttributes(
+			attribute.String("cache.key", key.String()),
+			attribute.String("snapshot.archive_name", archiveName),
+			attribute.Int("snapshot.include_paths", len(includePaths)),
+			attribute.Int("snapshot.exclude_patterns", len(excludePatterns)),
+			attribute.Int("snapshot.threads", threads),
+		),
+	)
+	defer func() {
+		if returnErr != nil {
+			span.RecordError(returnErr)
+			span.SetStatus(codes.Error, returnErr.Error())
+		}
+		span.End()
+	}()
+
 	headers := make(http.Header)
 	headers.Set("Content-Type", "application/zstd")
 	headers.Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", archiveName+".tar.zst"))
@@ -71,7 +95,21 @@ func StreamTo(ctx context.Context, w io.Writer, directory string, excludePattern
 // all file permissions, ownership, and symlinks.
 // The operation is fully streaming - no temporary files are created.
 // threads controls zstd parallelism; 0 uses all available CPU cores.
-func Restore(ctx context.Context, remote cache.Cache, key cache.Key, directory string, threads int) error {
+func Restore(ctx context.Context, remote cache.Cache, key cache.Key, directory string, threads int) (returnErr error) {
+	ctx, span := tracer.Start(ctx, "cachew.snapshot.restore",
+		trace.WithAttributes(
+			attribute.String("cache.key", key.String()),
+			attribute.Int("snapshot.threads", threads),
+		),
+	)
+	defer func() {
+		if returnErr != nil {
+			span.RecordError(returnErr)
+			span.SetStatus(codes.Error, returnErr.Error())
+		}
+		span.End()
+	}()
+
 	rc, _, err := remote.Open(ctx, key)
 	if err != nil {
 		return errors.Wrap(err, "failed to open object")
