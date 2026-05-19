@@ -7,6 +7,7 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/block/cachew/internal/metrics"
 )
@@ -27,6 +28,9 @@ type gitMetrics struct {
 	spoolFollowerWaitTotal metric.Int64Counter
 	spoolFollowerWait      metric.Float64Histogram
 	repackPackCount        metric.Float64Histogram
+	snapshotServeBandwidth metric.Float64Histogram
+	lfsPhaseDuration       metric.Float64Histogram
+	lfsPhaseBytes          metric.Float64Histogram
 }
 
 func newGitMetrics() *gitMetrics {
@@ -47,6 +51,9 @@ func newGitMetrics() *gitMetrics {
 		spoolFollowerWaitTotal: metrics.NewMetric[metric.Int64Counter](meter, "cachew.git.spool_follower_waits_total", "{waits}", "Snapshot spool follower events, by outcome (served, writer_failed)"),
 		spoolFollowerWait:      metrics.NewHistogram(meter, "cachew.git.spool_follower_wait_seconds", "s", "Time a snapshot spool follower spent waiting for the writer to publish headers", metrics.FastLatencyBuckets()),
 		repackPackCount:        metrics.NewHistogram(meter, "cachew.git.repack_pack_count", "{packs}", "Pack file count observed before and after repack, by stage (before, after)", metrics.SmallCountBuckets()),
+		snapshotServeBandwidth: metrics.NewHistogram(meter, "cachew.git.snapshot_serve_bandwidth_mbps", "MiBy/s", "Per-request snapshot serve throughput in MiB/s, by source and repository", metrics.BandwidthMbpsBuckets()),
+		lfsPhaseDuration:       metrics.NewHistogram(meter, "cachew.git.lfs_phase_duration_seconds", "s", "Duration of an LFS-snapshot generation phase (discover, clone, fetch, archive_upload), by status and repository", metrics.LatencyBuckets()),
+		lfsPhaseBytes:          metrics.NewHistogram(meter, "cachew.git.lfs_phase_bytes", "By", "Bytes processed in an LFS-snapshot generation phase, by phase and repository (e.g. .git/lfs size after fetch)", metrics.ByteBuckets()),
 	}
 }
 
@@ -64,7 +71,12 @@ func (m *gitMetrics) recordRequest(ctx context.Context, requestType string) {
 	m.requestTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("type", requestType)))
 }
 
-// recordSnapshotServe records a snapshot serve event with its source, repository, size and wall-clock duration.
+// recordSnapshotServe records a snapshot serve event with its source,
+// repository, size and wall-clock duration. Also records per-request
+// throughput (cachew.git.snapshot_serve_bandwidth_mbps) for non-empty,
+// non-zero-duration serves so we can see the distribution of MiB/s instead
+// of relying on aggregate-over-time of bytes/duration sums.
+//
 // Source is one of: "cache", "cold_cache", "spool", "generated".
 func (m *gitMetrics) recordSnapshotServe(ctx context.Context, source, repo string, sizeBytes int64, duration time.Duration) {
 	attrs := metric.WithAttributes(
@@ -77,6 +89,13 @@ func (m *gitMetrics) recordSnapshotServe(ctx context.Context, source, repo strin
 	}
 	if duration > 0 {
 		m.snapshotServeDuration.Record(ctx, duration.Seconds(), attrs)
+	}
+	if sizeBytes > 0 && duration > 0 {
+		mbps := float64(sizeBytes) / (1 << 20) / duration.Seconds()
+		m.snapshotServeBandwidth.Record(ctx, mbps, attrs)
+		trace.SpanFromContext(ctx).SetAttributes(
+			attribute.Float64("cachew.snapshot.bandwidth_mbps", mbps),
+		)
 	}
 }
 
@@ -135,5 +154,29 @@ func (m *gitMetrics) recordRepackPackCount(ctx context.Context, repo, stage stri
 	m.repackPackCount.Record(ctx, float64(count), metric.WithAttributes(
 		attribute.String("repository", repo),
 		attribute.String("stage", stage),
+	))
+}
+
+// recordLFSPhase records the duration of one phase of LFS-snapshot
+// generation. Phase is one of "discover", "clone", "fetch",
+// "archive_upload". Status is "success" or "error".
+func (m *gitMetrics) recordLFSPhase(ctx context.Context, repo, phase, status string, duration time.Duration) {
+	m.lfsPhaseDuration.Record(ctx, duration.Seconds(), metric.WithAttributes(
+		attribute.String("repository", repo),
+		attribute.String("phase", phase),
+		attribute.String("status", status),
+	))
+}
+
+// recordLFSPhaseBytes records the byte size associated with one phase of
+// LFS-snapshot generation (e.g. .git/lfs total size observed after a
+// fetch).
+func (m *gitMetrics) recordLFSPhaseBytes(ctx context.Context, repo, phase string, sizeBytes int64) {
+	if sizeBytes <= 0 {
+		return
+	}
+	m.lfsPhaseBytes.Record(ctx, float64(sizeBytes), metric.WithAttributes(
+		attribute.String("repository", repo),
+		attribute.String("phase", phase),
 	))
 }
