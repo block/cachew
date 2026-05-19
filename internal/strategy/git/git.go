@@ -249,6 +249,7 @@ func (s *Strategy) SetMetadataStore(store *metadatadb.Store) {
 // TODO: bound concurrency (currently serial).
 func (s *Strategy) prewarmMostCloned(ctx context.Context) {
 	logger := logging.FromContext(ctx)
+	passStart := time.Now()
 	select {
 	case <-ctx.Done():
 		return
@@ -257,6 +258,7 @@ func (s *Strategy) prewarmMostCloned(ctx context.Context) {
 	top := s.repoCounts.TopRepos(prewarmPopularityWindowDays, s.config.PrewarmMostClonedRepos)
 	if len(top) == 0 {
 		logger.WarnContext(ctx, "prewarm-most-cloned-repos is set but the clone histogram is empty; nothing to warm")
+		s.metrics.recordPrewarmPass(ctx, "empty_histogram", time.Since(passStart))
 		return
 	}
 	logger.InfoContext(ctx, "Prewarming most-cloned repositories", "count", len(top))
@@ -265,34 +267,41 @@ func (s *Strategy) prewarmMostCloned(ctx context.Context) {
 			return
 		}
 		start := time.Now()
-		if err := s.prewarmRepo(ctx, rc.Repo); err != nil {
+		path, err := s.prewarmRepo(ctx, rc.Repo)
+		dur := time.Since(start)
+		status := "success"
+		if err != nil {
+			status = "error"
 			logger.ErrorContext(ctx, "Failed to prewarm repo",
-				"upstream", rc.Repo, "clone_count", rc.Count, "duration", time.Since(start), "error", err)
-			continue
+				"upstream", rc.Repo, "clone_count", rc.Count, "path", path, "duration", dur, "error", err)
+		} else {
+			logger.InfoContext(ctx, "Prewarmed repo",
+				"upstream", rc.Repo, "clone_count", rc.Count, "path", path, "duration", dur)
 		}
-		logger.InfoContext(ctx, "Prewarmed repo",
-			"upstream", rc.Repo, "clone_count", rc.Count, "duration", time.Since(start))
+		s.metrics.recordPrewarmRepo(ctx, path, status, dur)
 	}
+	s.metrics.recordPrewarmPass(ctx, "complete", time.Since(passStart))
 }
 
 // prewarmRepo ensures the mirror for upstreamURL exists and has been freshened
 // once. Uses FetchTimeout (not CloneTimeout) on the fetch path so a slow
 // upstream on an already-cloned mirror cannot extend startup by an hour.
-func (s *Strategy) prewarmRepo(ctx context.Context, upstreamURL string) error {
+// Returns the path taken ("fetch" or "restore") for metrics labelling.
+func (s *Strategy) prewarmRepo(ctx context.Context, upstreamURL string) (string, error) {
 	repo, err := s.cloneManager.GetOrCreate(ctx, upstreamURL)
 	if err != nil {
-		return errors.Wrapf(err, "resolve clone for %s", upstreamURL)
+		return "restore", errors.Wrapf(err, "resolve clone for %s", upstreamURL)
 	}
 	if repo.State() != gitclone.StateReady {
 		if err := s.ensureCloneReady(ctx, repo); err != nil {
-			return errors.Wrapf(err, "clone %s", upstreamURL)
+			return "restore", errors.Wrapf(err, "clone %s", upstreamURL)
 		}
-		return nil
+		return "restore", nil
 	}
 	if err := repo.FetchLenient(ctx, s.cloneManager.Config().FetchTimeout); err != nil {
-		return errors.Wrapf(err, "fetch %s", upstreamURL)
+		return "fetch", errors.Wrapf(err, "fetch %s", upstreamURL)
 	}
-	return nil
+	return "fetch", nil
 }
 
 func (s *Strategy) warmExistingRepos(ctx context.Context) error {
