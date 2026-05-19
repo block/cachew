@@ -22,6 +22,6 @@ func newSchedulerMetrics() *schedulerMetrics {
 		activeWorkers: metrics.NewMetric[metric.Int64Gauge](meter, "cachew.scheduler.active_workers", "{workers}", "Number of workers currently executing jobs"),
 		activeClones:  metrics.NewMetric[metric.Int64Gauge](meter, "cachew.scheduler.active_clones", "{jobs}", "Number of clone jobs currently executing"),
 		jobsTotal:     metrics.NewMetric[metric.Int64Counter](meter, "cachew.scheduler.jobs_total", "{jobs}", "Total number of completed scheduler jobs"),
-		jobDuration:   metrics.NewMetric[metric.Float64Histogram](meter, "cachew.scheduler.job_duration", "s", "Histogram of job durations in seconds"),
+		jobDuration:   metrics.NewHistogram(meter, "cachew.scheduler.job_duration", "s", "Histogram of job durations in seconds", metrics.LatencyBuckets()),
 	}
 }

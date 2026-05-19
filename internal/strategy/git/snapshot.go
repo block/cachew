@@ -13,6 +13,9 @@ import (
 	"time"
 
 	"github.com/alecthomas/errors"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/block/cachew/internal/cache"
 	"github.com/block/cachew/internal/gitclone"
@@ -102,9 +105,23 @@ func (s *Strategy) withSnapshotClone(ctx context.Context, repo *gitclone.Reposit
 	return fn(workDir)
 }
 
-func (s *Strategy) generateAndUploadSnapshot(ctx context.Context, repo *gitclone.Repository) error {
-	logger := logging.FromContext(ctx)
+func (s *Strategy) generateAndUploadSnapshot(ctx context.Context, repo *gitclone.Repository) (returnErr error) {
 	upstream := repo.UpstreamURL()
+	ctx, span := tracer.Start(ctx, "git.snapshot.generate",
+		trace.WithAttributes(
+			attribute.String("cachew.operation", "snapshot_generate"),
+			attribute.String("cachew.upstream", upstream),
+		),
+	)
+	defer func() {
+		if returnErr != nil {
+			span.RecordError(returnErr)
+			span.SetStatus(codes.Error, returnErr.Error())
+		}
+		span.End()
+	}()
+
+	logger := logging.FromContext(ctx)
 	start := time.Now()
 
 	logger.InfoContext(ctx, "Snapshot generation started", "upstream", upstream)
@@ -139,9 +156,23 @@ func (s *Strategy) generateAndUploadSnapshot(ctx context.Context, repo *gitclone
 // restored directly as a mirror without any conversion. This is used for
 // pod-to-pod bootstrap: a new cachew pod restores the mirror snapshot and
 // is immediately ready to serve, with background fetch handling freshening.
-func (s *Strategy) generateAndUploadMirrorSnapshot(ctx context.Context, repo *gitclone.Repository) error {
-	logger := logging.FromContext(ctx)
+func (s *Strategy) generateAndUploadMirrorSnapshot(ctx context.Context, repo *gitclone.Repository) (returnErr error) {
 	upstream := repo.UpstreamURL()
+	ctx, span := tracer.Start(ctx, "git.snapshot.generate_mirror",
+		trace.WithAttributes(
+			attribute.String("cachew.operation", "mirror_snapshot_generate"),
+			attribute.String("cachew.upstream", upstream),
+		),
+	)
+	defer func() {
+		if returnErr != nil {
+			span.RecordError(returnErr)
+			span.SetStatus(codes.Error, returnErr.Error())
+		}
+		span.End()
+	}()
+
+	logger := logging.FromContext(ctx)
 
 	logger.InfoContext(ctx, "Mirror snapshot generation started", "upstream", upstream)
 
@@ -188,13 +219,22 @@ func (s *Strategy) snapshotMutexFor(upstreamURL string) *sync.Mutex {
 	return mu.(*sync.Mutex)
 }
 
-func (s *Strategy) handleSnapshotRequest(w http.ResponseWriter, r *http.Request, host, pathValue string) {
-	ctx := r.Context()
-	logger := logging.FromContext(ctx)
-
+func (s *Strategy) handleSnapshotRequest(w http.ResponseWriter, r *http.Request, host, pathValue string) { //nolint:funlen
+	start := time.Now()
 	repoPath := ExtractRepoPath(strings.TrimSuffix(pathValue, "/snapshot.tar.zst"))
 	upstreamURL := "https://" + host + "/" + repoPath
 	repoName := host + "/" + repoPath
+
+	ctx, span := tracer.Start(r.Context(), "git.snapshot.serve",
+		trace.WithAttributes(
+			attribute.String("cachew.operation", "snapshot_serve"),
+			attribute.String("cachew.upstream", upstreamURL),
+			attribute.String("cachew.repository", repoName),
+		),
+	)
+	defer span.End()
+	r = r.WithContext(ctx)
+	logger := logging.FromContext(ctx)
 
 	repo, repoErr := s.cloneManager.GetOrCreate(ctx, upstreamURL)
 	if repoErr != nil {
@@ -224,9 +264,12 @@ func (s *Strategy) handleSnapshotRequest(w http.ResponseWriter, r *http.Request,
 				logger.InfoContext(ctx, "Serving locally cached snapshot after waiting for in-flight fill", "upstream", upstreamURL)
 				w.Header().Set("Content-Type", "application/zstd")
 				n, err := serveReaderFast(w, r, reader)
-				s.metrics.recordSnapshotServe(ctx, "cold_cache", repoName, n)
+				s.metrics.recordSnapshotServe(ctx, "cold_cache", repoName, n, time.Since(start))
+				span.SetAttributes(attribute.String("cachew.source", "cold_cache"), attribute.Int64("cachew.bytes", n))
 				if err != nil {
 					logger.WarnContext(ctx, "Failed to stream locally cached snapshot", "upstream", upstreamURL, "error", err)
+					span.RecordError(err)
+					span.SetStatus(codes.Error, err.Error())
 				}
 				return
 			}
@@ -240,9 +283,12 @@ func (s *Strategy) handleSnapshotRequest(w http.ResponseWriter, r *http.Request,
 				logger.InfoContext(ctx, "Serving cached snapshot while mirror warms up", "upstream", upstreamURL)
 				w.Header().Set("Content-Type", "application/zstd")
 				n, err := serveReaderFast(w, r, reader)
-				s.metrics.recordSnapshotServe(ctx, "cold_cache", repoName, n)
+				s.metrics.recordSnapshotServe(ctx, "cold_cache", repoName, n, time.Since(start))
+				span.SetAttributes(attribute.String("cachew.source", "cold_cache"), attribute.Int64("cachew.bytes", n))
 				if err != nil {
 					logger.WarnContext(ctx, "Failed to stream cached snapshot", "upstream", upstreamURL, "error", err)
+					span.RecordError(err)
+					span.SetStatus(codes.Error, err.Error())
 				}
 				_ = reader.Close()
 				s.scheduleDeferredMirrorRestore(ctx, repo, entry)
@@ -271,15 +317,19 @@ func (s *Strategy) handleSnapshotRequest(w http.ResponseWriter, r *http.Request,
 	}
 
 	if reader == nil {
-		if err := s.serveSnapshotWithSpool(w, r, repo, upstreamURL, repoName); err != nil {
+		if err := s.serveSnapshotWithSpool(w, r, repo, upstreamURL, repoName, start); err != nil {
 			logger.ErrorContext(ctx, "Failed to serve snapshot via spool", "upstream", upstreamURL, "error", err)
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
 		}
 		return
 	}
 	defer reader.Close()
 
-	if err := s.serveSnapshotWithBundle(ctx, w, r, reader, headers, repo, upstreamURL, repoName); err != nil {
+	if err := s.serveSnapshotWithBundle(ctx, w, r, reader, headers, repo, upstreamURL, repoName, start); err != nil {
 		logger.ErrorContext(ctx, "Failed to serve snapshot", "upstream", upstreamURL, "error", err)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 	}
 }
 
@@ -314,27 +364,50 @@ func serveReaderFast(w http.ResponseWriter, r *http.Request, reader io.Reader) (
 	return n, errors.Wrap(err, "copy to response")
 }
 
-func (s *Strategy) handleBundleRequest(w http.ResponseWriter, r *http.Request, host, pathValue string) {
-	ctx := r.Context()
-	logger := logging.FromContext(ctx)
-
+func (s *Strategy) handleBundleRequest(w http.ResponseWriter, r *http.Request, host, pathValue string) { //nolint:funlen
+	start := time.Now()
 	repoPath := ExtractRepoPath(strings.TrimSuffix(pathValue, "/snapshot.bundle"))
 	upstreamURL := "https://" + host + "/" + repoPath
+	repoName := host + "/" + repoPath
+
+	ctx, span := tracer.Start(r.Context(), "git.bundle.serve",
+		trace.WithAttributes(
+			attribute.String("cachew.operation", "bundle_serve"),
+			attribute.String("cachew.upstream", upstreamURL),
+			attribute.String("cachew.repository", repoName),
+		),
+	)
+	defer span.End()
+	logger := logging.FromContext(ctx)
 
 	base := r.URL.Query().Get("base")
 	if base == "" {
 		http.Error(w, "missing base query parameter", http.StatusBadRequest)
+		span.SetAttributes(attribute.String("cachew.source", "bad_request"))
 		return
 	}
+	span.SetAttributes(attribute.String("cachew.base_commit", base))
 
 	bKey := bundleCacheKey(upstreamURL, base)
+
+	// Source and bytes are recorded by the deferred metric call.
+	source := "miss"
+	var bytes int64
+	defer func() {
+		span.SetAttributes(attribute.String("cachew.source", source), attribute.Int64("cachew.bytes", bytes))
+		s.metrics.recordBundleServe(ctx, source, repoName, bytes, time.Since(start))
+	}()
 
 	// Try serving from cache first — works on any pod.
 	if reader, _, err := s.cache.Open(ctx, bKey); err == nil && reader != nil {
 		defer reader.Close()
 		w.Header().Set("Content-Type", "application/x-git-bundle")
-		if _, err := io.Copy(w, reader); err != nil {
+		n, err := io.Copy(w, reader)
+		bytes = n
+		source = "cache"
+		if err != nil {
 			logger.WarnContext(ctx, "Failed to stream cached bundle", "upstream", upstreamURL, "error", err)
+			span.RecordError(err)
 		}
 		return
 	}
@@ -344,11 +417,15 @@ func (s *Strategy) handleBundleRequest(w http.ResponseWriter, r *http.Request, h
 	if repoErr != nil {
 		logger.ErrorContext(ctx, "Failed to get or create clone", "upstream", upstreamURL, "error", repoErr)
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		span.RecordError(repoErr)
+		span.SetStatus(codes.Error, repoErr.Error())
 		return
 	}
 	if cloneErr := s.ensureCloneReady(ctx, repo); cloneErr != nil {
 		logger.ErrorContext(ctx, "Clone unavailable for bundle", "upstream", upstreamURL, "error", cloneErr)
 		http.Error(w, "Repository unavailable", http.StatusServiceUnavailable)
+		span.RecordError(cloneErr)
+		span.SetStatus(codes.Error, cloneErr.Error())
 		return
 	}
 
@@ -356,6 +433,7 @@ func (s *Strategy) handleBundleRequest(w http.ResponseWriter, r *http.Request, h
 	if err != nil {
 		logger.WarnContext(ctx, "Failed to create bundle", "upstream", upstreamURL, "base", base, "error", err)
 		http.Error(w, "Bundle not available", http.StatusNotFound)
+		span.RecordError(err)
 		return
 	}
 	defer bundleFile.Close()
@@ -368,14 +446,22 @@ func (s *Strategy) handleBundleRequest(w http.ResponseWriter, r *http.Request, h
 	wc, cacheErr := s.cache.Create(ctx, bKey, http.Header{"Content-Type": {"application/x-git-bundle"}}, s.config.BundleCacheTTL)
 	if cacheErr != nil {
 		logger.WarnContext(ctx, "Failed to create bundle cache writer", "upstream", upstreamURL, "error", cacheErr)
-		if _, err := io.Copy(w, bundleFile); err != nil {
+		n, err := io.Copy(w, bundleFile)
+		bytes = n
+		source = "generated"
+		if err != nil {
 			logger.WarnContext(ctx, "Failed to stream bundle", "upstream", upstreamURL, "error", err)
+			span.RecordError(err)
 		}
 		return
 	}
-	if _, err := io.Copy(io.MultiWriter(w, wc), bundleFile); err != nil {
-		logger.WarnContext(ctx, "Failed to stream bundle", "upstream", upstreamURL, "error", err)
-		if abortErr := wc.Abort(err); abortErr != nil {
+	n, copyErr := io.Copy(io.MultiWriter(w, wc), bundleFile)
+	bytes = n
+	source = "generated"
+	if copyErr != nil {
+		logger.WarnContext(ctx, "Failed to stream bundle", "upstream", upstreamURL, "error", copyErr)
+		span.RecordError(copyErr)
+		if abortErr := wc.Abort(copyErr); abortErr != nil {
 			logger.WarnContext(ctx, "Failed to abort bundle cache writer", "upstream", upstreamURL, "error", abortErr)
 		}
 		return
@@ -385,7 +471,7 @@ func (s *Strategy) handleBundleRequest(w http.ResponseWriter, r *http.Request, h
 	}
 }
 
-func (s *Strategy) serveSnapshotWithBundle(ctx context.Context, w http.ResponseWriter, r *http.Request, reader io.ReadCloser, headers http.Header, repo *gitclone.Repository, upstreamURL, repoName string) error {
+func (s *Strategy) serveSnapshotWithBundle(ctx context.Context, w http.ResponseWriter, r *http.Request, reader io.ReadCloser, headers http.Header, repo *gitclone.Repository, upstreamURL, repoName string, start time.Time) error {
 	snapshotCommit := headers.Get("X-Cachew-Snapshot-Commit")
 	mirrorHead := s.getMirrorHead(ctx, repo)
 
@@ -420,7 +506,10 @@ func (s *Strategy) serveSnapshotWithBundle(ctx context.Context, w http.ResponseW
 
 	w.Header().Set("Content-Type", "application/zstd")
 	n, err := serveReaderFast(w, r, reader)
-	s.metrics.recordSnapshotServe(ctx, "cache", repoName, n)
+	s.metrics.recordSnapshotServe(ctx, "cache", repoName, n, time.Since(start))
+	if span := trace.SpanFromContext(ctx); span.SpanContext().IsValid() {
+		span.SetAttributes(attribute.String("cachew.source", "cache"), attribute.Int64("cachew.bytes", n))
+	}
 	return errors.Wrap(err, "stream snapshot")
 }
 
@@ -500,7 +589,7 @@ func (s *Strategy) createBundle(ctx context.Context, repo *gitclone.Repository, 
 // mirror, streams tar+zstd to both the HTTP client and a spool file, then
 // triggers a background cache backfill. Concurrent requests for the same URL
 // become readers that follow the spool, avoiding redundant clone+tar work.
-func (s *Strategy) serveSnapshotWithSpool(w http.ResponseWriter, r *http.Request, repo *gitclone.Repository, upstreamURL, repoName string) error {
+func (s *Strategy) serveSnapshotWithSpool(w http.ResponseWriter, r *http.Request, repo *gitclone.Repository, upstreamURL, repoName string, start time.Time) error {
 	ctx := r.Context()
 	logger := logging.FromContext(ctx)
 
@@ -511,26 +600,39 @@ func (s *Strategy) serveSnapshotWithSpool(w http.ResponseWriter, r *http.Request
 	entry := &snapshotSpoolEntry{ready: make(chan struct{})}
 	if existing, loaded := s.snapshotSpools.LoadOrStore(upstreamURL, entry); loaded {
 		winner := existing.(*snapshotSpoolEntry)
+		waitStart := time.Now()
 		<-winner.ready
+		wait := time.Since(waitStart)
 		if spool := winner.spool; spool != nil && !spool.Failed() {
-			logger.DebugContext(ctx, "Serving snapshot from spool", "upstream", upstreamURL)
+			logger.DebugContext(ctx, "Serving snapshot from spool", "upstream", upstreamURL, "wait", wait)
 			if err := spool.ServeTo(w); err != nil {
 				if errors.Is(err, ErrSpoolFailed) {
 					logger.DebugContext(ctx, "Snapshot spool failed before headers, falling back to direct stream", "upstream", upstreamURL)
+					s.metrics.recordSpoolFollowerWait(ctx, repoName, "writer_failed", wait)
 					return s.streamSnapshotDirect(w, r, repo)
 				}
+				s.metrics.recordSpoolFollowerWait(ctx, repoName, "read_error", wait)
 				return errors.Wrap(err, "snapshot spool read")
 			}
-			s.metrics.recordSnapshotServe(ctx, "spool", repoName, spool.Written())
+			s.metrics.recordSpoolFollowerWait(ctx, repoName, "served", wait)
+			s.metrics.recordSnapshotServe(ctx, "spool", repoName, spool.Written(), time.Since(start))
+			if span := trace.SpanFromContext(ctx); span.SpanContext().IsValid() {
+				span.SetAttributes(attribute.String("cachew.source", "spool"), attribute.Int64("cachew.bytes", spool.Written()),
+					attribute.Float64("cachew.spool_wait_seconds", wait.Seconds()))
+			}
 			return nil
 		}
 		// Writer failed; fall through to generate independently.
+		s.metrics.recordSpoolFollowerWait(ctx, repoName, "writer_failed", wait)
 		return s.streamSnapshotDirect(w, r, repo)
 	}
 
-	err := s.writeSnapshotSpool(w, r, repo, upstreamURL, entry)
+	err := s.writeSnapshotSpool(w, r, repo, upstreamURL, repoName, entry)
 	if err == nil {
-		s.metrics.recordSnapshotServe(ctx, "generated", repoName, entry.spool.Written())
+		s.metrics.recordSnapshotServe(ctx, "generated", repoName, entry.spool.Written(), time.Since(start))
+		if span := trace.SpanFromContext(ctx); span.SpanContext().IsValid() {
+			span.SetAttributes(attribute.String("cachew.source", "generated"), attribute.Int64("cachew.bytes", entry.spool.Written()))
+		}
 	}
 	return err
 }
@@ -602,12 +704,14 @@ func (s *Strategy) prepareSnapshotSpool(ctx context.Context, repo *gitclone.Repo
 // writeSnapshotSpool is the writer path for snapshot spooling. It creates a
 // spool, clones the mirror, streams the tar+zstd output through a SpoolTeeWriter,
 // and triggers a background cache backfill.
-func (s *Strategy) writeSnapshotSpool(w http.ResponseWriter, r *http.Request, repo *gitclone.Repository, upstreamURL string, entry *snapshotSpoolEntry) error {
+func (s *Strategy) writeSnapshotSpool(w http.ResponseWriter, r *http.Request, repo *gitclone.Repository, upstreamURL, repoName string, entry *snapshotSpoolEntry) error {
 	ctx := r.Context()
 	logger := logging.FromContext(ctx)
 
+	writerStart := time.Now()
 	spool, spoolDir, repoDir, err := s.prepareSnapshotSpool(ctx, repo, upstreamURL, entry)
 	if err != nil {
+		s.metrics.recordSpoolWriter(ctx, repoName, "prepare_error", time.Since(writerStart))
 		return errors.Wrap(err, "prepare snapshot spool")
 	}
 	snapshotDir := filepath.Dir(repoDir)
@@ -619,8 +723,10 @@ func (s *Strategy) writeSnapshotSpool(w http.ResponseWriter, r *http.Request, re
 	streamErr := snapshot.StreamTo(ctx, tw, repoDir, nil, s.config.ZstdThreads)
 	if streamErr != nil {
 		spool.MarkError(streamErr)
+		s.metrics.recordSpoolWriter(ctx, repoName, "error", time.Since(writerStart))
 	} else {
 		spool.MarkComplete()
+		s.metrics.recordSpoolWriter(ctx, repoName, "success", time.Since(writerStart))
 	}
 
 	go func() {
@@ -744,9 +850,23 @@ func snapshotSpoolDirForURL(mirrorRoot, upstreamURL string) (string, error) {
 //
 // The archive stores paths relative to .git/ (e.g. ./lfs/objects/xx/yy/sha256) so that
 // the client can extract it directly into the repo's .git/ directory.
-func (s *Strategy) generateAndUploadLFSSnapshot(ctx context.Context, repo *gitclone.Repository) error {
-	logger := logging.FromContext(ctx)
+func (s *Strategy) generateAndUploadLFSSnapshot(ctx context.Context, repo *gitclone.Repository) (returnErr error) {
 	upstream := repo.UpstreamURL()
+	ctx, span := tracer.Start(ctx, "git.snapshot.generate_lfs",
+		trace.WithAttributes(
+			attribute.String("cachew.operation", "lfs_snapshot_generate"),
+			attribute.String("cachew.upstream", upstream),
+		),
+	)
+	defer func() {
+		if returnErr != nil {
+			span.RecordError(returnErr)
+			span.SetStatus(codes.Error, returnErr.Error())
+		}
+		span.End()
+	}()
+
+	logger := logging.FromContext(ctx)
 
 	// Check if any .gitattributes file at HEAD declares filter=lfs. This searches
 	// the root and all nested .gitattributes, avoiding false negatives for repos
