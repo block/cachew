@@ -61,7 +61,13 @@ func Extract(ctx context.Context, r io.Reader, directory string, threads int) er
 		return errors.Wrap(err, "failed to create target directory")
 	}
 
-	zstdCmd := exec.CommandContext(ctx, "zstd", "-dc", fmt.Sprintf("-T%d", threads)) //nolint:gosec
+	// Decompress with pzstd to parallelize across cores. `zstd -d -T<N>`
+	// silently ignores -T for decompression (it only multi-threads on the
+	// compress side and prints a "decompression does not support
+	// multi-threading" warning); pzstd actually decompresses concurrently
+	// when the stream has skippable frames, which is the case for any
+	// archive produced by runTarZstdPipeline below.
+	zstdCmd := exec.CommandContext(ctx, "pzstd", "-dc", fmt.Sprintf("-p%d", threads)) //nolint:gosec
 	tarCmd := exec.CommandContext(ctx, "tar", "-xpf", "-", "-C", directory)
 
 	pr, pw, err := os.Pipe()
@@ -95,7 +101,7 @@ func Extract(ctx context.Context, r io.Reader, directory string, threads int) er
 
 	var errs []error
 	if zstdErr != nil {
-		errs = append(errs, errors.Errorf("zstd failed: %w: %s", zstdErr, zstdStderr.String()))
+		errs = append(errs, errors.Errorf("pzstd failed: %w: %s", zstdErr, zstdStderr.String()))
 	}
 	if tarErr != nil {
 		errs = append(errs, errors.Errorf("tar failed: %w: %s", tarErr, tarStderr.String()))
