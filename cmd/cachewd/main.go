@@ -141,6 +141,8 @@ func main() {
 		fatalIfError(ctx, logger, err, "Failed to start metrics server")
 	}
 
+	runOPATests(ctx, logger, globalConfig.OPAConfig)
+
 	logger.InfoContext(ctx, "Starting cachewd", "bind", globalConfig.Bind)
 
 	server, err := newServer(
@@ -317,6 +319,15 @@ func newMux(ctx context.Context, shuttingDown *atomic.Bool, cr *cache.Registry, 
 	readiers = loaded
 
 	return handler, nil
+}
+
+// runOPATests executes the configured OPA policy tests at startup, exiting if any fail.
+func runOPATests(ctx context.Context, logger *slog.Logger, cfg opa.Config) {
+	passed, err := opa.RunTests(ctx, cfg)
+	fatalIfError(ctx, logger, err, "OPA tests failed")
+	if passed > 0 {
+		logger.InfoContext(ctx, "OPA tests passed", "count", passed)
+	}
 }
 
 func fatalIfError(ctx context.Context, logger *slog.Logger, err error, msg string) {

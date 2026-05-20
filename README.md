@@ -168,6 +168,27 @@ opa {
 
 **Input fields:** `input.method`, `input.path` (string array), `input.headers`, `input.remote_addr` (includes port — use `startswith` to match by IP).
 
+### Testing policies
+
+The `test` field holds a Rego test module that is run against the policy when `cachewd` starts. Any rule prefixed with `test_` is executed; if a test fails, `cachewd` exits.
+
+```hcl
+opa {
+  policy = <<EOF
+    package cachew.authz
+    default allow := false
+    allow if input.method == "POST"
+  EOF
+  test = <<EOF
+    package cachew.authz_test
+    import data.cachew.authz
+
+    test_post_allowed if authz.allow with input as {"method": "POST"}
+    test_get_denied if not authz.allow with input as {"method": "GET"}
+  EOF
+}
+```
+
 ## GitHub App Authentication
 
 For private Git repositories and GitHub release assets, configure a GitHub App:

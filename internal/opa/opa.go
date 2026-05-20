@@ -4,12 +4,16 @@ package opa
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"strings"
 
 	"github.com/alecthomas/errors"
+	"github.com/open-policy-agent/opa/v1/ast"
 	"github.com/open-policy-agent/opa/v1/rego"
+	"github.com/open-policy-agent/opa/v1/storage/inmem"
+	"github.com/open-policy-agent/opa/v1/tester"
 
 	"github.com/block/cachew/internal/logging"
 )
@@ -29,6 +33,7 @@ type Config struct {
 	PolicyFile string `hcl:"policy-file,optional" help:"Path to a Rego policy file."`
 	Data       string `hcl:"data,optional" help:"Inline JSON object loaded as OPA data.*"`
 	DataFile   string `hcl:"data-file,optional" help:"Path to a JSON file loaded as OPA data.*"`
+	Test       string `hcl:"test,optional" help:"Inline Rego test module run against the policy when cachewd starts."`
 }
 
 // Middleware returns an http.Handler that evaluates OPA policy before delegating to next.
@@ -68,6 +73,71 @@ func Middleware(ctx context.Context, cfg Config, next http.Handler) (http.Handle
 
 		next.ServeHTTP(w, r)
 	}), nil
+}
+
+// RunTests compiles the configured policy together with the Rego test module in
+// cfg.Test and executes every test_* rule. It returns the number of tests that
+// passed and an error enumerating any that failed or errored. When cfg.Test is
+// empty it is a no-op. The policy under test is loaded the same way as
+// Middleware, so an empty policy config exercises DefaultPolicy.
+func RunTests(ctx context.Context, cfg Config) (int, error) {
+	if cfg.Test == "" {
+		return 0, nil
+	}
+
+	policy, err := loadPolicy(cfg)
+	if err != nil {
+		return 0, err
+	}
+	modules, err := parseTestModules(policy, cfg.Test)
+	if err != nil {
+		return 0, err
+	}
+
+	runner := tester.NewRunner().SetModules(modules)
+	if cfg.Data != "" || cfg.DataFile != "" {
+		opaData, err := loadData(cfg)
+		if err != nil {
+			return 0, err
+		}
+		runner = runner.SetStore(inmem.NewFromObject(opaData))
+	}
+
+	ch, err := runner.RunTests(ctx, nil)
+	if err != nil {
+		return 0, errors.Errorf("run OPA tests: %w", err)
+	}
+
+	passed := 0
+	var failures []string
+	for result := range ch {
+		switch {
+		case result.Pass():
+			passed++
+		case result.Skip:
+		case result.Error != nil:
+			failures = append(failures, fmt.Sprintf("%s.%s: %v", result.Package, result.Name, result.Error))
+		default:
+			failures = append(failures, fmt.Sprintf("%s.%s: failed", result.Package, result.Name))
+		}
+	}
+	if len(failures) > 0 {
+		return passed, errors.Errorf("OPA tests failed: %s", strings.Join(failures, "; "))
+	}
+	return passed, nil
+}
+
+// parseTestModules parses the policy and test Rego sources into modules keyed by filename.
+func parseTestModules(policy, test string) (map[string]*ast.Module, error) {
+	policyModule, err := ast.ParseModule("policy.rego", policy)
+	if err != nil {
+		return nil, errors.Errorf("parse OPA policy: %w", err)
+	}
+	testModule, err := ast.ParseModule("test.rego", test)
+	if err != nil {
+		return nil, errors.Errorf("parse OPA test: %w", err)
+	}
+	return map[string]*ast.Module{"policy.rego": policyModule, "test.rego": testModule}, nil
 }
 
 // prepareQuery compiles a single Rego query against the given policy and data options.
