@@ -105,6 +105,7 @@ func (s *Strategy) handleEnsureRefs(w http.ResponseWriter, r *http.Request, host
 		span.SetStatus(codes.Error, err.Error())
 		return
 	}
+	s.touchRepo(repo)
 
 	if repo.State() != gitclone.StateReady {
 		if err := s.ensureCloneReady(ctx, repo); err != nil {

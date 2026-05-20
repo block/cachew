@@ -201,17 +201,17 @@ func (s *Strategy) generateAndUploadMirrorSnapshot(ctx context.Context, repo *gi
 func (s *Strategy) scheduleSnapshotJobs(repo *gitclone.Repository) {
 	s.scheduler.SubmitPeriodicJob(repo.UpstreamURL(), "snapshot-periodic", s.config.SnapshotInterval, func(ctx context.Context) error {
 		return s.generateAndUploadSnapshot(ctx, repo)
-	})
+	}, s.config.IdleTimeout)
 	s.scheduler.SubmitPeriodicJob(repo.UpstreamURL(), "lfs-snapshot-periodic", s.config.SnapshotInterval, func(ctx context.Context) error {
 		return s.generateAndUploadLFSSnapshot(ctx, repo)
-	})
+	}, s.config.IdleTimeout)
 	mirrorInterval := s.config.MirrorSnapshotInterval
 	if mirrorInterval == 0 {
 		mirrorInterval = s.config.SnapshotInterval
 	}
 	s.scheduler.SubmitPeriodicJob(repo.UpstreamURL(), "mirror-snapshot-periodic", mirrorInterval, func(ctx context.Context) error {
 		return s.generateAndUploadMirrorSnapshot(ctx, repo)
-	})
+	}, s.config.IdleTimeout)
 }
 
 func (s *Strategy) snapshotMutexFor(upstreamURL string) *sync.Mutex {
@@ -242,6 +242,7 @@ func (s *Strategy) handleSnapshotRequest(w http.ResponseWriter, r *http.Request,
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
+	s.touchRepo(repo)
 
 	cacheKey := snapshotCacheKey(upstreamURL)
 
@@ -421,6 +422,7 @@ func (s *Strategy) handleBundleRequest(w http.ResponseWriter, r *http.Request, h
 		span.SetStatus(codes.Error, repoErr.Error())
 		return
 	}
+	s.touchRepo(repo)
 	if cloneErr := s.ensureCloneReady(ctx, repo); cloneErr != nil {
 		logger.ErrorContext(ctx, "Clone unavailable for bundle", "upstream", upstreamURL, "error", cloneErr)
 		http.Error(w, "Repository unavailable", http.StatusServiceUnavailable)
@@ -1014,13 +1016,16 @@ func (s *Strategy) handleLFSSnapshotRequest(w http.ResponseWriter, r *http.Reque
 	// restore + on-demand generation. Kick off a background mirror warm so
 	// the periodic LFS snapshot job can fire once the mirror is ready.
 	logger.InfoContext(ctx, "LFS snapshot cache miss, triggering background warm", "upstream", upstreamURL)
-	if repo, repoErr := s.cloneManager.GetOrCreate(ctx, upstreamURL); repoErr == nil && repo.State() != gitclone.StateReady {
-		s.scheduler.Submit(upstreamURL, "lfs-mirror-warm", func(ctx context.Context) error {
-			if err := s.startClone(ctx, repo); err != nil {
-				logger.WarnContext(ctx, "Background mirror warm for LFS failed", "upstream", upstreamURL, "error", err)
-			}
-			return nil
-		})
+	if repo, repoErr := s.cloneManager.GetOrCreate(ctx, upstreamURL); repoErr == nil {
+		s.touchRepo(repo)
+		if repo.State() != gitclone.StateReady {
+			s.scheduler.Submit(upstreamURL, "lfs-mirror-warm", func(ctx context.Context) error {
+				if err := s.startClone(ctx, repo); err != nil {
+					logger.WarnContext(ctx, "Background mirror warm for LFS failed", "upstream", upstreamURL, "error", err)
+				}
+				return nil
+			})
+		}
 	}
 	http.Error(w, "LFS snapshot not found", http.StatusNotFound)
 }
