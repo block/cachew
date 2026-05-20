@@ -275,6 +275,96 @@ allow if input.headers["authorization"]
 	assert.Equal(t, http.StatusOK, w.Code)
 }
 
+func TestRunTests(t *testing.T) {
+	tests := []struct {
+		Name        string
+		Config      opa.Config
+		ExpectError bool
+		ExpectPass  int
+	}{
+		{
+			Name:   "NoTestIsNoOp",
+			Config: opa.Config{},
+		},
+		{
+			Name: "PassingTestsAgainstInlinePolicy",
+			Config: opa.Config{
+				Policy: `package cachew.authz
+default allow := false
+allow if input.method == "POST"
+`,
+				Test: `package cachew.authz_test
+import data.cachew.authz
+
+test_post_allowed if authz.allow with input as {"method": "POST"}
+test_get_denied if not authz.allow with input as {"method": "GET"}
+`,
+			},
+			ExpectPass: 2,
+		},
+		{
+			Name: "FailingTest",
+			Config: opa.Config{
+				Policy: `package cachew.authz
+default allow := false
+allow if input.method == "POST"
+`,
+				Test: `package cachew.authz_test
+import data.cachew.authz
+
+test_get_allowed if authz.allow with input as {"method": "GET"}
+`,
+			},
+			ExpectError: true,
+		},
+		{
+			Name: "TestsAgainstDefaultPolicy",
+			Config: opa.Config{
+				Test: `package cachew.authz_test
+import data.cachew.authz
+
+test_localhost_allowed if authz.allow with input as {"remote_addr": "127.0.0.1:1", "path": ["api"]}
+test_remote_admin_denied if not authz.allow with input as {"remote_addr": "10.0.0.1:1", "path": ["admin"]}
+`,
+			},
+			ExpectPass: 2,
+		},
+		{
+			Name: "TestsWithData",
+			Config: opa.Config{
+				Policy: `package cachew.authz
+default allow := false
+allow if data.allowed_methods[input.method]
+`,
+				Data: `{"allowed_methods": {"DELETE": true}}`,
+				Test: `package cachew.authz_test
+import data.cachew.authz
+
+test_delete_allowed if authz.allow with input as {"method": "DELETE"}
+`,
+			},
+			ExpectPass: 1,
+		},
+		{
+			Name:        "InvalidTestModule",
+			Config:      opa.Config{Test: "not valid rego {"},
+			ExpectError: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.Name, func(t *testing.T) {
+			passed, err := opa.RunTests(t.Context(), test.Config)
+			if test.ExpectError {
+				assert.Error(t, err)
+				return
+			}
+			assert.NoError(t, err)
+			assert.Equal(t, test.ExpectPass, passed)
+		})
+	}
+}
+
 func TestMiddlewareEmptyPolicyDeniesAll(t *testing.T) {
 	policy := `package cachew.authz
 `
