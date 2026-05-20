@@ -240,6 +240,7 @@ func newRegistries(
 	metadatadb.RegisterS3(mr, s3ClientProvider)
 
 	sr := strategy.NewRegistry()
+	strategy.RegisterAndroidSDK(sr)
 	strategy.RegisterAPIV1(sr)
 	strategy.RegisterArtifactory(sr)
 	strategy.RegisterGitHubReleases(sr, tokenManagerProvider)
