@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/alecthomas/errors"
@@ -926,6 +927,13 @@ func (s *Strategy) generateAndUploadLFSSnapshot(ctx context.Context, repo *gitcl
 			cancel()
 			s.metrics.recordLFSPhase(ctx, upstream, "fetch", "error", time.Since(fetchStart))
 			return errors.Wrap(err, "create git lfs fetch command")
+		}
+		// Run in its own process group so the cancel below kills the whole
+		// tree — git-lfs spawns transfer helpers that inherit our pipes and
+		// can keep CombinedOutput blocked after the parent dies.
+		fetchCmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		fetchCmd.Cancel = func() error {
+			return syscall.Kill(-fetchCmd.Process.Pid, syscall.SIGKILL)
 		}
 		output, fetchErr := fetchCmd.CombinedOutput()
 		cancel()
