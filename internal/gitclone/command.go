@@ -51,7 +51,14 @@ func (r *Repository) GitCommand(ctx context.Context, args ...string) (*exec.Cmd,
 			// rewrite of credFile by the refresh goroutine is picked up on
 			// the next git-lfs retry — which is the whole point: long-running
 			// subprocesses can't otherwise observe a token rotation.
-			allArgs = append(allArgs, "-c", "credential.helper=!cat "+shellSingleQuote(credFile))
+			//
+			// Git appends the operation (`get`/`store`/`erase`) as a positional
+			// argument to the helper command. The function form here both gates
+			// on `get` and absorbs the argument, so a bare `cat <credfile>`
+			// can't be tricked into also reading a file named `get`/`store`/
+			// `erase` from the worktree.
+			allArgs = append(allArgs, "-c",
+				"credential.helper=!f() { test \"$1\" = get && cat "+shellSingleQuote(credFile)+"; }; f")
 		}
 	}
 

@@ -4,6 +4,8 @@ import (
 	"context"
 	"log/slog"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -233,6 +235,50 @@ func TestGitCommand_RefreshGoroutineUpdatesFile(t *testing.T) {
 	assert.Equal(t, "ghs_rotated", next2)
 }
 
+// TestGitCommand_HelperIgnoresHostileGetFile guards a real exploit: git
+// appends the credential operation (get/store/erase) as a positional
+// argument to `!`-prefixed helpers, so a bare `cat <credfile>` would also
+// `cat get` from the worktree and let a file named `get` override our token.
+// The helper must absorb that argument; this test exercises the full
+// invocation path through `git credential fill` to prove it does.
+func TestGitCommand_HelperIgnoresHostileGetFile(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+
+	repo := &Repository{
+		upstreamURL: "https://github.com/user/repo",
+		credentialProvider: &mockCredentialProvider{
+			token: "REAL_TOKEN",
+		},
+	}
+	cmd, cleanup, err := repo.GitCommand(testContext(t), "version")
+	assert.NoError(t, err)
+	t.Cleanup(cleanup)
+
+	helperArg := findCredentialHelperArg(cmd.Args)
+	assert.NotEqual(t, "", helperArg)
+
+	workDir := t.TempDir()
+	for _, op := range []string{"get", "store", "erase"} {
+		assert.NoError(t, os.WriteFile(filepath.Join(workDir, op),
+			[]byte("password=EVIL_TOKEN_VIA_"+op+"\n"), 0o600))
+	}
+
+	gitCmd := exec.Command("git", "-C", workDir,
+		"-c", "credential.helper=", // clear any inherited helpers
+		"-c", "credential.helper="+helperArg,
+		"credential", "fill",
+	)
+	gitCmd.Stdin = strings.NewReader("url=https://github.com/x/y\n\n")
+	out, err := gitCmd.Output()
+	assert.NoError(t, err)
+	assert.True(t, strings.Contains(string(out), "password=REAL_TOKEN\n"),
+		"expected REAL_TOKEN in helper output, got: %s", out)
+	assert.False(t, strings.Contains(string(out), "EVIL_TOKEN"),
+		"helper output must not include any worktree file content: %s", out)
+}
+
 // TestWriteCredentialFile_Atomic guards against the git credential helper
 // observing a half-written file while the refresh goroutine is rotating it.
 func TestWriteCredentialFile_Atomic(t *testing.T) {
@@ -292,8 +338,8 @@ func findCredentialHelperArg(args []string) string {
 
 func credentialFilePathFromHelper(t *testing.T, helper string) string {
 	t.Helper()
-	const prefix = "!cat '"
-	const suffix = "'"
+	const prefix = `!f() { test "$1" = get && cat '`
+	const suffix = `'; }; f`
 	assert.True(t, strings.HasPrefix(helper, prefix), "unexpected helper format: %q", helper)
 	assert.True(t, strings.HasSuffix(helper, suffix), "unexpected helper format: %q", helper)
 	path := strings.TrimSuffix(strings.TrimPrefix(helper, prefix), suffix)
