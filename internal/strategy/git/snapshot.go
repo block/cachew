@@ -918,16 +918,19 @@ func (s *Strategy) generateAndUploadLFSSnapshot(ctx context.Context, repo *gitcl
 		fetchStart := time.Now()
 		// fetchCleanup keeps the credential file refresh goroutine alive for
 		// the full fetch — these can exceed the GitHub App token's 1 h TTL on
-		// large LFS repos.
+		// large LFS repos. We tear it down as soon as the subprocess returns
+		// so the token file doesn't outlive the command it's scoped to (the
+		// subsequent archive upload runs against the local cache, not GitHub).
 		fetchCmd, fetchCleanup, err := repo.GitCommand(ctx, "-C", workDir, "lfs", "fetch", "origin", "HEAD")
 		if err != nil {
 			s.metrics.recordLFSPhase(ctx, upstream, "fetch", "error", time.Since(fetchStart))
 			return errors.Wrap(err, "create git lfs fetch command")
 		}
-		defer fetchCleanup()
-		if output, err := fetchCmd.CombinedOutput(); err != nil {
+		fetchOutput, fetchErr := fetchCmd.CombinedOutput()
+		fetchCleanup()
+		if fetchErr != nil {
 			s.metrics.recordLFSPhase(ctx, upstream, "fetch", "error", time.Since(fetchStart))
-			return errors.Wrapf(err, "git lfs fetch: %s", string(output))
+			return errors.Wrapf(fetchErr, "git lfs fetch: %s", string(fetchOutput))
 		}
 		s.metrics.recordLFSPhase(ctx, upstream, "fetch", "success", time.Since(fetchStart))
 
