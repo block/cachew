@@ -14,9 +14,8 @@ import (
 	"github.com/block/cachew/internal/logging"
 )
 
-// testContext returns a context wired with a default slog logger so code paths
-// that call logging.FromContext (notably the credential refresh goroutine) do
-// not panic in tests.
+// testContext attaches a default slog logger so the credential refresh
+// goroutine does not panic in logging.FromContext.
 func testContext(t *testing.T) context.Context {
 	t.Helper()
 	return logging.ContextWithLogger(context.Background(), slog.Default())
@@ -158,8 +157,8 @@ func TestGitCommandWithCredentialProvider(t *testing.T) {
 			}
 			assert.NotEqual(t, "", helperArg, "expected credential.helper to be configured")
 
-			// The helper must NOT contain the literal token (it must point at a
-			// file instead) — that is the whole point of the refresh fix.
+			// The token must live in the file, not in the helper string,
+			// so a refresh can rotate it without restarting the subprocess.
 			assert.False(t, strings.Contains(helperArg, tt.token),
 				"credential.helper must not embed the token literal: %q", helperArg)
 
@@ -168,8 +167,7 @@ func TestGitCommandWithCredentialProvider(t *testing.T) {
 			assert.NoError(t, err)
 			assert.Equal(t,
 				"username=x-access-token\npassword="+tt.token+"\n",
-				string(contents),
-				"credential file should contain a complete git credential helper response")
+				string(contents))
 
 			info, err := os.Stat(path)
 			assert.NoError(t, err)
@@ -179,9 +177,6 @@ func TestGitCommandWithCredentialProvider(t *testing.T) {
 	}
 }
 
-// TestGitCommand_CleanupRemovesCredentialFile verifies that calling the
-// returned cleanup function removes the on-disk credential file so we do not
-// leak rotated tokens between commands.
 func TestGitCommand_CleanupRemovesCredentialFile(t *testing.T) {
 	repo := &Repository{
 		upstreamURL: "https://github.com/user/repo",
@@ -203,16 +198,9 @@ func TestGitCommand_CleanupRemovesCredentialFile(t *testing.T) {
 	_, err = os.Stat(path)
 	assert.True(t, os.IsNotExist(err), "credential file should be removed by cleanup, got err=%v", err)
 
-	// Idempotency: calling cleanup twice must not panic or error.
-	cleanup()
+	cleanup() // cleanup must be idempotent
 }
 
-// TestGitCommand_RefreshGoroutineUpdatesFile verifies that the background
-// refresh goroutine rewrites the credential file when the upstream token
-// rotates. Without this behavior a long-running `git lfs fetch` (which the
-// snapshot job spawns) would keep using a stale 1-hour token after the
-// TokenManager rotates it and fail with "Bad credentials" — the exact
-// production incident this change is fixing.
 func TestGitCommand_RefreshGoroutineUpdatesFile(t *testing.T) {
 	provider := &mockCredentialProvider{token: "ghs_initial"}
 	repo := &Repository{
@@ -220,9 +208,6 @@ func TestGitCommand_RefreshGoroutineUpdatesFile(t *testing.T) {
 		credentialProvider: provider,
 	}
 
-	// Tighten the refresh interval for the test by using
-	// startTokenCredentialFile directly instead of GitCommand, so we do not
-	// have to wait 30 seconds for the goroutine to tick.
 	ctx, cancel := context.WithCancel(testContext(t))
 	defer cancel()
 	path, cleanup, err := repo.startTokenCredentialFile(ctx, "ghs_initial")
@@ -231,33 +216,25 @@ func TestGitCommand_RefreshGoroutineUpdatesFile(t *testing.T) {
 
 	provider.setToken("ghs_rotated")
 
-	// Drive the refresh loop manually for deterministic test timing rather
-	// than waiting for the production 30s ticker.
+	// Drive one tick synchronously rather than waiting for the 30 s ticker.
 	next, changed, err := repo.refreshCredentialFileOnce(ctx, path, "ghs_initial")
 	assert.NoError(t, err)
-	assert.True(t, changed, "refresh should detect the rotated token and rewrite the file")
+	assert.True(t, changed)
 	assert.Equal(t, "ghs_rotated", next)
 
 	contents, err := os.ReadFile(path)
 	assert.NoError(t, err)
-	assert.Equal(t,
-		"username=x-access-token\npassword=ghs_rotated\n",
-		string(contents),
-		"credential file should reflect the rotated token")
+	assert.Equal(t, "username=x-access-token\npassword=ghs_rotated\n", string(contents))
 
-	// A subsequent tick with the same token must be a no-op so the goroutine
-	// does not churn the file on every cycle.
+	// A tick with the same token must not churn the file.
 	next2, changed2, err := repo.refreshCredentialFileOnce(ctx, path, "ghs_rotated")
 	assert.NoError(t, err)
 	assert.False(t, changed2)
 	assert.Equal(t, "ghs_rotated", next2)
 }
 
-// TestWriteCredentialFile_Atomic verifies the rename-based atomic-write
-// behavior: a reader concurrent with the rewrite should always see a complete
-// credential response, never a half-written file. This protects the git
-// credential helper from observing a partial token while the refresh
-// goroutine is updating the file.
+// TestWriteCredentialFile_Atomic guards against the git credential helper
+// observing a half-written file while the refresh goroutine is rotating it.
 func TestWriteCredentialFile_Atomic(t *testing.T) {
 	f, err := os.CreateTemp(t.TempDir(), "cred-*")
 	assert.NoError(t, err)
@@ -304,9 +281,6 @@ func TestShellSingleQuote(t *testing.T) {
 	}
 }
 
-// findCredentialHelperArg returns the value portion of the
-// `credential.helper=...` entry in a git command's argv, or empty string if
-// none is present.
 func findCredentialHelperArg(args []string) string {
 	for i, a := range args {
 		if a == "-c" && i+1 < len(args) && strings.HasPrefix(args[i+1], "credential.helper=") {
@@ -316,8 +290,6 @@ func findCredentialHelperArg(args []string) string {
 	return ""
 }
 
-// credentialFilePathFromHelper extracts the filesystem path from a
-// `!cat '...'` credential helper expression and fails the test if it cannot.
 func credentialFilePathFromHelper(t *testing.T, helper string) string {
 	t.Helper()
 	const prefix = "!cat '"

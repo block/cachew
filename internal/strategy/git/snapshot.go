@@ -915,12 +915,10 @@ func (s *Strategy) generateAndUploadLFSSnapshot(ctx context.Context, repo *gitcl
 		}
 
 		// Fetch only the LFS objects referenced by HEAD (the default branch).
-		// LFS fetches for large repos (e.g. ios-register at ~34 GiB) routinely
-		// run longer than a GitHub App installation token's 1-hour TTL, which
-		// is why the cleanup-deferred refresh in GitCommand exists: without
-		// it, the embedded token expires mid-fetch and git-lfs retries with
-		// the stale credential for hours before giving up.
 		fetchStart := time.Now()
+		// fetchCleanup keeps the credential file refresh goroutine alive for
+		// the full fetch — these can exceed the GitHub App token's 1 h TTL on
+		// large LFS repos.
 		fetchCmd, fetchCleanup, err := repo.GitCommand(ctx, "-C", workDir, "lfs", "fetch", "origin", "HEAD")
 		if err != nil {
 			s.metrics.recordLFSPhase(ctx, upstream, "fetch", "error", time.Since(fetchStart))
