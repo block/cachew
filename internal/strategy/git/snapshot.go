@@ -23,6 +23,8 @@ import (
 	"github.com/block/cachew/internal/snapshot"
 )
 
+const lfsFetchTimeout = 25 * time.Minute
+
 func snapshotDirForURL(mirrorRoot, upstreamURL string) (string, error) {
 	repoPath, err := gitclone.RepoPathFromURL(upstreamURL)
 	if err != nil {
@@ -915,15 +917,21 @@ func (s *Strategy) generateAndUploadLFSSnapshot(ctx context.Context, repo *gitcl
 		}
 
 		// Fetch only the LFS objects referenced by HEAD (the default branch).
+		// Timeout must stay below githubapp.RefreshBuffer (30m) so the baked-in
+		// token can't expire mid-fetch and trigger a retry storm.
 		fetchStart := time.Now()
-		fetchCmd, err := repo.GitCommand(ctx, "-C", workDir, "lfs", "fetch", "origin", "HEAD")
+		fetchCtx, cancel := context.WithTimeout(ctx, lfsFetchTimeout)
+		fetchCmd, err := repo.GitCommand(fetchCtx, "-C", workDir, "lfs", "fetch", "origin", "HEAD")
 		if err != nil {
+			cancel()
 			s.metrics.recordLFSPhase(ctx, upstream, "fetch", "error", time.Since(fetchStart))
 			return errors.Wrap(err, "create git lfs fetch command")
 		}
-		if output, err := fetchCmd.CombinedOutput(); err != nil {
+		output, fetchErr := fetchCmd.CombinedOutput()
+		cancel()
+		if fetchErr != nil {
 			s.metrics.recordLFSPhase(ctx, upstream, "fetch", "error", time.Since(fetchStart))
-			return errors.Wrapf(err, "git lfs fetch: %s", string(output))
+			return errors.Wrapf(fetchErr, "git lfs fetch: %s", string(output))
 		}
 		s.metrics.recordLFSPhase(ctx, upstream, "fetch", "success", time.Since(fetchStart))
 
