@@ -10,6 +10,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/alecthomas/assert/v2"
 
@@ -277,6 +278,97 @@ func TestGitCommand_HelperIgnoresHostileGetFile(t *testing.T) {
 		"expected REAL_TOKEN in helper output, got: %s", out)
 	assert.False(t, strings.Contains(string(out), "EVIL_TOKEN"),
 		"helper output must not include any worktree file content: %s", out)
+}
+
+// TestWriteCredentialFile_IgnoresHostileSiblingSymlink ensures that a
+// pre-existing `<path>.new` symlink planted by a hostile local user can't
+// redirect the rotated token write to attacker-readable storage.
+func TestWriteCredentialFile_IgnoresHostileSiblingSymlink(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cred")
+	assert.NoError(t, writeCredentialFile(path, "ghs_initial"))
+
+	// Plant the symlink the old `path + ".new"` code would have followed.
+	sentinel := filepath.Join(dir, "attacker-readable")
+	assert.NoError(t, os.WriteFile(sentinel, []byte("unchanged"), 0o600))
+	assert.NoError(t, os.Symlink(sentinel, path+".new"))
+
+	assert.NoError(t, writeCredentialFile(path, "ghs_rotated"))
+
+	credBytes, err := os.ReadFile(path)
+	assert.NoError(t, err)
+	assert.Equal(t, "username=x-access-token\npassword=ghs_rotated\n", string(credBytes))
+
+	sentinelBytes, err := os.ReadFile(sentinel)
+	assert.NoError(t, err)
+	assert.Equal(t, "unchanged", string(sentinelBytes),
+		"writeCredentialFile must not follow a hostile <path>.new symlink")
+}
+
+// TestCleanup_WaitsForInFlightRefresh ensures cleanup blocks until the
+// refresh goroutine exits so it can't race a rename and leave a stray file
+// behind after the caller thinks the credentials have been wiped.
+func TestCleanup_WaitsForInFlightRefresh(t *testing.T) {
+	prev := credentialFileRefreshInterval
+	credentialFileRefreshInterval = time.Millisecond
+	t.Cleanup(func() { credentialFileRefreshInterval = prev })
+
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseProvider := func() { releaseOnce.Do(func() { close(release) }) }
+	provider := &blockingCredentialProvider{
+		token:   "ghs_rotated",
+		release: release,
+		entered: make(chan struct{}),
+	}
+	repo := &Repository{
+		upstreamURL:        "https://github.com/user/repo",
+		credentialProvider: provider,
+	}
+
+	path, cleanup, err := repo.startTokenCredentialFile(testContext(t), "ghs_initial")
+	assert.NoError(t, err)
+	t.Cleanup(func() { releaseProvider(); cleanup() })
+
+	// Wait for the production refresh goroutine to enter the blocking
+	// provider, so we know cleanup will hit an in-flight tick.
+	<-provider.entered
+
+	cleanupReturned := make(chan struct{})
+	go func() {
+		cleanup()
+		close(cleanupReturned)
+	}()
+
+	// cleanup must NOT have returned yet — the goroutine is blocked inside
+	// GetTokenForURL and wg.Wait must hold cleanup until it unwinds.
+	select {
+	case <-cleanupReturned:
+		t.Fatal("cleanup returned while a refresh tick was still in flight")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	releaseProvider()
+	<-cleanupReturned
+
+	_, err = os.Stat(path)
+	assert.True(t, os.IsNotExist(err), "credential file should be removed after cleanup, got err=%v", err)
+}
+
+// blockingCredentialProvider blocks GetTokenForURL until release is closed.
+// entered is closed on the first call so tests can wait for the goroutine
+// to be inside the provider before exercising cancellation.
+type blockingCredentialProvider struct {
+	token       string
+	release     chan struct{}
+	entered     chan struct{}
+	enteredOnce sync.Once
+}
+
+func (p *blockingCredentialProvider) GetTokenForURL(_ context.Context, _ string) (string, error) {
+	p.enteredOnce.Do(func() { close(p.entered) })
+	<-p.release
+	return p.token, nil
 }
 
 // TestWriteCredentialFile_Atomic guards against the git credential helper

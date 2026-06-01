@@ -7,6 +7,7 @@ import (
 	"context"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -19,8 +20,9 @@ import (
 // credentialFileRefreshInterval is short enough that any rotation by
 // TokenManager (which refreshes ~5 min before the 1 h token expiry) is
 // reflected on disk before git-lfs exhausts its retry budget on a stale
-// token.
-const credentialFileRefreshInterval = 30 * time.Second
+// token. It is a var (rather than a const) only so tests can shrink it to
+// drive the refresh goroutine deterministically.
+var credentialFileRefreshInterval = 30 * time.Second //nolint:gochecknoglobals // test seam
 
 // GitCommand returns a git subprocess configured with repository-scoped
 // authentication and any per-URL git config overrides disabled.
@@ -91,15 +93,21 @@ func (r *Repository) startTokenCredentialFile(ctx context.Context, initialToken 
 	}
 
 	refreshCtx, cancel := context.WithCancel(ctx)
+	var wg sync.WaitGroup
+	wg.Go(func() { r.refreshCredentialFile(refreshCtx, path, initialToken) })
+
+	// cleanup waits for any in-flight refresh tick to finish before removing
+	// the file. Otherwise a tick that began before cancel could rename a new
+	// token into place AFTER cleanup deleted the old one, leaving a stray
+	// token file in /tmp.
 	var once sync.Once
 	cleanup := func() {
 		once.Do(func() {
 			cancel()
+			wg.Wait()
 			_ = os.Remove(path) //nolint:gosec // path is from os.CreateTemp
 		})
 	}
-
-	go r.refreshCredentialFile(refreshCtx, path, initialToken)
 
 	return path, cleanup, nil
 }
@@ -143,14 +151,30 @@ func (r *Repository) refreshCredentialFileOnce(ctx context.Context, path, curren
 // for token to path. The on-disk format matches the helper protocol output
 // so that `credential.helper=!cat <path>` satisfies a `get` query without
 // any shell-level templating of the token value.
+//
+// The intermediate file is created via os.CreateTemp (O_EXCL + random
+// suffix), not as a deterministic `path + ".new"` sibling — otherwise a
+// hostile local user on a shared host could pre-create that sibling as a
+// symlink and have os.WriteFile follow it, leaking the rotated token to
+// attacker-readable storage.
 func writeCredentialFile(path, token string) error {
-	body := "username=x-access-token\npassword=" + token + "\n"
-	tmp := path + ".new"
-	if err := os.WriteFile(tmp, []byte(body), 0o600); err != nil { //nolint:gosec // path derives from os.CreateTemp
+	body := []byte("username=x-access-token\npassword=" + token + "\n")
+	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".*")
+	if err != nil {
+		return errors.Wrap(err, "create temp credential file")
+	}
+	tmpPath := tmp.Name()
+	if _, err := tmp.Write(body); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath) //nolint:gosec // tmpPath is from os.CreateTemp
 		return errors.Wrap(err, "write temp credential file")
 	}
-	if err := os.Rename(tmp, path); err != nil { //nolint:gosec // path derives from os.CreateTemp
-		_ = os.Remove(tmp) //nolint:gosec // path derives from os.CreateTemp
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpPath) //nolint:gosec // tmpPath is from os.CreateTemp
+		return errors.Wrap(err, "close temp credential file")
+	}
+	if err := os.Rename(tmpPath, path); err != nil { //nolint:gosec // both paths are from os.CreateTemp
+		_ = os.Remove(tmpPath) //nolint:gosec // tmpPath is from os.CreateTemp
 		return errors.Wrap(err, "rename credential file")
 	}
 	return nil
