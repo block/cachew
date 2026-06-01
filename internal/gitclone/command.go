@@ -17,19 +17,13 @@ import (
 	"github.com/block/cachew/internal/logging"
 )
 
-// credentialFileRefreshInterval is short enough that any rotation by
-// TokenManager (which refreshes ~5 min before the 1 h token expiry) is
-// reflected on disk before git-lfs exhausts its retry budget on a stale
-// token. It is a var (rather than a const) only so tests can shrink it to
-// drive the refresh goroutine deterministically.
+// credentialFileRefreshInterval beats the GitHub App token's 1 h TTL with
+// margin. Var (not const) so tests can shrink it.
 var credentialFileRefreshInterval = 30 * time.Second //nolint:gochecknoglobals // test seam
 
 // GitCommand returns a git subprocess configured with repository-scoped
-// authentication and any per-URL git config overrides disabled.
-//
-// Callers MUST invoke the returned cleanup (typically via defer) once the
-// command has finished. cleanup is always non-nil and safe to call multiple
-// times, including when GitCommand returns an error.
+// authentication. Callers MUST invoke cleanup (typically via defer) once
+// the command has finished. cleanup is always non-nil and idempotent.
 func (r *Repository) GitCommand(ctx context.Context, args ...string) (*exec.Cmd, func(), error) {
 	cleanup := func() {}
 
@@ -49,16 +43,10 @@ func (r *Repository) GitCommand(ctx context.Context, args ...string) (*exec.Cmd,
 				return nil, cleanup, errors.Wrap(err, "start token credential file")
 			}
 			cleanup = fileCleanup
-			// `!cmd` runs cmd via the shell on every credential query, so a
-			// rewrite of credFile by the refresh goroutine is picked up on
-			// the next git-lfs retry — which is the whole point: long-running
-			// subprocesses can't otherwise observe a token rotation.
-			//
-			// Git appends the operation (`get`/`store`/`erase`) as a positional
-			// argument to the helper command. The function form here both gates
-			// on `get` and absorbs the argument, so a bare `cat <credfile>`
-			// can't be tricked into also reading a file named `get`/`store`/
-			// `erase` from the worktree.
+			// Shell-form (`!cmd`) re-reads credFile on every credential query
+			// so refreshes take effect mid-subprocess. The f() wrapper gates
+			// on the op arg git appends (`get`/`store`/`erase`), so a worktree
+			// file named `get` can't be cat'd as a token.
 			allArgs = append(allArgs, "-c",
 				"credential.helper=!f() { test \"$1\" = get && cat "+shellSingleQuote(credFile)+"; }; f")
 		}
@@ -69,10 +57,8 @@ func (r *Repository) GitCommand(ctx context.Context, args ...string) (*exec.Cmd,
 	return exec.CommandContext(ctx, "git", allArgs...), cleanup, nil
 }
 
-// startTokenCredentialFile creates a 0600 temp file containing a git
-// credential helper response for the given initial token and spawns a
-// goroutine that rewrites it whenever the token rotates, until cleanup is
-// called or ctx is cancelled.
+// startTokenCredentialFile creates a 0600 credential file and spawns a
+// goroutine that rewrites it on token rotation until cleanup or ctx ends.
 func (r *Repository) startTokenCredentialFile(ctx context.Context, initialToken string) (string, func(), error) {
 	f, err := os.CreateTemp("", "cachew-git-cred-*")
 	if err != nil {
@@ -96,10 +82,8 @@ func (r *Repository) startTokenCredentialFile(ctx context.Context, initialToken 
 	var wg sync.WaitGroup
 	wg.Go(func() { r.refreshCredentialFile(refreshCtx, path, initialToken) })
 
-	// cleanup waits for any in-flight refresh tick to finish before removing
-	// the file. Otherwise a tick that began before cancel could rename a new
-	// token into place AFTER cleanup deleted the old one, leaving a stray
-	// token file in /tmp.
+	// Wait for any in-flight refresh tick before removing the file so it
+	// can't rename a new token into place after we've deleted the old one.
 	var once sync.Once
 	cleanup := func() {
 		once.Do(func() {
@@ -147,10 +131,9 @@ func (r *Repository) refreshCredentialFileOnce(ctx context.Context, path, curren
 	return token, true, nil
 }
 
-// writeCredentialFile atomically rotates the git credential helper file at
-// path to contain token. The intermediate file uses os.CreateTemp rather
-// than a deterministic <path>.new sibling so a hostile local user can't
-// pre-plant a symlink there and redirect the rotated token write.
+// writeCredentialFile atomically rotates the credential file at path to
+// contain token. Uses os.CreateTemp (not a <path>.new sibling) so a planted
+// symlink can't redirect the write.
 func writeCredentialFile(path, token string) error {
 	body := []byte("username=x-access-token\npassword=" + token + "\n")
 	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".*")

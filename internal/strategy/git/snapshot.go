@@ -915,12 +915,9 @@ func (s *Strategy) generateAndUploadLFSSnapshot(ctx context.Context, repo *gitcl
 		}
 
 		// Fetch only the LFS objects referenced by HEAD (the default branch).
+		// Cleanup runs as soon as the subprocess returns so the credential
+		// file doesn't outlive the only command that needs it.
 		fetchStart := time.Now()
-		// fetchCleanup keeps the credential file refresh goroutine alive for
-		// the full fetch — these can exceed the GitHub App token's 1 h TTL on
-		// large LFS repos. We tear it down as soon as the subprocess returns
-		// so the token file doesn't outlive the command it's scoped to (the
-		// subsequent archive upload runs against the local cache, not GitHub).
 		fetchCmd, fetchCleanup, err := repo.GitCommand(ctx, "-C", workDir, "lfs", "fetch", "origin", "HEAD")
 		if err != nil {
 			s.metrics.recordLFSPhase(ctx, upstream, "fetch", "error", time.Since(fetchStart))

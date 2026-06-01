@@ -17,8 +17,7 @@ import (
 	"github.com/block/cachew/internal/logging"
 )
 
-// testContext attaches a default slog logger so the credential refresh
-// goroutine does not panic in logging.FromContext.
+// testContext attaches a slog logger so refreshCredentialFile doesn't panic.
 func testContext(t *testing.T) context.Context {
 	t.Helper()
 	return logging.ContextWithLogger(context.Background(), slog.Default())
@@ -160,8 +159,8 @@ func TestGitCommandWithCredentialProvider(t *testing.T) {
 			}
 			assert.NotEqual(t, "", helperArg, "expected credential.helper to be configured")
 
-			// The token must live in the file, not in the helper string,
-			// so a refresh can rotate it without restarting the subprocess.
+			// Token must live in the file, not the helper string, so refresh
+			// can rotate it without restarting the subprocess.
 			assert.False(t, strings.Contains(helperArg, tt.token),
 				"credential.helper must not embed the token literal: %q", helperArg)
 
@@ -174,8 +173,7 @@ func TestGitCommandWithCredentialProvider(t *testing.T) {
 
 			info, err := os.Stat(path)
 			assert.NoError(t, err)
-			assert.Equal(t, os.FileMode(0o600), info.Mode().Perm(),
-				"credential file must be 0600 to avoid leaking tokens to other users")
+			assert.Equal(t, os.FileMode(0o600), info.Mode().Perm())
 		})
 	}
 }
@@ -219,7 +217,6 @@ func TestGitCommand_RefreshGoroutineUpdatesFile(t *testing.T) {
 
 	provider.setToken("ghs_rotated")
 
-	// Drive one tick synchronously rather than waiting for the 30 s ticker.
 	next, changed, err := repo.refreshCredentialFileOnce(ctx, path, "ghs_initial")
 	assert.NoError(t, err)
 	assert.True(t, changed)
@@ -229,19 +226,16 @@ func TestGitCommand_RefreshGoroutineUpdatesFile(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, "username=x-access-token\npassword=ghs_rotated\n", string(contents))
 
-	// A tick with the same token must not churn the file.
+	// Same token must not churn the file.
 	next2, changed2, err := repo.refreshCredentialFileOnce(ctx, path, "ghs_rotated")
 	assert.NoError(t, err)
 	assert.False(t, changed2)
 	assert.Equal(t, "ghs_rotated", next2)
 }
 
-// TestGitCommand_HelperIgnoresHostileGetFile guards a real exploit: git
-// appends the credential operation (get/store/erase) as a positional
-// argument to `!`-prefixed helpers, so a bare `cat <credfile>` would also
-// `cat get` from the worktree and let a file named `get` override our token.
-// The helper must absorb that argument; this test exercises the full
-// invocation path through `git credential fill` to prove it does.
+// Git appends the credential op (get/store/erase) as a positional arg to
+// `!`-helpers, so a bare `cat <credfile>` would also cat a worktree file
+// named `get`. The helper must absorb that argument.
 func TestGitCommand_HelperIgnoresHostileGetFile(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not on PATH")
@@ -267,7 +261,7 @@ func TestGitCommand_HelperIgnoresHostileGetFile(t *testing.T) {
 	}
 
 	gitCmd := exec.Command("git", "-C", workDir,
-		"-c", "credential.helper=", // clear any inherited helpers
+		"-c", "credential.helper=", // empty value resets inherited helpers
 		"-c", "credential.helper="+helperArg,
 		"credential", "fill",
 	)
@@ -280,9 +274,6 @@ func TestGitCommand_HelperIgnoresHostileGetFile(t *testing.T) {
 		"helper output must not include any worktree file content: %s", out)
 }
 
-// TestWriteCredentialFile_IgnoresHostileSiblingSymlink ensures that a
-// pre-existing `<path>.new` symlink planted by a hostile local user can't
-// redirect the rotated token write to attacker-readable storage.
 func TestWriteCredentialFile_IgnoresHostileSiblingSymlink(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cred")
@@ -301,13 +292,9 @@ func TestWriteCredentialFile_IgnoresHostileSiblingSymlink(t *testing.T) {
 
 	sentinelBytes, err := os.ReadFile(sentinel)
 	assert.NoError(t, err)
-	assert.Equal(t, "unchanged", string(sentinelBytes),
-		"writeCredentialFile must not follow a hostile <path>.new symlink")
+	assert.Equal(t, "unchanged", string(sentinelBytes))
 }
 
-// TestCleanup_WaitsForInFlightRefresh ensures cleanup blocks until the
-// refresh goroutine exits so it can't race a rename and leave a stray file
-// behind after the caller thinks the credentials have been wiped.
 func TestCleanup_WaitsForInFlightRefresh(t *testing.T) {
 	prev := credentialFileRefreshInterval
 	credentialFileRefreshInterval = time.Millisecond
@@ -330,8 +317,6 @@ func TestCleanup_WaitsForInFlightRefresh(t *testing.T) {
 	assert.NoError(t, err)
 	t.Cleanup(func() { releaseProvider(); cleanup() })
 
-	// Wait for the production refresh goroutine to enter the blocking
-	// provider, so we know cleanup will hit an in-flight tick.
 	<-provider.entered
 
 	cleanupReturned := make(chan struct{})
@@ -340,8 +325,6 @@ func TestCleanup_WaitsForInFlightRefresh(t *testing.T) {
 		close(cleanupReturned)
 	}()
 
-	// cleanup must NOT have returned yet — the goroutine is blocked inside
-	// GetTokenForURL and wg.Wait must hold cleanup until it unwinds.
 	select {
 	case <-cleanupReturned:
 		t.Fatal("cleanup returned while a refresh tick was still in flight")
@@ -355,9 +338,8 @@ func TestCleanup_WaitsForInFlightRefresh(t *testing.T) {
 	assert.True(t, os.IsNotExist(err), "credential file should be removed after cleanup, got err=%v", err)
 }
 
-// blockingCredentialProvider blocks GetTokenForURL until release is closed.
-// entered is closed on the first call so tests can wait for the goroutine
-// to be inside the provider before exercising cancellation.
+// blockingCredentialProvider blocks GetTokenForURL until release is closed,
+// and closes entered on the first call.
 type blockingCredentialProvider struct {
 	token       string
 	release     chan struct{}
@@ -371,8 +353,8 @@ func (p *blockingCredentialProvider) GetTokenForURL(_ context.Context, _ string)
 	return p.token, nil
 }
 
-// TestWriteCredentialFile_Atomic guards against the git credential helper
-// observing a half-written file while the refresh goroutine is rotating it.
+// Concurrent rotation must never expose a partial credential file to the
+// helper running in parallel.
 func TestWriteCredentialFile_Atomic(t *testing.T) {
 	f, err := os.CreateTemp(t.TempDir(), "cred-*")
 	assert.NoError(t, err)
@@ -382,7 +364,8 @@ func TestWriteCredentialFile_Atomic(t *testing.T) {
 	assert.NoError(t, writeCredentialFile(path, "ghs_one"))
 
 	stop := make(chan struct{})
-	go func() {
+	var wg sync.WaitGroup
+	wg.Go(func() {
 		for {
 			select {
 			case <-stop:
@@ -398,12 +381,13 @@ func TestWriteCredentialFile_Atomic(t *testing.T) {
 					"reader observed partial write: %q", s)
 			}
 		}
-	}()
+	})
 
 	for range 200 {
 		assert.NoError(t, writeCredentialFile(path, "ghs_rotated"))
 	}
 	close(stop)
+	wg.Wait()
 }
 
 func TestShellSingleQuote(t *testing.T) {
