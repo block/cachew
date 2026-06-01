@@ -147,16 +147,10 @@ func (r *Repository) refreshCredentialFileOnce(ctx context.Context, path, curren
 	return token, true, nil
 }
 
-// writeCredentialFile atomically writes the git credential helper response
-// for token to path. The on-disk format matches the helper protocol output
-// so that `credential.helper=!cat <path>` satisfies a `get` query without
-// any shell-level templating of the token value.
-//
-// The intermediate file is created via os.CreateTemp (O_EXCL + random
-// suffix), not as a deterministic `path + ".new"` sibling — otherwise a
-// hostile local user on a shared host could pre-create that sibling as a
-// symlink and have os.WriteFile follow it, leaking the rotated token to
-// attacker-readable storage.
+// writeCredentialFile atomically rotates the git credential helper file at
+// path to contain token. The intermediate file uses os.CreateTemp rather
+// than a deterministic <path>.new sibling so a hostile local user can't
+// pre-plant a symlink there and redirect the rotated token write.
 func writeCredentialFile(path, token string) error {
 	body := []byte("username=x-access-token\npassword=" + token + "\n")
 	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".*")
