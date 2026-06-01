@@ -524,10 +524,11 @@ func (r *Repository) executeClone(ctx context.Context) error {
 		r.upstreamURL, cloneDest,
 	}
 
-	cmd, err := r.GitCommand(cloneCtx, args...)
+	cmd, cleanup, err := r.GitCommand(cloneCtx, args...)
 	if err != nil {
 		return errors.Wrap(err, "create git command")
 	}
+	defer cleanup()
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error {
 		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
@@ -602,10 +603,11 @@ func (r *Repository) fetchInternal(ctx context.Context, timeout time.Duration, e
 	}
 	args = append(args, "fetch", "--prune", "--prune-tags")
 
-	cmd, err := r.GitCommand(fetchCtx, args...)
+	cmd, cleanup, err := r.GitCommand(fetchCtx, args...)
 	if err != nil {
 		return errors.Wrap(err, "create git command")
 	}
+	defer cleanup()
 	// Start the process in its own process group so we can kill the entire
 	// tree (git spawns child processes like git-remote-https that inherit
 	// stdout/stderr pipes and prevent CombinedOutput from returning).
@@ -786,10 +788,11 @@ func (r *Repository) GetLocalRefs(ctx context.Context) (map[string]string, error
 
 func (r *Repository) GetUpstreamRefs(ctx context.Context) (map[string]string, error) {
 	// #nosec G204 - r.upstreamURL is controlled by us
-	cmd, err := r.GitCommand(ctx, "ls-remote", r.upstreamURL)
+	cmd, cleanup, err := r.GitCommand(ctx, "ls-remote", r.upstreamURL)
 	if err != nil {
 		return nil, errors.Wrap(err, "create git command")
 	}
+	defer cleanup()
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return nil, errors.Wrap(err, "git ls-remote")
