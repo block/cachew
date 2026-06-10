@@ -815,7 +815,7 @@ func (s *Strategy) scheduleDeferredMirrorRestore(ctx context.Context, repo *gitc
 		if s.config.SnapshotInterval > 0 {
 			s.scheduleSnapshotJobs(repo)
 		}
-		if s.config.RepackInterval > 0 {
+		if s.repackEnabled() {
 			s.scheduleRepackJobs(repo)
 		}
 		return nil

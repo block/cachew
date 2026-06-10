@@ -46,7 +46,8 @@ func Register(r *strategy.Registry, scheduler jobscheduler.Provider, cloneManage
 type Config struct {
 	SnapshotInterval       time.Duration `hcl:"snapshot-interval,optional" help:"How often to generate tar.zstd workstation snapshots. 0 disables snapshots." default:"0"`
 	MirrorSnapshotInterval time.Duration `hcl:"mirror-snapshot-interval,optional" help:"How often to generate mirror snapshots for pod bootstrap. 0 uses snapshot-interval. Defaults to 2h." default:"2h"`
-	RepackInterval         time.Duration `hcl:"repack-interval,optional" help:"How often to run full repack. 0 disables." default:"0"`
+	RepackInterval         time.Duration `hcl:"repack-interval,optional" help:"How often to run the geometric repack (consolidates packs, reuses deltas). 0 disables." default:"0"`
+	FullRepackInterval     time.Duration `hcl:"full-repack-interval,optional" help:"How often to run the full repack (re-selects deltas across all objects, shrinking the mirror). Far more expensive than the geometric repack, so use a slow cadence. 0 disables." default:"0"`
 	ZstdThreads            int           `hcl:"zstd-threads,optional" help:"Threads for zstd compression/decompression. 0 = all CPU cores; useful for short-lived CLI invocations but risky on a long-running server where multiple snapshot/restore operations can run concurrently." default:"4"`
 	BundleCacheTTL         time.Duration `hcl:"bundle-cache-ttl,optional" help:"TTL of cached server-side git bundles." default:"2h"`
 }
@@ -247,7 +248,7 @@ func (s *Strategy) warmExistingRepos(ctx context.Context) error {
 		if s.config.SnapshotInterval > 0 {
 			s.scheduleSnapshotJobs(repo)
 		}
-		if s.config.RepackInterval > 0 {
+		if s.repackEnabled() {
 			s.scheduleRepackJobs(repo)
 		}
 	}
@@ -618,7 +619,7 @@ func (s *Strategy) startClone(ctx context.Context, repo *gitclone.Repository) (r
 			if s.config.SnapshotInterval > 0 {
 				s.scheduleSnapshotJobs(repo)
 			}
-			if s.config.RepackInterval > 0 {
+			if s.repackEnabled() {
 				s.scheduleRepackJobs(repo)
 			}
 			return nil
@@ -648,7 +649,7 @@ func (s *Strategy) startClone(ctx context.Context, repo *gitclone.Repository) (r
 	if s.config.SnapshotInterval > 0 {
 		s.scheduleSnapshotJobs(repo)
 	}
-	if s.config.RepackInterval > 0 {
+	if s.repackEnabled() {
 		s.scheduleRepackJobs(repo)
 	}
 	return nil
