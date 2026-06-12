@@ -209,8 +209,10 @@ func TestSnapshotGenerationViaLocalClone(t *testing.T) {
 	err = s.GenerateAndUploadSnapshot(ctx, repo)
 	assert.NoError(t, err)
 
-	// Verify snapshot was uploaded to cache.
-	cacheKey := cache.NewKey(upstreamURL + ".snapshot")
+	// Verify snapshot was uploaded under the content-addressed key + pointer.
+	commit, ok := s.ReadSnapshotPointer(ctx, upstreamURL)
+	assert.True(t, ok)
+	cacheKey := git.SnapshotCommitCacheKey(upstreamURL, commit)
 	_, headers, err := memCache.Open(ctx, cacheKey)
 	assert.NoError(t, err)
 	assert.Equal(t, "application/zstd", headers.Get("Content-Type"))
@@ -276,7 +278,9 @@ func TestSnapshotGenerationIncludesTrackedLockFiles(t *testing.T) {
 	err = s.GenerateAndUploadSnapshot(ctx, repo)
 	assert.NoError(t, err)
 
-	cacheKey := cache.NewKey(upstreamURL + ".snapshot")
+	commit, ok := s.ReadSnapshotPointer(ctx, upstreamURL)
+	assert.True(t, ok)
+	cacheKey := git.SnapshotCommitCacheKey(upstreamURL, commit)
 	restoreDir := filepath.Join(tmpDir, "restored")
 	err = snapshot.Restore(ctx, memCache, cacheKey, restoreDir, 0)
 	assert.NoError(t, err)
@@ -786,7 +790,9 @@ func TestSnapshotRemoteURLUsesUpstreamURL(t *testing.T) {
 	err = s.GenerateAndUploadSnapshot(ctx, repo)
 	assert.NoError(t, err)
 
-	cacheKey := cache.NewKey(upstreamURL + ".snapshot")
+	commit, ok := s.ReadSnapshotPointer(ctx, upstreamURL)
+	assert.True(t, ok)
+	cacheKey := git.SnapshotCommitCacheKey(upstreamURL, commit)
 	restoreDir := filepath.Join(tmpDir, "restored")
 	err = snapshot.Restore(ctx, memCache, cacheKey, restoreDir, 0)
 	assert.NoError(t, err)
@@ -795,4 +801,259 @@ func TestSnapshotRemoteURLUsesUpstreamURL(t *testing.T) {
 	output, err := cmd.CombinedOutput()
 	assert.NoError(t, err, string(output))
 	assert.Equal(t, upstreamURL+"\n", string(output))
+}
+
+func TestParseImmutableSnapshotPath(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		path     string
+		repoPath string
+		commit   string
+		ok       bool
+	}{
+		{"valid", "org/repo/snapshot/abc123.tar.zst", "org/repo", "abc123", true},
+		{"nested repo", "org/team/repo/snapshot/deadbeef.tar.zst", "org/team/repo", "deadbeef", true},
+		{"no infix", "org/repo/snapshot.tar.zst", "", "", false},
+		{"empty commit", "org/repo/snapshot/.tar.zst", "", "", false},
+		{"slash in commit", "org/repo/snapshot/a/b.tar.zst", "", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repoPath, commit, ok := git.ParseImmutableSnapshotPath(tc.path)
+			assert.Equal(t, tc.ok, ok)
+			assert.Equal(t, tc.repoPath, repoPath)
+			assert.Equal(t, tc.commit, commit)
+		})
+	}
+}
+
+// TestStableSnapshotRoutingForRepoNamedSnapshot guards against the immutable
+// route (matched by "/snapshot/" + ".tar.zst") swallowing the stable snapshot
+// request of a repo whose own path ends in "snapshot".
+func TestStableSnapshotRoutingForRepoNamedSnapshot(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not found in PATH")
+	}
+
+	_, ctx := logging.Configure(context.Background(), logging.Config{})
+	tmpDir := t.TempDir()
+	mirrorRoot := filepath.Join(tmpDir, "mirrors")
+	upstreamURL := "https://github.com/org/snapshot"
+
+	mirrorPath := filepath.Join(mirrorRoot, "github.com", "org", "snapshot")
+	createTestMirrorRepo(t, mirrorPath)
+
+	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: time.Hour})
+	assert.NoError(t, err)
+	mux := newTestMux()
+
+	cm := gitclone.NewManagerProvider(ctx, gitclone.Config{MirrorRoot: mirrorRoot}, nil)
+	s, err := git.New(ctx, git.Config{}, newTestScheduler(ctx, t), memCache, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
+	assert.NoError(t, err)
+
+	manager, err := cm()
+	assert.NoError(t, err)
+	repo, err := manager.GetOrCreate(ctx, upstreamURL)
+	assert.NoError(t, err)
+
+	waitForReady(t, s)
+	err = s.GenerateAndUploadSnapshot(ctx, repo)
+	assert.NoError(t, err)
+
+	handler := mux.handlers["GET /git/{host}/{path...}"]
+	path := "org/snapshot/snapshot.tar.zst"
+	req := httptest.NewRequest(http.MethodGet, "/git/github.com/"+path, nil)
+	req = req.WithContext(ctx)
+	req.SetPathValue("host", "github.com")
+	req.SetPathValue("path", path)
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	// The stable handler serves the snapshot; misrouting to the immutable
+	// handler would parse commit "snapshot" and 404.
+	assert.Equal(t, 200, w.Code)
+	assert.True(t, w.Body.Len() > 0)
+}
+
+func TestImmutableSnapshotRouteServesBlob(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not found in PATH")
+	}
+
+	_, ctx := logging.Configure(context.Background(), logging.Config{})
+	tmpDir := t.TempDir()
+	mirrorRoot := filepath.Join(tmpDir, "mirrors")
+	upstreamURL := "https://github.com/org/repo"
+
+	mirrorPath := filepath.Join(mirrorRoot, "github.com", "org", "repo")
+	createTestMirrorRepo(t, mirrorPath)
+
+	// A disk cache serves blobs as *os.File, exercising the http.ServeContent
+	// range path the immutable route depends on.
+	diskCache, err := cache.NewDisk(ctx, cache.DiskConfig{Root: filepath.Join(tmpDir, "cache"), MaxTTL: time.Hour, EvictInterval: time.Hour})
+	assert.NoError(t, err)
+	mux := newTestMux()
+
+	cm := gitclone.NewManagerProvider(ctx, gitclone.Config{MirrorRoot: mirrorRoot}, nil)
+	s, err := git.New(ctx, git.Config{}, newTestScheduler(ctx, t), diskCache, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
+	assert.NoError(t, err)
+
+	manager, err := cm()
+	assert.NoError(t, err)
+	repo, err := manager.GetOrCreate(ctx, upstreamURL)
+	assert.NoError(t, err)
+
+	waitForReady(t, s)
+	err = s.GenerateAndUploadSnapshot(ctx, repo)
+	assert.NoError(t, err)
+
+	commit, ok := s.ReadSnapshotPointer(ctx, upstreamURL)
+	assert.True(t, ok)
+
+	handler := mux.handlers["GET /git/{host}/{path...}"]
+	path := "org/repo/snapshot/" + commit + ".tar.zst"
+	req := httptest.NewRequest(http.MethodGet, "/git/github.com/"+path, nil)
+	req = req.WithContext(ctx)
+	req.SetPathValue("host", "github.com")
+	req.SetPathValue("path", path)
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	assert.Equal(t, 200, w.Code)
+	assert.Equal(t, "bytes", w.Header().Get("Accept-Ranges"))
+	assert.Equal(t, "application/zstd", w.Header().Get("Content-Type"))
+	assert.True(t, w.Body.Len() > 0)
+
+	// A range request against the immutable blob must return 206 so parallel
+	// clients can stitch byte ranges.
+	rangeReq := httptest.NewRequest(http.MethodGet, "/git/github.com/"+path, nil)
+	rangeReq = rangeReq.WithContext(ctx)
+	rangeReq.SetPathValue("host", "github.com")
+	rangeReq.SetPathValue("path", path)
+	rangeReq.Header.Set("Range", "bytes=0-99")
+	rangeW := httptest.NewRecorder()
+	handler.ServeHTTP(rangeW, rangeReq)
+	assert.Equal(t, http.StatusPartialContent, rangeW.Code)
+	assert.Equal(t, 100, rangeW.Body.Len())
+
+	// An unknown commit must 404 so the client re-resolves via the stable URL.
+	missPath := "org/repo/snapshot/0000000000000000000000000000000000000000.tar.zst"
+	missReq := httptest.NewRequest(http.MethodGet, "/git/github.com/"+missPath, nil)
+	missReq = missReq.WithContext(ctx)
+	missReq.SetPathValue("host", "github.com")
+	missReq.SetPathValue("path", missPath)
+	missW := httptest.NewRecorder()
+
+	handler.ServeHTTP(missW, missReq)
+	assert.Equal(t, 404, missW.Code)
+}
+
+// TestImmutableSnapshotColdTierOmitsAcceptRanges verifies the cold path (a
+// non-file reader, e.g. an S3 stream) does not advertise range support, so
+// clients don't attempt ranges the fallback copy can't honor.
+func TestImmutableSnapshotColdTierOmitsAcceptRanges(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not found in PATH")
+	}
+
+	_, ctx := logging.Configure(context.Background(), logging.Config{})
+	tmpDir := t.TempDir()
+	mirrorRoot := filepath.Join(tmpDir, "mirrors")
+	upstreamURL := "https://github.com/org/repo"
+
+	mirrorPath := filepath.Join(mirrorRoot, "github.com", "org", "repo")
+	createTestMirrorRepo(t, mirrorPath)
+
+	// Memory cache serves blobs as a non-file reader, modeling the cold S3 path.
+	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: time.Hour})
+	assert.NoError(t, err)
+	mux := newTestMux()
+
+	cm := gitclone.NewManagerProvider(ctx, gitclone.Config{MirrorRoot: mirrorRoot}, nil)
+	s, err := git.New(ctx, git.Config{}, newTestScheduler(ctx, t), memCache, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
+	assert.NoError(t, err)
+
+	manager, err := cm()
+	assert.NoError(t, err)
+	repo, err := manager.GetOrCreate(ctx, upstreamURL)
+	assert.NoError(t, err)
+
+	waitForReady(t, s)
+	err = s.GenerateAndUploadSnapshot(ctx, repo)
+	assert.NoError(t, err)
+
+	commit, ok := s.ReadSnapshotPointer(ctx, upstreamURL)
+	assert.True(t, ok)
+
+	handler := mux.handlers["GET /git/{host}/{path...}"]
+	path := "org/repo/snapshot/" + commit + ".tar.zst"
+	req := httptest.NewRequest(http.MethodGet, "/git/github.com/"+path, nil)
+	req = req.WithContext(ctx)
+	req.SetPathValue("host", "github.com")
+	req.SetPathValue("path", path)
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	assert.Equal(t, 200, w.Code)
+	assert.Equal(t, "", w.Header().Get("Accept-Ranges"))
+}
+
+// TestSnapshotWriteOnceForUnchangedHead verifies a re-run for an unchanged HEAD
+// does not overwrite the existing content-addressed blob, which would otherwise
+// corrupt an in-flight parallel range download.
+func TestSnapshotWriteOnceForUnchangedHead(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not found in PATH")
+	}
+
+	_, ctx := logging.Configure(context.Background(), logging.Config{})
+	tmpDir := t.TempDir()
+	mirrorRoot := filepath.Join(tmpDir, "mirrors")
+	upstreamURL := "https://github.com/org/repo"
+
+	mirrorPath := filepath.Join(mirrorRoot, "github.com", "org", "repo")
+	createTestMirrorRepo(t, mirrorPath)
+
+	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: time.Hour})
+	assert.NoError(t, err)
+	mux := newTestMux()
+
+	cm := gitclone.NewManagerProvider(ctx, gitclone.Config{MirrorRoot: mirrorRoot}, nil)
+	s, err := git.New(ctx, git.Config{}, newTestScheduler(ctx, t), memCache, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
+	assert.NoError(t, err)
+
+	manager, err := cm()
+	assert.NoError(t, err)
+	repo, err := manager.GetOrCreate(ctx, upstreamURL)
+	assert.NoError(t, err)
+
+	waitForReady(t, s)
+	err = s.GenerateAndUploadSnapshot(ctx, repo)
+	assert.NoError(t, err)
+
+	commit, ok := s.ReadSnapshotPointer(ctx, upstreamURL)
+	assert.True(t, ok)
+	commitKey := git.SnapshotCommitCacheKey(upstreamURL, commit)
+
+	// Replace the blob with a sentinel; a write-once regeneration must leave it
+	// untouched, whereas an overwrite would replace it with a real archive.
+	sentinel := []byte("SENTINEL-DO-NOT-OVERWRITE")
+	writer, err := memCache.Create(ctx, commitKey, http.Header{"Content-Type": {"application/zstd"}}, time.Hour)
+	assert.NoError(t, err)
+	_, err = writer.Write(sentinel)
+	assert.NoError(t, err)
+	assert.NoError(t, writer.Close())
+
+	// Regenerate with HEAD unchanged.
+	err = s.GenerateAndUploadSnapshot(ctx, repo)
+	assert.NoError(t, err)
+
+	reader, _, err := memCache.Open(ctx, commitKey)
+	assert.NoError(t, err)
+	defer reader.Close()
+	got, err := io.ReadAll(reader)
+	assert.NoError(t, err)
+	assert.Equal(t, string(sentinel), string(got))
 }

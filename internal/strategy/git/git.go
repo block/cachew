@@ -295,6 +295,15 @@ func (s *Strategy) handleRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Least specific of the snapshot routes: a content-addressed blob at
+	// <repo>/snapshot/<commit>.tar.zst. Checked after the exact-suffix routes
+	// above so repos/groups named "snapshot" still resolve correctly.
+	if strings.Contains(pathValue, "/snapshot/") && strings.HasSuffix(pathValue, ".tar.zst") {
+		s.metrics.recordRequest(ctx, "snapshot-immutable")
+		s.handleImmutableSnapshotRequest(w, r, host, pathValue)
+		return
+	}
+
 	service := r.URL.Query().Get("service")
 	isReceivePack := service == "git-receive-pack" || strings.HasSuffix(pathValue, "/git-receive-pack")
 
