@@ -158,6 +158,13 @@ func (s *S3) statAndHeaders(ctx context.Context, key Key) (minio.ObjectInfo, htt
 		headers.Set("Last-Modified", objInfo.LastModified.UTC().Format(http.TimeFormat))
 	}
 
+	// Surface S3's content-derived ETag so it flows through Open into the
+	// tiered backfill and is persisted on the disk copy. This lets a disk and
+	// an S3 serve of the same revision report the same pin token.
+	if objInfo.ETag != "" {
+		headers.Set(ContentETagHeader, objInfo.ETag)
+	}
+
 	return objInfo, headers, nil
 }
 
@@ -243,10 +250,14 @@ func (r *s3Reader) Read(p []byte) (int, error) {
 	if err == nil || errors.Is(err, io.EOF) {
 		return n, err //nolint:wrapcheck
 	}
-	// Convert NoSuchKey to os.ErrNotExist for consistency
 	errResponse := minio.ToErrorResponse(err)
-	if errResponse.Code == s3ErrNoSuchKey {
+	switch {
+	case errResponse.Code == s3ErrNoSuchKey:
+		// Convert NoSuchKey to os.ErrNotExist for consistency.
 		return n, os.ErrNotExist
+	case errResponse.StatusCode == http.StatusPreconditionFailed || errResponse.Code == "PreconditionFailed":
+		// A pinned (If-Match ETag) range whose object was overwritten.
+		return n, ErrPinStale
 	}
 	return n, errors.WithStack(err)
 }

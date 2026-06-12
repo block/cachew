@@ -340,3 +340,47 @@ func (t Tiered) ListNamespaces(ctx context.Context) ([]string, error) {
 	sort.Strings(namespaces)
 	return namespaces, nil
 }
+
+var _ PinnedRangeCache = (*Tiered)(nil)
+
+// Pin returns a pin token from the authoritative shared tier (the last pinnable
+// tier, i.e. S3) so the token is consistent across replicas. A disk tier may
+// hold a stale copy, so it must not mint the cross-replica pin.
+func (t Tiered) Pin(ctx context.Context, key Key) (PinnedObject, error) {
+	for i := len(t.caches) - 1; i >= 0; i-- {
+		pc, ok := t.caches[i].(PinnedRangeCache)
+		if !ok {
+			continue
+		}
+		obj, err := pc.Pin(ctx, key)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		return obj, errors.WithStack(err)
+	}
+	return PinnedObject{}, os.ErrNotExist
+}
+
+// OpenPinnedRange serves a range from the first tier that holds the pinned
+// revision, preferring local disk (sendfile zero-copy) over S3. A disk miss or
+// ETag mismatch returns os.ErrNotExist, which falls through to S3; S3's
+// ErrPinStale (the revision was overwritten) propagates to fail the request closed.
+func (t Tiered) OpenPinnedRange(ctx context.Context, key Key, pin string, start, end int64) (io.ReadCloser, int64, error) {
+	var found bool
+	for _, c := range t.caches {
+		pc, ok := c.(PinnedRangeCache)
+		if !ok {
+			continue
+		}
+		found = true
+		rc, total, err := pc.OpenPinnedRange(ctx, key, pin, start, end)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		return rc, total, errors.WithStack(err)
+	}
+	if !found {
+		return nil, 0, errors.New("no pinnable cache tier configured")
+	}
+	return nil, 0, os.ErrNotExist
+}

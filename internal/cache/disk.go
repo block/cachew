@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -44,6 +45,10 @@ type Disk struct {
 	runEviction  chan struct{}
 	stop         context.CancelFunc
 	evictionDone chan struct{}
+	// replaceMu serializes a writer's rename→metadata commit against a pinned
+	// reader's metadata→open, so the reader never observes a new file under old
+	// metadata. A pointer so namespaced shallow copies share one lock.
+	replaceMu *sync.RWMutex
 }
 
 var _ Cache = (*Disk)(nil)
@@ -118,6 +123,7 @@ func NewDisk(ctx context.Context, config DiskConfig) (*Disk, error) {
 		runEviction:  make(chan struct{}),
 		stop:         stop,
 		evictionDone: make(chan struct{}),
+		replaceMu:    &sync.RWMutex{},
 	}
 	disk.size.Store(size)
 
@@ -467,6 +473,11 @@ func (w *diskWriter) Close() error {
 	if err := os.MkdirAll(dir, 0750); err != nil {
 		return errors.Errorf("failed to create directory: %w", err)
 	}
+
+	// Hold replaceMu so the rename and metadata commit are atomic to pinned
+	// readers: they never see the new file paired with the old metadata.
+	w.disk.replaceMu.Lock()
+	defer w.disk.replaceMu.Unlock()
 
 	// Check if we're overwriting an existing file and subtract its size
 	if info, err := os.Stat(w.path); err == nil {

@@ -1,6 +1,7 @@
 package git
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"io"
@@ -8,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -248,6 +250,20 @@ func (s *Strategy) handleSnapshotRequest(w http.ResponseWriter, r *http.Request,
 
 	cacheKey := snapshotCacheKey(upstreamURL)
 
+	// Parallel download path: a Range request carrying a strong If-Match ETag is
+	// pinned to one content revision, so concurrent chunks stitch correctly
+	// across replicas and a regenerated snapshot fails closed (412) rather than
+	// mixing revisions. Served from the tiered cache (disk first, then S3),
+	// bypassing the cold-start/freshness logic below.
+	if rangeHdr := r.Header.Get("Range"); rangeHdr != "" {
+		if etag, matched := strongIfMatchETag(r.Header.Get("If-Match")); matched {
+			if pc, pinnable := s.cache.(cache.PinnedRangeCache); pinnable {
+				s.servePinnedRange(w, r, pc, cacheKey, repoName, etag, start)
+				return
+			}
+		}
+	}
+
 	// On cold start the local mirror may not be ready yet. Check the S3 cache
 	// first so we can stream a cached snapshot to the client immediately while
 	// the mirror restores in the background. This avoids blocking the client
@@ -257,7 +273,7 @@ func (s *Strategy) handleSnapshotRequest(w http.ResponseWriter, r *http.Request,
 		if existing, loaded := s.coldSnapshotMu.LoadOrStore(upstreamURL, entry); loaded {
 			winner := existing.(*coldSnapshotEntry)
 			<-winner.done
-			reader, _, openErr := s.cache.Open(ctx, cacheKey)
+			reader, hdrs, openErr := s.cache.Open(ctx, cacheKey)
 			if openErr == nil && reader != nil {
 				winner.serving.Add(1)
 				defer func() {
@@ -266,6 +282,7 @@ func (s *Strategy) handleSnapshotRequest(w http.ResponseWriter, r *http.Request,
 				}()
 				logger.InfoContext(ctx, "Serving locally cached snapshot after waiting for in-flight fill", "upstream", upstreamURL)
 				w.Header().Set("Content-Type", "application/zstd")
+				advertiseSnapshotValidators(w, hdrs)
 				n, err := serveReaderFast(w, r, reader)
 				s.metrics.recordSnapshotServe(ctx, "cold_cache", repoName, n, time.Since(start))
 				span.SetAttributes(attribute.String("cachew.source", "cold_cache"), attribute.Int64("cachew.bytes", n))
@@ -281,10 +298,11 @@ func (s *Strategy) handleSnapshotRequest(w http.ResponseWriter, r *http.Request,
 				close(entry.done)
 				s.coldSnapshotMu.Delete(upstreamURL)
 			}()
-			reader, _, openErr := s.cache.Open(ctx, cacheKey)
+			reader, hdrs, openErr := s.cache.Open(ctx, cacheKey)
 			if openErr == nil && reader != nil {
 				logger.InfoContext(ctx, "Serving cached snapshot while mirror warms up", "upstream", upstreamURL)
 				w.Header().Set("Content-Type", "application/zstd")
+				advertiseSnapshotValidators(w, hdrs)
 				n, err := serveReaderFast(w, r, reader)
 				s.metrics.recordSnapshotServe(ctx, "cold_cache", repoName, n, time.Since(start))
 				span.SetAttributes(attribute.String("cachew.source", "cold_cache"), attribute.Int64("cachew.bytes", n))
@@ -334,6 +352,133 @@ func (s *Strategy) handleSnapshotRequest(w http.ResponseWriter, r *http.Request,
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
 	}
+}
+
+// maxPinRangeBytes caps a single pinned range. Ranges are streamed, not
+// buffered, but a cap still bounds the work one request can demand and keeps
+// clients on reasonable chunk sizes.
+const maxPinRangeBytes = 256 << 20 // 256 MiB
+
+// advertiseSnapshotValidators sets the headers a parallel-download client needs
+// to discover the pin: the content ETag (strong validator) and Accept-Ranges.
+// They are set only when the cache surfaced a content ETag; entries without one
+// are served as a normal stream and the client won't attempt ranges.
+func advertiseSnapshotValidators(w http.ResponseWriter, headers http.Header) {
+	if etag := headers.Get(cache.ContentETagHeader); etag != "" {
+		w.Header().Set("ETag", strconv.Quote(etag))
+		w.Header().Set("Accept-Ranges", "bytes")
+	}
+}
+
+// strongIfMatchETag extracts a single strong ETag from an If-Match header,
+// returning false for missing, weak (W/...), "*", or multi-value forms. A
+// content-revision pin must be a single strong validator.
+func strongIfMatchETag(header string) (string, bool) {
+	header = strings.TrimSpace(header)
+	if header == "" || header == "*" || strings.Contains(header, ",") || strings.HasPrefix(header, "W/") {
+		return "", false
+	}
+	etag, err := strconv.Unquote(header)
+	if err != nil {
+		return "", false
+	}
+	return etag, true
+}
+
+// servePinnedRange serves one byte range pinned to the client's If-Match content
+// ETag. Every range across a parallel download resolves to the same revision, so
+// chunks stitch correctly no matter which replica handles each request. The
+// tiered cache serves from local disk when its stored ETag matches (sendfile
+// zero-copy), else from S3. A revision overwritten mid-download fails closed
+// with 412 so the client re-reads the validator and restarts.
+func (s *Strategy) servePinnedRange(w http.ResponseWriter, r *http.Request, pc cache.PinnedRangeCache, cacheKey cache.Key, repoName, etag string, start time.Time) {
+	ctx := r.Context()
+	startByte, endByte, ok := parseSingleByteRange(r.Header.Get("Range"))
+	// endByte-startByte is overflow-safe (both non-negative, end >= start); the
+	// length form endByte-startByte+1 is not.
+	if !ok || endByte-startByte >= maxPinRangeBytes {
+		http.Error(w, "invalid or oversized range", http.StatusRequestedRangeNotSatisfiable)
+		return
+	}
+
+	reader, total, err := pc.OpenPinnedRange(ctx, cacheKey, cache.ETagPin(etag), startByte, endByte)
+	switch {
+	case errors.Is(err, cache.ErrRangeNotSatisfiable):
+		http.Error(w, "range not satisfiable", http.StatusRequestedRangeNotSatisfiable)
+		return
+	case errors.Is(err, cache.ErrPinStale), errors.Is(err, os.ErrNotExist):
+		// The revision is gone (overwritten or evicted). Fail closed.
+		http.Error(w, "snapshot revision unavailable", http.StatusPreconditionFailed)
+		return
+	case err != nil:
+		logging.FromContext(ctx).ErrorContext(ctx, "Failed to open pinned range", "repo", repoName, "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	defer reader.Close()
+
+	// A disk *os.File is validated up front, so it can stream directly (and via
+	// sendfile). A lazy S3 reader can still 412 on the stat→get race, so force
+	// its first read with a one-byte peek to surface that before the 206 status.
+	body := io.Reader(reader)
+	if _, isFile := reader.(*os.File); !isFile {
+		br := bufio.NewReader(reader)
+		if _, err := br.Peek(1); err != nil {
+			switch {
+			case errors.Is(err, cache.ErrPinStale), errors.Is(err, os.ErrNotExist):
+				http.Error(w, "snapshot revision unavailable", http.StatusPreconditionFailed)
+			default:
+				logging.FromContext(ctx).ErrorContext(ctx, "Failed to read pinned range", "repo", repoName, "error", err)
+				http.Error(w, "internal server error", http.StatusInternalServerError)
+			}
+			return
+		}
+		body = br
+	}
+
+	// Clamp the end to the object so the advertised length matches the bytes a
+	// backend actually serves (a client may request a chunk past EOF).
+	if endByte >= total {
+		endByte = total - 1
+	}
+	length := endByte - startByte + 1
+
+	w.Header().Set("Content-Type", "application/zstd")
+	w.Header().Set("ETag", strconv.Quote(etag))
+	w.Header().Set("Accept-Ranges", "bytes")
+	w.Header().Set("Content-Length", strconv.FormatInt(length, 10))
+	w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", startByte, endByte, total))
+	w.WriteHeader(http.StatusPartialContent)
+
+	// io.CopyN bounds a disk *os.File to length while preserving sendfile; an S3
+	// reader is already bounded to the range by SetRange.
+	n, err := io.CopyN(w, body, length)
+	if err != nil && !errors.Is(err, io.EOF) {
+		logging.FromContext(ctx).WarnContext(ctx, "Failed to write pinned range", "repo", repoName, "error", err)
+	}
+	s.metrics.recordSnapshotServe(ctx, "pin_range", repoName, n, time.Since(start))
+}
+
+// parseSingleByteRange parses a closed "bytes=a-b" range header. Open-ended or
+// multi-range forms are rejected; pinned clients always request closed ranges.
+func parseSingleByteRange(header string) (start, end int64, ok bool) {
+	spec, found := strings.CutPrefix(header, "bytes=")
+	if !found || strings.Contains(spec, ",") {
+		return 0, 0, false
+	}
+	lo, hi, found := strings.Cut(spec, "-")
+	if !found || lo == "" || hi == "" {
+		return 0, 0, false
+	}
+	start, err := strconv.ParseInt(lo, 10, 64)
+	if err != nil {
+		return 0, 0, false
+	}
+	end, err = strconv.ParseInt(hi, 10, 64)
+	if err != nil || end < start {
+		return 0, 0, false
+	}
+	return start, end, true
 }
 
 func (s *Strategy) streamSnapshotArtifact(_ context.Context, w http.ResponseWriter, r *http.Request, reader io.ReadCloser, headers http.Header) error {
@@ -508,6 +653,7 @@ func (s *Strategy) serveSnapshotWithBundle(ctx context.Context, w http.ResponseW
 	}
 
 	w.Header().Set("Content-Type", "application/zstd")
+	advertiseSnapshotValidators(w, headers)
 	n, err := serveReaderFast(w, r, reader)
 	s.metrics.recordSnapshotServe(ctx, "cache", repoName, n, time.Since(start))
 	if span := trace.SpanFromContext(ctx); span.SpanContext().IsValid() {
