@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strconv"
 	"testing"
 	"time"
 
@@ -55,6 +56,10 @@ func Suite(t *testing.T, newCache func(t *testing.T) cache.Cache) {
 
 	t.Run("LastModified", func(t *testing.T) {
 		testLastModified(t, newCache(t))
+	})
+
+	t.Run("ContentLength", func(t *testing.T) {
+		testContentLength(t, newCache(t))
 	})
 
 	t.Run("NamespaceIsolation", func(t *testing.T) {
@@ -341,6 +346,29 @@ func testLastModified(t *testing.T, c cache.Cache) {
 	defer reader2.Close()
 
 	assert.Equal(t, explicitTime.Format(http.TimeFormat), headers2.Get("Last-Modified"))
+}
+
+func testContentLength(t *testing.T, c cache.Cache) {
+	defer c.Close()
+	ctx := t.Context()
+
+	content := []byte("hello content length")
+	key := cache.NewKey("test-content-length")
+
+	w, err := c.Create(ctx, key, nil, time.Hour)
+	assert.NoError(t, err)
+	_, err = w.Write(content)
+	assert.NoError(t, err)
+	assert.NoError(t, w.Close())
+
+	reader, headers, err := c.Open(ctx, key)
+	assert.NoError(t, err)
+	defer reader.Close()
+	assert.Equal(t, strconv.Itoa(len(content)), headers.Get("Content-Length"))
+
+	statHeaders, err := c.Stat(ctx, key)
+	assert.NoError(t, err)
+	assert.Equal(t, strconv.Itoa(len(content)), statHeaders.Get("Content-Length"))
 }
 
 func testNamespaceIsolation(t *testing.T, c cache.Cache) {
