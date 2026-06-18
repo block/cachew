@@ -57,43 +57,44 @@ type CacheWriter interface {
 	Abort(err error) error
 }
 
-// Preconditions holds conditional request parameters (RFC 7232).
-type Preconditions struct {
+// OpenOptions holds optional parameters for Open, including conditional
+// request headers (RFC 7232).
+type OpenOptions struct {
 	IfNoneMatch string
 	IfMatch     string
 }
 
-// Precondition configures a conditional request parameter.
-type Precondition func(*Preconditions)
+// OpenOption configures an optional parameter for Open.
+type OpenOption func(*OpenOptions)
 
 // WithIfNoneMatch sets the If-None-Match precondition.
 // For GET/HEAD, a matching ETag results in ErrNotModified.
 // For POST, a matching ETag results in ErrPreconditionFailed.
-func WithIfNoneMatch(etag string) Precondition {
-	return func(p *Preconditions) {
+func WithIfNoneMatch(etag string) OpenOption {
+	return func(p *OpenOptions) {
 		p.IfNoneMatch = etag
 	}
 }
 
 // WithIfMatch sets the If-Match precondition.
 // If the server's ETag does not match, ErrPreconditionFailed is returned.
-func WithIfMatch(etag string) Precondition {
-	return func(p *Preconditions) {
+func WithIfMatch(etag string) OpenOption {
+	return func(p *OpenOptions) {
 		p.IfMatch = etag
 	}
 }
 
-// ResolvePreconditions collects variadic precondition options into a Preconditions struct.
-func ResolvePreconditions(conds []Precondition) Preconditions {
-	var p Preconditions
+// ResolveOpenOptions collects variadic options into an OpenOptions struct.
+func ResolveOpenOptions(conds []OpenOption) OpenOptions {
+	var p OpenOptions
 	for _, c := range conds {
 		c(&p)
 	}
 	return p
 }
 
-func applyPreconditions(req *http.Request, conds []Precondition) {
-	p := ResolvePreconditions(conds)
+func applyOpenOptions(req *http.Request, conds []OpenOption) {
+	p := ResolveOpenOptions(conds)
 	if p.IfNoneMatch != "" {
 		req.Header.Set("If-None-Match", p.IfNoneMatch)
 	}
@@ -199,13 +200,13 @@ func (c *Client) objectURL(key Key) string {
 }
 
 // Open retrieves an object from the cache server.
-func (c *Client) Open(ctx context.Context, key Key, conds ...Precondition) (io.ReadCloser, http.Header, error) {
+func (c *Client) Open(ctx context.Context, key Key, conds ...OpenOption) (io.ReadCloser, http.Header, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.objectURL(key), nil)
 	if err != nil {
 		return nil, nil, errors.Wrap(err, "failed to create request")
 	}
 
-	applyPreconditions(req, conds)
+	applyOpenOptions(req, conds)
 
 	resp, err := c.http.Do(req)
 	if err != nil {
@@ -238,13 +239,13 @@ func (c *Client) Open(ctx context.Context, key Key, conds ...Precondition) (io.R
 }
 
 // Stat retrieves headers for an object from the cache server.
-func (c *Client) Stat(ctx context.Context, key Key, conds ...Precondition) (http.Header, error) {
+func (c *Client) Stat(ctx context.Context, key Key, conds ...OpenOption) (http.Header, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodHead, c.objectURL(key), nil)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to create request")
 	}
 
-	applyPreconditions(req, conds)
+	applyOpenOptions(req, conds)
 
 	resp, err := c.http.Do(req)
 	if err != nil {
@@ -274,7 +275,7 @@ func (c *Client) Stat(ctx context.Context, key Key, conds ...Precondition) (http
 // Create stores a new object in the cache server. The returned CacheWriter
 // must be closed to commit the upload. Call Abort instead of Close to discard
 // the in-progress write and ensure the object is never made visible.
-func (c *Client) Create(ctx context.Context, key Key, headers http.Header, ttl time.Duration, conds ...Precondition) (CacheWriter, error) {
+func (c *Client) Create(ctx context.Context, key Key, headers http.Header, ttl time.Duration, conds ...OpenOption) (CacheWriter, error) {
 	ctx, cancel := context.WithCancelCause(ctx)
 	pr, pw := io.Pipe()
 
@@ -290,7 +291,7 @@ func (c *Client) Create(ctx context.Context, key Key, headers http.Header, ttl t
 		req.Header.Set("Time-To-Live", ttl.String())
 	}
 
-	applyPreconditions(req, conds)
+	applyOpenOptions(req, conds)
 
 	wc := &writeCloser{
 		pw:     pw,
@@ -325,13 +326,13 @@ func (c *Client) Create(ctx context.Context, key Key, headers http.Header, ttl t
 }
 
 // Delete removes an object from the cache server.
-func (c *Client) Delete(ctx context.Context, key Key, conds ...Precondition) error {
+func (c *Client) Delete(ctx context.Context, key Key, conds ...OpenOption) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.objectURL(key), nil)
 	if err != nil {
 		return errors.Wrap(err, "failed to create request")
 	}
 
-	applyPreconditions(req, conds)
+	applyOpenOptions(req, conds)
 
 	resp, err := c.http.Do(req)
 	if err != nil {

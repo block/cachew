@@ -120,14 +120,14 @@ func NewKey(s string) Key { return client.NewKey(s) }
 // Stats contains health and usage statistics for a cache.
 type Stats = client.Stats
 
-// Precondition configures a conditional request parameter for Open.
-type Precondition = client.Precondition
+// OpenOption configures an optional parameter for Open.
+type OpenOption = client.OpenOption
 
-// Preconditions holds resolved conditional request parameters.
-type Preconditions = client.Preconditions
+// OpenOptions holds resolved optional parameters for Open.
+type OpenOptions = client.OpenOptions
 
-// ResolvePreconditions collects variadic options into a Preconditions struct.
-var ResolvePreconditions = client.ResolvePreconditions //nolint:gochecknoglobals
+// ResolveOpenOptions collects variadic options into an OpenOptions struct.
+var ResolveOpenOptions = client.ResolveOpenOptions //nolint:gochecknoglobals
 
 // WithIfMatch sets the If-Match precondition.
 var WithIfMatch = client.WithIfMatch //nolint:gochecknoglobals
@@ -162,7 +162,7 @@ type Cache interface {
 	// Must return os.ErrNotExist if the file does not exist.
 	// Must return ErrNotModified if an If-None-Match precondition matches.
 	// Must return ErrPreconditionFailed if an If-Match precondition fails.
-	Open(ctx context.Context, key Key, conds ...Precondition) (io.ReadCloser, http.Header, error)
+	Open(ctx context.Context, key Key, conds ...OpenOption) (io.ReadCloser, http.Header, error)
 	// Create a new file in the cache.
 	//
 	// If "ttl" is zero, a maximum TTL MUST be used by the implementation.

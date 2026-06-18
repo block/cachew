@@ -68,7 +68,7 @@ func (d *APIV1) statObject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var conds []cache.Precondition
+	var conds []cache.OpenOption
 	if v := r.Header.Get("If-None-Match"); v != "" {
 		conds = append(conds, cache.WithIfNoneMatch(v))
 	}
@@ -108,7 +108,7 @@ func (d *APIV1) getObject(w http.ResponseWriter, r *http.Request) {
 
 	namespacedCache := d.cache.Namespace(namespace)
 
-	var conds []cache.Precondition
+	var conds []cache.OpenOption
 	if v := r.Header.Get("If-None-Match"); v != "" {
 		conds = append(conds, cache.WithIfNoneMatch(v))
 	}
@@ -192,7 +192,7 @@ func (d *APIV1) putObject(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		} else {
-			var conds []cache.Precondition
+			var conds []cache.OpenOption
 			if v := r.Header.Get("If-Match"); v != "" {
 				conds = append(conds, cache.WithIfMatch(v))
 			}
@@ -257,7 +257,7 @@ func (d *APIV1) deleteObject(w http.ResponseWriter, r *http.Request) {
 			d.httpError(w, http.StatusInternalServerError, statErr, "Failed to stat cache object", "key", key)
 			return
 		}
-		var conds []cache.Precondition
+		var conds []cache.OpenOption
 		if v := r.Header.Get("If-Match"); v != "" {
 			conds = append(conds, cache.WithIfMatch(v))
 		}

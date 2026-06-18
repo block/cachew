@@ -47,11 +47,11 @@ func SetETag(headers http.Header, etag string) {
 // CheckPreconditions evaluates If-Match and If-None-Match preconditions against
 // the given headers. Returns ErrPreconditionFailed or ErrNotModified if a
 // precondition is not satisfied, or nil if all preconditions pass.
-func CheckPreconditions(headers http.Header, conds ...Precondition) error {
+func CheckPreconditions(headers http.Header, conds ...OpenOption) error {
 	if len(conds) == 0 {
 		return nil
 	}
-	p := ResolvePreconditions(conds)
+	p := ResolveOpenOptions(conds)
 	etag := headers.Get("ETag")
 	if p.IfMatch != "" && !CheckIfMatch(p.IfMatch, etag) {
 		return ErrPreconditionFailed

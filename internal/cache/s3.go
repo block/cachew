@@ -170,7 +170,7 @@ func (s *S3) Stat(ctx context.Context, key Key) (http.Header, error) {
 	return headers, nil
 }
 
-func (s *S3) Open(ctx context.Context, key Key, conds ...Precondition) (io.ReadCloser, http.Header, error) {
+func (s *S3) Open(ctx context.Context, key Key, conds ...OpenOption) (io.ReadCloser, http.Header, error) {
 	objInfo, headers, err := s.statAndHeaders(ctx, key)
 	if err != nil {
 		return nil, nil, err

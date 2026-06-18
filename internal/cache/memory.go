@@ -81,7 +81,7 @@ func (m *Memory) Stat(_ context.Context, key Key) (http.Header, error) {
 	return headers, nil
 }
 
-func (m *Memory) Open(_ context.Context, key Key, conds ...Precondition) (io.ReadCloser, http.Header, error) {
+func (m *Memory) Open(_ context.Context, key Key, conds ...OpenOption) (io.ReadCloser, http.Header, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
