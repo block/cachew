@@ -113,15 +113,15 @@ func (t Tiered) Stat(ctx context.Context, key Key) (http.Header, error) {
 // subsequent Opens are served locally.
 //
 // If all caches fail, all errors are returned.
-func (t Tiered) Open(ctx context.Context, key Key) (io.ReadCloser, http.Header, error) {
+func (t Tiered) Open(ctx context.Context, key Key, conds ...Precondition) (io.ReadCloser, http.Header, error) {
 	errs := make([]error, len(t.caches))
 	for i, c := range t.caches {
-		r, headers, err := c.Open(ctx, key)
+		r, headers, err := c.Open(ctx, key, conds...)
 		errs[i] = err
 		if errors.Is(err, os.ErrNotExist) {
 			continue
 		} else if err != nil {
-			return nil, nil, errors.WithStack(err)
+			return nil, headers, errors.WithStack(err)
 		}
 		if i > 0 {
 			r = t.backfillReader(ctx, key, r, headers, t.caches[0])

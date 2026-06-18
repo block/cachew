@@ -17,6 +17,12 @@ import (
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
+// ErrNotModified is returned when a conditional request results in a 304 Not Modified response.
+var ErrNotModified = errors.New("not modified")
+
+// ErrPreconditionFailed is returned when a conditional request results in a 412 Precondition Failed response.
+var ErrPreconditionFailed = errors.New("precondition failed")
+
 // HTTPStatusError is returned when the server responds with an unexpected
 // HTTP status code. Callers can use errors.As to inspect the status code.
 type HTTPStatusError struct {
@@ -49,6 +55,51 @@ type CacheWriter interface {
 	// The provided error is recorded as the cause of cancellation.
 	// The object MUST NOT be made available in the cache after Abort.
 	Abort(err error) error
+}
+
+// Preconditions holds conditional request parameters (RFC 7232).
+type Preconditions struct {
+	IfNoneMatch string
+	IfMatch     string
+}
+
+// Precondition configures a conditional request parameter.
+type Precondition func(*Preconditions)
+
+// WithIfNoneMatch sets the If-None-Match precondition.
+// For GET/HEAD, a matching ETag results in ErrNotModified.
+// For POST, a matching ETag results in ErrPreconditionFailed.
+func WithIfNoneMatch(etag string) Precondition {
+	return func(p *Preconditions) {
+		p.IfNoneMatch = etag
+	}
+}
+
+// WithIfMatch sets the If-Match precondition.
+// If the server's ETag does not match, ErrPreconditionFailed is returned.
+func WithIfMatch(etag string) Precondition {
+	return func(p *Preconditions) {
+		p.IfMatch = etag
+	}
+}
+
+// ResolvePreconditions collects variadic precondition options into a Preconditions struct.
+func ResolvePreconditions(conds []Precondition) Preconditions {
+	var p Preconditions
+	for _, c := range conds {
+		c(&p)
+	}
+	return p
+}
+
+func applyPreconditions(req *http.Request, conds []Precondition) {
+	p := ResolvePreconditions(conds)
+	if p.IfNoneMatch != "" {
+		req.Header.Set("If-None-Match", p.IfNoneMatch)
+	}
+	if p.IfMatch != "" {
+		req.Header.Set("If-Match", p.IfMatch)
+	}
 }
 
 // HeaderFunc returns headers to attach to each outgoing request.
@@ -148,11 +199,13 @@ func (c *Client) objectURL(key Key) string {
 }
 
 // Open retrieves an object from the cache server.
-func (c *Client) Open(ctx context.Context, key Key) (io.ReadCloser, http.Header, error) {
+func (c *Client) Open(ctx context.Context, key Key, conds ...Precondition) (io.ReadCloser, http.Header, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.objectURL(key), nil)
 	if err != nil {
 		return nil, nil, errors.Wrap(err, "failed to create request")
 	}
+
+	applyPreconditions(req, conds)
 
 	resp, err := c.http.Do(req)
 	if err != nil {
@@ -164,6 +217,18 @@ func (c *Client) Open(ctx context.Context, key Key) (io.ReadCloser, http.Header,
 		return nil, nil, errors.Join(os.ErrNotExist, resp.Body.Close())
 	}
 
+	if resp.StatusCode == http.StatusNotModified {
+		_, _ = io.Copy(io.Discard, resp.Body) //nolint:errcheck,gosec
+		headers := filterHeaders(resp.Header, transportHeaders...)
+		return nil, headers, errors.Join(ErrNotModified, resp.Body.Close())
+	}
+
+	if resp.StatusCode == http.StatusPreconditionFailed {
+		_, _ = io.Copy(io.Discard, resp.Body) //nolint:errcheck,gosec
+		headers := filterHeaders(resp.Header, transportHeaders...)
+		return nil, headers, errors.Join(ErrPreconditionFailed, resp.Body.Close())
+	}
+
 	if resp.StatusCode != http.StatusOK {
 		_, _ = io.Copy(io.Discard, resp.Body) //nolint:errcheck,gosec
 		return nil, nil, errors.Join(errors.WithStack(&HTTPStatusError{StatusCode: resp.StatusCode}), resp.Body.Close())
@@ -173,11 +238,13 @@ func (c *Client) Open(ctx context.Context, key Key) (io.ReadCloser, http.Header,
 }
 
 // Stat retrieves headers for an object from the cache server.
-func (c *Client) Stat(ctx context.Context, key Key) (http.Header, error) {
+func (c *Client) Stat(ctx context.Context, key Key, conds ...Precondition) (http.Header, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodHead, c.objectURL(key), nil)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to create request")
 	}
+
+	applyPreconditions(req, conds)
 
 	resp, err := c.http.Do(req)
 	if err != nil {
@@ -187,6 +254,14 @@ func (c *Client) Stat(ctx context.Context, key Key) (http.Header, error) {
 
 	if resp.StatusCode == http.StatusNotFound {
 		return nil, os.ErrNotExist
+	}
+
+	if resp.StatusCode == http.StatusNotModified {
+		return filterHeaders(resp.Header, transportHeaders...), ErrNotModified
+	}
+
+	if resp.StatusCode == http.StatusPreconditionFailed {
+		return nil, ErrPreconditionFailed
 	}
 
 	if resp.StatusCode != http.StatusOK {
@@ -199,7 +274,7 @@ func (c *Client) Stat(ctx context.Context, key Key) (http.Header, error) {
 // Create stores a new object in the cache server. The returned CacheWriter
 // must be closed to commit the upload. Call Abort instead of Close to discard
 // the in-progress write and ensure the object is never made visible.
-func (c *Client) Create(ctx context.Context, key Key, headers http.Header, ttl time.Duration) (CacheWriter, error) {
+func (c *Client) Create(ctx context.Context, key Key, headers http.Header, ttl time.Duration, conds ...Precondition) (CacheWriter, error) {
 	ctx, cancel := context.WithCancelCause(ctx)
 	pr, pw := io.Pipe()
 
@@ -214,6 +289,8 @@ func (c *Client) Create(ctx context.Context, key Key, headers http.Header, ttl t
 	if ttl > 0 {
 		req.Header.Set("Time-To-Live", ttl.String())
 	}
+
+	applyPreconditions(req, conds)
 
 	wc := &writeCloser{
 		pw:     pw,
@@ -231,6 +308,11 @@ func (c *Client) Create(ctx context.Context, key Key, headers http.Header, ttl t
 		_, _ = io.Copy(io.Discard, resp.Body) //nolint:errcheck,gosec
 		_ = resp.Body.Close()                 //nolint:gosec
 
+		if resp.StatusCode == http.StatusPreconditionFailed {
+			wc.done <- ErrPreconditionFailed
+			return
+		}
+
 		if resp.StatusCode != http.StatusOK {
 			wc.done <- errors.WithStack(&HTTPStatusError{StatusCode: resp.StatusCode})
 			return
@@ -243,11 +325,13 @@ func (c *Client) Create(ctx context.Context, key Key, headers http.Header, ttl t
 }
 
 // Delete removes an object from the cache server.
-func (c *Client) Delete(ctx context.Context, key Key) error {
+func (c *Client) Delete(ctx context.Context, key Key, conds ...Precondition) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.objectURL(key), nil)
 	if err != nil {
 		return errors.Wrap(err, "failed to create request")
 	}
+
+	applyPreconditions(req, conds)
 
 	resp, err := c.http.Do(req)
 	if err != nil {
@@ -257,6 +341,10 @@ func (c *Client) Delete(ctx context.Context, key Key) error {
 
 	if resp.StatusCode == http.StatusNotFound {
 		return os.ErrNotExist
+	}
+
+	if resp.StatusCode == http.StatusPreconditionFailed {
+		return ErrPreconditionFailed
 	}
 
 	if resp.StatusCode != http.StatusOK {

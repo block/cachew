@@ -187,6 +187,7 @@ func (d *Disk) Create(ctx context.Context, key Key, headers http.Header, ttl tim
 	return &diskWriter{
 		disk:      d,
 		file:      f,
+		hasher:    NewHashingWriter(f),
 		key:       key,
 		namespace: d.namespace,
 		path:      fullPath,
@@ -258,7 +259,7 @@ func (d *Disk) Stat(ctx context.Context, key Key) (http.Header, error) {
 	return headers, nil
 }
 
-func (d *Disk) Open(ctx context.Context, key Key) (io.ReadCloser, http.Header, error) {
+func (d *Disk) Open(ctx context.Context, key Key, conds ...Precondition) (io.ReadCloser, http.Header, error) {
 	path := d.keyToPath(d.namespace, key)
 	fullPath := filepath.Join(d.config.Root, path)
 
@@ -280,6 +281,10 @@ func (d *Disk) Open(ctx context.Context, key Key) (io.ReadCloser, http.Header, e
 	headers, err := d.db.getHeaders(d.namespace, key)
 	if err != nil {
 		return nil, nil, errors.Join(errors.Errorf("failed to get headers: %w", err), f.Close())
+	}
+
+	if err := CheckPreconditions(headers, conds...); err != nil {
+		return nil, headers, errors.Join(err, f.Close())
 	}
 
 	finfo, err := f.Stat()
@@ -432,6 +437,7 @@ func (d *Disk) evictBySize(remainingFiles []evictFileInfo) error {
 type diskWriter struct {
 	disk      *Disk
 	file      *os.File
+	hasher    *HashingWriter
 	key       Key
 	namespace Namespace
 	path      string
@@ -445,7 +451,7 @@ type diskWriter struct {
 }
 
 func (w *diskWriter) Write(p []byte) (int, error) {
-	n, err := w.file.Write(p)
+	n, err := w.hasher.Write(p)
 	w.size += int64(n)
 	return n, errors.WithStack(err)
 }
@@ -470,6 +476,8 @@ func (w *diskWriter) Close() error {
 		// Clean up temp file and abort
 		return errors.Join(errors.Wrap(err, "create operation cancelled"), os.Remove(w.tempPath))
 	}
+
+	SetETag(w.headers, w.hasher.ETag())
 
 	// Ensure directory exists (eviction may have removed it)
 	dir := filepath.Dir(w.path)

@@ -81,7 +81,7 @@ func (m *Memory) Stat(_ context.Context, key Key) (http.Header, error) {
 	return headers, nil
 }
 
-func (m *Memory) Open(_ context.Context, key Key) (io.ReadCloser, http.Header, error) {
+func (m *Memory) Open(_ context.Context, key Key, conds ...Precondition) (io.ReadCloser, http.Header, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -100,7 +100,11 @@ func (m *Memory) Open(_ context.Context, key Key) (io.ReadCloser, http.Header, e
 	}
 
 	headers := maps.Clone(entry.headers)
-	headers.Set("Content-Length", strconv.Itoa(len(entry.data)))
+
+	if err := CheckPreconditions(headers, conds...); err != nil {
+		return nil, headers, err
+	}
+
 	return io.NopCloser(bytes.NewReader(entry.data)), headers, nil
 }
 
@@ -119,11 +123,15 @@ func (m *Memory) Create(ctx context.Context, key Key, headers http.Header, ttl t
 
 	ctx, cancel := context.WithCancelCause(ctx)
 
+	buf := &bytes.Buffer{}
+	hasher := NewHashingWriter(buf)
+
 	writer := &memoryWriter{
 		cache:     m,
 		namespace: m.namespace,
 		key:       key,
-		buf:       &bytes.Buffer{},
+		buf:       buf,
+		hasher:    hasher,
 		expiresAt: now.Add(ttl),
 		headers:   clonedHeaders,
 		ctx:       ctx,
@@ -220,6 +228,7 @@ type memoryWriter struct {
 	namespace Namespace
 	key       Key
 	buf       *bytes.Buffer
+	hasher    *HashingWriter
 	expiresAt time.Time
 	headers   http.Header
 	closed    bool
@@ -231,7 +240,7 @@ func (w *memoryWriter) Write(p []byte) (int, error) {
 	if w.closed {
 		return 0, errors.New("writer closed")
 	}
-	return errors.WithStack2(w.buf.Write(p))
+	return errors.WithStack2(w.hasher.Write(p))
 }
 
 func (w *memoryWriter) Abort(err error) error {
@@ -249,6 +258,8 @@ func (w *memoryWriter) Close() error {
 	if err := w.ctx.Err(); err != nil {
 		return errors.Wrap(err, "create operation cancelled")
 	}
+
+	SetETag(w.headers, w.hasher.ETag())
 
 	w.cache.mu.Lock()
 	defer w.cache.mu.Unlock()

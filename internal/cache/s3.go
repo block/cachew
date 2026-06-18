@@ -170,13 +170,17 @@ func (s *S3) Stat(ctx context.Context, key Key) (http.Header, error) {
 	return headers, nil
 }
 
-func (s *S3) Open(ctx context.Context, key Key) (io.ReadCloser, http.Header, error) {
+func (s *S3) Open(ctx context.Context, key Key, conds ...Precondition) (io.ReadCloser, http.Header, error) {
 	objInfo, headers, err := s.statAndHeaders(ctx, key)
 	if err != nil {
 		return nil, nil, err
 	}
 
 	headers.Set("Content-Length", strconv.FormatInt(objInfo.Size, 10))
+
+	if err := CheckPreconditions(headers, conds...); err != nil {
+		return nil, headers, err
+	}
 
 	objectName := s.keyToPath(s.namespace, key)
 
@@ -273,12 +277,14 @@ func (s *S3) Create(ctx context.Context, key Key, headers http.Header, ttl time.
 	ctx, cancel := context.WithCancelCause(ctx)
 
 	pr, pw := io.Pipe()
+	hasher := NewHashingWriter(pw)
 
 	writer := &s3Writer{
 		s3:        s,
 		key:       key,
 		namespace: s.namespace,
 		pipe:      pw,
+		hasher:    hasher,
 		expiresAt: expiresAt,
 		headers:   clonedHeaders,
 		ctx:       ctx,
@@ -320,6 +326,7 @@ type s3Writer struct {
 	key       Key
 	namespace Namespace
 	pipe      *io.PipeWriter
+	hasher    *HashingWriter
 	expiresAt time.Time
 	headers   http.Header
 	ctx       context.Context
@@ -330,7 +337,7 @@ type s3Writer struct {
 }
 
 func (w *s3Writer) Write(p []byte) (int, error) {
-	n, err := w.pipe.Write(p)
+	n, err := w.hasher.Write(p)
 	if err != nil {
 		// Check if upload failed - if so, return that error instead
 		select {
@@ -371,6 +378,33 @@ func (w *s3Writer) Close() error {
 	err := <-w.errCh
 	if err != nil {
 		return err
+	}
+
+	// Update stored headers with the content-hash ETag via a server-side
+	// copy-to-self. There is a brief window between PutObject completing
+	// and this metadata update where the object is visible without an ETag.
+	SetETag(w.headers, w.hasher.ETag())
+
+	objectName := w.s3.keyToPath(w.namespace, w.key)
+	headersJSON, err := json.Marshal(w.headers)
+	if err != nil {
+		return errors.Errorf("failed to marshal headers with etag: %w", err)
+	}
+
+	src := minio.CopySrcOptions{
+		Bucket: w.s3.config.Bucket,
+		Object: objectName,
+	}
+	dst := minio.CopyDestOptions{
+		Bucket:          w.s3.config.Bucket,
+		Object:          objectName,
+		UserMetadata:    map[string]string{"Headers": string(headersJSON)},
+		ReplaceMetadata: true,
+		Expires:         w.expiresAt,
+	}
+	if _, err := w.s3.client.CopyObject(w.ctx, dst, src); err != nil {
+		_ = w.s3.client.RemoveObject(context.WithoutCancel(w.ctx), w.s3.config.Bucket, objectName, minio.RemoveObjectOptions{}) //nolint:errcheck,gosec
+		return errors.Wrap(err, "failed to update S3 metadata with ETag")
 	}
 
 	return nil

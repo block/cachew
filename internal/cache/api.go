@@ -120,6 +120,27 @@ func NewKey(s string) Key { return client.NewKey(s) }
 // Stats contains health and usage statistics for a cache.
 type Stats = client.Stats
 
+// Precondition configures a conditional request parameter for Open.
+type Precondition = client.Precondition
+
+// Preconditions holds resolved conditional request parameters.
+type Preconditions = client.Preconditions
+
+// ResolvePreconditions collects variadic options into a Preconditions struct.
+var ResolvePreconditions = client.ResolvePreconditions //nolint:gochecknoglobals
+
+// WithIfMatch sets the If-Match precondition.
+var WithIfMatch = client.WithIfMatch //nolint:gochecknoglobals
+
+// WithIfNoneMatch sets the If-None-Match precondition.
+var WithIfNoneMatch = client.WithIfNoneMatch //nolint:gochecknoglobals
+
+// ErrNotModified is returned by Open when an If-None-Match precondition matches.
+var ErrNotModified = client.ErrNotModified
+
+// ErrPreconditionFailed is returned by Open when an If-Match precondition fails.
+var ErrPreconditionFailed = client.ErrPreconditionFailed
+
 // A Cache knows how to retrieve, create and delete objects from a cache.
 //
 // Objects in the cache are not guaranteed to persist and implementations may delete them at any time.
@@ -139,7 +160,9 @@ type Cache interface {
 	// Expired files MUST NOT be returned.
 	// The returned headers MUST include a Last-Modified header.
 	// Must return os.ErrNotExist if the file does not exist.
-	Open(ctx context.Context, key Key) (io.ReadCloser, http.Header, error)
+	// Must return ErrNotModified if an If-None-Match precondition matches.
+	// Must return ErrPreconditionFailed if an If-Match precondition fails.
+	Open(ctx context.Context, key Key, conds ...Precondition) (io.ReadCloser, http.Header, error)
 	// Create a new file in the cache.
 	//
 	// If "ttl" is zero, a maximum TTL MUST be used by the implementation.

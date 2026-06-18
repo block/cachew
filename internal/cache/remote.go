@@ -38,8 +38,8 @@ func (r *Remote) Namespace(namespace Namespace) Cache {
 	return &Remote{c: r.c.Namespace(namespace)}
 }
 
-func (r *Remote) Open(ctx context.Context, key Key) (io.ReadCloser, http.Header, error) {
-	rc, h, err := r.c.Open(ctx, key)
+func (r *Remote) Open(ctx context.Context, key Key, conds ...Precondition) (io.ReadCloser, http.Header, error) {
+	rc, h, err := r.c.Open(ctx, key, conds...)
 	return rc, h, errors.WithStack(err)
 }
 

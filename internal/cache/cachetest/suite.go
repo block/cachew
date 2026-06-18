@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -60,6 +61,22 @@ func Suite(t *testing.T, newCache func(t *testing.T) cache.Cache) {
 
 	t.Run("ContentLength", func(t *testing.T) {
 		testContentLength(t, newCache(t))
+	})
+
+	t.Run("ETag", func(t *testing.T) {
+		testETag(t, newCache(t))
+	})
+
+	t.Run("ETagConsistency", func(t *testing.T) {
+		testETagConsistency(t, newCache(t))
+	})
+
+	t.Run("OpenIfNoneMatch", func(t *testing.T) {
+		testOpenIfNoneMatch(t, newCache(t))
+	})
+
+	t.Run("OpenIfMatch", func(t *testing.T) {
+		testOpenIfMatch(t, newCache(t))
 	})
 
 	t.Run("NamespaceIsolation", func(t *testing.T) {
@@ -369,6 +386,124 @@ func testContentLength(t *testing.T, c cache.Cache) {
 	statHeaders, err := c.Stat(ctx, key)
 	assert.NoError(t, err)
 	assert.Equal(t, strconv.Itoa(len(content)), statHeaders.Get("Content-Length"))
+}
+
+func testETag(t *testing.T, c cache.Cache) {
+	defer c.Close()
+	ctx := t.Context()
+
+	key := cache.NewKey("test-etag")
+
+	writer, err := c.Create(ctx, key, nil, time.Hour)
+	assert.NoError(t, err)
+	_, err = writer.Write([]byte("hello world"))
+	assert.NoError(t, err)
+	assert.NoError(t, writer.Close())
+
+	reader, headers, err := c.Open(ctx, key)
+	assert.NoError(t, err)
+	defer reader.Close()
+
+	etag := headers.Get("ETag")
+	assert.NotZero(t, etag, "ETag header should be set")
+	assert.True(t, strings.HasPrefix(etag, `"sha256:`), "ETag should be a sha256-based strong ETag, got: %s", etag)
+	assert.True(t, strings.HasSuffix(etag, `"`), "ETag should end with a quote")
+
+	statHeaders, err := c.Stat(ctx, key)
+	assert.NoError(t, err)
+	assert.Equal(t, etag, statHeaders.Get("ETag"))
+}
+
+func testETagConsistency(t *testing.T, c cache.Cache) {
+	defer c.Close()
+	ctx := t.Context()
+
+	content := []byte("identical content for etag consistency")
+
+	key1 := cache.NewKey("etag-consistency-1")
+	w1, err := c.Create(ctx, key1, nil, time.Hour)
+	assert.NoError(t, err)
+	_, err = w1.Write(content)
+	assert.NoError(t, err)
+	assert.NoError(t, w1.Close())
+
+	key2 := cache.NewKey("etag-consistency-2")
+	w2, err := c.Create(ctx, key2, nil, time.Hour)
+	assert.NoError(t, err)
+	_, err = w2.Write(content)
+	assert.NoError(t, err)
+	assert.NoError(t, w2.Close())
+
+	_, h1, err := c.Open(ctx, key1)
+	assert.NoError(t, err)
+	_, h2, err := c.Open(ctx, key2)
+	assert.NoError(t, err)
+
+	assert.Equal(t, h1.Get("ETag"), h2.Get("ETag"))
+}
+
+func testOpenIfNoneMatch(t *testing.T, c cache.Cache) {
+	defer c.Close()
+	ctx := t.Context()
+
+	key := cache.NewKey("test-if-none-match")
+	w, err := c.Create(ctx, key, nil, time.Hour)
+	assert.NoError(t, err)
+	_, err = w.Write([]byte("some content"))
+	assert.NoError(t, err)
+	assert.NoError(t, w.Close())
+
+	// Get the ETag
+	_, headers, err := c.Open(ctx, key)
+	assert.NoError(t, err)
+	etag := headers.Get("ETag")
+	assert.NotZero(t, etag)
+
+	// If-None-Match with matching ETag → ErrNotModified
+	_, retHeaders, err := c.Open(ctx, key, cache.WithIfNoneMatch(etag))
+	assert.IsError(t, err, cache.ErrNotModified)
+	assert.Equal(t, etag, retHeaders.Get("ETag"))
+
+	// If-None-Match with non-matching ETag → success
+	reader, _, err := c.Open(ctx, key, cache.WithIfNoneMatch(`"wrong"`))
+	assert.NoError(t, err)
+	assert.NoError(t, reader.Close())
+
+	// If-None-Match on non-existent key → ErrNotExist (not ErrNotModified)
+	_, _, err = c.Open(ctx, cache.NewKey("nonexistent"), cache.WithIfNoneMatch(etag))
+	assert.IsError(t, err, os.ErrNotExist)
+}
+
+func testOpenIfMatch(t *testing.T, c cache.Cache) {
+	defer c.Close()
+	ctx := t.Context()
+
+	key := cache.NewKey("test-if-match")
+	w, err := c.Create(ctx, key, nil, time.Hour)
+	assert.NoError(t, err)
+	_, err = w.Write([]byte("some content"))
+	assert.NoError(t, err)
+	assert.NoError(t, w.Close())
+
+	// Get the ETag
+	_, headers, err := c.Open(ctx, key)
+	assert.NoError(t, err)
+	etag := headers.Get("ETag")
+	assert.NotZero(t, etag)
+
+	// If-Match with matching ETag → success
+	reader, _, err := c.Open(ctx, key, cache.WithIfMatch(etag))
+	assert.NoError(t, err)
+	assert.NoError(t, reader.Close())
+
+	// If-Match with non-matching ETag → ErrPreconditionFailed
+	_, retHeaders, err := c.Open(ctx, key, cache.WithIfMatch(`"wrong"`))
+	assert.IsError(t, err, cache.ErrPreconditionFailed)
+	assert.Equal(t, etag, retHeaders.Get("ETag"))
+
+	// If-Match on non-existent key → ErrNotExist (not ErrPreconditionFailed)
+	_, _, err = c.Open(ctx, cache.NewKey("nonexistent"), cache.WithIfMatch(etag))
+	assert.IsError(t, err, os.ErrNotExist)
 }
 
 func testNamespaceIsolation(t *testing.T, c cache.Cache) {

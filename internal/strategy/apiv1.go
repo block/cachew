@@ -64,8 +64,30 @@ func (d *APIV1) statObject(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Cache object not found", http.StatusNotFound)
 			return
 		}
-		d.httpError(w, http.StatusInternalServerError, err, "Failed to open cache object", "key", key)
+		d.httpError(w, http.StatusInternalServerError, err, "Failed to stat cache object", "key", key)
 		return
+	}
+
+	var conds []cache.Precondition
+	if v := r.Header.Get("If-None-Match"); v != "" {
+		conds = append(conds, cache.WithIfNoneMatch(v))
+	}
+	if v := r.Header.Get("If-Match"); v != "" {
+		conds = append(conds, cache.WithIfMatch(v))
+	}
+	if err := cache.CheckPreconditions(headers, conds...); err != nil {
+		if errors.Is(err, cache.ErrNotModified) {
+			maps.Copy(w.Header(), headers)
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		if errors.Is(err, cache.ErrPreconditionFailed) {
+			if etag := headers.Get("ETag"); etag != "" {
+				w.Header().Set("ETag", etag)
+			}
+			http.Error(w, "Precondition failed", http.StatusPreconditionFailed)
+			return
+		}
 	}
 
 	maps.Copy(w.Header(), headers)
@@ -85,10 +107,31 @@ func (d *APIV1) getObject(w http.ResponseWriter, r *http.Request) {
 	}
 
 	namespacedCache := d.cache.Namespace(namespace)
-	cr, headers, err := namespacedCache.Open(r.Context(), key)
+
+	var conds []cache.Precondition
+	if v := r.Header.Get("If-None-Match"); v != "" {
+		conds = append(conds, cache.WithIfNoneMatch(v))
+	}
+	if v := r.Header.Get("If-Match"); v != "" {
+		conds = append(conds, cache.WithIfMatch(v))
+	}
+
+	cr, headers, err := namespacedCache.Open(r.Context(), key, conds...)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			http.Error(w, "Cache object not found", http.StatusNotFound)
+			return
+		}
+		if errors.Is(err, cache.ErrNotModified) {
+			maps.Copy(w.Header(), headers)
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		if errors.Is(err, cache.ErrPreconditionFailed) {
+			if etag := headers.Get("ETag"); etag != "" {
+				w.Header().Set("ETag", etag)
+			}
+			http.Error(w, "Precondition failed", http.StatusPreconditionFailed)
 			return
 		}
 		d.httpError(w, http.StatusInternalServerError, err, "Failed to open cache object", "key", key)
@@ -130,8 +173,35 @@ func (d *APIV1) putObject(w http.ResponseWriter, r *http.Request) {
 
 	// Extract and filter headers from request
 	headers := httputil.FilterHeaders(r.Header, httputil.TransportHeaders...)
+	headers = httputil.FilterHeaders(headers, cache.RequestHeaders...)
 
 	namespacedCache := d.cache.Namespace(namespace)
+
+	if r.Header.Get("If-Match") != "" || r.Header.Get("If-None-Match") != "" {
+		existingHeaders, statErr := namespacedCache.Stat(r.Context(), key)
+		if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
+			d.httpError(w, http.StatusInternalServerError, statErr, "Failed to stat cache object", "key", key)
+			return
+		}
+		if existingHeaders == nil {
+			existingHeaders = make(http.Header)
+		}
+		var conds []cache.Precondition
+		if v := r.Header.Get("If-Match"); v != "" {
+			conds = append(conds, cache.WithIfMatch(v))
+		}
+		if v := r.Header.Get("If-None-Match"); v != "" {
+			conds = append(conds, cache.WithIfNoneMatch(v))
+		}
+		if err := cache.CheckPreconditions(existingHeaders, conds...); err != nil {
+			if etag := existingHeaders.Get("ETag"); etag != "" {
+				w.Header().Set("ETag", etag)
+			}
+			http.Error(w, "Precondition failed", http.StatusPreconditionFailed)
+			return
+		}
+	}
+
 	cw, err := namespacedCache.Create(r.Context(), key, headers, ttl)
 	if err != nil {
 		d.httpError(w, http.StatusInternalServerError, err, "Failed to create cache writer", "key", key)
@@ -146,6 +216,13 @@ func (d *APIV1) putObject(w http.ResponseWriter, r *http.Request) {
 	if err := cw.Close(); err != nil {
 		d.httpError(w, http.StatusInternalServerError, err, "Failed to close cache writer")
 		return
+	}
+
+	storedHeaders, err := namespacedCache.Stat(r.Context(), key)
+	if err == nil {
+		if etag := storedHeaders.Get("ETag"); etag != "" {
+			w.Header().Set("ETag", etag)
+		}
 	}
 }
 
@@ -162,6 +239,33 @@ func (d *APIV1) deleteObject(w http.ResponseWriter, r *http.Request) {
 	}
 
 	namespacedCache := d.cache.Namespace(namespace)
+
+	if r.Header.Get("If-Match") != "" || r.Header.Get("If-None-Match") != "" {
+		existingHeaders, statErr := namespacedCache.Stat(r.Context(), key)
+		if statErr != nil {
+			if errors.Is(statErr, os.ErrNotExist) {
+				http.Error(w, "Cache object not found", http.StatusNotFound)
+				return
+			}
+			d.httpError(w, http.StatusInternalServerError, statErr, "Failed to stat cache object", "key", key)
+			return
+		}
+		var conds []cache.Precondition
+		if v := r.Header.Get("If-Match"); v != "" {
+			conds = append(conds, cache.WithIfMatch(v))
+		}
+		if v := r.Header.Get("If-None-Match"); v != "" {
+			conds = append(conds, cache.WithIfNoneMatch(v))
+		}
+		if err := cache.CheckPreconditions(existingHeaders, conds...); err != nil {
+			if etag := existingHeaders.Get("ETag"); etag != "" {
+				w.Header().Set("ETag", etag)
+			}
+			http.Error(w, "Precondition failed", http.StatusPreconditionFailed)
+			return
+		}
+	}
+
 	err = namespacedCache.Delete(r.Context(), key)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
