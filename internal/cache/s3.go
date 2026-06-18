@@ -2,6 +2,7 @@ package cache
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -54,6 +55,14 @@ type S3 struct {
 }
 
 var _ Cache = (*S3)(nil)
+
+// s3Meta stores mutable metadata in a companion object alongside the
+// data object, avoiding expensive server-side copies when updating
+// headers or refreshing expiry.
+type s3Meta struct {
+	Headers   http.Header `json:"headers,omitempty"`
+	ExpiresAt time.Time   `json:"expires_at"`
+}
 
 // NewS3 creates a new S3-based cache instance.
 //
@@ -131,38 +140,51 @@ func (s *S3) keyToPath(namespace Namespace, key Key) string {
 }
 
 // statAndHeaders retrieves object metadata, checks expiry, and returns parsed headers.
-func (s *S3) statAndHeaders(ctx context.Context, key Key) (minio.ObjectInfo, http.Header, error) {
+// It reads immutable headers from the data object's user metadata, then overlays
+// mutable metadata from a companion .meta object (ETag, refreshed expiry).
+func (s *S3) statAndHeaders(ctx context.Context, key Key) (minio.ObjectInfo, http.Header, s3Meta, error) {
 	objectName := s.keyToPath(s.namespace, key)
 
 	objInfo, err := s.client.StatObject(ctx, s.config.Bucket, objectName, minio.StatObjectOptions{})
 	if err != nil {
 		errResponse := minio.ToErrorResponse(err)
 		if errResponse.Code == s3ErrNoSuchKey {
-			return minio.ObjectInfo{}, nil, os.ErrNotExist
+			return minio.ObjectInfo{}, nil, s3Meta{}, os.ErrNotExist
 		}
-		return minio.ObjectInfo{}, nil, errors.Errorf("failed to stat object: %w", err)
-	}
-
-	if !objInfo.Expires.IsZero() && time.Now().After(objInfo.Expires) {
-		return minio.ObjectInfo{}, nil, errors.Join(os.ErrNotExist, s.Delete(ctx, key))
+		return minio.ObjectInfo{}, nil, s3Meta{}, errors.Errorf("failed to stat object: %w", err)
 	}
 
 	headers := make(http.Header)
 	if headersJSON := objInfo.UserMetadata["Headers"]; headersJSON != "" {
 		if err := json.Unmarshal([]byte(headersJSON), &headers); err != nil {
-			return minio.ObjectInfo{}, nil, errors.Errorf("failed to unmarshal headers: %w", err)
+			return minio.ObjectInfo{}, nil, s3Meta{}, errors.Errorf("failed to unmarshal headers: %w", err)
 		}
+	}
+
+	meta, err := s.readMeta(ctx, s.namespace, key)
+	if err != nil {
+		return minio.ObjectInfo{}, nil, s3Meta{}, err
+	}
+	maps.Copy(headers, meta.Headers)
+
+	// Companion expiry takes precedence over the data object's Expires header.
+	if meta.ExpiresAt.IsZero() {
+		meta.ExpiresAt = objInfo.Expires
+	}
+
+	if !meta.ExpiresAt.IsZero() && time.Now().After(meta.ExpiresAt) {
+		return minio.ObjectInfo{}, nil, s3Meta{}, errors.Join(os.ErrNotExist, s.Delete(ctx, key))
 	}
 
 	if headers.Get("Last-Modified") == "" && !objInfo.LastModified.IsZero() {
 		headers.Set("Last-Modified", objInfo.LastModified.UTC().Format(http.TimeFormat))
 	}
 
-	return objInfo, headers, nil
+	return objInfo, headers, meta, nil
 }
 
 func (s *S3) Stat(ctx context.Context, key Key) (http.Header, error) {
-	objInfo, headers, err := s.statAndHeaders(ctx, key)
+	objInfo, headers, _, err := s.statAndHeaders(ctx, key)
 	if err != nil {
 		return nil, err
 	}
@@ -171,7 +193,7 @@ func (s *S3) Stat(ctx context.Context, key Key) (http.Header, error) {
 }
 
 func (s *S3) Open(ctx context.Context, key Key) (io.ReadCloser, http.Header, error) {
-	objInfo, headers, err := s.statAndHeaders(ctx, key)
+	objInfo, headers, meta, err := s.statAndHeaders(ctx, key)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -181,16 +203,21 @@ func (s *S3) Open(ctx context.Context, key Key) (io.ReadCloser, http.Header, err
 	objectName := s.keyToPath(s.namespace, key)
 
 	// Reset expiration time to implement LRU (same as disk cache).
-	// Only refresh when remaining TTL is below 50% of max to avoid a
-	// server-side copy on every read.
-	if !objInfo.Expires.IsZero() {
+	// Only refresh when remaining TTL is below 50% of max to avoid
+	// rewriting the companion metadata on every read.
+	if !meta.ExpiresAt.IsZero() {
 		now := time.Now()
-		if objInfo.Expires.Sub(now) < s.config.MaxTTL/2 {
+		if meta.ExpiresAt.Sub(now) < s.config.MaxTTL/2 {
 			newExpiresAt := ceilSecond(now.Add(s.config.MaxTTL))
+			refreshHeaders := make(http.Header)
+			if etag := meta.Headers.Get(ETagKey); etag != "" {
+				refreshHeaders.Set(ETagKey, etag)
+			}
+			refreshMeta := s3Meta{Headers: refreshHeaders, ExpiresAt: newExpiresAt}
 			go func() {
 				bgCtx := context.WithoutCancel(ctx)
-				if err := s.refreshExpiration(bgCtx, objectName, objInfo, newExpiresAt); err != nil {
-					s.logger.WarnContext(bgCtx, "Failed to refresh S3 expiration", "object", objectName, "error", err)
+				if err := s.writeMeta(bgCtx, s.namespace, key, refreshMeta); err != nil {
+					s.logger.WarnContext(bgCtx, "Failed to refresh S3 expiration", "key", key, "error", err)
 				}
 			}()
 		}
@@ -204,50 +231,49 @@ func (s *S3) Open(ctx context.Context, key Key) (io.ReadCloser, http.Header, err
 	return reader, headers, nil
 }
 
-// refreshExpiration updates the Expires header on an S3 object using
-// server-side copy-to-self with metadata replacement. This avoids re-uploading
-// the object data.
-func (s *S3) refreshExpiration(ctx context.Context, objectName string, objInfo minio.ObjectInfo, newExpiresAt time.Time) error {
-	src := minio.CopySrcOptions{
-		Bucket: s.config.Bucket,
-		Object: objectName,
+func (s *S3) metaPath(namespace Namespace, key Key) string {
+	return s.keyToPath(namespace, key) + ".meta"
+}
+
+// writeMeta writes the companion metadata object for the given key.
+func (s *S3) writeMeta(ctx context.Context, namespace Namespace, key Key, meta s3Meta) error {
+	data, err := json.Marshal(meta)
+	if err != nil {
+		return errors.Wrap(err, "marshal metadata")
 	}
-	dst := minio.CopyDestOptions{
-		Bucket:          s.config.Bucket,
-		Object:          objectName,
-		UserMetadata:    objInfo.UserMetadata,
-		ReplaceMetadata: true,
-		Expires:         newExpiresAt,
-	}
-	if _, err := s.client.CopyObject(ctx, dst, src); err != nil {
-		return errors.Wrap(err, "copy object")
+	objectName := s.metaPath(namespace, key)
+	_, err = s.client.PutObject(ctx, s.config.Bucket, objectName, bytes.NewReader(data), int64(len(data)), minio.PutObjectOptions{
+		ContentType: "application/json",
+	})
+	if err != nil {
+		return errors.Wrap(err, "put metadata object")
 	}
 	return nil
 }
 
-// updateHeaders replaces the stored headers on an S3 object using server-side
-// copy-to-self with metadata replacement.
-func (s *S3) updateHeaders(ctx context.Context, namespace Namespace, key Key, headers http.Header, expiresAt time.Time) error {
-	objectName := s.keyToPath(namespace, key)
-	userMetadata := make(map[string]string)
-	headersJSON, err := json.Marshal(headers)
+// readMeta reads the companion metadata object for the given key.
+// Returns a zero s3Meta if the companion does not exist (legacy objects).
+func (s *S3) readMeta(ctx context.Context, namespace Namespace, key Key) (s3Meta, error) {
+	objectName := s.metaPath(namespace, key)
+	obj, err := s.client.GetObject(ctx, s.config.Bucket, objectName, minio.GetObjectOptions{})
 	if err != nil {
-		return errors.Errorf("failed to marshal headers: %w", err)
+		return s3Meta{}, errors.Wrap(err, "get metadata object")
 	}
-	userMetadata["Headers"] = string(headersJSON)
+	defer obj.Close()
 
-	src := minio.CopySrcOptions{Bucket: s.config.Bucket, Object: objectName}
-	dst := minio.CopyDestOptions{
-		Bucket:          s.config.Bucket,
-		Object:          objectName,
-		UserMetadata:    userMetadata,
-		ReplaceMetadata: true,
-		Expires:         expiresAt,
+	data, err := io.ReadAll(obj)
+	if err != nil {
+		if minio.ToErrorResponse(err).Code == s3ErrNoSuchKey {
+			return s3Meta{}, nil
+		}
+		return s3Meta{}, errors.Wrap(err, "read metadata object")
 	}
-	if _, err := s.client.CopyObject(ctx, dst, src); err != nil {
-		return errors.Wrap(err, "update headers")
+
+	var meta s3Meta
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return s3Meta{}, errors.Wrap(err, "unmarshal metadata")
 	}
-	return nil
+	return meta, nil
 }
 
 // ceilSecond rounds a time up to the next whole second. S3's Expires header
@@ -326,12 +352,11 @@ func (s *S3) Create(ctx context.Context, key Key, headers http.Header, ttl time.
 
 func (s *S3) Delete(ctx context.Context, key Key) error {
 	objectName := s.keyToPath(s.namespace, key)
-
-	err := s.client.RemoveObject(ctx, s.config.Bucket, objectName, minio.RemoveObjectOptions{})
-	if err != nil {
+	if err := s.client.RemoveObject(ctx, s.config.Bucket, objectName, minio.RemoveObjectOptions{}); err != nil {
 		return errors.Errorf("failed to remove object: %w", err)
 	}
-
+	// Best-effort removal of companion metadata object.
+	_ = s.client.RemoveObject(ctx, s.config.Bucket, s.metaPath(s.namespace, key), minio.RemoveObjectOptions{}) //nolint:errcheck
 	return nil
 }
 
@@ -406,7 +431,9 @@ func (w *s3Writer) Close() error {
 	// Skip if the context was cancelled (via Abort).
 	if w.ctx.Err() == nil {
 		w.etag.SetETag(w.headers)
-		return w.s3.updateHeaders(w.ctx, w.namespace, w.key, w.headers, w.expiresAt)
+		metaHeaders := make(http.Header)
+		metaHeaders.Set(ETagKey, w.headers.Get(ETagKey))
+		return w.s3.writeMeta(w.ctx, w.namespace, w.key, s3Meta{Headers: metaHeaders, ExpiresAt: w.expiresAt})
 	}
 	return nil
 }
