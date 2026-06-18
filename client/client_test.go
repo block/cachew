@@ -3,6 +3,8 @@ package client_test
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"maps"
@@ -51,6 +53,28 @@ func (fs *fakeServer) key(r *http.Request) string {
 	return r.PathValue("namespace") + "/" + r.PathValue("key")
 }
 
+func fakeCheckConditionals(r *http.Request, etag string) int {
+	if ifMatch := r.Header.Get("If-Match"); ifMatch != "" {
+		if etag == "" || (ifMatch != "*" && ifMatch != etag) {
+			return http.StatusPreconditionFailed
+		}
+	}
+	if ifNoneMatch := r.Header.Get("If-None-Match"); ifNoneMatch != "" {
+		if (ifNoneMatch == "*" && etag != "") || ifNoneMatch == etag {
+			if r.Method == http.MethodGet || r.Method == http.MethodHead {
+				return http.StatusNotModified
+			}
+			return http.StatusPreconditionFailed
+		}
+	}
+	return 0
+}
+
+func fakeETag(data []byte) string {
+	sum := sha256.Sum256(data)
+	return `"` + hex.EncodeToString(sum[:]) + `"`
+}
+
 func (fs *fakeServer) get(w http.ResponseWriter, r *http.Request) {
 	fs.mu.Lock()
 	obj, ok := fs.objects[fs.key(r)]
@@ -60,6 +84,10 @@ func (fs *fakeServer) get(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	maps.Copy(w.Header(), obj.headers)
+	if status := fakeCheckConditionals(r, obj.headers.Get("ETag")); status != 0 {
+		w.WriteHeader(status)
+		return
+	}
 	w.WriteHeader(http.StatusOK)
 	w.Write(obj.body) //nolint:errcheck
 }
@@ -73,6 +101,10 @@ func (fs *fakeServer) stat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	maps.Copy(w.Header(), obj.headers)
+	if status := fakeCheckConditionals(r, obj.headers.Get("ETag")); status != 0 {
+		w.WriteHeader(status)
+		return
+	}
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -90,6 +122,7 @@ func (fs *fakeServer) put(w http.ResponseWriter, r *http.Request) {
 		}
 		headers[k] = v
 	}
+	headers.Set("ETag", fakeETag(body))
 	fs.mu.Lock()
 	fs.objects[fs.key(r)] = fakeObject{body: body, headers: headers}
 	fs.mu.Unlock()
@@ -286,6 +319,110 @@ func TestArchiveExtract(t *testing.T) {
 	}
 	assert.True(t, slices.Contains(names, "x.txt"))
 	assert.False(t, slices.Contains(names, "y.log"))
+}
+
+func TestOpenIfNoneMatch(t *testing.T) {
+	srv := newFakeServer(nil)
+	defer srv.Close()
+
+	c := client.New(srv.URL, nil).Namespace("test")
+	defer c.Close()
+	ctx := t.Context()
+
+	key := client.NewKey("etag-test")
+	payload := []byte("etag content")
+
+	wc, err := c.Create(ctx, key, nil, 0)
+	assert.NoError(t, err)
+	_, err = wc.Write(payload)
+	assert.NoError(t, err)
+	assert.NoError(t, wc.Close())
+
+	etag := fakeETag(payload)
+
+	tests := []struct {
+		name        string
+		ifNoneMatch string
+		wantErr     error
+	}{
+		{name: "Matching", ifNoneMatch: etag, wantErr: client.ErrNotModified},
+		{name: "NonMatching", ifNoneMatch: `"wrong"`, wantErr: nil},
+		{name: "Wildcard", ifNoneMatch: "*", wantErr: client.ErrNotModified},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rc, headers, err := c.Open(ctx, key, client.IfNoneMatch(tt.ifNoneMatch))
+			if tt.wantErr != nil {
+				assert.IsError(t, err, tt.wantErr)
+				assert.NotZero(t, headers.Get("ETag"))
+				assert.True(t, rc == nil)
+			} else {
+				assert.NoError(t, err)
+				data, readErr := io.ReadAll(rc)
+				assert.NoError(t, readErr)
+				assert.NoError(t, rc.Close())
+				assert.Equal(t, payload, data)
+				_ = headers
+			}
+		})
+	}
+}
+
+func TestStatIfNoneMatch(t *testing.T) {
+	srv := newFakeServer(nil)
+	defer srv.Close()
+
+	c := client.New(srv.URL, nil).Namespace("test")
+	defer c.Close()
+	ctx := t.Context()
+
+	key := client.NewKey("stat-etag")
+	payload := []byte("stat content")
+
+	wc, err := c.Create(ctx, key, nil, 0)
+	assert.NoError(t, err)
+	_, err = wc.Write(payload)
+	assert.NoError(t, err)
+	assert.NoError(t, wc.Close())
+
+	etag := fakeETag(payload)
+
+	headers, err := c.Stat(ctx, key, client.IfNoneMatch(etag))
+	assert.IsError(t, err, client.ErrNotModified)
+	assert.NotZero(t, headers.Get("ETag"))
+
+	headers, err = c.Stat(ctx, key, client.IfNoneMatch(`"wrong"`))
+	assert.NoError(t, err)
+	assert.NotZero(t, headers.Get("ETag"))
+}
+
+func TestOpenIfMatch(t *testing.T) {
+	srv := newFakeServer(nil)
+	defer srv.Close()
+
+	c := client.New(srv.URL, nil).Namespace("test")
+	defer c.Close()
+	ctx := t.Context()
+
+	key := client.NewKey("ifmatch-test")
+	payload := []byte("ifmatch content")
+
+	wc, err := c.Create(ctx, key, nil, 0)
+	assert.NoError(t, err)
+	_, err = wc.Write(payload)
+	assert.NoError(t, err)
+	assert.NoError(t, wc.Close())
+
+	etag := fakeETag(payload)
+
+	// Matching ETag should succeed
+	rc, _, err := c.Open(ctx, key, client.IfMatch(etag))
+	assert.NoError(t, err)
+	assert.NoError(t, rc.Close())
+
+	// Non-matching should fail with 412
+	_, _, err = c.Open(ctx, key, client.IfMatch(`"wrong"`))
+	assert.IsError(t, err, client.ErrPreconditionFailed)
 }
 
 func TestParseKey(t *testing.T) {

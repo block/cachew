@@ -69,6 +69,10 @@ func (d *APIV1) statObject(w http.ResponseWriter, r *http.Request) {
 	}
 
 	maps.Copy(w.Header(), headers)
+	if status := checkConditionals(r, headers.Get("ETag")); status != 0 {
+		w.WriteHeader(status)
+		return
+	}
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -96,6 +100,11 @@ func (d *APIV1) getObject(w http.ResponseWriter, r *http.Request) {
 	}
 
 	maps.Copy(w.Header(), headers)
+	if status := checkConditionals(r, headers.Get("ETag")); status != 0 {
+		_ = cr.Close()
+		w.WriteHeader(status)
+		return
+	}
 
 	_, err = io.Copy(w, cr)
 	if err != nil {
@@ -207,4 +216,21 @@ func (d *APIV1) httpError(w http.ResponseWriter, code int, err error, message st
 	args = append(args, "error", err)
 	d.logger.Error(message, args...)
 	http.Error(w, message, code)
+}
+
+// checkConditionals evaluates If-Match and If-None-Match precondition headers
+// against the stored ETag for GET/HEAD requests. Returns 0 if all
+// preconditions pass, otherwise the HTTP status code to send (304 or 412).
+func checkConditionals(r *http.Request, etag string) int {
+	if ifMatch := r.Header.Get("If-Match"); ifMatch != "" {
+		if etag == "" || (ifMatch != "*" && ifMatch != etag) {
+			return http.StatusPreconditionFailed
+		}
+	}
+	if ifNoneMatch := r.Header.Get("If-None-Match"); ifNoneMatch != "" {
+		if (ifNoneMatch == "*" && etag != "") || ifNoneMatch == etag {
+			return http.StatusNotModified
+		}
+	}
+	return 0
 }

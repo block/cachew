@@ -27,6 +27,18 @@ func (e *HTTPStatusError) Error() string {
 	return fmt.Sprintf("unexpected status code: %d", e.StatusCode)
 }
 
+// Is allows errors.Is to match HTTPStatusError against sentinel errors.
+func (e *HTTPStatusError) Is(target error) bool {
+	switch target { //nolint:errorlint // comparing sentinel values, not wrapped errors
+	case ErrNotModified:
+		return e.StatusCode == http.StatusNotModified
+	case ErrPreconditionFailed:
+		return e.StatusCode == http.StatusPreconditionFailed
+	default:
+		return false
+	}
+}
+
 // transportHeaders are headers added by the HTTP transport layer that should
 // not be surfaced as cached-object metadata on responses.
 var transportHeaders = []string{ //nolint:gochecknoglobals
@@ -147,11 +159,15 @@ func (c *Client) objectURL(key Key) string {
 	return fmt.Sprintf("%s/api/v1/object/%s/%s", c.baseURL, c.resolvedNamespace(), key.String())
 }
 
-// Open retrieves an object from the cache server.
-func (c *Client) Open(ctx context.Context, key Key) (io.ReadCloser, http.Header, error) {
+// Open retrieves an object from the cache server. Accepts optional
+// [RequestOption]s such as [IfNoneMatch] for conditional requests.
+func (c *Client) Open(ctx context.Context, key Key, opts ...RequestOption) (io.ReadCloser, http.Header, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.objectURL(key), nil)
 	if err != nil {
 		return nil, nil, errors.Wrap(err, "failed to create request")
+	}
+	for _, opt := range opts {
+		opt(req)
 	}
 
 	resp, err := c.http.Do(req)
@@ -159,24 +175,37 @@ func (c *Client) Open(ctx context.Context, key Key) (io.ReadCloser, http.Header,
 		return nil, nil, errors.Wrap(err, "failed to execute request")
 	}
 
-	if resp.StatusCode == http.StatusNotFound {
+	switch resp.StatusCode {
+	case http.StatusOK:
+		return resp.Body, filterHeaders(resp.Header, transportHeaders...), nil
+
+	case http.StatusNotFound:
 		_, _ = io.Copy(io.Discard, resp.Body) //nolint:errcheck,gosec
 		return nil, nil, errors.Join(os.ErrNotExist, resp.Body.Close())
-	}
 
-	if resp.StatusCode != http.StatusOK {
+	case http.StatusNotModified:
+		_, _ = io.Copy(io.Discard, resp.Body) //nolint:errcheck,gosec
+		return nil, filterHeaders(resp.Header, transportHeaders...), errors.Join(ErrNotModified, resp.Body.Close())
+
+	case http.StatusPreconditionFailed:
+		_, _ = io.Copy(io.Discard, resp.Body) //nolint:errcheck,gosec
+		return nil, nil, errors.Join(ErrPreconditionFailed, resp.Body.Close())
+
+	default:
 		_, _ = io.Copy(io.Discard, resp.Body) //nolint:errcheck,gosec
 		return nil, nil, errors.Join(errors.WithStack(&HTTPStatusError{StatusCode: resp.StatusCode}), resp.Body.Close())
 	}
-
-	return resp.Body, filterHeaders(resp.Header, transportHeaders...), nil
 }
 
-// Stat retrieves headers for an object from the cache server.
-func (c *Client) Stat(ctx context.Context, key Key) (http.Header, error) {
+// Stat retrieves headers for an object from the cache server. Accepts optional
+// [RequestOption]s such as [IfNoneMatch] for conditional requests.
+func (c *Client) Stat(ctx context.Context, key Key, opts ...RequestOption) (http.Header, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodHead, c.objectURL(key), nil)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to create request")
+	}
+	for _, opt := range opts {
+		opt(req)
 	}
 
 	resp, err := c.http.Do(req)
@@ -185,15 +214,18 @@ func (c *Client) Stat(ctx context.Context, key Key) (http.Header, error) {
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode == http.StatusNotFound {
+	switch resp.StatusCode {
+	case http.StatusOK:
+		return filterHeaders(resp.Header, transportHeaders...), nil
+	case http.StatusNotFound:
 		return nil, os.ErrNotExist
-	}
-
-	if resp.StatusCode != http.StatusOK {
+	case http.StatusNotModified:
+		return filterHeaders(resp.Header, transportHeaders...), ErrNotModified
+	case http.StatusPreconditionFailed:
+		return nil, ErrPreconditionFailed
+	default:
 		return nil, errors.WithStack(&HTTPStatusError{StatusCode: resp.StatusCode})
 	}
-
-	return filterHeaders(resp.Header, transportHeaders...), nil
 }
 
 // Create stores a new object in the cache server. The returned CacheWriter
