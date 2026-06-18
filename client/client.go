@@ -30,7 +30,6 @@ func (e *HTTPStatusError) Error() string {
 // transportHeaders are headers added by the HTTP transport layer that should
 // not be surfaced as cached-object metadata on responses.
 var transportHeaders = []string{ //nolint:gochecknoglobals
-	"Content-Length",
 	"Date",
 	"Accept-Encoding",
 	"User-Agent",

@@ -8,6 +8,7 @@ import (
 	"maps"
 	"net/http"
 	"os"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -75,7 +76,9 @@ func (m *Memory) Stat(_ context.Context, key Key) (http.Header, error) {
 		return nil, os.ErrNotExist
 	}
 
-	return entry.headers, nil
+	headers := maps.Clone(entry.headers)
+	headers.Set("Content-Length", strconv.Itoa(len(entry.data)))
+	return headers, nil
 }
 
 func (m *Memory) Open(_ context.Context, key Key) (io.ReadCloser, http.Header, error) {
@@ -96,7 +99,9 @@ func (m *Memory) Open(_ context.Context, key Key) (io.ReadCloser, http.Header, e
 		return nil, nil, os.ErrNotExist
 	}
 
-	return io.NopCloser(bytes.NewReader(entry.data)), entry.headers, nil
+	headers := maps.Clone(entry.headers)
+	headers.Set("Content-Length", strconv.Itoa(len(entry.data)))
+	return io.NopCloser(bytes.NewReader(entry.data)), headers, nil
 }
 
 func (m *Memory) Create(ctx context.Context, key Key, headers http.Header, ttl time.Duration) (Writer, error) {

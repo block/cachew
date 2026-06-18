@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"sync/atomic"
 	"time"
 
@@ -234,7 +235,8 @@ func (d *Disk) Stat(ctx context.Context, key Key) (http.Header, error) {
 	path := d.keyToPath(d.namespace, key)
 	fullPath := filepath.Join(d.config.Root, path)
 
-	if _, err := os.Stat(fullPath); err != nil {
+	info, err := os.Stat(fullPath)
+	if err != nil {
 		return nil, errors.Errorf("failed to stat file: %w", err)
 	}
 
@@ -252,6 +254,7 @@ func (d *Disk) Stat(ctx context.Context, key Key) (http.Header, error) {
 		return nil, errors.Errorf("failed to get headers: %w", err)
 	}
 
+	headers.Set("Content-Length", strconv.FormatInt(info.Size(), 10))
 	return headers, nil
 }
 
@@ -278,6 +281,12 @@ func (d *Disk) Open(ctx context.Context, key Key) (io.ReadCloser, http.Header, e
 	if err != nil {
 		return nil, nil, errors.Join(errors.Errorf("failed to get headers: %w", err), f.Close())
 	}
+
+	finfo, err := f.Stat()
+	if err != nil {
+		return nil, nil, errors.Join(errors.Errorf("failed to stat file for size: %w", err), f.Close())
+	}
+	headers.Set("Content-Length", strconv.FormatInt(finfo.Size(), 10))
 
 	// Reset expiration time to implement LRU
 	ttl := min(expiresAt.Sub(now), d.config.MaxTTL)

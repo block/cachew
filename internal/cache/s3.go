@@ -162,8 +162,12 @@ func (s *S3) statAndHeaders(ctx context.Context, key Key) (minio.ObjectInfo, htt
 }
 
 func (s *S3) Stat(ctx context.Context, key Key) (http.Header, error) {
-	_, headers, err := s.statAndHeaders(ctx, key)
-	return headers, err
+	objInfo, headers, err := s.statAndHeaders(ctx, key)
+	if err != nil {
+		return nil, err
+	}
+	headers.Set("Content-Length", strconv.FormatInt(objInfo.Size, 10))
+	return headers, nil
 }
 
 func (s *S3) Open(ctx context.Context, key Key) (io.ReadCloser, http.Header, error) {
