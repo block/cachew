@@ -126,6 +126,7 @@ func (m *Memory) Create(ctx context.Context, key Key, headers http.Header, ttl t
 		buf:       &bytes.Buffer{},
 		expiresAt: now.Add(ttl),
 		headers:   clonedHeaders,
+		etag:      newETagWriter(),
 		ctx:       ctx,
 		cancel:    cancel,
 	}
@@ -222,6 +223,7 @@ type memoryWriter struct {
 	buf       *bytes.Buffer
 	expiresAt time.Time
 	headers   http.Header
+	etag      *etagWriter
 	closed    bool
 	ctx       context.Context
 	cancel    context.CancelCauseFunc
@@ -231,7 +233,9 @@ func (w *memoryWriter) Write(p []byte) (int, error) {
 	if w.closed {
 		return 0, errors.New("writer closed")
 	}
-	return errors.WithStack2(w.buf.Write(p))
+	n, err := w.buf.Write(p)
+	w.etag.WriteBytes(p[:n])
+	return n, errors.WithStack(err)
 }
 
 func (w *memoryWriter) Abort(err error) error {
@@ -275,6 +279,8 @@ func (w *memoryWriter) Close() error {
 			w.cache.evictOldest(neededSpace)
 		}
 	}
+
+	w.etag.SetETag(w.headers)
 
 	w.cache.currentSize.Add(-oldSize)
 	// Copy the buffer data to avoid holding a reference to the buffer's internal slice

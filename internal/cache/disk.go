@@ -193,6 +193,7 @@ func (d *Disk) Create(ctx context.Context, key Key, headers http.Header, ttl tim
 		tempPath:  f.Name(),
 		expiresAt: expiresAt,
 		headers:   clonedHeaders,
+		etag:      newETagWriter(),
 		ctx:       ctx,
 		cancel:    cancel,
 	}, nil
@@ -439,6 +440,7 @@ type diskWriter struct {
 	expiresAt time.Time
 	headers   http.Header
 	size      int64
+	etag      *etagWriter
 	ctx       context.Context
 	cancel    context.CancelCauseFunc
 	closed    bool
@@ -447,6 +449,7 @@ type diskWriter struct {
 func (w *diskWriter) Write(p []byte) (int, error) {
 	n, err := w.file.Write(p)
 	w.size += int64(n)
+	w.etag.WriteBytes(p[:n])
 	return n, errors.WithStack(err)
 }
 
@@ -485,6 +488,8 @@ func (w *diskWriter) Close() error {
 	if err := os.Rename(w.tempPath, w.path); err != nil {
 		return errors.Errorf("failed to rename temp file: %w", err)
 	}
+
+	w.etag.SetETag(w.headers)
 
 	if err := w.disk.db.set(w.key, w.namespace, w.expiresAt, w.headers); err != nil {
 		return errors.Join(errors.Errorf("failed to set metadata: %w", err), os.Remove(w.path))
