@@ -81,3 +81,51 @@ func TestTieredPinnedRangeFallthrough(t *testing.T) {
 	// Disk warm: same pin still serves identical bytes (now from disk).
 	assert.True(t, bytes.Equal(data, stitch()), "disk-served ranges must match")
 }
+
+// TestTieredCreateStampsDiskETag verifies that a tiered Create writing both disk
+// and S3 stamps S3's content ETag onto the disk copy at write time, so the disk
+// tier is immediately pinnable without a prior Open/backfill. The disk and S3
+// pins must report the same token, and a disk range must match.
+func TestTieredCreateStampsDiskETag(t *testing.T) {
+	bucket := s3clienttest.Start(t)
+	_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelDebug})
+
+	disk, err := cache.NewDisk(ctx, cache.DiskConfig{Root: t.TempDir(), LimitMB: 1024, MaxTTL: time.Hour})
+	assert.NoError(t, err)
+	defer disk.Close()
+
+	clientProvider := s3client.NewClientProvider(ctx, s3client.Config{Endpoint: s3clienttest.Addr, UseSSL: false})
+	s3, err := cache.NewS3(ctx, cache.S3Config{Bucket: bucket, MaxTTL: time.Hour, UploadPartSizeMB: 16}, clientProvider)
+	assert.NoError(t, err)
+	defer s3.Close()
+
+	key := cache.NewKey("tiered-stamp")
+	data := make([]byte, 4<<20)
+	_, err = rand.Read(data)
+	assert.NoError(t, err)
+
+	tiered := cache.MaybeNewTiered(ctx, []cache.Cache{disk, s3})
+	w, err := tiered.Create(ctx, key, nil, 0)
+	assert.NoError(t, err)
+	_, err = w.Write(data)
+	assert.NoError(t, err)
+	assert.NoError(t, w.Close())
+
+	// Disk is pinnable immediately, without any Open/backfill, and reports the
+	// same pin token as the authoritative S3 tier.
+	diskPin, err := disk.Pin(ctx, key)
+	assert.NoError(t, err)
+	s3Pin, err := s3.Pin(ctx, key)
+	assert.NoError(t, err)
+	assert.Equal(t, s3Pin.Pin, diskPin.Pin)
+	assert.Equal(t, int64(len(data)), diskPin.Size)
+
+	// A range served from the disk tier matches.
+	r, total, err := disk.OpenPinnedRange(ctx, key, diskPin.Pin, 0, int64(len(data))-1)
+	assert.NoError(t, err)
+	assert.Equal(t, int64(len(data)), total)
+	got, err := io.ReadAll(r)
+	assert.NoError(t, err)
+	assert.NoError(t, r.Close())
+	assert.True(t, bytes.Equal(data, got), "disk range must match written bytes")
+}

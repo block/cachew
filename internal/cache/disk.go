@@ -427,18 +427,19 @@ func (d *Disk) evictBySize(remainingFiles []evictFileInfo) error {
 }
 
 type diskWriter struct {
-	disk      *Disk
-	file      *os.File
-	key       Key
-	namespace Namespace
-	path      string
-	tempPath  string
-	expiresAt time.Time
-	headers   http.Header
-	size      int64
-	ctx       context.Context
-	cancel    context.CancelCauseFunc
-	closed    bool
+	disk        *Disk
+	file        *os.File
+	key         Key
+	namespace   Namespace
+	path        string
+	tempPath    string
+	expiresAt   time.Time
+	headers     http.Header
+	contentETag string
+	size        int64
+	ctx         context.Context
+	cancel      context.CancelCauseFunc
+	closed      bool
 }
 
 func (w *diskWriter) Write(p []byte) (int, error) {
@@ -488,7 +489,19 @@ func (w *diskWriter) Close() error {
 		return errors.Errorf("failed to rename temp file: %w", err)
 	}
 
-	if err := w.disk.db.set(w.key, w.namespace, w.expiresAt, w.headers); err != nil {
+	headers := w.headers
+	if w.contentETag != "" {
+		// Fold the content ETag into this writer's own atomic commit so the
+		// disk copy is immediately pinnable. Clone so the shared headers map
+		// (also referenced by sibling tier writers) is not mutated.
+		headers = headers.Clone()
+		if headers == nil {
+			headers = http.Header{}
+		}
+		headers.Set(ContentETagHeader, w.contentETag)
+	}
+
+	if err := w.disk.db.set(w.key, w.namespace, w.expiresAt, headers); err != nil {
 		return errors.Join(errors.Errorf("failed to set metadata: %w", err), os.Remove(w.path))
 	}
 
@@ -501,6 +514,12 @@ func (w *diskWriter) Close() error {
 
 	return nil
 }
+
+// setContentETag records the content ETag to persist with this entry so the
+// disk copy is immediately pinnable. It must be called before Close so the ETag
+// is folded into the writer's atomic metadata commit (rather than a racy
+// post-commit update).
+func (w *diskWriter) setContentETag(etag string) { w.contentETag = etag }
 
 // Namespace creates a namespaced view of the disk cache.
 func (d *Disk) Namespace(namespace Namespace) Cache {

@@ -334,7 +334,13 @@ type s3Writer struct {
 	errCh     chan error
 	uploadErr error
 	closed    bool
+	etag      string // content ETag from PutObject, valid after a successful Close
 }
+
+// contentETag returns the object's content ETag once the upload has completed.
+// The channel handoff in Close establishes happens-before with the assignment in
+// upload, so the value is safe to read after Close returns nil.
+func (w *s3Writer) contentETag() string { return w.etag }
 
 func (w *s3Writer) Write(p []byte) (int, error) {
 	n, err := w.pipe.Write(p)
@@ -419,7 +425,7 @@ func (w *s3Writer) upload(pr *io.PipeReader, r io.Reader) {
 	}
 
 	// Upload object with streaming (size -1 means unknown size, will use chunked encoding)
-	_, err := w.s3.client.PutObject(
+	info, err := w.s3.client.PutObject(
 		w.ctx,
 		w.s3.config.Bucket,
 		objectName,
@@ -433,6 +439,7 @@ func (w *s3Writer) upload(pr *io.PipeReader, r io.Reader) {
 		return
 	}
 
+	w.etag = info.ETag
 	w.errCh <- nil
 }
 

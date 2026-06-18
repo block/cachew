@@ -274,6 +274,16 @@ type tieredWriter struct {
 	closed  bool
 }
 
+// contentETagProvider is implemented by a tier writer that learns the object's
+// content ETag while closing (S3).
+type contentETagProvider interface{ contentETag() string }
+
+// contentETagReceiver is implemented by a tier writer that can persist the
+// content ETag with its entry so it becomes pinnable without an S3 round-trip
+// (disk). setContentETag must be called before Close so the ETag is folded into
+// the writer's atomic commit.
+type contentETagReceiver interface{ setContentETag(etag string) }
+
 var _ Writer = (*tieredWriter)(nil)
 
 func (t *tieredWriter) Abort(err error) error {
@@ -288,13 +298,58 @@ func (t *tieredWriter) Close() error {
 	}
 	t.closed = true
 
+	// Close ETag providers (S3) first so the content ETag is known before the
+	// receiving tiers (disk) commit, letting each fold the ETag into its own
+	// atomic metadata write. This makes a freshly written disk copy immediately
+	// pinnable (disk-first range serving) instead of proxying pinned reads
+	// through S3 until a backfill persists the ETag. Both tiers were fed the
+	// same byte stream, so the ETag is valid for the disk copy.
+	var providers, receivers []Writer
+	for _, w := range t.writers {
+		switch {
+		case isContentETagProvider(w):
+			providers = append(providers, w)
+		default:
+			receivers = append(receivers, w)
+		}
+	}
+
+	errs := closeAll(providers)
+	if errors.Join(errs...) == nil {
+		if etag := providerETag(providers); etag != "" {
+			for _, w := range receivers {
+				if r, ok := w.(contentETagReceiver); ok {
+					r.setContentETag(etag)
+				}
+			}
+		}
+	}
+	return errors.Join(append(errs, closeAll(receivers)...)...)
+}
+
+func isContentETagProvider(w Writer) bool {
+	_, ok := w.(contentETagProvider)
+	return ok
+}
+
+// providerETag returns the first non-empty content ETag among providers.
+func providerETag(providers []Writer) string {
+	for _, w := range providers {
+		if p, ok := w.(contentETagProvider); ok && p.contentETag() != "" {
+			return p.contentETag()
+		}
+	}
+	return ""
+}
+
+func closeAll(writers []Writer) []error {
 	wg := sync.WaitGroup{}
-	errs := make([]error, len(t.writers))
-	for i, cache := range t.writers {
-		wg.Go(func() { errs[i] = errors.WithStack(cache.Close()) })
+	errs := make([]error, len(writers))
+	for i, w := range writers {
+		wg.Go(func() { errs[i] = errors.WithStack(w.Close()) })
 	}
 	wg.Wait()
-	return errors.Join(errs...)
+	return errs
 }
 
 func (t *tieredWriter) Write(p []byte) (n int, err error) {
