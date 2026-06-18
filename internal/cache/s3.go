@@ -225,6 +225,31 @@ func (s *S3) refreshExpiration(ctx context.Context, objectName string, objInfo m
 	return nil
 }
 
+// updateHeaders replaces the stored headers on an S3 object using server-side
+// copy-to-self with metadata replacement.
+func (s *S3) updateHeaders(ctx context.Context, namespace Namespace, key Key, headers http.Header, expiresAt time.Time) error {
+	objectName := s.keyToPath(namespace, key)
+	userMetadata := make(map[string]string)
+	headersJSON, err := json.Marshal(headers)
+	if err != nil {
+		return errors.Errorf("failed to marshal headers: %w", err)
+	}
+	userMetadata["Headers"] = string(headersJSON)
+
+	src := minio.CopySrcOptions{Bucket: s.config.Bucket, Object: objectName}
+	dst := minio.CopyDestOptions{
+		Bucket:          s.config.Bucket,
+		Object:          objectName,
+		UserMetadata:    userMetadata,
+		ReplaceMetadata: true,
+		Expires:         expiresAt,
+	}
+	if _, err := s.client.CopyObject(ctx, dst, src); err != nil {
+		return errors.Wrap(err, "update headers")
+	}
+	return nil
+}
+
 // ceilSecond rounds a time up to the next whole second. S3's Expires header
 // uses HTTP-date format (second precision), so sub-second components would be
 // silently truncated, potentially causing premature expiry.
@@ -281,6 +306,7 @@ func (s *S3) Create(ctx context.Context, key Key, headers http.Header, ttl time.
 		pipe:      pw,
 		expiresAt: expiresAt,
 		headers:   clonedHeaders,
+		etag:      newETagWriter(),
 		ctx:       ctx,
 		cancel:    cancel,
 		errCh:     make(chan error, 1),
@@ -322,6 +348,7 @@ type s3Writer struct {
 	pipe      *io.PipeWriter
 	expiresAt time.Time
 	headers   http.Header
+	etag      *etagWriter
 	ctx       context.Context
 	cancel    context.CancelCauseFunc
 	errCh     chan error
@@ -331,6 +358,9 @@ type s3Writer struct {
 
 func (w *s3Writer) Write(p []byte) (int, error) {
 	n, err := w.pipe.Write(p)
+	if n > 0 {
+		w.etag.WriteBytes(p[:n])
+	}
 	if err != nil {
 		// Check if upload failed - if so, return that error instead
 		select {
@@ -368,11 +398,16 @@ func (w *s3Writer) Close() error {
 	}
 
 	// Wait for upload to complete and get any error
-	err := <-w.errCh
-	if err != nil {
+	if err := <-w.errCh; err != nil {
 		return err
 	}
 
+	// Update stored headers with the computed ETag via server-side copy.
+	// Skip if the context was cancelled (via Abort).
+	if w.ctx.Err() == nil {
+		w.etag.SetETag(w.headers)
+		return w.s3.updateHeaders(w.ctx, w.namespace, w.key, w.headers, w.expiresAt)
+	}
 	return nil
 }
 

@@ -2,6 +2,8 @@ package cachetest
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"io"
 	"net/http"
 	"os"
@@ -72,6 +74,10 @@ func Suite(t *testing.T, newCache func(t *testing.T) cache.Cache) {
 
 	t.Run("NamespaceDelete", func(t *testing.T) {
 		testNamespaceDelete(t, newCache(t))
+	})
+
+	t.Run("ETag", func(t *testing.T) {
+		testETag(t, newCache(t))
 	})
 }
 
@@ -449,6 +455,34 @@ func testListNamespaces(t *testing.T, c cache.Cache) {
 	assert.True(t, nsMap["git"])
 	assert.True(t, nsMap["gomod"])
 	assert.True(t, nsMap["hermit"])
+}
+
+func testETag(t *testing.T, c cache.Cache) {
+	defer c.Close()
+	ctx := t.Context()
+
+	content := []byte("hello etag world")
+	key := cache.NewKey("test-etag")
+
+	w, err := c.Create(ctx, key, nil, time.Hour)
+	assert.NoError(t, err)
+	_, err = w.Write(content)
+	assert.NoError(t, err)
+	assert.NoError(t, w.Close())
+
+	sum := sha256.Sum256(content)
+	expectedETag := `"` + hex.EncodeToString(sum[:]) + `"`
+
+	// Verify ETag from Open
+	reader, openHeaders, err := c.Open(ctx, key)
+	assert.NoError(t, err)
+	defer reader.Close()
+	assert.Equal(t, expectedETag, openHeaders.Get("ETag"))
+
+	// Verify ETag from Stat is consistent
+	statHeaders, err := c.Stat(ctx, key)
+	assert.NoError(t, err)
+	assert.Equal(t, expectedETag, statHeaders.Get("ETag"))
 }
 
 func testNamespaceDelete(t *testing.T, c cache.Cache) {
