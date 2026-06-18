@@ -19,7 +19,7 @@ func TestCheckIfNoneMatch(t *testing.T) {
 		{"EmptyIfNoneMatch", "", `"abc"`, false},
 		{"EmptyETag", `"abc"`, "", false},
 		{"WildcardMatchesAny", "*", `"abc"`, true},
-		{"WildcardEmptyETag", "*", "", false},
+		{"WildcardMatchesEmptyETag", "*", "", true},
 		{"ExactMatchStrong", `"abc"`, `"abc"`, true},
 		{"NoMatch", `"abc"`, `"xyz"`, false},
 		{"MultipleOneMatches", `"aaa", "bbb", "ccc"`, `"bbb"`, true},
@@ -43,7 +43,7 @@ func TestCheckIfMatch(t *testing.T) {
 	}{
 		{"EmptyIfMatch", "", `"abc"`, true},
 		{"WildcardNonEmpty", "*", `"abc"`, true},
-		{"WildcardEmptyETag", "*", "", false},
+		{"WildcardMatchesEmptyETag", "*", "", true},
 		{"ExactMatch", `"abc"`, `"abc"`, true},
 		{"NoMatch", `"abc"`, `"xyz"`, false},
 		{"MultipleOneMatches", `"aaa", "bbb", "ccc"`, `"bbb"`, true},

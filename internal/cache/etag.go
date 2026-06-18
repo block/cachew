@@ -74,25 +74,32 @@ var RequestHeaders = []string{ //nolint:gochecknoglobals
 
 // CheckIfNoneMatch reports whether the given ETag matches any of the values in
 // the If-None-Match header using weak comparison (RFC 7232 §3.2).
-// Handles the special "*" wildcard.
+// The "*" wildcard matches any existing resource, even one without an ETag.
 func CheckIfNoneMatch(ifNoneMatch string, etag string) bool {
-	if ifNoneMatch == "" || etag == "" {
+	if ifNoneMatch == "" {
 		return false
 	}
 	if ifNoneMatch == "*" {
 		return true
 	}
+	if etag == "" {
+		return false
+	}
 	return parseETagList(ifNoneMatch, etag, true)
 }
 
 // CheckIfMatch reports whether the given ETag satisfies the If-Match
-// precondition. An empty If-Match header is always satisfied.
+// precondition (RFC 7232 §3.1). An empty If-Match header is always satisfied.
+// The "*" wildcard is satisfied by any existing resource, even one without an ETag.
 func CheckIfMatch(ifMatch string, etag string) bool {
 	if ifMatch == "" {
 		return true
 	}
 	if ifMatch == "*" {
-		return etag != ""
+		return true
+	}
+	if etag == "" {
+		return false
 	}
 	return parseETagList(ifMatch, etag, false)
 }
