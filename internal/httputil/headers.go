@@ -10,6 +10,8 @@ var TransportHeaders = []string{ //nolint:gochecknoglobals
 	"User-Agent",
 	"Transfer-Encoding",
 	"Time-To-Live",
+	"If-Match",
+	"If-None-Match",
 }
 
 // HopByHopHeaders are hop-by-hop headers that should not be forwarded by proxies (RFC 7230).

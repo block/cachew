@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -42,6 +43,108 @@ func TestPutObjectAbortsOnReadError(t *testing.T) {
 	nsCache := memCache.Namespace("test")
 	_, _, err = nsCache.Open(ctx, key)
 	assert.IsError(t, err, os.ErrNotExist)
+}
+
+func testAPISetup(t *testing.T) (http.Handler, context.Context) {
+	t.Helper()
+	_, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelError})
+	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: time.Hour})
+	assert.NoError(t, err)
+	t.Cleanup(func() { memCache.Close() })
+
+	mux := http.NewServeMux()
+	_, err = strategy.NewAPIV1(ctx, struct{}{}, memCache, mux)
+	assert.NoError(t, err)
+	return mux, ctx
+}
+
+func apiPut(ctx context.Context, t *testing.T, handler http.Handler, key cache.Key) string {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/object/test/"+key.String(), strings.NewReader("test data"))
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	// Stat to get the ETag
+	req = httptest.NewRequest(http.MethodHead, "/api/v1/object/test/"+key.String(), nil)
+	req = req.WithContext(ctx)
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusOK, w.Code)
+	etag := w.Header().Get("ETag")
+	assert.NotZero(t, etag)
+	return etag
+}
+
+func TestConditionalGetIfNoneMatch(t *testing.T) {
+	handler, ctx := testAPISetup(t)
+	key := cache.NewKey("cond-get")
+	etag := apiPut(ctx, t, handler, key)
+
+	tests := []struct {
+		name           string
+		ifNoneMatch    string
+		expectedStatus int
+	}{
+		{name: "Matching", ifNoneMatch: etag, expectedStatus: http.StatusNotModified},
+		{name: "NonMatching", ifNoneMatch: `"wrong"`, expectedStatus: http.StatusOK},
+		{name: "Wildcard", ifNoneMatch: "*", expectedStatus: http.StatusNotModified},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/object/test/"+key.String(), nil)
+			req = req.WithContext(ctx)
+			req.Header.Set("If-None-Match", tt.ifNoneMatch)
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, req)
+			assert.Equal(t, tt.expectedStatus, w.Code)
+			if tt.expectedStatus == http.StatusNotModified {
+				assert.Equal(t, etag, w.Header().Get("ETag"))
+				assert.Equal(t, 0, w.Body.Len())
+			}
+		})
+	}
+}
+
+func TestConditionalHeadIfNoneMatch(t *testing.T) {
+	handler, ctx := testAPISetup(t)
+	key := cache.NewKey("cond-head")
+	etag := apiPut(ctx, t, handler, key)
+
+	req := httptest.NewRequest(http.MethodHead, "/api/v1/object/test/"+key.String(), nil)
+	req = req.WithContext(ctx)
+	req.Header.Set("If-None-Match", etag)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusNotModified, w.Code)
+	assert.Equal(t, etag, w.Header().Get("ETag"))
+}
+
+func TestConditionalGetIfMatch(t *testing.T) {
+	handler, ctx := testAPISetup(t)
+	key := cache.NewKey("cond-ifmatch")
+	etag := apiPut(ctx, t, handler, key)
+
+	tests := []struct {
+		name           string
+		ifMatch        string
+		expectedStatus int
+	}{
+		{name: "Matching", ifMatch: etag, expectedStatus: http.StatusOK},
+		{name: "NonMatching", ifMatch: `"wrong"`, expectedStatus: http.StatusPreconditionFailed},
+		{name: "Wildcard", ifMatch: "*", expectedStatus: http.StatusOK},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/object/test/"+key.String(), nil)
+			req = req.WithContext(ctx)
+			req.Header.Set("If-Match", tt.ifMatch)
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, req)
+			assert.Equal(t, tt.expectedStatus, w.Code)
+		})
+	}
 }
 
 // failingReader returns data up to failAfter bytes, then returns an error.
