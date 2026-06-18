@@ -155,6 +155,36 @@ func TestPutObjectIfNoneMatchStar(t *testing.T) {
 	assert.Equal(t, http.StatusPreconditionFailed, w.Code)
 }
 
+func TestPutObjectIfNoneMatchStarNewKey(t *testing.T) {
+	mux, ctx, _, _ := setupAPIV1(t)
+
+	// Create-if-absent on a new key — should succeed
+	newKey := cache.NewKey("brand-new-key")
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/object/default/"+newKey.String(),
+		strings.NewReader("new data"))
+	req.Header.Set("If-None-Match", "*")
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+}
+
+func TestPutObjectIfMatchStarNewKey(t *testing.T) {
+	mux, ctx, _, _ := setupAPIV1(t)
+
+	// If-Match: * on a non-existent key — should fail
+	newKey := cache.NewKey("nonexistent-key")
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/object/default/"+newKey.String(),
+		strings.NewReader("new data"))
+	req.Header.Set("If-Match", "*")
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusPreconditionFailed, w.Code)
+}
+
 func TestPutObjectIfMatchCorrect(t *testing.T) {
 	mux, ctx, key, etag := setupAPIV1(t)
 

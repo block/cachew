@@ -183,22 +183,29 @@ func (d *APIV1) putObject(w http.ResponseWriter, r *http.Request) {
 			d.httpError(w, http.StatusInternalServerError, statErr, "Failed to stat cache object", "key", key)
 			return
 		}
-		if existingHeaders == nil {
-			existingHeaders = make(http.Header)
-		}
-		var conds []cache.Precondition
-		if v := r.Header.Get("If-Match"); v != "" {
-			conds = append(conds, cache.WithIfMatch(v))
-		}
-		if v := r.Header.Get("If-None-Match"); v != "" {
-			conds = append(conds, cache.WithIfNoneMatch(v))
-		}
-		if err := cache.CheckPreconditions(existingHeaders, conds...); err != nil {
-			if etag := existingHeaders.Get("ETag"); etag != "" {
-				w.Header().Set("ETag", etag)
+		resourceExists := statErr == nil
+		if !resourceExists {
+			// Resource doesn't exist: If-Match always fails (nothing to match),
+			// If-None-Match always passes (nothing to conflict with).
+			if r.Header.Get("If-Match") != "" {
+				http.Error(w, "Precondition failed", http.StatusPreconditionFailed)
+				return
 			}
-			http.Error(w, "Precondition failed", http.StatusPreconditionFailed)
-			return
+		} else {
+			var conds []cache.Precondition
+			if v := r.Header.Get("If-Match"); v != "" {
+				conds = append(conds, cache.WithIfMatch(v))
+			}
+			if v := r.Header.Get("If-None-Match"); v != "" {
+				conds = append(conds, cache.WithIfNoneMatch(v))
+			}
+			if err := cache.CheckPreconditions(existingHeaders, conds...); err != nil {
+				if etag := existingHeaders.Get("ETag"); etag != "" {
+					w.Header().Set("ETag", etag)
+				}
+				http.Error(w, "Precondition failed", http.StatusPreconditionFailed)
+				return
+			}
 		}
 	}
 

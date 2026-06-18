@@ -104,7 +104,7 @@ func (m *Memory) Open(_ context.Context, key Key, conds ...Precondition) (io.Rea
 	if err := CheckPreconditions(headers, conds...); err != nil {
 		return nil, headers, err
 	}
-
+	headers.Set("Content-Length", strconv.Itoa(len(entry.data)))
 	return io.NopCloser(bytes.NewReader(entry.data)), headers, nil
 }
 
