@@ -550,7 +550,18 @@ func (s *Strategy) serveSnapshotWithBundle(ctx context.Context, w http.ResponseW
 	}
 
 	applySnapshotCacheHeaders(w, headers)
-	n, err := serveReaderFast(w, r, reader)
+
+	// Honour conditional GETs against the advertised ETag. ServeContent does this
+	// natively for *os.File readers, but cache backends returning non-file readers
+	// (S3, memory, remote) fall through to io.Copy, so revalidate explicitly to
+	// avoid streaming the full snapshot when the client already has it.
+	var n int64
+	var err error
+	if status := strategy.CheckConditionals(r, headers.Get(cache.ETagKey)); status != 0 {
+		w.WriteHeader(status)
+	} else {
+		n, err = serveReaderFast(w, r, reader)
+	}
 	s.metrics.recordSnapshotServe(ctx, "cache", repoName, n, time.Since(start))
 	if span := trace.SpanFromContext(ctx); span.SpanContext().IsValid() {
 		span.SetAttributes(attribute.String("cachew.source", "cache"), attribute.Int64("cachew.bytes", n))
