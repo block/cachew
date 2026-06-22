@@ -8,6 +8,7 @@ import (
 	"maps"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/alecthomas/errors"
@@ -223,14 +224,28 @@ func (d *APIV1) httpError(w http.ResponseWriter, code int, err error, message st
 // preconditions pass, otherwise the HTTP status code to send (304 or 412).
 func checkConditionals(r *http.Request, etag string) int {
 	if ifMatch := r.Header.Get("If-Match"); ifMatch != "" {
-		if etag == "" || (ifMatch != "*" && ifMatch != etag) {
+		if etag == "" || !etagListMatches(ifMatch, etag) {
 			return http.StatusPreconditionFailed
 		}
 	}
 	if ifNoneMatch := r.Header.Get("If-None-Match"); ifNoneMatch != "" {
-		if (ifNoneMatch == "*" && etag != "") || ifNoneMatch == etag {
+		if etag != "" && etagListMatches(ifNoneMatch, etag) {
 			return http.StatusNotModified
 		}
 	}
 	return 0
+}
+
+// etagListMatches reports whether etag matches an RFC 7232 If-Match /
+// If-None-Match header value, which may be a comma-separated list of ETags or
+// the "*" wildcard. Stored ETags are always strong, so weak comparison is not
+// required.
+func etagListMatches(headerValue, etag string) bool {
+	for candidate := range strings.SplitSeq(headerValue, ",") {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "*" || candidate == etag {
+			return true
+		}
+	}
+	return false
 }
