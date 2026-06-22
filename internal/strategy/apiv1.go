@@ -5,10 +5,8 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
-	"maps"
 	"net/http"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/alecthomas/errors"
@@ -69,12 +67,7 @@ func (d *APIV1) statObject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	maps.Copy(w.Header(), headers)
-	if status := CheckConditionals(r, headers.Get("ETag")); status != 0 {
-		w.WriteHeader(status)
-		return
-	}
-	w.WriteHeader(http.StatusOK)
+	httputil.ServeCacheStat(w, r, headers)
 }
 
 func (d *APIV1) getObject(w http.ResponseWriter, r *http.Request) {
@@ -100,19 +93,8 @@ func (d *APIV1) getObject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	maps.Copy(w.Header(), headers)
-	if status := CheckConditionals(r, headers.Get("ETag")); status != 0 {
-		_ = cr.Close()
-		w.WriteHeader(status)
-		return
-	}
-
-	_, err = io.Copy(w, cr)
-	if err != nil {
-		d.logger.Error("Failed to copy cache object to response", "error", err, "key", key)
-	}
-	if cerr := cr.Close(); cerr != nil {
-		d.logger.Error("Failed to close cache reader", "error", cerr, "key", key)
+	if err := httputil.ServeCacheHit(w, r, headers, cr); err != nil {
+		d.logger.Error("Failed to serve cache object", "error", err, "key", key)
 	}
 }
 
@@ -217,35 +199,4 @@ func (d *APIV1) httpError(w http.ResponseWriter, code int, err error, message st
 	args = append(args, "error", err)
 	d.logger.Error(message, args...)
 	http.Error(w, message, code)
-}
-
-// CheckConditionals evaluates If-Match and If-None-Match precondition headers
-// against the stored ETag for GET/HEAD requests. Returns 0 if all
-// preconditions pass, otherwise the HTTP status code to send (304 or 412).
-func CheckConditionals(r *http.Request, etag string) int {
-	if ifMatch := r.Header.Get("If-Match"); ifMatch != "" {
-		if etag == "" || !etagListMatches(ifMatch, etag) {
-			return http.StatusPreconditionFailed
-		}
-	}
-	if ifNoneMatch := r.Header.Get("If-None-Match"); ifNoneMatch != "" {
-		if etag != "" && etagListMatches(ifNoneMatch, etag) {
-			return http.StatusNotModified
-		}
-	}
-	return 0
-}
-
-// etagListMatches reports whether etag matches an RFC 7232 If-Match /
-// If-None-Match header value, which may be a comma-separated list of ETags or
-// the "*" wildcard. Stored ETags are always strong, so weak comparison is not
-// required.
-func etagListMatches(headerValue, etag string) bool {
-	for candidate := range strings.SplitSeq(headerValue, ",") {
-		candidate = strings.TrimSpace(candidate)
-		if candidate == "*" || candidate == etag {
-			return true
-		}
-	}
-	return false
 }

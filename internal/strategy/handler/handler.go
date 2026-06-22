@@ -171,12 +171,7 @@ func (h *Handler) serveCached(w http.ResponseWriter, r *http.Request, key cache.
 	}
 
 	logging.FromContext(r.Context()).DebugContext(r.Context(), "Cache hit")
-	defer cr.Close()
-	maps.Copy(w.Header(), headers)
-	if _, err := io.Copy(w, cr); err != nil {
-		return true, errors.Wrap(err, "stream from cache")
-	}
-	return true, nil
+	return true, errors.WithStack(httputil.ServeCacheHit(w, r, headers, cr))
 }
 
 func (h *Handler) fetchAndCache(w http.ResponseWriter, r *http.Request, key cache.Key) error {

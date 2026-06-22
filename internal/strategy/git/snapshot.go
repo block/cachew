@@ -20,9 +20,9 @@ import (
 
 	"github.com/block/cachew/internal/cache"
 	"github.com/block/cachew/internal/gitclone"
+	"github.com/block/cachew/internal/httputil"
 	"github.com/block/cachew/internal/logging"
 	"github.com/block/cachew/internal/snapshot"
-	"github.com/block/cachew/internal/strategy"
 )
 
 const lfsFetchTimeout = 25 * time.Minute
@@ -367,7 +367,7 @@ func (s *Strategy) serveSnapshotHead(ctx context.Context, w http.ResponseWriter,
 	}
 
 	status := http.StatusOK
-	if conditional := strategy.CheckConditionals(r, headers.Get(cache.ETagKey)); conditional != 0 {
+	if conditional := httputil.CheckConditionals(r, headers.Get(cache.ETagKey)); conditional != 0 {
 		status = conditional
 	}
 	w.WriteHeader(status)
@@ -557,7 +557,7 @@ func (s *Strategy) serveSnapshotWithBundle(ctx context.Context, w http.ResponseW
 	// avoid streaming the full snapshot when the client already has it.
 	var n int64
 	var err error
-	if status := strategy.CheckConditionals(r, headers.Get(cache.ETagKey)); status != 0 {
+	if status := httputil.CheckConditionals(r, headers.Get(cache.ETagKey)); status != 0 {
 		w.WriteHeader(status)
 	} else {
 		n, err = serveReaderFast(w, r, reader)
