@@ -546,3 +546,65 @@ func TestCreateCloseIdempotent(t *testing.T) {
 		t.Fatal("second Close blocked; expected idempotent return")
 	}
 }
+
+// TestOpenRejectsFullResponseToRangedGet verifies that a 200 OK to a ranged
+// GET (a server or intermediary that ignored the Range) is rejected rather than
+// silently handing the caller bytes from offset 0.
+func TestOpenRejectsFullResponseToRangedGet(t *testing.T) {
+	content := []byte("0123456789")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "10")
+		w.Header().Set("ETag", `"x"`)
+		if r.Method == http.MethodHead {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		// Ignore any Range header and always return the full object.
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(content)
+	}))
+	defer srv.Close()
+
+	c := client.New(srv.URL, nil)
+	rc, _, err := c.Open(t.Context(), client.NewKey("k"))
+	assert.NoError(t, err)
+	defer rc.Close()
+
+	_, err = rc.Seek(5, io.SeekStart)
+	assert.NoError(t, err)
+	_, err = io.ReadAll(rc)
+	assert.Error(t, err)
+}
+
+// TestOpenPinsGetToHeadETag verifies that the lazy GET carries an If-Match for
+// the ETag observed by the HEAD, so an overwrite between the HEAD and the first
+// Read surfaces as a precondition failure rather than a body/metadata mismatch.
+func TestOpenPinsGetToHeadETag(t *testing.T) {
+	content := []byte("0123456789")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead {
+			w.Header().Set("Content-Length", "10")
+			w.Header().Set("ETag", `"v1"`)
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		// Simulate the object having been overwritten since the HEAD: the GET
+		// must pin to the HEAD ETag, so a stale If-Match is rejected.
+		if r.Header.Get("If-Match") == `"v1"` {
+			w.WriteHeader(http.StatusPreconditionFailed)
+			return
+		}
+		w.Header().Set("Content-Length", "10")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(content)
+	}))
+	defer srv.Close()
+
+	c := client.New(srv.URL, nil)
+	rc, _, err := c.Open(t.Context(), client.NewKey("k"))
+	assert.NoError(t, err)
+	defer rc.Close()
+
+	_, err = io.ReadAll(rc)
+	assert.IsError(t, err, client.ErrPreconditionFailed)
+}

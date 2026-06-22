@@ -139,7 +139,14 @@ type Cache interface {
 	// Expired files MUST NOT be returned.
 	// The returned headers MUST include a Last-Modified header.
 	// Must return os.ErrNotExist if the file does not exist.
-	Open(ctx context.Context, key Key) (io.ReadCloser, http.Header, error)
+	//
+	// The returned reader is an io.ReadSeekCloser. Any number of Seeks are
+	// permitted before the first Read — including io.SeekEnd, resolved against
+	// the known object size — but once reading has begun no further Seek is
+	// allowed (it returns an error). Some backends stream over the network and
+	// only open the underlying stream, at the final seeked offset, on the first
+	// Read, so pre-read seeks are virtual and seek-after-read is unsupportable.
+	Open(ctx context.Context, key Key) (io.ReadSeekCloser, http.Header, error)
 	// Create a new file in the cache.
 	//
 	// If "ttl" is zero, a maximum TTL MUST be used by the implementation.

@@ -18,6 +18,7 @@ import (
 	"github.com/alecthomas/errors"
 	"github.com/minio/minio-go/v7"
 
+	"github.com/block/cachew/client"
 	"github.com/block/cachew/internal/logging"
 	"github.com/block/cachew/internal/s3client"
 )
@@ -43,8 +44,8 @@ type S3Config struct {
 	MaxTTL              time.Duration `hcl:"max-ttl,optional" help:"Maximum time-to-live for entries in the S3 cache (defaults to 1 hour)." default:"1h"`
 	UploadConcurrency   uint          `hcl:"upload-concurrency,optional" help:"Number of concurrent workers for multi-part uploads (0 = use all CPU cores, defaults to 1)." default:"1"`
 	UploadPartSizeMB    uint          `hcl:"upload-part-size-mb,optional" help:"Size of each part for multi-part uploads in megabytes (defaults to 16MB, minimum 5MB)." default:"16"`
-	DownloadConcurrency uint          `hcl:"download-concurrency,optional" help:"Number of concurrent range-GET workers for downloads (defaults to 8)." default:"8"`
-	DownloadPartSizeMB  uint          `hcl:"download-part-size-mb,optional" help:"Size of each parallel range-GET request in megabytes (defaults to 32MB)." default:"32"`
+	DownloadConcurrency uint          `hcl:"download-concurrency,optional" help:"Deprecated: ignored; download parallelism will move to a higher layer."`
+	DownloadPartSizeMB  uint          `hcl:"download-part-size-mb,optional" help:"Deprecated: ignored; download parallelism will move to a higher layer."`
 }
 
 type S3 struct {
@@ -84,12 +85,10 @@ func NewS3(ctx context.Context, config S3Config, clientProvider s3client.ClientP
 		return nil, errors.New("upload-part-size-mb must be at least 5MB (S3 minimum part size)")
 	}
 
-	if config.DownloadConcurrency == 0 {
-		config.DownloadConcurrency = 8
-	}
+	logger := logging.FromContext(ctx)
 
-	if config.DownloadPartSizeMB == 0 {
-		config.DownloadPartSizeMB = 32
+	if config.DownloadConcurrency != 0 || config.DownloadPartSizeMB != 0 {
+		logger.WarnContext(ctx, "S3 cache options download-concurrency and download-part-size-mb are deprecated and ignored; download parallelism will move to a higher layer")
 	}
 
 	client, err := clientProvider()
@@ -97,11 +96,10 @@ func NewS3(ctx context.Context, config S3Config, clientProvider s3client.ClientP
 		return nil, errors.Errorf("failed to obtain shared S3 client: %w", err)
 	}
 
-	logging.FromContext(ctx).InfoContext(ctx, "Constructing S3 cache",
+	logger.InfoContext(ctx, "Constructing S3 cache",
 		"endpoint", client.EndpointURL(), "bucket", config.Bucket,
 		"max-ttl", config.MaxTTL,
-		"upload-concurrency", config.UploadConcurrency, "upload-part-size-mb", config.UploadPartSizeMB,
-		"download-concurrency", config.DownloadConcurrency, "download-part-size-mb", config.DownloadPartSizeMB)
+		"upload-concurrency", config.UploadConcurrency, "upload-part-size-mb", config.UploadPartSizeMB)
 
 	// Verify bucket exists
 	exists, err := client.BucketExists(ctx, config.Bucket)
@@ -113,7 +111,7 @@ func NewS3(ctx context.Context, config S3Config, clientProvider s3client.ClientP
 	}
 
 	return &S3{
-		logger: logging.FromContext(ctx),
+		logger: logger,
 		config: config,
 		client: client,
 	}, nil
@@ -192,7 +190,7 @@ func (s *S3) Stat(ctx context.Context, key Key) (http.Header, error) {
 	return headers, nil
 }
 
-func (s *S3) Open(ctx context.Context, key Key) (io.ReadCloser, http.Header, error) {
+func (s *S3) Open(ctx context.Context, key Key) (io.ReadSeekCloser, http.Header, error) {
 	objInfo, headers, meta, err := s.statAndHeaders(ctx, key)
 	if err != nil {
 		return nil, nil, err
@@ -223,12 +221,34 @@ func (s *S3) Open(ctx context.Context, key Key) (io.ReadCloser, http.Header, err
 		}
 	}
 
-	reader, err := s.parallelGetReader(ctx, s.config.Bucket, objectName, objInfo.Size, objInfo.ETag)
-	if err != nil {
-		return nil, nil, err
+	// open lazily fetches the object starting at the given offset via a single
+	// ranged GET, pinned to the stat'd revision so an overwrite mid-read cannot
+	// splice old and new data together.
+	etag := objInfo.ETag
+	size := objInfo.Size
+	open := func(offset int64) (io.ReadCloser, error) {
+		opts := minio.GetObjectOptions{}
+		if etag != "" {
+			if err := opts.SetMatchETag(etag); err != nil {
+				return nil, errors.Errorf("set etag %s: %w", etag, err)
+			}
+		}
+		// Pin the GET to the stat'd extent [offset, size-1] so it returns exactly
+		// the advertised Content-Length, whether reading from the start or a
+		// seeked offset. A zero-length object needs no range.
+		if size > 0 {
+			if err := opts.SetRange(offset, size-1); err != nil {
+				return nil, errors.Errorf("set range %d-%d: %w", offset, size-1, err)
+			}
+		}
+		obj, err := s.client.GetObject(ctx, s.config.Bucket, objectName, opts)
+		if err != nil {
+			return nil, errors.Errorf("failed to get object: %w", err)
+		}
+		return &s3Reader{obj: obj}, nil
 	}
 
-	return reader, headers, nil
+	return client.NewSeekReadCloser(objInfo.Size, open), headers, nil
 }
 
 func (s *S3) metaPath(namespace Namespace, key Key) string {

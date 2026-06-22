@@ -259,7 +259,7 @@ func (d *Disk) Stat(ctx context.Context, key Key) (http.Header, error) {
 	return headers, nil
 }
 
-func (d *Disk) Open(ctx context.Context, key Key) (io.ReadCloser, http.Header, error) {
+func (d *Disk) Open(ctx context.Context, key Key) (io.ReadSeekCloser, http.Header, error) {
 	path := d.keyToPath(d.namespace, key)
 	fullPath := filepath.Join(d.config.Root, path)
 

@@ -23,4 +23,6 @@ comments should explain WHY something is happening, not WHAT is happening.
 Functions should return errors, not log them internally. Logging belongs at the call site so callers retain control over
 how failures are reported and handled.
 
-When logging with slog, NEVER use slog.String(), slog.Int and friends, it's too verbose. Instead, use `key, value` pairs. Don't use a new line for each pair, concatenate them and wrap at 120 columns.
+When logging:
+- NEVER use slog.String(), slog.Int and friends, it's too verbose. Instead, use `key, value` pairs. Don't use a new line for each pair, concatenate them and wrap at 120 columns.
+- If there's more than one log emission per function, use `logger := logging.FromContext(ctx)` and reuse that, rather than retrieving the logger from the context repeatedly.

@@ -1,6 +1,7 @@
 package cache_test
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log/slog"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/alecthomas/assert/v2"
+	"github.com/alecthomas/errors"
 
 	"github.com/block/cachew/internal/cache"
 	"github.com/block/cachew/internal/cache/cachetest"
@@ -145,6 +147,161 @@ func TestTieredBackfillPermutations(t *testing.T) {
 			assert.Equal(t, content, data2)
 		})
 	}
+}
+
+// TestTieredRangeBackfill verifies that a ranged read through the tiered cache
+// does not commit a truncated tier-0 entry, and instead triggers a background
+// full copy that warms tier 0 with the whole object.
+func TestTieredRangeBackfill(t *testing.T) {
+	_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelError})
+	lower, err := cache.NewMemory(ctx, cache.MemoryConfig{LimitMB: 1024, MaxTTL: time.Hour})
+	assert.NoError(t, err)
+	upper, err := cache.NewMemory(ctx, cache.MemoryConfig{LimitMB: 1024, MaxTTL: time.Hour})
+	assert.NoError(t, err)
+	tiered := cache.MaybeNewTiered(ctx, []cache.Cache{lower, upper})
+	defer tiered.Close()
+
+	key := cache.NewKey("range-backfill")
+	content := []byte("0123456789abcdefghij")
+
+	// Seed only the upper tier, simulating a lower-tier miss.
+	w, err := upper.Create(ctx, key, nil, time.Minute)
+	assert.NoError(t, err)
+	_, err = w.Write(content)
+	assert.NoError(t, err)
+	assert.NoError(t, w.Close())
+
+	// Ranged read through the tiered cache.
+	reader, _, err := tiered.Open(ctx, key)
+	assert.NoError(t, err)
+	off, err := reader.Seek(10, io.SeekStart)
+	assert.NoError(t, err)
+	assert.Equal(t, int64(10), off)
+	got, err := io.ReadAll(reader)
+	assert.NoError(t, err)
+	assert.NoError(t, reader.Close())
+	assert.Equal(t, content[10:], got)
+
+	// The background singleton copy eventually warms tier 0 with the whole
+	// object — never the truncated range slice.
+	assert.NoError(t, waitFor(2*time.Second, func() bool {
+		r, _, oErr := lower.Open(ctx, key)
+		if oErr != nil {
+			return false
+		}
+		data, _ := io.ReadAll(r)
+		_ = r.Close()
+		return string(data) == string(content)
+	}))
+}
+
+// TestTieredFullReadTees verifies that a full sequential read still tees into
+// tier 0 via the cheap backfill path (no background copy needed).
+func TestTieredFullReadTees(t *testing.T) {
+	_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelError})
+	lower, err := cache.NewMemory(ctx, cache.MemoryConfig{LimitMB: 1024, MaxTTL: time.Hour})
+	assert.NoError(t, err)
+	upper, err := cache.NewMemory(ctx, cache.MemoryConfig{LimitMB: 1024, MaxTTL: time.Hour})
+	assert.NoError(t, err)
+	tiered := cache.MaybeNewTiered(ctx, []cache.Cache{lower, upper})
+	defer tiered.Close()
+
+	key := cache.NewKey("full-read-tees")
+	content := []byte("the quick brown fox jumps over the lazy dog")
+
+	w, err := upper.Create(ctx, key, nil, time.Minute)
+	assert.NoError(t, err)
+	_, err = w.Write(content)
+	assert.NoError(t, err)
+	assert.NoError(t, w.Close())
+
+	reader, _, err := tiered.Open(ctx, key)
+	assert.NoError(t, err)
+	got, err := io.ReadAll(reader)
+	assert.NoError(t, err)
+	assert.NoError(t, reader.Close())
+	assert.Equal(t, content, got)
+
+	assert.NoError(t, waitFor(2*time.Second, func() bool {
+		r, _, oErr := lower.Open(ctx, key)
+		if oErr != nil {
+			return false
+		}
+		data, _ := io.ReadAll(r)
+		_ = r.Close()
+		return string(data) == string(content)
+	}))
+}
+
+// TestTieredIncompleteReadDiscards verifies that closing a higher-tier-backed
+// reader before fully consuming it never commits a truncated or empty tier-0
+// entry. The close-without-read case is exactly what the conditional-request
+// (304/412) short-circuit does.
+func TestTieredIncompleteReadDiscards(t *testing.T) {
+	content := []byte("0123456789abcdefghij")
+
+	setup := func(t *testing.T) (ctx context.Context, lower, tiered cache.Cache, key cache.Key) {
+		t.Helper()
+		_, ctx = logging.Configure(t.Context(), logging.Config{Level: slog.LevelError})
+		lower, err := cache.NewMemory(ctx, cache.MemoryConfig{LimitMB: 1024, MaxTTL: time.Hour})
+		assert.NoError(t, err)
+		upper, err := cache.NewMemory(ctx, cache.MemoryConfig{LimitMB: 1024, MaxTTL: time.Hour})
+		assert.NoError(t, err)
+		tiered = cache.MaybeNewTiered(ctx, []cache.Cache{lower, upper})
+		t.Cleanup(func() { tiered.Close() })
+
+		key = cache.NewKey("incomplete-read")
+		w, err := upper.Create(ctx, key, nil, time.Minute)
+		assert.NoError(t, err)
+		_, err = w.Write(content)
+		assert.NoError(t, err)
+		assert.NoError(t, w.Close())
+		return ctx, lower, tiered, key
+	}
+
+	t.Run("CloseWithoutReading", func(t *testing.T) {
+		ctx, lower, tiered, key := setup(t)
+		r, _, err := tiered.Open(ctx, key)
+		assert.NoError(t, err)
+		assert.NoError(t, r.Close())
+
+		_, _, err = lower.Open(ctx, key)
+		assert.IsError(t, err, os.ErrNotExist)
+	})
+
+	t.Run("PartialReadWarmsFullObject", func(t *testing.T) {
+		ctx, lower, tiered, key := setup(t)
+		r, _, err := tiered.Open(ctx, key)
+		assert.NoError(t, err)
+		buf := make([]byte, 5)
+		_, err = io.ReadFull(r, buf)
+		assert.NoError(t, err)
+		assert.NoError(t, r.Close())
+
+		// The partial read abandons the tee (so no truncated entry is committed)
+		// and warms tier 0 with a background full copy of the whole object.
+		assert.NoError(t, waitFor(2*time.Second, func() bool {
+			lr, _, oErr := lower.Open(ctx, key)
+			if oErr != nil {
+				return false
+			}
+			data, _ := io.ReadAll(lr)
+			_ = lr.Close()
+			return string(data) == string(content)
+		}))
+	})
+}
+
+// waitFor polls cond until it returns true or the timeout elapses.
+func waitFor(timeout time.Duration, cond func() bool) error {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return nil
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return errors.New("condition not met within timeout")
 }
 
 func TestTieredDeletePermutations(t *testing.T) {

@@ -79,6 +79,45 @@ func Suite(t *testing.T, newCache func(t *testing.T) cache.Cache) {
 	t.Run("ETag", func(t *testing.T) {
 		testETag(t, newCache(t))
 	})
+
+	t.Run("Range", func(t *testing.T) {
+		testRange(t, newCache(t))
+	})
+}
+
+// testRange verifies the io.ReadSeekCloser contract every backend must satisfy:
+// any number of seeks (including io.SeekEnd) are allowed before reading, after
+// which sequential reads return the object's tail from the final offset.
+func testRange(t *testing.T, c cache.Cache) {
+	defer c.Close()
+	ctx := t.Context()
+
+	key := cache.NewKey("range-key")
+	content := []byte("0123456789abcdefghij")
+
+	writer, err := c.Create(ctx, key, nil, time.Hour)
+	assert.NoError(t, err)
+	_, err = writer.Write(content)
+	assert.NoError(t, err)
+	assert.NoError(t, writer.Close())
+
+	reader, _, err := c.Open(ctx, key)
+	assert.NoError(t, err)
+	defer reader.Close()
+
+	// io.SeekEnd resolves against the known object size, and multiple seeks
+	// before the first Read are permitted; only the final offset takes effect.
+	end, err := reader.Seek(0, io.SeekEnd)
+	assert.NoError(t, err)
+	assert.Equal(t, int64(len(content)), end)
+
+	off, err := reader.Seek(10, io.SeekStart)
+	assert.NoError(t, err)
+	assert.Equal(t, int64(10), off)
+
+	got, err := io.ReadAll(reader)
+	assert.NoError(t, err)
+	assert.Equal(t, content[10:], got)
 }
 
 func testCreateAndOpen(t *testing.T, c cache.Cache) {

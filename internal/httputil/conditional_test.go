@@ -64,9 +64,10 @@ func TestCheckConditionals(t *testing.T) {
 }
 
 // trackingReader records whether Close was called, so tests can assert the body
-// is always released.
+// is always released. It embeds an *strings.Reader so it satisfies
+// io.ReadSeekCloser.
 type trackingReader struct {
-	io.Reader
+	io.ReadSeeker
 	closed bool
 }
 
@@ -77,7 +78,7 @@ func (t *trackingReader) Close() error {
 
 func TestServeCacheHit(t *testing.T) {
 	t.Run("StreamsBodyWhenFresh", func(t *testing.T) {
-		body := &trackingReader{Reader: strings.NewReader("payload")}
+		body := &trackingReader{ReadSeeker: strings.NewReader("payload")}
 		headers := cacheHeaders([2]string{"Content-Type", "text/plain"})
 		w := httptest.NewRecorder()
 
@@ -95,7 +96,7 @@ func TestServeCacheHit(t *testing.T) {
 	})
 
 	t.Run("NotModifiedSkipsBody", func(t *testing.T) {
-		body := &trackingReader{Reader: strings.NewReader("payload")}
+		body := &trackingReader{ReadSeeker: strings.NewReader("payload")}
 		headers := cacheHeaders()
 		w := httptest.NewRecorder()
 
@@ -111,7 +112,7 @@ func TestServeCacheHit(t *testing.T) {
 	})
 
 	t.Run("PreconditionFailedSkipsBody", func(t *testing.T) {
-		body := &trackingReader{Reader: strings.NewReader("payload")}
+		body := &trackingReader{ReadSeeker: strings.NewReader("payload")}
 		headers := cacheHeaders()
 		w := httptest.NewRecorder()
 
@@ -122,6 +123,151 @@ func TestServeCacheHit(t *testing.T) {
 		resp := w.Result()
 		defer resp.Body.Close()
 		assert.Equal(t, http.StatusPreconditionFailed, resp.StatusCode)
+	})
+
+	t.Run("AdvertisesAcceptRangesOnFullRequest", func(t *testing.T) {
+		body := &trackingReader{ReadSeeker: strings.NewReader("payload")}
+		headers := cacheHeaders([2]string{"Content-Length", "7"})
+		w := httptest.NewRecorder()
+
+		err := httputil.ServeCacheHit(w, newRequest(t, "", ""), headers, body)
+		assert.NoError(t, err)
+
+		resp := w.Result()
+		defer resp.Body.Close()
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+		assert.Equal(t, "bytes", resp.Header.Get("Accept-Ranges"))
+		data, _ := io.ReadAll(resp.Body)
+		assert.Equal(t, "payload", string(data))
+	})
+
+	t.Run("ServesSingleRange", func(t *testing.T) {
+		body := &trackingReader{ReadSeeker: strings.NewReader("payload")}
+		headers := cacheHeaders([2]string{"Content-Length", "7"})
+		r := newRequest(t, "", "")
+		r.Header.Set("Range", "bytes=2-4")
+		w := httptest.NewRecorder()
+
+		err := httputil.ServeCacheHit(w, r, headers, body)
+		assert.NoError(t, err)
+		assert.True(t, body.closed)
+
+		resp := w.Result()
+		defer resp.Body.Close()
+		assert.Equal(t, http.StatusPartialContent, resp.StatusCode)
+		assert.Equal(t, "bytes 2-4/7", resp.Header.Get("Content-Range"))
+		assert.Equal(t, "3", resp.Header.Get("Content-Length"))
+		assert.Equal(t, "bytes", resp.Header.Get("Accept-Ranges"))
+		data, _ := io.ReadAll(resp.Body)
+		assert.Equal(t, "ylo", string(data))
+	})
+
+	t.Run("ServesOpenEndedRange", func(t *testing.T) {
+		body := &trackingReader{ReadSeeker: strings.NewReader("payload")}
+		headers := cacheHeaders([2]string{"Content-Length", "7"})
+		r := newRequest(t, "", "")
+		r.Header.Set("Range", "bytes=3-")
+		w := httptest.NewRecorder()
+
+		err := httputil.ServeCacheHit(w, r, headers, body)
+		assert.NoError(t, err)
+
+		resp := w.Result()
+		defer resp.Body.Close()
+		assert.Equal(t, http.StatusPartialContent, resp.StatusCode)
+		assert.Equal(t, "bytes 3-6/7", resp.Header.Get("Content-Range"))
+		data, _ := io.ReadAll(resp.Body)
+		assert.Equal(t, "load", string(data))
+	})
+
+	t.Run("UnsatisfiableRange", func(t *testing.T) {
+		body := &trackingReader{ReadSeeker: strings.NewReader("payload")}
+		headers := cacheHeaders([2]string{"Content-Length", "7"})
+		r := newRequest(t, "", "")
+		r.Header.Set("Range", "bytes=10-20")
+		w := httptest.NewRecorder()
+
+		err := httputil.ServeCacheHit(w, r, headers, body)
+		assert.NoError(t, err)
+		assert.True(t, body.closed)
+
+		resp := w.Result()
+		defer resp.Body.Close()
+		assert.Equal(t, http.StatusRequestedRangeNotSatisfiable, resp.StatusCode)
+		assert.Equal(t, "bytes */7", resp.Header.Get("Content-Range"))
+	})
+
+	t.Run("MultiRangeServedInFull", func(t *testing.T) {
+		body := &trackingReader{ReadSeeker: strings.NewReader("payload")}
+		headers := cacheHeaders([2]string{"Content-Length", "7"})
+		r := newRequest(t, "", "")
+		r.Header.Set("Range", "bytes=0-1,3-4")
+		w := httptest.NewRecorder()
+
+		err := httputil.ServeCacheHit(w, r, headers, body)
+		assert.NoError(t, err)
+
+		resp := w.Result()
+		defer resp.Body.Close()
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+		data, _ := io.ReadAll(resp.Body)
+		assert.Equal(t, "payload", string(data))
+	})
+
+	t.Run("IfRangeMatchingETagServesRange", func(t *testing.T) {
+		body := &trackingReader{ReadSeeker: strings.NewReader("payload")}
+		headers := cacheHeaders([2]string{"Content-Length", "7"})
+		r := newRequest(t, "", "")
+		r.Header.Set("Range", "bytes=2-4")
+		r.Header.Set("If-Range", testETag)
+		w := httptest.NewRecorder()
+
+		err := httputil.ServeCacheHit(w, r, headers, body)
+		assert.NoError(t, err)
+
+		resp := w.Result()
+		defer resp.Body.Close()
+		assert.Equal(t, http.StatusPartialContent, resp.StatusCode)
+		data, _ := io.ReadAll(resp.Body)
+		assert.Equal(t, "ylo", string(data))
+	})
+
+	t.Run("IfRangeStaleETagServesFull", func(t *testing.T) {
+		body := &trackingReader{ReadSeeker: strings.NewReader("payload")}
+		headers := cacheHeaders([2]string{"Content-Length", "7"})
+		r := newRequest(t, "", "")
+		r.Header.Set("Range", "bytes=2-4")
+		r.Header.Set("If-Range", `"stale"`)
+		w := httptest.NewRecorder()
+
+		err := httputil.ServeCacheHit(w, r, headers, body)
+		assert.NoError(t, err)
+
+		resp := w.Result()
+		defer resp.Body.Close()
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+		assert.Equal(t, "", resp.Header.Get("Content-Range"))
+		data, _ := io.ReadAll(resp.Body)
+		assert.Equal(t, "payload", string(data))
+	})
+
+	t.Run("IfRangeMatchingDateServesRange", func(t *testing.T) {
+		const lastMod = "Mon, 02 Jan 2006 15:04:05 GMT"
+		body := &trackingReader{ReadSeeker: strings.NewReader("payload")}
+		headers := cacheHeaders([2]string{"Content-Length", "7"}, [2]string{"Last-Modified", lastMod})
+		r := newRequest(t, "", "")
+		r.Header.Set("Range", "bytes=2-4")
+		r.Header.Set("If-Range", lastMod)
+		w := httptest.NewRecorder()
+
+		err := httputil.ServeCacheHit(w, r, headers, body)
+		assert.NoError(t, err)
+
+		resp := w.Result()
+		defer resp.Body.Close()
+		assert.Equal(t, http.StatusPartialContent, resp.StatusCode)
+		data, _ := io.ReadAll(resp.Body)
+		assert.Equal(t, "ylo", string(data))
 	})
 }
 

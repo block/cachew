@@ -20,7 +20,12 @@ import (
 // It is not directly selectable from configuration, but instead is automatically used if multiple caches are
 // configured.
 type Tiered struct {
-	caches []Cache
+	caches    []Cache
+	namespace Namespace
+	// copying deduplicates background tier-0 warming copies by namespace/key.
+	// It is shared by pointer across namespaced views (see Namespace) so dedup
+	// spans requests, since Namespace returns a fresh Tiered value per request.
+	copying *sync.Map
 }
 
 // MaybeNewTiered creates a [Tiered] cache if multiple are provided, or if there is only one it will return that cache.
@@ -34,7 +39,7 @@ func MaybeNewTiered(ctx context.Context, caches []Cache) Cache {
 	if len(caches) == 1 {
 		return caches[0]
 	}
-	return Tiered{caches}
+	return Tiered{caches: caches, copying: &sync.Map{}}
 }
 
 var _ Cache = (*Tiered)(nil)
@@ -113,7 +118,7 @@ func (t Tiered) Stat(ctx context.Context, key Key) (http.Header, error) {
 // subsequent Opens are served locally.
 //
 // If all caches fail, all errors are returned.
-func (t Tiered) Open(ctx context.Context, key Key) (io.ReadCloser, http.Header, error) {
+func (t Tiered) Open(ctx context.Context, key Key) (io.ReadSeekCloser, http.Header, error) {
 	errs := make([]error, len(t.caches))
 	for i, c := range t.caches {
 		r, headers, err := c.Open(ctx, key)
@@ -124,7 +129,7 @@ func (t Tiered) Open(ctx context.Context, key Key) (io.ReadCloser, http.Header, 
 			return nil, nil, errors.WithStack(err)
 		}
 		if i > 0 {
-			r = t.backfillReader(ctx, key, r, headers, t.caches[0])
+			r = t.backfillReader(ctx, key, r, headers, c, t.caches[0])
 		}
 		return r, headers, nil
 	}
@@ -135,7 +140,10 @@ func (t Tiered) Open(ctx context.Context, key Key) (io.ReadCloser, http.Header, 
 // On successful close the dst entry becomes available for future reads.
 // On error or partial read the dst entry is discarded per the Cache contract
 // (the context is cancelled, causing the writer to discard on Close).
-func (t Tiered) backfillReader(ctx context.Context, key Key, src io.ReadCloser, headers http.Header, dst Cache) io.ReadCloser {
+//
+// from is the tier that produced src; on a ranged read the tee is abandoned and
+// a one-shot background full copy from that tier warms dst instead.
+func (t Tiered) backfillReader(ctx context.Context, key Key, src io.ReadSeekCloser, headers http.Header, from, dst Cache) io.ReadSeekCloser {
 	logger := logging.FromContext(ctx)
 	// Use a cancellable context so we can abort the write on failure.
 	// The Cache contract guarantees that cancelled-context writes are discarded.
@@ -146,7 +154,37 @@ func (t Tiered) backfillReader(ctx context.Context, key Key, src io.ReadCloser, 
 		logger.WarnContext(ctx, "Tier backfill: failed to create writer, skipping", "error", err)
 		return src
 	}
-	return newBackfillReadCloser(ctx, src, w, cancel)
+	trigger := func() { t.triggerBackfillCopy(ctx, key, from, dst) }
+	return newBackfillReadCloser(ctx, src, w, cancel, trigger)
+}
+
+// triggerBackfillCopy starts a background, request-independent full copy of key
+// from the hitting tier into dst, deduplicated per namespace/key so concurrent
+// range readers trigger at most one copy. Warming is best-effort: errors are
+// logged, not returned.
+func (t Tiered) triggerBackfillCopy(ctx context.Context, key Key, from, dst Cache) {
+	dedupKey := string(t.namespace) + "/" + key.String()
+	if _, loaded := t.copying.LoadOrStore(dedupKey, struct{}{}); loaded {
+		return
+	}
+	bgCtx := context.WithoutCancel(ctx)
+	logger := logging.FromContext(bgCtx)
+	go func() {
+		defer t.copying.Delete(dedupKey)
+		rc, headers, err := from.Open(bgCtx, key)
+		if err != nil {
+			logger.WarnContext(bgCtx, "Tier backfill copy: open failed", "key", key, "error", err)
+			return
+		}
+		defer rc.Close() //nolint:errcheck
+		err = WriteFunc(bgCtx, dst, key, headers, 0, func(w io.Writer) error {
+			_, cErr := io.Copy(w, rc)
+			return errors.WithStack(cErr)
+		})
+		if err != nil {
+			logger.WarnContext(bgCtx, "Tier backfill copy: write failed", "key", key, "error", err)
+		}
+	}()
 }
 
 // backfillReadCloser tees reads from src into dst asynchronously. Chunks are
@@ -156,21 +194,26 @@ func (t Tiered) backfillReader(ctx context.Context, key Key, src io.ReadCloser, 
 // (committing the cached entry). On any write failure the backfill is
 // abandoned but reads continue unaffected.
 type backfillReadCloser struct {
-	src     io.ReadCloser
-	ch      chan []byte
-	ctx     context.Context
-	cancel  context.CancelFunc
-	done    chan error
-	closed  bool
-	closeMu sync.Mutex
+	src          io.ReadSeekCloser
+	ch           chan []byte
+	ctx          context.Context
+	cancel       context.CancelFunc
+	done         chan error
+	closed       bool
+	closeMu      sync.Mutex
+	pos          int64  // current logical position (final pre-read seek, then bytes read)
+	started      bool   // true once the first Read has occurred
+	completed    bool   // true once the source has been fully read to EOF
+	teeAbandoned bool   // true once the tee is given up (ranged read or buffer overflow)
+	trigger      func() // fires a one-shot background full copy to warm tier 0
 }
 
 const backfillBufSize = 128 // number of chunks buffered (~32 MB at 256 KB each)
 
-func newBackfillReadCloser(ctx context.Context, src io.ReadCloser, dst io.WriteCloser, cancel context.CancelFunc) *backfillReadCloser {
+func newBackfillReadCloser(ctx context.Context, src io.ReadSeekCloser, dst io.WriteCloser, cancel context.CancelFunc, trigger func()) *backfillReadCloser {
 	ch := make(chan []byte, backfillBufSize)
 	done := make(chan error, 1)
-	b := &backfillReadCloser{src: src, ch: ch, ctx: ctx, cancel: cancel, done: done}
+	b := &backfillReadCloser{src: src, ch: ch, ctx: ctx, cancel: cancel, done: done, trigger: trigger}
 	go func() {
 		var err error
 		for chunk := range ch {
@@ -207,8 +250,18 @@ func (b *backfillReadCloser) closeChan() {
 }
 
 func (b *backfillReadCloser) Read(p []byte) (int, error) {
+	if !b.started {
+		b.started = true
+		// A read beginning at a non-zero offset cannot tee usefully (it would
+		// write only a slice to tier 0), so give up the tee immediately. Tier 0
+		// is instead warmed by the background full copy triggered on Close.
+		if b.pos != 0 {
+			b.abandon()
+		}
+	}
 	n, err := b.src.Read(p)
 	if n > 0 {
+		b.pos += int64(n)
 		b.closeMu.Lock()
 		if !b.closed {
 			// Copy the data — p is reused by the caller.
@@ -217,8 +270,9 @@ func (b *backfillReadCloser) Read(p []byte) (int, error) {
 			select {
 			case b.ch <- chunk:
 			default:
-				// Buffer full — abandon backfill.
+				// Buffer full — give up the tee.
 				b.closed = true
+				b.teeAbandoned = true
 				close(b.ch)
 				b.cancel()
 			}
@@ -226,21 +280,63 @@ func (b *backfillReadCloser) Read(p []byte) (int, error) {
 		b.closeMu.Unlock()
 	}
 	if err != nil {
+		if errors.Is(err, io.EOF) {
+			b.completed = true
+		}
 		b.closeChan()
 	}
 	return n, err //nolint:wrapcheck // must return unwrapped io.EOF per io.Reader contract
 }
 
+// Seek positions the source before the first read; any number of seeks
+// (including io.SeekEnd) are allowed until then, after which it returns an
+// error. How tier 0 is warmed — the cheap tee versus a background full copy —
+// is decided on Close based on how much of the object was actually consumed.
+func (b *backfillReadCloser) Seek(offset int64, whence int) (int64, error) {
+	if b.started {
+		return 0, errors.New("seek after read is not supported")
+	}
+	abs, err := b.src.Seek(offset, whence)
+	if err != nil {
+		return 0, errors.WithStack(err)
+	}
+	b.pos = abs
+	return abs, nil
+}
+
+// abandon gives up the tee and cancels the tier-0 write so its partial entry is
+// discarded.
+func (b *backfillReadCloser) abandon() {
+	b.closeMu.Lock()
+	defer b.closeMu.Unlock()
+	if !b.closed {
+		b.closed = true
+		b.teeAbandoned = true
+		close(b.ch)
+		b.cancel()
+	}
+}
+
 func (b *backfillReadCloser) Close() error {
+	// The cheap tee warms tier 0 only when the whole object was streamed
+	// sequentially from offset 0. For any other consumption — a ranged read
+	// (including a zero-based prefix range such as bytes=0-1023), a partial
+	// read, or a buffer-overflow abandon — discard any partial tier-0 write and,
+	// if a read actually began, warm tier 0 with a one-shot background full copy
+	// instead. A close-without-read (e.g. a 304 short-circuit) warms nothing.
+	teeCommitted := b.completed && !b.teeAbandoned
+	if !teeCommitted {
+		b.cancel()
+		if b.started {
+			b.trigger()
+		}
+	}
 	srcErr := b.src.Close()
 	b.closeChan()
-	// Wait for the background writer to finish.
-	bgErr := <-b.done
-	if srcErr != nil || bgErr != nil {
-		b.cancel()
-		return errors.WithStack(srcErr)
-	}
-	return nil
+	// Wait for the background writer to finish. Its error (a best-effort warming
+	// failure, already logged) is intentionally not propagated.
+	<-b.done
+	return errors.WithStack(srcErr)
 }
 
 func (t Tiered) String() string {
@@ -317,7 +413,7 @@ func (t Tiered) Namespace(namespace Namespace) Cache {
 	for i, c := range t.caches {
 		namespaced[i] = c.Namespace(namespace)
 	}
-	return Tiered{caches: namespaced}
+	return Tiered{caches: namespaced, namespace: namespace, copying: t.copying}
 }
 
 // ListNamespaces returns unique namespaces from all underlying caches.

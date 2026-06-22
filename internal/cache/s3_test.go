@@ -2,6 +2,7 @@ package cache_test
 
 import (
 	"context"
+	"io"
 	"log/slog"
 	"os"
 	"testing"
@@ -69,6 +70,51 @@ func TestS3ContextCancellationAbortsUpload(t *testing.T) {
 	// The object must not be retrievable.
 	_, _, err = c.Open(t.Context(), key)
 	assert.IsError(t, err, os.ErrNotExist)
+}
+
+// TestS3SeekableReader verifies the S3 backend's io.ReadSeekCloser: a single
+// seek-to-start yields the object's tail via a ranged GET, and seeking after
+// reading has begun is rejected.
+func TestS3SeekableReader(t *testing.T) {
+	bucket := s3clienttest.Start(t)
+	c := newS3Cache(t, bucket)
+	defer c.Close()
+	ctx := t.Context()
+
+	key := cache.NewKey("seekable")
+	content := []byte("0123456789abcdefghij")
+	w, err := c.Create(ctx, key, nil, time.Hour)
+	assert.NoError(t, err)
+	_, err = w.Write(content)
+	assert.NoError(t, err)
+	assert.NoError(t, w.Close())
+
+	t.Run("SeekThenSequentialRead", func(t *testing.T) {
+		reader, _, err := c.Open(ctx, key)
+		assert.NoError(t, err)
+		defer reader.Close()
+
+		off, err := reader.Seek(10, io.SeekStart)
+		assert.NoError(t, err)
+		assert.Equal(t, int64(10), off)
+		got, err := io.ReadAll(reader)
+		assert.NoError(t, err)
+		assert.Equal(t, content[10:], got)
+	})
+
+	t.Run("SeekAfterReadFails", func(t *testing.T) {
+		reader, _, err := c.Open(ctx, key)
+		assert.NoError(t, err)
+		defer reader.Close()
+
+		buf := make([]byte, 4)
+		_, err = io.ReadFull(reader, buf)
+		assert.NoError(t, err)
+		assert.Equal(t, content[:4], buf)
+
+		_, err = reader.Seek(0, io.SeekStart)
+		assert.Error(t, err)
+	})
 }
 
 func TestS3CacheSoak(t *testing.T) {

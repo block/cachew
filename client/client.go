@@ -9,6 +9,7 @@ import (
 	"maps"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -159,12 +160,62 @@ func (c *Client) objectURL(key Key) string {
 	return fmt.Sprintf("%s/api/v1/object/%s/%s", c.baseURL, c.resolvedNamespace(), key.String())
 }
 
-// Open retrieves an object from the cache server. Accepts optional
-// [RequestOption]s such as [IfNoneMatch] for conditional requests.
-func (c *Client) Open(ctx context.Context, key Key, opts ...RequestOption) (io.ReadCloser, http.Header, error) {
+// Open retrieves an object from the cache server as an io.ReadSeekCloser.
+// Accepts optional [RequestOption]s such as [IfNoneMatch] for conditional
+// requests.
+//
+// Open issues a HEAD to obtain the headers and size; no body is fetched yet.
+// Seeks are then free — they only choose the start offset (io.SeekEnd is
+// resolved against the size) and perform no I/O. The first Read issues a single
+// GET, ranged from the seeked offset and pinned (via If-Match) to the revision
+// the HEAD observed, and reads sequentially; the server (whose cache is itself
+// seekable) performs the actual seek. Once reading has begun Seek returns an
+// error.
+func (c *Client) Open(ctx context.Context, key Key, opts ...RequestOption) (io.ReadSeekCloser, http.Header, error) {
+	headers, err := c.Stat(ctx, key, opts...)
+	if err != nil {
+		return nil, headers, errors.WithStack(err)
+	}
+
+	size := int64(-1)
+	if cl := headers.Get("Content-Length"); cl != "" {
+		if v, perr := strconv.ParseInt(cl, 10, 64); perr == nil {
+			size = v
+		}
+	}
+
+	// Pin the lazy GET to the revision the HEAD observed: if the key is
+	// overwritten between the HEAD and the first Read, the GET fails the
+	// If-Match precondition (412) instead of pairing the stale headers and size
+	// (used for SeekEnd/range bounds) with a newer body. The caller's own
+	// options are carried through too so the body is validated consistently.
+	etag := headers.Get("ETag")
+	open := func(offset int64) (io.ReadCloser, error) {
+		reqOpts := append([]RequestOption(nil), opts...)
+		if etag != "" {
+			reqOpts = append(reqOpts, IfMatch(etag))
+		}
+		if offset == 0 {
+			return c.openStream(ctx, key, false, reqOpts...)
+		}
+		if size < 0 {
+			return nil, errors.Errorf("cannot range-read from offset %d: server did not report Content-Length", offset)
+		}
+		reqOpts = append(reqOpts, byteRange(offset, size-1))
+		return c.openStream(ctx, key, true, reqOpts...)
+	}
+
+	return NewSeekReadCloser(size, open), headers, nil
+}
+
+// openStream issues the GET and returns the raw response body for a hit. When
+// requirePartial is set (a ranged read from a non-zero offset), a 200 OK is
+// rejected: a server or intermediary that ignored the Range would return the
+// body from offset 0, silently handing the caller the wrong bytes.
+func (c *Client) openStream(ctx context.Context, key Key, requirePartial bool, opts ...RequestOption) (io.ReadCloser, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.objectURL(key), nil)
 	if err != nil {
-		return nil, nil, errors.Wrap(err, "failed to create request")
+		return nil, errors.Wrap(err, "failed to create request")
 	}
 	for _, opt := range opts {
 		opt(req)
@@ -172,28 +223,35 @@ func (c *Client) Open(ctx context.Context, key Key, opts ...RequestOption) (io.R
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return nil, nil, errors.Wrap(err, "failed to execute request")
+		return nil, errors.Wrap(err, "failed to execute request")
 	}
 
 	switch resp.StatusCode {
+	case http.StatusPartialContent:
+		return resp.Body, nil
+
 	case http.StatusOK:
-		return resp.Body, filterHeaders(resp.Header, transportHeaders...), nil
+		if requirePartial {
+			_, _ = io.Copy(io.Discard, resp.Body) //nolint:errcheck,gosec
+			return nil, errors.Join(errors.New("server ignored Range request: returned 200 OK for a ranged GET"), resp.Body.Close())
+		}
+		return resp.Body, nil
 
 	case http.StatusNotFound:
 		_, _ = io.Copy(io.Discard, resp.Body) //nolint:errcheck,gosec
-		return nil, nil, errors.Join(os.ErrNotExist, resp.Body.Close())
+		return nil, errors.Join(os.ErrNotExist, resp.Body.Close())
 
 	case http.StatusNotModified:
 		_, _ = io.Copy(io.Discard, resp.Body) //nolint:errcheck,gosec
-		return nil, filterHeaders(resp.Header, transportHeaders...), errors.Join(ErrNotModified, resp.Body.Close())
+		return nil, errors.Join(ErrNotModified, resp.Body.Close())
 
 	case http.StatusPreconditionFailed:
 		_, _ = io.Copy(io.Discard, resp.Body) //nolint:errcheck,gosec
-		return nil, nil, errors.Join(ErrPreconditionFailed, resp.Body.Close())
+		return nil, errors.Join(ErrPreconditionFailed, resp.Body.Close())
 
 	default:
 		_, _ = io.Copy(io.Discard, resp.Body) //nolint:errcheck,gosec
-		return nil, nil, errors.Join(errors.WithStack(&HTTPStatusError{StatusCode: resp.StatusCode}), resp.Body.Close())
+		return nil, errors.Join(errors.WithStack(&HTTPStatusError{StatusCode: resp.StatusCode}), resp.Body.Close())
 	}
 }
 

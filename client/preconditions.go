@@ -1,6 +1,7 @@
 package client
 
 import (
+	"fmt"
 	"net/http"
 
 	"github.com/alecthomas/errors"
@@ -30,5 +31,18 @@ func IfMatch(etag string) RequestOption {
 func IfNoneMatch(etag string) RequestOption {
 	return func(req *http.Request) {
 		req.Header.Set("If-None-Match", etag)
+	}
+}
+
+// byteRange sets a bounded "bytes=start-end" Range header (both ends inclusive).
+//
+// It is internal: ranged reads are driven by Open's seek-then-read path, which
+// returns whole-object headers and reads a slice. Exposing a bounded Range as a
+// public Open option would return a short body alongside those whole-object
+// headers, so a dedicated ranged-fetch API (returning the 206 headers) is the
+// right home for that when it is needed.
+func byteRange(start, end int64) RequestOption {
+	return func(req *http.Request) {
+		req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", start, end))
 	}
 }

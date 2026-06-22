@@ -38,7 +38,7 @@ func (r *Remote) Namespace(namespace Namespace) Cache {
 	return &Remote{c: r.c.Namespace(namespace)}
 }
 
-func (r *Remote) Open(ctx context.Context, key Key) (io.ReadCloser, http.Header, error) {
+func (r *Remote) Open(ctx context.Context, key Key) (io.ReadSeekCloser, http.Header, error) {
 	rc, h, err := r.c.Open(ctx, key)
 	return rc, h, errors.WithStack(err)
 }
