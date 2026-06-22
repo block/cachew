@@ -22,6 +22,7 @@ import (
 	"github.com/block/cachew/internal/gitclone"
 	"github.com/block/cachew/internal/logging"
 	"github.com/block/cachew/internal/snapshot"
+	"github.com/block/cachew/internal/strategy"
 )
 
 const lfsFetchTimeout = 25 * time.Minute
@@ -239,14 +240,21 @@ func (s *Strategy) handleSnapshotRequest(w http.ResponseWriter, r *http.Request,
 	r = r.WithContext(ctx)
 	logger := logging.FromContext(ctx)
 
+	cacheKey := snapshotCacheKey(upstreamURL)
+
+	// HEAD is answered from cache metadata alone so probes never read or
+	// generate the snapshot body, and never warm up a mirror.
+	if r.Method == http.MethodHead {
+		s.serveSnapshotHead(ctx, w, r, cacheKey, repoName, start)
+		return
+	}
+
 	repo, repoErr := s.cloneManager.GetOrCreate(ctx, upstreamURL)
 	if repoErr != nil {
 		logger.ErrorContext(ctx, "Failed to get or create clone", "upstream", upstreamURL, "error", repoErr)
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
-
-	cacheKey := snapshotCacheKey(upstreamURL)
 
 	// On cold start the local mirror may not be ready yet. Check the S3 cache
 	// first so we can stream a cached snapshot to the client immediately while
@@ -333,6 +341,40 @@ func (s *Strategy) handleSnapshotRequest(w http.ResponseWriter, r *http.Request,
 		logger.ErrorContext(ctx, "Failed to serve snapshot", "upstream", upstreamURL, "error", err)
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
+	}
+}
+
+// serveSnapshotHead answers a HEAD request from cache metadata alone via Stat,
+// reporting the snapshot's validators (ETag, Content-Length) and freshness
+// commit without reading or generating the body. An uncached snapshot yields
+// 404 rather than triggering the expensive on-demand generation that GET does.
+// If-None-Match / If-Match preconditions are honoured against the cached ETag.
+func (s *Strategy) serveSnapshotHead(ctx context.Context, w http.ResponseWriter, r *http.Request, cacheKey cache.Key, repoName string, start time.Time) {
+	headers, err := s.cache.Stat(ctx, cacheKey)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			http.Error(w, "Snapshot not cached", http.StatusNotFound)
+			return
+		}
+		logging.FromContext(ctx).ErrorContext(ctx, "Failed to stat snapshot", "error", err)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	applySnapshotCacheHeaders(w, headers)
+	if commit := headers.Get("X-Cachew-Snapshot-Commit"); commit != "" {
+		w.Header().Set("X-Cachew-Snapshot-Commit", commit)
+	}
+
+	status := http.StatusOK
+	if conditional := strategy.CheckConditionals(r, headers.Get(cache.ETagKey)); conditional != 0 {
+		status = conditional
+	}
+	w.WriteHeader(status)
+
+	s.metrics.recordSnapshotServe(ctx, "head", repoName, 0, time.Since(start))
+	if span := trace.SpanFromContext(ctx); span.SpanContext().IsValid() {
+		span.SetAttributes(attribute.String("cachew.source", "head"), attribute.Int64("cachew.bytes", 0))
 	}
 }
 
@@ -507,13 +549,26 @@ func (s *Strategy) serveSnapshotWithBundle(ctx context.Context, w http.ResponseW
 		}()
 	}
 
-	w.Header().Set("Content-Type", "application/zstd")
+	applySnapshotCacheHeaders(w, headers)
 	n, err := serveReaderFast(w, r, reader)
 	s.metrics.recordSnapshotServe(ctx, "cache", repoName, n, time.Since(start))
 	if span := trace.SpanFromContext(ctx); span.SpanContext().IsValid() {
 		span.SetAttributes(attribute.String("cachew.source", "cache"), attribute.Int64("cachew.bytes", n))
 	}
 	return errors.Wrap(err, "stream snapshot")
+}
+
+// applySnapshotCacheHeaders forwards the cached snapshot's validators so clients
+// can revalidate (ETag) and size the transfer (Content-Length). Content-Type is
+// fixed for snapshots regardless of what the cache backend recorded.
+func applySnapshotCacheHeaders(w http.ResponseWriter, headers http.Header) {
+	w.Header().Set("Content-Type", "application/zstd")
+	if etag := headers.Get(cache.ETagKey); etag != "" {
+		w.Header().Set(cache.ETagKey, etag)
+	}
+	if contentLength := headers.Get("Content-Length"); contentLength != "" {
+		w.Header().Set("Content-Length", contentLength)
+	}
 }
 
 // cacheBundle streams r into the cache under key. Used by the bundle

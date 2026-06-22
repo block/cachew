@@ -508,6 +508,81 @@ func TestSnapshotServesFreshSnapshotWithCommitHeader(t *testing.T) {
 		"X-Cachew-Snapshot-Commit should be set so client knows snapshot is fresh")
 	assert.Equal(t, "", w.Header().Get("X-Cachew-Bundle-Url"),
 		"no bundle URL when snapshot is already at mirror HEAD")
+	assert.NotEqual(t, "", w.Header().Get(cache.ETagKey),
+		"ETag should be forwarded from the cached snapshot so clients can revalidate")
+	assert.NotEqual(t, "", w.Header().Get("Content-Length"),
+		"Content-Length should be forwarded from the cached snapshot")
+}
+
+func TestSnapshotHeadServesMetadataWithoutBody(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not found in PATH")
+	}
+
+	_, ctx := logging.Configure(context.Background(), logging.Config{})
+	tmpDir := t.TempDir()
+	mirrorRoot := filepath.Join(tmpDir, "mirrors")
+	upstreamURL := "https://github.com/org/repo"
+	mirrorPath := filepath.Join(mirrorRoot, "github.com", "org", "repo")
+	createTestMirrorRepo(t, mirrorPath)
+
+	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: time.Hour})
+	assert.NoError(t, err)
+	mux := newTestMux()
+
+	cm := gitclone.NewManagerProvider(ctx, gitclone.Config{MirrorRoot: mirrorRoot}, nil)
+	s, err := git.New(ctx, git.Config{}, newTestScheduler(ctx, t), memCache, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
+	assert.NoError(t, err)
+
+	manager, err := cm()
+	assert.NoError(t, err)
+	repo, err := manager.GetOrCreate(ctx, upstreamURL)
+	assert.NoError(t, err)
+
+	handler := mux.handlers["GET /git/{host}/{path...}"]
+	assert.NotZero(t, handler)
+
+	// Before any snapshot exists, HEAD must report 404 rather than generating one.
+	missReq := httptest.NewRequest(http.MethodHead, "/git/github.com/org/repo/snapshot.tar.zst", nil)
+	missReq = missReq.WithContext(ctx)
+	missReq.SetPathValue("host", "github.com")
+	missReq.SetPathValue("path", "org/repo/snapshot.tar.zst")
+	missResp := httptest.NewRecorder()
+	handler.ServeHTTP(missResp, missReq)
+	assert.Equal(t, 404, missResp.Code, "HEAD on an uncached snapshot must not trigger generation")
+
+	waitForReady(t, s)
+	err = s.GenerateAndUploadSnapshot(ctx, repo)
+	assert.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodHead, "/git/github.com/org/repo/snapshot.tar.zst", nil)
+	req = req.WithContext(ctx)
+	req.SetPathValue("host", "github.com")
+	req.SetPathValue("path", "org/repo/snapshot.tar.zst")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	assert.Equal(t, 200, w.Code)
+	assert.Equal(t, 0, w.Body.Len(), "HEAD must not return a body")
+	assert.Equal(t, "application/zstd", w.Header().Get("Content-Type"))
+	assert.NotEqual(t, "", w.Header().Get(cache.ETagKey),
+		"HEAD should report the snapshot ETag from cache metadata")
+	assert.NotEqual(t, "", w.Header().Get("Content-Length"),
+		"HEAD should report the snapshot Content-Length from cache metadata")
+	assert.NotEqual(t, "", w.Header().Get("X-Cachew-Snapshot-Commit"),
+		"HEAD should report the snapshot commit from cache metadata")
+
+	// A HEAD carrying the snapshot's ETag in If-None-Match must revalidate to 304.
+	etag := w.Header().Get(cache.ETagKey)
+	condReq := httptest.NewRequest(http.MethodHead, "/git/github.com/org/repo/snapshot.tar.zst", nil)
+	condReq = condReq.WithContext(ctx)
+	condReq.SetPathValue("host", "github.com")
+	condReq.SetPathValue("path", "org/repo/snapshot.tar.zst")
+	condReq.Header.Set("If-None-Match", etag)
+	condResp := httptest.NewRecorder()
+	handler.ServeHTTP(condResp, condReq)
+	assert.Equal(t, http.StatusNotModified, condResp.Code,
+		"HEAD with a matching If-None-Match should return 304")
 }
 
 func TestSnapshotServesBundleURLWhenStale(t *testing.T) {
