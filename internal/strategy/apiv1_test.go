@@ -90,6 +90,8 @@ func TestConditionalGetIfNoneMatch(t *testing.T) {
 		{name: "Matching", ifNoneMatch: etag, expectedStatus: http.StatusNotModified},
 		{name: "NonMatching", ifNoneMatch: `"wrong"`, expectedStatus: http.StatusOK},
 		{name: "Wildcard", ifNoneMatch: "*", expectedStatus: http.StatusNotModified},
+		{name: "ListMatching", ifNoneMatch: `"a", ` + etag + `, "b"`, expectedStatus: http.StatusNotModified},
+		{name: "ListNonMatching", ifNoneMatch: `"a", "b"`, expectedStatus: http.StatusOK},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -134,6 +136,8 @@ func TestConditionalGetIfMatch(t *testing.T) {
 		{name: "Matching", ifMatch: etag, expectedStatus: http.StatusOK},
 		{name: "NonMatching", ifMatch: `"wrong"`, expectedStatus: http.StatusPreconditionFailed},
 		{name: "Wildcard", ifMatch: "*", expectedStatus: http.StatusOK},
+		{name: "ListMatching", ifMatch: `"a", ` + etag + `, "b"`, expectedStatus: http.StatusOK},
+		{name: "ListNonMatching", ifMatch: `"a", "b"`, expectedStatus: http.StatusPreconditionFailed},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
