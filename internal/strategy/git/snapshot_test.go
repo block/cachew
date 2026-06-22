@@ -585,6 +585,65 @@ func TestSnapshotHeadServesMetadataWithoutBody(t *testing.T) {
 		"HEAD with a matching If-None-Match should return 304")
 }
 
+func TestSnapshotGetHonorsIfNoneMatch(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not found in PATH")
+	}
+
+	_, ctx := logging.Configure(context.Background(), logging.Config{})
+	tmpDir := t.TempDir()
+	mirrorRoot := filepath.Join(tmpDir, "mirrors")
+	upstreamURL := "https://github.com/org/repo"
+	mirrorPath := filepath.Join(mirrorRoot, "github.com", "org", "repo")
+	createTestMirrorRepo(t, mirrorPath)
+
+	// The memory cache returns a non-*os.File reader, exercising the io.Copy path
+	// where ServeContent would not otherwise evaluate conditionals.
+	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: time.Hour})
+	assert.NoError(t, err)
+	mux := newTestMux()
+
+	cm := gitclone.NewManagerProvider(ctx, gitclone.Config{MirrorRoot: mirrorRoot}, nil)
+	s, err := git.New(ctx, git.Config{}, newTestScheduler(ctx, t), memCache, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
+	assert.NoError(t, err)
+
+	manager, err := cm()
+	assert.NoError(t, err)
+	repo, err := manager.GetOrCreate(ctx, upstreamURL)
+	assert.NoError(t, err)
+
+	waitForReady(t, s)
+	err = s.GenerateAndUploadSnapshot(ctx, repo)
+	assert.NoError(t, err)
+
+	handler := mux.handlers["GET /git/{host}/{path...}"]
+	assert.NotZero(t, handler)
+
+	// First GET captures the advertised ETag and the full body.
+	req := httptest.NewRequest(http.MethodGet, "/git/github.com/org/repo/snapshot.tar.zst", nil)
+	req = req.WithContext(ctx)
+	req.SetPathValue("host", "github.com")
+	req.SetPathValue("path", "org/repo/snapshot.tar.zst")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	assert.Equal(t, 200, w.Code)
+	etag := w.Header().Get(cache.ETagKey)
+	assert.NotEqual(t, "", etag, "GET should advertise the snapshot ETag")
+	assert.NotEqual(t, 0, w.Body.Len(), "unconditional GET should return the snapshot body")
+
+	// A conditional GET with the matching ETag must return 304 with no body.
+	condReq := httptest.NewRequest(http.MethodGet, "/git/github.com/org/repo/snapshot.tar.zst", nil)
+	condReq = condReq.WithContext(ctx)
+	condReq.SetPathValue("host", "github.com")
+	condReq.SetPathValue("path", "org/repo/snapshot.tar.zst")
+	condReq.Header.Set("If-None-Match", etag)
+	condResp := httptest.NewRecorder()
+	handler.ServeHTTP(condResp, condReq)
+	assert.Equal(t, http.StatusNotModified, condResp.Code,
+		"GET with a matching If-None-Match should return 304")
+	assert.Equal(t, 0, condResp.Body.Len(), "304 must not return a body")
+}
+
 func TestSnapshotServesBundleURLWhenStale(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not found in PATH")
