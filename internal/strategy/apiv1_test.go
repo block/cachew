@@ -221,6 +221,33 @@ func TestGetObjectRange(t *testing.T) {
 		w := get(t, "bytes=100-200", `"wrong"`, "")
 		assert.Equal(t, http.StatusPreconditionFailed, w.Code)
 	})
+
+	getIfRange := func(t *testing.T, rangeHeader, ifRange string) *httptest.ResponseRecorder {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/object/test/"+key.String(), nil)
+		req = req.WithContext(ctx)
+		req.Header.Set("Range", rangeHeader)
+		req.Header.Set("If-Range", ifRange)
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+		return w
+	}
+
+	// If-Range with the current validator serves the partial response.
+	t.Run("IfRangeMatchServesPartial", func(t *testing.T) {
+		w := getIfRange(t, "bytes=0-3", etag)
+		assert.Equal(t, http.StatusPartialContent, w.Code)
+		assert.Equal(t, "test", w.Body.String())
+	})
+
+	// If-Range with a stale validator must serve the full current object so a
+	// resuming client discards its partial copy (RFC 9110 §13.1.5).
+	t.Run("IfRangeStaleServesFull", func(t *testing.T) {
+		w := getIfRange(t, "bytes=0-3", `"stale"`)
+		assert.Equal(t, http.StatusOK, w.Code)
+		assert.Equal(t, "test data", w.Body.String())
+		assert.Zero(t, w.Header().Get("Content-Range"))
+	})
 }
 
 // failingReader returns data up to failAfter bytes, then returns an error.

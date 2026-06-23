@@ -129,6 +129,14 @@ func (d *APIV1) getObjectRange(w http.ResponseWriter, r *http.Request, c cache.C
 		return
 	}
 
+	// A stale If-Range validator means the client's partial copy is for an older
+	// object; serve the full current object so it cannot append fresh bytes onto
+	// a stale prefix (RFC 9110 §13.1.5).
+	if !httputil.IfRangeAllowsRange(r, statHeaders.Get(httputil.ETagHeader), statHeaders.Get("Last-Modified")) {
+		d.serveFull(w, r, c, key)
+		return
+	}
+
 	// size comes from Stat and is used only to resolve the range and build the
 	// Content-Range total. If the object changes between Stat and Open the body
 	// from Open is still internally consistent (its own Content-Length); only
@@ -137,14 +145,8 @@ func (d *APIV1) getObjectRange(w http.ResponseWriter, r *http.Request, c cache.C
 	size, _ := strconv.ParseInt(statHeaders.Get("Content-Length"), 10, 64) //nolint:errcheck
 	start, end, ok, satisfiable := httputil.ParseByteRange(rangeHeader, size)
 	if !ok {
-		cr, headers, err := c.Open(r.Context(), key, 0, -1)
-		if err != nil {
-			d.httpError(w, http.StatusInternalServerError, err, "Failed to open cache object", "key", key)
-			return
-		}
-		if err := httputil.ServeCacheHit(w, r, headers, cr); err != nil {
-			d.logger.Error("Failed to serve cache object", "error", err, "key", key)
-		}
+		// Unsupported or multi-range header — serve the whole object.
+		d.serveFull(w, r, c, key)
 		return
 	}
 	if !satisfiable {
@@ -168,6 +170,23 @@ func (d *APIV1) getObjectRange(w http.ResponseWriter, r *http.Request, c cache.C
 
 	if err := httputil.ServeCachePartial(w, r, headers, cr, start, end, size); err != nil {
 		d.logger.Error("Failed to serve cache object range", "error", err, "key", key)
+	}
+}
+
+// serveFull opens and serves the entire object as a normal cache hit (200),
+// used by the range handler when no usable range applies.
+func (d *APIV1) serveFull(w http.ResponseWriter, r *http.Request, c cache.Cache, key cache.Key) {
+	cr, headers, err := c.Open(r.Context(), key, 0, -1)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			http.Error(w, "Cache object not found", http.StatusNotFound)
+			return
+		}
+		d.httpError(w, http.StatusInternalServerError, err, "Failed to open cache object", "key", key)
+		return
+	}
+	if err := httputil.ServeCacheHit(w, r, headers, cr); err != nil {
+		d.logger.Error("Failed to serve cache object", "error", err, "key", key)
 	}
 }
 

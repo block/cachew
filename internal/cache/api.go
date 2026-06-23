@@ -50,8 +50,11 @@ func resolveRange(start, end, size int64) (int64, int64, error) {
 	if start == 0 && end == -1 {
 		return 0, size, nil
 	}
-	if start > size || (start == size && size > 0) {
-		return 0, 0, errors.Errorf("range start %d beyond size %d: %w", start, size, ErrRangeNotSatisfiable)
+	// A non-full range must begin before the end of the object. start == size
+	// (including any non-full range on an empty object) has no satisfiable
+	// bytes, matching the HTTP path's 416.
+	if start >= size {
+		return 0, 0, errors.Errorf("range start %d not within size %d: %w", start, size, ErrRangeNotSatisfiable)
 	}
 	if end == -1 || end > size {
 		end = size

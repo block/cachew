@@ -63,6 +63,37 @@ func ServeCacheHit(w http.ResponseWriter, r *http.Request, headers http.Header, 
 	return errors.Wrap(errors.Join(copyErr, body.Close()), "serve cache hit")
 }
 
+// IfRangeAllowsRange reports whether a Range request guarded by an If-Range
+// header may be served as a partial response (RFC 9110 §13.1.5). It returns
+// true when there is no If-Range header or the validator still matches the
+// current representation; false means the validator is stale and the caller
+// must serve the full object so a resuming client discards its partial copy.
+//
+// If-Range uses strong comparison: an ETag matches only if byte-identical to
+// the stored (always strong) ETag, and a date matches only if equal to
+// Last-Modified at second precision.
+func IfRangeAllowsRange(r *http.Request, etag, lastModified string) bool {
+	ir := strings.TrimSpace(r.Header.Get("If-Range"))
+	if ir == "" {
+		return true
+	}
+	if strings.HasPrefix(ir, `"`) || strings.HasPrefix(ir, "W/") {
+		return etag != "" && ir == etag
+	}
+	if lastModified == "" {
+		return false
+	}
+	irTime, err := http.ParseTime(ir)
+	if err != nil {
+		return false
+	}
+	lmTime, err := http.ParseTime(lastModified)
+	if err != nil {
+		return false
+	}
+	return irTime.Equal(lmTime)
+}
+
 // ParseByteRange parses a single HTTP Range header value against the object
 // size, returning the resolved half-open [start, end) byte range. ok is false
 // when the header is absent, malformed, or specifies multiple ranges, in which

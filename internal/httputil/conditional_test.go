@@ -183,3 +183,30 @@ func TestParseByteRange(t *testing.T) {
 		})
 	}
 }
+
+func TestIfRangeAllowsRange(t *testing.T) {
+	const etag = `"v1"`
+	lastMod := "Wed, 21 Oct 2026 07:28:00 GMT"
+	otherDate := "Wed, 21 Oct 2026 07:30:00 GMT"
+	for _, tt := range []struct {
+		name    string
+		ifRange string
+		allow   bool
+	}{
+		{name: "Absent", ifRange: "", allow: true},
+		{name: "MatchingETag", ifRange: etag, allow: true},
+		{name: "StaleETag", ifRange: `"v0"`, allow: false},
+		{name: "WeakETagNeverMatches", ifRange: `W/"v1"`, allow: false},
+		{name: "MatchingDate", ifRange: lastMod, allow: true},
+		{name: "StaleDate", ifRange: otherDate, allow: false},
+		{name: "GarbageDate", ifRange: "not-a-date", allow: false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			r := httptest.NewRequest(http.MethodGet, "/", nil)
+			if tt.ifRange != "" {
+				r.Header.Set("If-Range", tt.ifRange)
+			}
+			assert.Equal(t, tt.allow, httputil.IfRangeAllowsRange(r, etag, lastMod))
+		})
+	}
+}

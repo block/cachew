@@ -348,6 +348,11 @@ func TestOpenRangeEmptyObject(t *testing.T) {
 			assert.NoError(t, err)
 			assert.Equal(t, "", string(data))
 			assert.Equal(t, "0", headers.Get("Content-Length"))
+
+			// A non-full range on an empty object has no satisfiable bytes,
+			// matching the HTTP path's 416 rather than succeeding with an empty body.
+			_, _, err = c.Open(ctx, key, 0, 1)
+			assert.IsError(t, err, cache.ErrRangeNotSatisfiable)
 		})
 	}
 }
