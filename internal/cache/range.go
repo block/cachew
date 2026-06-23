@@ -13,8 +13,9 @@ import (
 // size and the stored ETag in headers. On a satisfiable single range it sets
 // Content-Range, rewrites Content-Length to the range length, and returns the
 // [start, start+length) window with ok=true. When no range applies it returns
-// ok=false (serve the full object). An unsatisfiable range sets
-// Content-Range: bytes */size and returns ErrRangeNotSatisfiable.
+// ok=false (serve the full object) and strips any Content-Range left in stale
+// metadata. An unsatisfiable range sets Content-Range: bytes */size and returns
+// ErrRangeNotSatisfiable.
 func rangeShortCircuit(headers http.Header, size int64, opts []Option) (start, length int64, ok bool, err error) {
 	s, l, outcome := NewRequestOptions(opts...).ResolveRange(size, headers.Get(ETagKey))
 	switch outcome {
@@ -31,6 +32,9 @@ func rangeShortCircuit(headers http.Header, size int64, opts []Option) (start, l
 		return 0, 0, false, ErrRangeNotSatisfiable
 
 	case RangeFull:
+		// A full response must never carry Content-Range; drop any persisted in
+		// stale metadata, otherwise ServeCacheHit would mistake it for a 206.
+		headers.Del("Content-Range")
 	}
 	return 0, size, false, nil
 }
