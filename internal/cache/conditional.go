@@ -4,8 +4,6 @@ import (
 	"net/http"
 
 	"github.com/alecthomas/errors"
-
-	"github.com/block/cachew/client"
 )
 
 // conditionalShortCircuit evaluates conditional opts against the stored ETag in
@@ -14,7 +12,7 @@ import (
 // headers (so callers can surface a 304 with the stored validators), while
 // ErrPreconditionFailed is returned with nil headers.
 func conditionalShortCircuit(headers http.Header, opts []Option) (http.Header, error) {
-	err := errors.WithStack(client.NewRequestOptions(opts...).Check(headers.Get(ETagKey)))
+	err := errors.WithStack(NewRequestOptions(opts...).Check(headers.Get(ETagKey)))
 	if errors.Is(err, ErrNotModified) {
 		return headers, err
 	}

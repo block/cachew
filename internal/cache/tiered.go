@@ -12,7 +12,6 @@ import (
 
 	"github.com/alecthomas/errors"
 
-	"github.com/block/cachew/client"
 	"github.com/block/cachew/internal/logging"
 )
 
@@ -117,7 +116,7 @@ func (t Tiered) Stat(ctx context.Context, key Key, opts ...Option) (http.Header,
 func (t Tiered) Open(ctx context.Context, key Key, opts ...Option) (io.ReadCloser, http.Header, error) {
 	// A Range request yields a partial body, which must never be backfilled
 	// into a lower tier as if it were the whole object.
-	partial := client.NewRequestOptions(opts...).Range != ""
+	partial := NewRequestOptions(opts...).Range != ""
 	errs := make([]error, len(t.caches))
 	for i, c := range t.caches {
 		r, headers, err := c.Open(ctx, key, opts...)

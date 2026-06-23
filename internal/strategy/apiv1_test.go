@@ -202,7 +202,10 @@ func TestRangeGet(t *testing.T) {
 			assert.Equal(t, tt.wantStatus, w.Code)
 			assert.Equal(t, "bytes", w.Header().Get("Accept-Ranges"))
 			assert.Equal(t, tt.wantCotRange, w.Header().Get("Content-Range"))
-			if tt.wantStatus != http.StatusRequestedRangeNotSatisfiable {
+			if tt.wantStatus == http.StatusRequestedRangeNotSatisfiable {
+				// No body, so the full-size Content-Length must not be advertised.
+				assert.Equal(t, "", w.Header().Get("Content-Length"))
+			} else {
 				assert.Equal(t, tt.wantBody, w.Body.String())
 			}
 		})

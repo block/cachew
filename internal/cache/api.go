@@ -34,6 +34,26 @@ var ErrNotFound = errors.New("cache backend not found")
 // Option configures conditional parameters on a cache Open or Stat.
 type Option = client.RequestOption
 
+// RequestOptions is the resolved set of conditional and range parameters for an
+// Open or Stat.
+type RequestOptions = client.RequestOptions
+
+// NewRequestOptions applies opts and returns the resulting RequestOptions.
+func NewRequestOptions(opts ...Option) RequestOptions { return client.NewRequestOptions(opts...) }
+
+// RangeOutcome classifies how a Range request should be answered, as returned by
+// RequestOptions.ResolveRange.
+type RangeOutcome = client.RangeOutcome
+
+const (
+	// RangeFull indicates the full object should be served.
+	RangeFull = client.RangeFull
+	// RangePartial indicates a single satisfiable byte range.
+	RangePartial = client.RangePartial
+	// RangeNotSatisfiable indicates the range lies outside the object.
+	RangeNotSatisfiable = client.RangeNotSatisfiable
+)
+
 // IfMatch sets the If-Match precondition. Open/Stat return ErrPreconditionFailed
 // if the stored ETag does not match.
 func IfMatch(etag string) Option { return client.IfMatch(etag) }
