@@ -21,7 +21,9 @@ import (
 // mid-download, a chunk's ETag will differ and ParallelGet returns an error
 // rather than splicing bytes from two revisions. A missing or truncated chunk
 // is likewise reported as an error, so a partially written dst must be discarded
-// by the caller on failure.
+// by the caller on failure. An object with no ETag to pin to (e.g. one stored
+// before ETags were recorded) cannot be kept revision-safe across chunks, so it
+// falls back to a single full read instead of parallelising.
 //
 // dst is written via concurrent WriteAt calls at non-overlapping offsets; the
 // caller owns dst's lifecycle (open, close, cleanup) and need not pre-size it,
@@ -55,6 +57,22 @@ func ParallelGet(ctx context.Context, c Cache, key Key, dst io.WriterAt, chunkSi
 	}
 	if !hasRange || total <= chunkSize {
 		return errors.Wrap(writeChunkAt(dst, 0, firstLen, rc), "parallel get")
+	}
+
+	// Subsequent chunks are pinned to the discovery ETag via IfRange. Without a
+	// validator there is nothing to pin to (IfRange("") is a no-op and an empty
+	// ETag matches an empty ETag), so chunks could be spliced across a rewrite
+	// undetected. Objects stored before ETags were recorded fall here, so fall
+	// back to a single, revision-consistent read rather than parallelising.
+	if etag == "" {
+		if err := rc.Close(); err != nil {
+			return errors.Wrap(err, "parallel get: close discovery reader")
+		}
+		full, _, err := c.Open(ctx, key)
+		if err != nil {
+			return errors.Wrap(err, "parallel get: full read")
+		}
+		return errors.Wrap(writeChunkAt(dst, 0, total, full), "parallel get")
 	}
 
 	// Multiple chunks: copy the already-open first chunk concurrently with the

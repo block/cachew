@@ -137,3 +137,50 @@ func TestParallelGetETagMismatch(t *testing.T) {
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "object changed during read")
 }
+
+// noETagCache serves byte ranges but never sets an ETag, modelling a legacy
+// entry or a Cache implementation that omits it.
+type noETagCache struct {
+	cache.Cache // embedded; only Open is exercised
+	data        []byte
+}
+
+func (n *noETagCache) Open(_ context.Context, _ cache.Key, opts ...cache.Option) (io.ReadCloser, http.Header, error) {
+	size := int64(len(n.data))
+	start, length, outcome := cache.NewRequestOptions(opts...).ResolveRange(size, "")
+	headers := http.Header{}
+	if outcome == cache.RangeNotSatisfiable {
+		headers.Set("Content-Range", fmt.Sprintf("bytes */%d", size))
+		return nil, headers, cache.ErrRangeNotSatisfiable
+	}
+	headers.Set("Content-Length", strconv.FormatInt(length, 10))
+	if outcome == cache.RangePartial {
+		headers.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, start+length-1, size))
+	}
+	return io.NopCloser(bytes.NewReader(n.data[start : start+length])), headers, nil
+}
+
+func TestParallelGetNoETagMultiChunk(t *testing.T) {
+	// A multi-chunk object with no ETag can't be pinned, so it falls back to a
+	// single full read (backwards compatible with objects stored before ETags).
+	data := make([]byte, 1000)
+	for i := range data {
+		data[i] = byte(i % 251)
+	}
+	c := &noETagCache{data: data}
+	var dst bufferAt
+	err := cache.ParallelGet(context.Background(), c, cache.NewKey("k"), &dst, 100, 4)
+	assert.NoError(t, err)
+	assert.Equal(t, data, dst.buf)
+}
+
+func TestParallelGetNoETagSingleChunk(t *testing.T) {
+	// A no-ETag object delivered entirely by the discovery request is a single
+	// revision, so it succeeds without pinning.
+	data := []byte("0123456789")
+	c := &noETagCache{data: data}
+	var dst bufferAt
+	err := cache.ParallelGet(context.Background(), c, cache.NewKey("k"), &dst, 100, 4)
+	assert.NoError(t, err)
+	assert.Equal(t, data, dst.buf)
+}
