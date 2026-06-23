@@ -230,6 +230,18 @@ func (s *S3) Open(ctx context.Context, key Key, opts ...Option) (io.ReadCloser, 
 		return nil, h, err
 	}
 
+	start, length, partial, rangeErr := rangeShortCircuit(headers, objInfo.Size, opts)
+	if rangeErr != nil {
+		return nil, headers, rangeErr
+	}
+	if partial {
+		reader, err := s.rangeGetReader(ctx, s.config.Bucket, objectName, start, length, objInfo.ETag)
+		if err != nil {
+			return nil, nil, err
+		}
+		return reader, headers, nil
+	}
+
 	reader, err := s.parallelGetReader(ctx, s.config.Bucket, objectName, objInfo.Size, objInfo.ETag)
 	if err != nil {
 		return nil, nil, err

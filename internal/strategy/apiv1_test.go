@@ -151,6 +151,109 @@ func TestConditionalGetIfMatch(t *testing.T) {
 	}
 }
 
+func apiPutBody(ctx context.Context, t *testing.T, handler http.Handler, key cache.Key, body string) string {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/object/test/"+key.String(), strings.NewReader(body))
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	req = httptest.NewRequest(http.MethodHead, "/api/v1/object/test/"+key.String(), nil)
+	req = req.WithContext(ctx)
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "bytes", w.Header().Get("Accept-Ranges"))
+	return w.Header().Get("ETag")
+}
+
+func TestRangeGet(t *testing.T) {
+	handler, ctx := testAPISetup(t)
+	key := cache.NewKey("range-get")
+	apiPutBody(ctx, t, handler, key, "0123456789")
+
+	tests := []struct {
+		name         string
+		rangeHeader  string
+		ifRange      string
+		wantStatus   int
+		wantBody     string
+		wantCotRange string
+	}{
+		{name: "FirstBytes", rangeHeader: "bytes=0-3", wantStatus: http.StatusPartialContent, wantBody: "0123", wantCotRange: "bytes 0-3/10"},
+		{name: "Middle", rangeHeader: "bytes=2-5", wantStatus: http.StatusPartialContent, wantBody: "2345", wantCotRange: "bytes 2-5/10"},
+		{name: "OpenEnded", rangeHeader: "bytes=7-", wantStatus: http.StatusPartialContent, wantBody: "789", wantCotRange: "bytes 7-9/10"},
+		{name: "Suffix", rangeHeader: "bytes=-3", wantStatus: http.StatusPartialContent, wantBody: "789", wantCotRange: "bytes 7-9/10"},
+		{name: "NotSatisfiable", rangeHeader: "bytes=20-30", wantStatus: http.StatusRequestedRangeNotSatisfiable, wantCotRange: "bytes */10"},
+		{name: "MultiRangeFallsBackToFull", rangeHeader: "bytes=0-1,4-5", wantStatus: http.StatusOK, wantBody: "0123456789"},
+		{name: "NoRange", wantStatus: http.StatusOK, wantBody: "0123456789"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/object/test/"+key.String(), nil)
+			req = req.WithContext(ctx)
+			if tt.rangeHeader != "" {
+				req.Header.Set("Range", tt.rangeHeader)
+			}
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, req)
+
+			assert.Equal(t, tt.wantStatus, w.Code)
+			assert.Equal(t, "bytes", w.Header().Get("Accept-Ranges"))
+			assert.Equal(t, tt.wantCotRange, w.Header().Get("Content-Range"))
+			if tt.wantStatus != http.StatusRequestedRangeNotSatisfiable {
+				assert.Equal(t, tt.wantBody, w.Body.String())
+			}
+		})
+	}
+}
+
+func TestRangeGetIfRange(t *testing.T) {
+	handler, ctx := testAPISetup(t)
+	key := cache.NewKey("range-ifrange")
+	etag := apiPutBody(ctx, t, handler, key, "0123456789")
+
+	tests := []struct {
+		name       string
+		ifRange    string
+		wantStatus int
+		wantBody   string
+	}{
+		{name: "Match", ifRange: etag, wantStatus: http.StatusPartialContent, wantBody: "0123"},
+		{name: "Mismatch", ifRange: `"stale"`, wantStatus: http.StatusOK, wantBody: "0123456789"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/object/test/"+key.String(), nil)
+			req = req.WithContext(ctx)
+			req.Header.Set("Range", "bytes=0-3")
+			req.Header.Set("If-Range", tt.ifRange)
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, req)
+
+			assert.Equal(t, tt.wantStatus, w.Code)
+			assert.Equal(t, tt.wantBody, w.Body.String())
+		})
+	}
+}
+
+func TestRangeHeadIgnoresRange(t *testing.T) {
+	handler, ctx := testAPISetup(t)
+	key := cache.NewKey("range-head")
+	apiPutBody(ctx, t, handler, key, "0123456789")
+
+	req := httptest.NewRequest(http.MethodHead, "/api/v1/object/test/"+key.String(), nil)
+	req = req.WithContext(ctx)
+	req.Header.Set("Range", "bytes=0-3")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "bytes", w.Header().Get("Accept-Ranges"))
+	assert.Equal(t, "", w.Header().Get("Content-Range"))
+}
+
 // failingReader returns data up to failAfter bytes, then returns an error.
 type failingReader struct {
 	data      []byte

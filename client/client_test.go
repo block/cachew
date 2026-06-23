@@ -425,6 +425,43 @@ func TestOpenIfMatch(t *testing.T) {
 	assert.IsError(t, err, client.ErrPreconditionFailed)
 }
 
+func TestOpenRange(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/v1/object/{namespace}/{key}", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Header.Get("Range") {
+		case "bytes=0-3":
+			w.Header().Set("Content-Range", "bytes 0-3/10")
+			w.Header().Set("Content-Length", "4")
+			w.WriteHeader(http.StatusPartialContent)
+			w.Write([]byte("0123")) //nolint:errcheck
+		case "bytes=50-60":
+			w.Header().Set("Content-Range", "bytes */10")
+			w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
+		default:
+			http.Error(w, "unexpected range", http.StatusBadRequest)
+		}
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	c := client.New(srv.URL, nil).Namespace("test")
+	defer c.Close()
+	ctx := t.Context()
+	key := client.NewKey("range-test")
+
+	rc, headers, err := c.Open(ctx, key, client.Range("bytes=0-3"))
+	assert.NoError(t, err)
+	data, readErr := io.ReadAll(rc)
+	assert.NoError(t, readErr)
+	assert.NoError(t, rc.Close())
+	assert.Equal(t, "0123", string(data))
+	assert.Equal(t, "bytes 0-3/10", headers.Get("Content-Range"))
+
+	_, headers, err = c.Open(ctx, key, client.Range("bytes=50-60"))
+	assert.IsError(t, err, client.ErrRangeNotSatisfiable)
+	assert.Equal(t, "bytes */10", headers.Get("Content-Range"))
+}
+
 func TestParseKey(t *testing.T) {
 	tests := []struct {
 		name  string

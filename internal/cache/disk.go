@@ -304,6 +304,17 @@ func (d *Disk) Open(ctx context.Context, key Key, opts ...Option) (io.ReadCloser
 		return nil, h, errors.Join(condErr, f.Close())
 	}
 
+	start, length, partial, rangeErr := rangeShortCircuit(headers, finfo.Size(), opts)
+	if rangeErr != nil {
+		return nil, headers, errors.Join(rangeErr, f.Close())
+	}
+	if partial {
+		if _, err := f.Seek(start, io.SeekStart); err != nil {
+			return nil, nil, errors.Join(errors.Errorf("failed to seek for range: %w", err), f.Close())
+		}
+		return newLimitedReadCloser(f, length), headers, nil
+	}
+
 	return f, headers, nil
 }
 

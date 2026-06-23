@@ -107,7 +107,16 @@ func (m *Memory) Open(_ context.Context, key Key, opts ...Option) (io.ReadCloser
 	if h, err := conditionalShortCircuit(headers, opts); err != nil {
 		return nil, h, err
 	}
-	return io.NopCloser(bytes.NewReader(entry.data)), headers, nil
+
+	start, length, partial, rangeErr := rangeShortCircuit(headers, int64(len(entry.data)), opts)
+	if rangeErr != nil {
+		return nil, headers, rangeErr
+	}
+	data := entry.data
+	if partial {
+		data = data[start : start+length]
+	}
+	return io.NopCloser(bytes.NewReader(data)), headers, nil
 }
 
 func (m *Memory) Create(ctx context.Context, key Key, headers http.Header, ttl time.Duration) (Writer, error) {

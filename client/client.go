@@ -34,6 +34,8 @@ func (e *HTTPStatusError) Is(target error) bool {
 		return e.StatusCode == http.StatusNotModified
 	case ErrPreconditionFailed:
 		return e.StatusCode == http.StatusPreconditionFailed
+	case ErrRangeNotSatisfiable:
+		return e.StatusCode == http.StatusRequestedRangeNotSatisfiable
 	default:
 		return false
 	}
@@ -174,7 +176,7 @@ func (c *Client) Open(ctx context.Context, key Key, opts ...RequestOption) (io.R
 	}
 
 	switch resp.StatusCode {
-	case http.StatusOK:
+	case http.StatusOK, http.StatusPartialContent:
 		return resp.Body, filterHeaders(resp.Header, transportHeaders...), nil
 
 	case http.StatusNotFound:
@@ -184,6 +186,10 @@ func (c *Client) Open(ctx context.Context, key Key, opts ...RequestOption) (io.R
 	case http.StatusNotModified:
 		_, _ = io.Copy(io.Discard, resp.Body) //nolint:errcheck,gosec
 		return nil, filterHeaders(resp.Header, transportHeaders...), errors.Join(ErrNotModified, resp.Body.Close())
+
+	case http.StatusRequestedRangeNotSatisfiable:
+		_, _ = io.Copy(io.Discard, resp.Body) //nolint:errcheck,gosec
+		return nil, filterHeaders(resp.Header, transportHeaders...), errors.Join(ErrRangeNotSatisfiable, resp.Body.Close())
 
 	case http.StatusPreconditionFailed:
 		_, _ = io.Copy(io.Discard, resp.Body) //nolint:errcheck,gosec
