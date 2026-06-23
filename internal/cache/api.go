@@ -31,6 +31,25 @@ type Writer = client.CacheWriter
 // ErrNotFound is returned when a cache backend is not found.
 var ErrNotFound = errors.New("cache backend not found")
 
+// Option configures conditional parameters on a cache Open or Stat.
+type Option = client.RequestOption
+
+// IfMatch sets the If-Match precondition. Open/Stat return ErrPreconditionFailed
+// if the stored ETag does not match.
+func IfMatch(etag string) Option { return client.IfMatch(etag) }
+
+// IfNoneMatch sets the If-None-Match precondition. Open/Stat return
+// ErrNotModified when the stored ETag matches.
+func IfNoneMatch(etag string) Option { return client.IfNoneMatch(etag) }
+
+// ErrNotModified is returned by Open/Stat when an If-None-Match precondition is
+// satisfied.
+var ErrNotModified = client.ErrNotModified
+
+// ErrPreconditionFailed is returned by Open/Stat when an If-Match precondition
+// is not met.
+var ErrPreconditionFailed = client.ErrPreconditionFailed
+
 // ErrStatsUnavailable is returned when a cache backend cannot provide statistics.
 var ErrStatsUnavailable = client.ErrStatsUnavailable
 
@@ -133,13 +152,21 @@ type Cache interface {
 	//
 	// Expired files MUST not be returned.
 	// Must return os.ErrNotExist if the file does not exist.
-	Stat(ctx context.Context, key Key) (http.Header, error)
+	//
+	// Conditional opts are evaluated against the stored ETag: a satisfied
+	// If-None-Match returns ErrNotModified (with headers); a failed If-Match
+	// returns ErrPreconditionFailed.
+	Stat(ctx context.Context, key Key, opts ...Option) (http.Header, error)
 	// Open an existing file in the cache.
 	//
 	// Expired files MUST NOT be returned.
 	// The returned headers MUST include a Last-Modified header.
 	// Must return os.ErrNotExist if the file does not exist.
-	Open(ctx context.Context, key Key) (io.ReadCloser, http.Header, error)
+	//
+	// Conditional opts are evaluated against the stored ETag: a satisfied
+	// If-None-Match returns ErrNotModified (with headers, no body); a failed
+	// If-Match returns ErrPreconditionFailed.
+	Open(ctx context.Context, key Key, opts ...Option) (io.ReadCloser, http.Header, error)
 	// Create a new file in the cache.
 	//
 	// If "ttl" is zero, a maximum TTL MUST be used by the implementation.

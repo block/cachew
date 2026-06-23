@@ -4,71 +4,92 @@ import (
 	"io"
 	"maps"
 	"net/http"
-	"strings"
 
 	"github.com/alecthomas/errors"
+
+	"github.com/block/cachew/client"
 )
 
-// ETagHeader is the HTTP header used to carry an object's entity tag.
-const ETagHeader = "ETag"
+// ConditionalOptions extracts conditional-request options from an incoming
+// request, for forwarding to a cache Open or Stat.
+func ConditionalOptions(r *http.Request) []client.RequestOption {
+	var opts []client.RequestOption
+	if v := r.Header.Get("If-Match"); v != "" {
+		opts = append(opts, client.IfMatch(v))
+	}
+	if v := r.Header.Get("If-None-Match"); v != "" {
+		opts = append(opts, client.IfNoneMatch(v))
+	}
+	return opts
+}
 
 // CheckConditionals evaluates RFC 7232 If-Match and If-None-Match precondition
-// headers against the stored ETag. It returns 0 when all preconditions pass,
-// otherwise the HTTP status code the caller should send: 412 Precondition
-// Failed for a failed If-Match, or 304 Not Modified for a satisfied
-// If-None-Match.
+// headers on r against etag. It returns 0 when all preconditions pass,
+// otherwise the HTTP status the caller should send: 412 Precondition Failed for
+// a failed If-Match, or 304 Not Modified for a satisfied If-None-Match. It is
+// for callers that serve a body directly (not via ServeCacheHit) and need the
+// status code.
 func CheckConditionals(r *http.Request, etag string) int {
-	if ifMatch := r.Header.Get("If-Match"); ifMatch != "" {
-		if etag == "" || !etagListMatches(ifMatch, etag) {
-			return http.StatusPreconditionFailed
-		}
+	switch err := client.NewRequestOptions(ConditionalOptions(r)...).Check(etag); {
+	case errors.Is(err, client.ErrNotModified):
+		return http.StatusNotModified
+	case errors.Is(err, client.ErrPreconditionFailed):
+		return http.StatusPreconditionFailed
+	default:
+		return 0
 	}
-	if ifNoneMatch := r.Header.Get("If-None-Match"); ifNoneMatch != "" {
-		if etag != "" && etagListMatches(ifNoneMatch, etag) {
-			return http.StatusNotModified
-		}
-	}
-	return 0
 }
 
-// etagListMatches reports whether etag matches an If-Match / If-None-Match
-// header value, which may be a comma-separated list of ETags or the "*"
-// wildcard. Stored ETags are always strong, so weak comparison is not required.
-func etagListMatches(headerValue, etag string) bool {
-	for candidate := range strings.SplitSeq(headerValue, ",") {
-		candidate = strings.TrimSpace(candidate)
-		if candidate == "*" || candidate == etag {
-			return true
-		}
+// ServeCacheHit writes the outcome of a cache Open to w. headers and body are
+// the Open return values and openErr its error. It handles the success and
+// conditional cases: a nil error streams the body (always closing it), a
+// satisfied If-None-Match (ErrNotModified) writes 304 with the stored headers,
+// and a failed If-Match (ErrPreconditionFailed) writes 412. It returns
+// handled=false for any other error (e.g. os.ErrNotExist) so the caller can map
+// it to its own status.
+func ServeCacheHit(w http.ResponseWriter, headers http.Header, body io.ReadCloser, openErr error) (handled bool, err error) {
+	switch {
+	case openErr == nil:
+		maps.Copy(w.Header(), headers)
+		_, copyErr := io.Copy(w, body)
+		return true, errors.Wrap(errors.Join(copyErr, body.Close()), "serve cache hit")
+
+	case errors.Is(openErr, client.ErrNotModified):
+		maps.Copy(w.Header(), headers)
+		w.WriteHeader(http.StatusNotModified)
+		return true, nil
+
+	case errors.Is(openErr, client.ErrPreconditionFailed):
+		w.WriteHeader(http.StatusPreconditionFailed)
+		return true, nil
+
+	default:
+		return false, nil
 	}
-	return false
 }
 
-// ServeCacheHit serves a cache hit over HTTP. It copies the stored headers onto
-// the response, evaluates conditional request preconditions against the stored
-// ETag, and either short-circuits with a 304/412 status or streams the body.
-// The body is always closed.
-//
-// This consolidates the validator-aware serving path shared by handlers that
-// return a single cached object (e.g. the API and the generic caching handler).
-func ServeCacheHit(w http.ResponseWriter, r *http.Request, headers http.Header, body io.ReadCloser) error {
-	maps.Copy(w.Header(), headers)
-	if status := CheckConditionals(r, headers.Get(ETagHeader)); status != 0 {
-		w.WriteHeader(status)
-		return errors.WithStack(body.Close())
-	}
-	_, copyErr := io.Copy(w, body)
-	return errors.Wrap(errors.Join(copyErr, body.Close()), "serve cache hit")
-}
+// ServeCacheStat answers a metadata-only (HEAD) request from the outcome of a
+// cache Stat. It mirrors ServeCacheHit without a body: success writes 200 with
+// the stored headers, ErrNotModified writes 304 with headers, and
+// ErrPreconditionFailed writes 412. It returns handled=false for any other
+// error so the caller can map it to its own status.
+func ServeCacheStat(w http.ResponseWriter, headers http.Header, statErr error) (handled bool) {
+	switch {
+	case statErr == nil:
+		maps.Copy(w.Header(), headers)
+		w.WriteHeader(http.StatusOK)
+		return true
 
-// ServeCacheStat answers a metadata-only (HEAD) request from stored headers. It
-// copies the headers onto the response and writes the status determined by the
-// conditional request preconditions, defaulting to 200 OK.
-func ServeCacheStat(w http.ResponseWriter, r *http.Request, headers http.Header) {
-	maps.Copy(w.Header(), headers)
-	status := CheckConditionals(r, headers.Get(ETagHeader))
-	if status == 0 {
-		status = http.StatusOK
+	case errors.Is(statErr, client.ErrNotModified):
+		maps.Copy(w.Header(), headers)
+		w.WriteHeader(http.StatusNotModified)
+		return true
+
+	case errors.Is(statErr, client.ErrPreconditionFailed):
+		w.WriteHeader(http.StatusPreconditionFailed)
+		return true
+
+	default:
+		return false
 	}
-	w.WriteHeader(status)
 }

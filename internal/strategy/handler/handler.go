@@ -161,17 +161,16 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) serveCached(w http.ResponseWriter, r *http.Request, key cache.Key) (bool, error) {
-	cr, headers, err := h.cache.Open(r.Context(), key)
-	if err != nil {
-		if !errors.Is(err, os.ErrNotExist) {
-			h.errorHandler(httputil.Errorf(http.StatusInternalServerError, "failed to open cache: %w", err), w, r)
-			return true, nil
-		}
+	cr, headers, err := h.cache.Open(r.Context(), key, httputil.ConditionalOptions(r)...)
+	if handled, serveErr := httputil.ServeCacheHit(w, headers, cr, err); handled {
+		logging.FromContext(r.Context()).DebugContext(r.Context(), "Cache hit")
+		return true, errors.WithStack(serveErr)
+	}
+	if errors.Is(err, os.ErrNotExist) {
 		return false, nil
 	}
-
-	logging.FromContext(r.Context()).DebugContext(r.Context(), "Cache hit")
-	return true, errors.WithStack(httputil.ServeCacheHit(w, r, headers, cr))
+	h.errorHandler(httputil.Errorf(http.StatusInternalServerError, "failed to open cache: %w", err), w, r)
+	return true, nil
 }
 
 func (h *Handler) fetchAndCache(w http.ResponseWriter, r *http.Request, key cache.Key) error {

@@ -4,11 +4,13 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 
 	"github.com/alecthomas/assert/v2"
 
+	"github.com/block/cachew/client"
 	"github.com/block/cachew/internal/httputil"
 )
 
@@ -16,7 +18,7 @@ const testETag = `"abc123"`
 
 func cacheHeaders(extra ...[2]string) http.Header {
 	h := http.Header{}
-	h.Set(httputil.ETagHeader, testETag)
+	h.Set("ETag", testETag)
 	for _, kv := range extra {
 		h.Set(kv[0], kv[1])
 	}
@@ -81,7 +83,8 @@ func TestServeCacheHit(t *testing.T) {
 		headers := cacheHeaders([2]string{"Content-Type", "text/plain"})
 		w := httptest.NewRecorder()
 
-		err := httputil.ServeCacheHit(w, newRequest(t, "", ""), headers, body)
+		handled, err := httputil.ServeCacheHit(w, headers, body, nil)
+		assert.True(t, handled)
 		assert.NoError(t, err)
 		assert.True(t, body.closed)
 
@@ -94,34 +97,41 @@ func TestServeCacheHit(t *testing.T) {
 		assert.Equal(t, "payload", string(data))
 	})
 
-	t.Run("NotModifiedSkipsBody", func(t *testing.T) {
-		body := &trackingReader{Reader: strings.NewReader("payload")}
+	t.Run("NotModifiedKeepsHeaders", func(t *testing.T) {
 		headers := cacheHeaders()
 		w := httptest.NewRecorder()
 
-		err := httputil.ServeCacheHit(w, newRequest(t, "", testETag), headers, body)
+		handled, err := httputil.ServeCacheHit(w, headers, nil, client.ErrNotModified)
+		assert.True(t, handled)
 		assert.NoError(t, err)
-		assert.True(t, body.closed)
 
 		resp := w.Result()
 		defer resp.Body.Close()
 		assert.Equal(t, http.StatusNotModified, resp.StatusCode)
+		assert.Equal(t, testETag, resp.Header.Get("ETag"))
 		data, _ := io.ReadAll(resp.Body)
 		assert.Equal(t, "", string(data))
 	})
 
-	t.Run("PreconditionFailedSkipsBody", func(t *testing.T) {
-		body := &trackingReader{Reader: strings.NewReader("payload")}
-		headers := cacheHeaders()
+	t.Run("PreconditionFailed", func(t *testing.T) {
 		w := httptest.NewRecorder()
 
-		err := httputil.ServeCacheHit(w, newRequest(t, `"other"`, ""), headers, body)
+		handled, err := httputil.ServeCacheHit(w, nil, nil, client.ErrPreconditionFailed)
+		assert.True(t, handled)
 		assert.NoError(t, err)
-		assert.True(t, body.closed)
 
 		resp := w.Result()
 		defer resp.Body.Close()
 		assert.Equal(t, http.StatusPreconditionFailed, resp.StatusCode)
+	})
+
+	t.Run("NotHandledForOtherError", func(t *testing.T) {
+		w := httptest.NewRecorder()
+
+		handled, err := httputil.ServeCacheHit(w, nil, nil, os.ErrNotExist)
+		assert.False(t, handled)
+		assert.NoError(t, err)
+		assert.Equal(t, http.StatusOK, w.Result().StatusCode) // response untouched
 	})
 }
 
@@ -130,7 +140,7 @@ func TestServeCacheStat(t *testing.T) {
 		headers := cacheHeaders()
 		w := httptest.NewRecorder()
 
-		httputil.ServeCacheStat(w, newRequest(t, "", ""), headers)
+		assert.True(t, httputil.ServeCacheStat(w, headers, nil))
 
 		resp := w.Result()
 		defer resp.Body.Close()
@@ -142,10 +152,16 @@ func TestServeCacheStat(t *testing.T) {
 		headers := cacheHeaders()
 		w := httptest.NewRecorder()
 
-		httputil.ServeCacheStat(w, newRequest(t, "", testETag), headers)
+		assert.True(t, httputil.ServeCacheStat(w, headers, client.ErrNotModified))
 
 		resp := w.Result()
 		defer resp.Body.Close()
 		assert.Equal(t, http.StatusNotModified, resp.StatusCode)
+		assert.Equal(t, testETag, resp.Header.Get("ETag"))
+	})
+
+	t.Run("NotHandledForOtherError", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		assert.False(t, httputil.ServeCacheStat(w, nil, os.ErrNotExist))
 	})
 }

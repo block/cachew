@@ -38,13 +38,13 @@ func (r *Remote) Namespace(namespace Namespace) Cache {
 	return &Remote{c: r.c.Namespace(namespace)}
 }
 
-func (r *Remote) Open(ctx context.Context, key Key) (io.ReadCloser, http.Header, error) {
-	rc, h, err := r.c.Open(ctx, key)
+func (r *Remote) Open(ctx context.Context, key Key, opts ...Option) (io.ReadCloser, http.Header, error) {
+	rc, h, err := r.c.Open(ctx, key, opts...)
 	return rc, h, errors.WithStack(err)
 }
 
-func (r *Remote) Stat(ctx context.Context, key Key) (http.Header, error) {
-	return errors.WithStack2(r.c.Stat(ctx, key))
+func (r *Remote) Stat(ctx context.Context, key Key, opts ...Option) (http.Header, error) {
+	return errors.WithStack2(r.c.Stat(ctx, key, opts...))
 }
 
 func (r *Remote) Create(ctx context.Context, key Key, headers http.Header, ttl time.Duration) (Writer, error) {

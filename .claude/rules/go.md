@@ -16,7 +16,6 @@
 - Where it makes sense, update existing test rather than creating new ones.
 - ALWAYS run tests with `-timeout 30s` to ensure that wedged tests don't last forever.
 - Don't run tests with `-v` in general, as it produces a large amount of output.
-- Once the change is complete and working, run `golangci-lint run` and fix any linter errors introduced before adding the files to git. Do NOT EVER run `golangci-lint` on individual files.
 - For "unparam" linter warnings about "XXX is unused", remove the parameter unless the type is part of an interface implementation or callback system.
 - ALWAYS respect encapsulation of struct fields, even between types in the same package.
 - ALWAYS apply the Go proverb "align the happy path to the left", to avoid deep nesting. 
