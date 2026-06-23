@@ -18,6 +18,7 @@ import (
 	"github.com/alecthomas/errors"
 	"github.com/minio/minio-go/v7"
 
+	"github.com/block/cachew/internal/httputil"
 	"github.com/block/cachew/internal/logging"
 	"github.com/block/cachew/internal/s3client"
 )
@@ -334,9 +335,8 @@ func (s *S3) Create(ctx context.Context, key Key, headers http.Header, ttl time.
 		ttl = s.config.MaxTTL
 	}
 
-	// Clone headers to avoid concurrent access issues
-	clonedHeaders := make(http.Header)
-	maps.Copy(clonedHeaders, headers)
+	// Clone (to avoid concurrent access) and drop transport headers.
+	clonedHeaders := httputil.FilterHeaders(headers, httputil.TransportHeaders...)
 
 	expiresAt := ceilSecond(time.Now().Add(ttl))
 
