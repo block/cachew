@@ -46,15 +46,15 @@ func TestDiskEvictionBySize(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 
 	// key1 (oldest) should be evicted
-	_, _, err = c.Open(ctx, keys[0])
+	_, _, err = c.Open(ctx, keys[0], 0, -1)
 	assert.Error(t, err)
 
 	// key2 and key3 should still exist
-	r2, _, err := c.Open(ctx, keys[1])
+	r2, _, err := c.Open(ctx, keys[1], 0, -1)
 	assert.NoError(t, err)
 	assert.NoError(t, r2.Close())
 
-	r3, _, err := c.Open(ctx, keys[2])
+	r3, _, err := c.Open(ctx, keys[2], 0, -1)
 	assert.NoError(t, err)
 	assert.NoError(t, r3.Close())
 }
@@ -110,16 +110,16 @@ func TestDiskEvictionAcrossNamespaces(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 
 	// First git entry (oldest) should be evicted
-	_, _, err = gitCache.Open(ctx, gitKey)
+	_, _, err = gitCache.Open(ctx, gitKey, 0, -1)
 	assert.Error(t, err)
 
 	// gomod entry should still exist
-	r, _, err := gomodCache.Open(ctx, gomodKey)
+	r, _, err := gomodCache.Open(ctx, gomodKey, 0, -1)
 	assert.NoError(t, err)
 	assert.NoError(t, r.Close())
 
 	// Newer git entry should still exist
-	r, _, err = gitCache.Open(ctx, gitKey2)
+	r, _, err = gitCache.Open(ctx, gitKey2, 0, -1)
 	assert.NoError(t, err)
 	assert.NoError(t, r.Close())
 }

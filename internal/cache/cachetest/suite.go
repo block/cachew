@@ -79,6 +79,55 @@ func Suite(t *testing.T, newCache func(t *testing.T) cache.Cache) {
 	t.Run("ETag", func(t *testing.T) {
 		testETag(t, newCache(t))
 	})
+
+	t.Run("OpenRange", func(t *testing.T) {
+		testOpenRange(t, newCache(t))
+	})
+}
+
+func testOpenRange(t *testing.T, c cache.Cache) {
+	defer c.Close()
+	ctx := t.Context()
+
+	content := []byte("0123456789")
+	key := cache.NewKey("test-open-range")
+
+	w, err := c.Create(ctx, key, nil, time.Hour)
+	assert.NoError(t, err)
+	_, err = w.Write(content)
+	assert.NoError(t, err)
+	assert.NoError(t, w.Close())
+
+	size := int64(len(content))
+	for _, tt := range []struct {
+		name           string
+		start, end     int64
+		want           string
+		notSatisfiable bool
+	}{
+		{name: "Full", start: 0, end: -1, want: "0123456789"},
+		{name: "Prefix", start: 0, end: 4, want: "0123"},
+		{name: "Middle", start: 3, end: 7, want: "3456"},
+		{name: "OffsetToEnd", start: 5, end: -1, want: "56789"},
+		{name: "LastByte", start: 9, end: 10, want: "9"},
+		{name: "ClampEndPastSize", start: 8, end: 100, want: "89"},
+		{name: "StartAtSize", start: size, end: -1, notSatisfiable: true},
+		{name: "StartPastSize", start: size + 5, end: -1, notSatisfiable: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			reader, headers, err := c.Open(ctx, key, tt.start, tt.end)
+			if tt.notSatisfiable {
+				assert.IsError(t, err, cache.ErrRangeNotSatisfiable)
+				return
+			}
+			assert.NoError(t, err)
+			defer reader.Close()
+			data, err := io.ReadAll(reader)
+			assert.NoError(t, err)
+			assert.Equal(t, tt.want, string(data))
+			assert.Equal(t, strconv.Itoa(len(tt.want)), headers.Get("Content-Length"))
+		})
+	}
 }
 
 func testCreateAndOpen(t *testing.T, c cache.Cache) {
@@ -96,7 +145,7 @@ func testCreateAndOpen(t *testing.T, c cache.Cache) {
 	err = writer.Close()
 	assert.NoError(t, err)
 
-	reader, _, err := c.Open(ctx, key)
+	reader, _, err := c.Open(ctx, key, 0, -1)
 	assert.NoError(t, err)
 	defer reader.Close()
 
@@ -111,7 +160,7 @@ func testNotFound(t *testing.T, c cache.Cache) {
 
 	key := cache.NewKey("nonexistent")
 
-	_, _, err := c.Open(ctx, key)
+	_, _, err := c.Open(ctx, key, 0, -1)
 	assert.IsError(t, err, os.ErrNotExist)
 }
 
@@ -130,13 +179,13 @@ func testExpiration(t *testing.T, c cache.Cache) {
 	err = writer.Close()
 	assert.NoError(t, err)
 
-	reader, _, err := c.Open(ctx, key)
+	reader, _, err := c.Open(ctx, key, 0, -1)
 	assert.NoError(t, err)
 	assert.NoError(t, reader.Close())
 
 	time.Sleep(4 * time.Second)
 
-	_, _, err = c.Open(ctx, key)
+	_, _, err = c.Open(ctx, key, 0, -1)
 	assert.IsError(t, err, os.ErrNotExist)
 }
 
@@ -155,7 +204,7 @@ func testDefaultTTL(t *testing.T, c cache.Cache) {
 	err = writer.Close()
 	assert.NoError(t, err)
 
-	reader, _, err := c.Open(ctx, key)
+	reader, _, err := c.Open(ctx, key, 0, -1)
 	assert.NoError(t, err)
 	assert.NoError(t, reader.Close())
 }
@@ -178,7 +227,7 @@ func testDelete(t *testing.T, c cache.Cache) {
 	err = c.Delete(ctx, key)
 	assert.NoError(t, err)
 
-	_, _, err = c.Open(ctx, key)
+	_, _, err = c.Open(ctx, key, 0, -1)
 	assert.IsError(t, err, os.ErrNotExist)
 }
 
@@ -200,7 +249,7 @@ func testMultipleWrites(t *testing.T, c cache.Cache) {
 	err = writer.Close()
 	assert.NoError(t, err)
 
-	reader, _, err := c.Open(ctx, key)
+	reader, _, err := c.Open(ctx, key, 0, -1)
 	assert.NoError(t, err)
 	defer reader.Close()
 
@@ -221,13 +270,13 @@ func testNotAvailableUntilClosed(t *testing.T, c cache.Cache) {
 	_, err = writer.Write([]byte("test data"))
 	assert.NoError(t, err)
 
-	_, _, err = c.Open(ctx, key)
+	_, _, err = c.Open(ctx, key, 0, -1)
 	assert.IsError(t, err, os.ErrNotExist)
 
 	err = writer.Close()
 	assert.NoError(t, err)
 
-	_, _, err = c.Open(ctx, key)
+	_, _, err = c.Open(ctx, key, 0, -1)
 	assert.NoError(t, err)
 }
 
@@ -254,7 +303,7 @@ func testHeaders(t *testing.T, c cache.Cache) {
 	assert.NoError(t, err)
 
 	// Open and verify headers are returned
-	reader, returnedHeaders, err := c.Open(ctx, key)
+	reader, returnedHeaders, err := c.Open(ctx, key, 0, -1)
 	assert.NoError(t, err)
 	defer reader.Close()
 
@@ -297,7 +346,7 @@ func testContextCancellation(t *testing.T, c cache.Cache) {
 	assert.Contains(t, err.Error(), "cancel")
 
 	// Object should not be in cache
-	_, _, err = c.Open(ctx, key)
+	_, _, err = c.Open(ctx, key, 0, -1)
 	assert.IsError(t, err, os.ErrNotExist)
 }
 
@@ -318,7 +367,7 @@ func testLastModified(t *testing.T, c cache.Cache) {
 	assert.NoError(t, err)
 
 	// Open and verify Last-Modified header is present
-	reader, headers, err := c.Open(ctx, key)
+	reader, headers, err := c.Open(ctx, key, 0, -1)
 	assert.NoError(t, err)
 	defer reader.Close()
 
@@ -347,7 +396,7 @@ func testLastModified(t *testing.T, c cache.Cache) {
 	assert.NoError(t, err)
 
 	// Verify explicit Last-Modified is preserved
-	reader2, headers2, err := c.Open(ctx, key2)
+	reader2, headers2, err := c.Open(ctx, key2, 0, -1)
 	assert.NoError(t, err)
 	defer reader2.Close()
 
@@ -367,7 +416,7 @@ func testContentLength(t *testing.T, c cache.Cache) {
 	assert.NoError(t, err)
 	assert.NoError(t, w.Close())
 
-	reader, headers, err := c.Open(ctx, key)
+	reader, headers, err := c.Open(ctx, key, 0, -1)
 	assert.NoError(t, err)
 	defer reader.Close()
 	assert.Equal(t, strconv.Itoa(len(content)), headers.Get("Content-Length"))
@@ -403,14 +452,14 @@ func testNamespaceIsolation(t *testing.T, c cache.Cache) {
 	assert.NoError(t, w.Close())
 
 	// Verify isolation - each namespace returns its own data
-	r, _, err := gitCache.Open(ctx, key)
+	r, _, err := gitCache.Open(ctx, key, 0, -1)
 	assert.NoError(t, err)
 	gitData, err := io.ReadAll(r)
 	assert.NoError(t, err)
 	assert.Equal(t, "git data", string(gitData))
 	assert.NoError(t, r.Close())
 
-	r, _, err = gomodCache.Open(ctx, key)
+	r, _, err = gomodCache.Open(ctx, key, 0, -1)
 	assert.NoError(t, err)
 	gomodData, err := io.ReadAll(r)
 	assert.NoError(t, err)
@@ -474,7 +523,7 @@ func testETag(t *testing.T, c cache.Cache) {
 	expectedETag := `"` + hex.EncodeToString(sum[:]) + `"`
 
 	// Verify ETag from Open
-	reader, openHeaders, err := c.Open(ctx, key)
+	reader, openHeaders, err := c.Open(ctx, key, 0, -1)
 	assert.NoError(t, err)
 	defer reader.Close()
 	assert.Equal(t, expectedETag, openHeaders.Get("ETag"))
@@ -513,11 +562,11 @@ func testNamespaceDelete(t *testing.T, c cache.Cache) {
 	assert.NoError(t, err)
 
 	// Verify git entry is gone
-	_, _, err = gitCache.Open(ctx, key)
+	_, _, err = gitCache.Open(ctx, key, 0, -1)
 	assert.IsError(t, err, os.ErrNotExist)
 
 	// Verify gomod entry still exists
-	r, _, err := gomodCache.Open(ctx, key)
+	r, _, err := gomodCache.Open(ctx, key, 0, -1)
 	assert.NoError(t, err)
 	assert.NoError(t, r.Close())
 }

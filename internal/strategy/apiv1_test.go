@@ -41,7 +41,7 @@ func TestPutObjectAbortsOnReadError(t *testing.T) {
 
 	// The partial data must not be cached.
 	nsCache := memCache.Namespace("test")
-	_, _, err = nsCache.Open(ctx, key)
+	_, _, err = nsCache.Open(ctx, key, 0, -1)
 	assert.IsError(t, err, os.ErrNotExist)
 }
 
@@ -149,6 +149,78 @@ func TestConditionalGetIfMatch(t *testing.T) {
 			assert.Equal(t, tt.expectedStatus, w.Code)
 		})
 	}
+}
+
+func TestGetObjectRange(t *testing.T) {
+	handler, ctx := testAPISetup(t)
+	key := cache.NewKey("range-get")
+	// apiPut writes the body "test data" (9 bytes).
+	etag := apiPut(ctx, t, handler, key)
+
+	get := func(t *testing.T, rangeHeader, ifMatch, ifNoneMatch string) *httptest.ResponseRecorder {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/object/test/"+key.String(), nil)
+		req = req.WithContext(ctx)
+		if rangeHeader != "" {
+			req.Header.Set("Range", rangeHeader)
+		}
+		if ifMatch != "" {
+			req.Header.Set("If-Match", ifMatch)
+		}
+		if ifNoneMatch != "" {
+			req.Header.Set("If-None-Match", ifNoneMatch)
+		}
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+		return w
+	}
+
+	t.Run("PartialContent", func(t *testing.T) {
+		w := get(t, "bytes=0-3", "", "")
+		assert.Equal(t, http.StatusPartialContent, w.Code)
+		assert.Equal(t, "test", w.Body.String())
+		assert.Equal(t, "bytes 0-3/9", w.Header().Get("Content-Range"))
+		assert.Equal(t, "4", w.Header().Get("Content-Length"))
+		assert.Equal(t, "bytes", w.Header().Get("Accept-Ranges"))
+	})
+
+	t.Run("Suffix", func(t *testing.T) {
+		w := get(t, "bytes=-4", "", "")
+		assert.Equal(t, http.StatusPartialContent, w.Code)
+		assert.Equal(t, "data", w.Body.String())
+		assert.Equal(t, "bytes 5-8/9", w.Header().Get("Content-Range"))
+	})
+
+	t.Run("NotSatisfiable", func(t *testing.T) {
+		w := get(t, "bytes=100-200", "", "")
+		assert.Equal(t, http.StatusRequestedRangeNotSatisfiable, w.Code)
+		assert.Equal(t, "bytes */9", w.Header().Get("Content-Range"))
+	})
+
+	t.Run("MultiRangeFallsBackToFull", func(t *testing.T) {
+		w := get(t, "bytes=0-1,3-4", "", "")
+		assert.Equal(t, http.StatusOK, w.Code)
+		assert.Equal(t, "test data", w.Body.String())
+	})
+
+	// Preconditions take precedence over the range (RFC 9110 §13.2.2).
+	t.Run("IfNoneMatchBeatsRange", func(t *testing.T) {
+		w := get(t, "bytes=0-3", "", etag)
+		assert.Equal(t, http.StatusNotModified, w.Code)
+		assert.Equal(t, 0, w.Body.Len())
+		assert.Equal(t, etag, w.Header().Get("ETag"))
+	})
+
+	t.Run("IfMatchFailureBeatsRange", func(t *testing.T) {
+		w := get(t, "bytes=0-3", `"wrong"`, "")
+		assert.Equal(t, http.StatusPreconditionFailed, w.Code)
+	})
+
+	// A failed precondition wins even when the range is unsatisfiable.
+	t.Run("IfMatchFailureBeatsUnsatisfiableRange", func(t *testing.T) {
+		w := get(t, "bytes=100-200", `"wrong"`, "")
+		assert.Equal(t, http.StatusPreconditionFailed, w.Code)
+	})
 }
 
 // failingReader returns data up to failAfter bytes, then returns an error.

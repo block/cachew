@@ -259,7 +259,7 @@ func (d *Disk) Stat(ctx context.Context, key Key) (http.Header, error) {
 	return headers, nil
 }
 
-func (d *Disk) Open(ctx context.Context, key Key) (io.ReadCloser, http.Header, error) {
+func (d *Disk) Open(ctx context.Context, key Key, start, end int64) (io.ReadCloser, http.Header, error) {
 	path := d.keyToPath(d.namespace, key)
 	fullPath := filepath.Join(d.config.Root, path)
 
@@ -287,7 +287,13 @@ func (d *Disk) Open(ctx context.Context, key Key) (io.ReadCloser, http.Header, e
 	if err != nil {
 		return nil, nil, errors.Join(errors.Errorf("failed to stat file for size: %w", err), f.Close())
 	}
-	headers.Set("Content-Length", strconv.FormatInt(finfo.Size(), 10))
+
+	size := finfo.Size()
+	start, end, err = resolveRange(start, end, size)
+	if err != nil {
+		return nil, nil, errors.Join(err, f.Close())
+	}
+	headers.Set("Content-Length", strconv.FormatInt(end-start, 10))
 
 	// Reset expiration time to implement LRU
 	ttl := min(expiresAt.Sub(now), d.config.MaxTTL)
@@ -297,8 +303,22 @@ func (d *Disk) Open(ctx context.Context, key Key) (io.ReadCloser, http.Header, e
 		return nil, nil, errors.Join(errors.Errorf("failed to update expiration time: %w", err), f.Close())
 	}
 
-	return f, headers, nil
+	// Return the raw file for full reads so callers (e.g. http.ServeContent)
+	// can use sendfile(2); slice with a SectionReader for partial reads.
+	if start == 0 && end == size {
+		return f, headers, nil
+	}
+	return &sectionReadCloser{SectionReader: io.NewSectionReader(f, start, end-start), closer: f}, headers, nil
 }
+
+// sectionReadCloser adapts an io.SectionReader over a file into an io.ReadCloser
+// that closes the underlying file.
+type sectionReadCloser struct {
+	*io.SectionReader
+	closer io.Closer
+}
+
+func (s *sectionReadCloser) Close() error { return errors.WithStack(s.closer.Close()) }
 
 func (d *Disk) keyToPath(namespace Namespace, key Key) string {
 	hexKey := key.String()

@@ -117,6 +117,6 @@ func TestFetchDirectAbortsOnPartialResponse(t *testing.T) {
 	_ = resp.Body.Close()
 
 	// The partial response must not be cached.
-	_, _, err = memCache.Open(ctx, key)
+	_, _, err = memCache.Open(ctx, key, 0, -1)
 	assert.IsError(t, err, os.ErrNotExist)
 }

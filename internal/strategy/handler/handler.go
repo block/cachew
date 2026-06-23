@@ -161,7 +161,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) serveCached(w http.ResponseWriter, r *http.Request, key cache.Key) (bool, error) {
-	cr, headers, err := h.cache.Open(r.Context(), key)
+	cr, headers, err := h.cache.Open(r.Context(), key, 0, -1)
 	if err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
 			h.errorHandler(httputil.Errorf(http.StatusInternalServerError, "failed to open cache: %w", err), w, r)

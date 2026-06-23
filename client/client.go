@@ -176,12 +176,16 @@ func (c *Client) Open(ctx context.Context, key Key, opts ...RequestOption) (io.R
 	}
 
 	switch resp.StatusCode {
-	case http.StatusOK:
+	case http.StatusOK, http.StatusPartialContent:
 		return resp.Body, filterHeaders(resp.Header, transportHeaders...), nil
 
 	case http.StatusNotFound:
 		_, _ = io.Copy(io.Discard, resp.Body) //nolint:errcheck,gosec
 		return nil, nil, errors.Join(os.ErrNotExist, resp.Body.Close())
+
+	case http.StatusRequestedRangeNotSatisfiable:
+		_, _ = io.Copy(io.Discard, resp.Body) //nolint:errcheck,gosec
+		return nil, nil, errors.Join(ErrRangeNotSatisfiable, resp.Body.Close())
 
 	case http.StatusNotModified:
 		_, _ = io.Copy(io.Discard, resp.Body) //nolint:errcheck,gosec

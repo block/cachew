@@ -434,7 +434,7 @@ func TestStreamAndCacheAbortsOnUpstreamError(t *testing.T) {
 
 	// The partial response must not be cached.
 	key := cache.NewKey("http://example.com/test")
-	_, _, err := c.Open(ctx, key)
+	_, _, err := c.Open(ctx, key, 0, -1)
 	assert.IsError(t, err, os.ErrNotExist)
 }
 

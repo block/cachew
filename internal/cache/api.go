@@ -34,6 +34,31 @@ var ErrNotFound = errors.New("cache backend not found")
 // ErrStatsUnavailable is returned when a cache backend cannot provide statistics.
 var ErrStatsUnavailable = client.ErrStatsUnavailable
 
+// ErrRangeNotSatisfiable is returned by Open when the requested range cannot be
+// satisfied (e.g. start is at or beyond the object size). It mirrors HTTP 416.
+var ErrRangeNotSatisfiable = client.ErrRangeNotSatisfiable
+
+// resolveRange validates a half-open [start, end) range against size and returns
+// the resolved [start, resolvedEnd) where resolvedEnd is clamped to size and an
+// end of -1 means "to the end of the object". It mirrors HTTP range semantics:
+// an end past the object size is clamped, while a start at or beyond the size is
+// not satisfiable.
+func resolveRange(start, end, size int64) (int64, int64, error) {
+	if start < 0 || end < -1 || (end != -1 && end < start) {
+		return 0, 0, errors.Errorf("invalid range [%d, %d)", start, end)
+	}
+	if start == 0 && end == -1 {
+		return 0, size, nil
+	}
+	if start > size || (start == size && size > 0) {
+		return 0, 0, errors.Errorf("range start %d beyond size %d: %w", start, size, ErrRangeNotSatisfiable)
+	}
+	if end == -1 || end > size {
+		end = size
+	}
+	return start, end, nil
+}
+
 type registryEntry struct {
 	schema  *hcl.Block
 	factory func(ctx context.Context, config *hcl.Block, vars map[string]string) (Cache, error)
@@ -134,12 +159,18 @@ type Cache interface {
 	// Expired files MUST not be returned.
 	// Must return os.ErrNotExist if the file does not exist.
 	Stat(ctx context.Context, key Key) (http.Header, error)
-	// Open an existing file in the cache.
+	// Open an existing file in the cache, optionally returning only a byte range.
+	//
+	// The range is half-open [start, end). An end of -1 means "to the end of the
+	// object", so a full read is Open(ctx, key, 0, -1). An end past the object
+	// size is clamped; a start at or beyond the size returns
+	// ErrRangeNotSatisfiable. The returned headers' Content-Length reflects the
+	// number of bytes returned.
 	//
 	// Expired files MUST NOT be returned.
 	// The returned headers MUST include a Last-Modified header.
 	// Must return os.ErrNotExist if the file does not exist.
-	Open(ctx context.Context, key Key) (io.ReadCloser, http.Header, error)
+	Open(ctx context.Context, key Key, start, end int64) (io.ReadCloser, http.Header, error)
 	// Create a new file in the cache.
 	//
 	// If "ttl" is zero, a maximum TTL MUST be used by the implementation.

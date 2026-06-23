@@ -159,7 +159,7 @@ func TestHTTPProxyNonOKStatus(t *testing.T) {
 
 	// Nothing should have been written to the cache.
 	key := cache.NewKey("https://dl.google.com/android/repository/missing.xml")
-	_, _, err := memCache.Open(context.Background(), key)
+	_, _, err := memCache.Open(context.Background(), key, 0, -1)
 	assert.Error(t, err, "non-OK responses should not be cached")
 }
 
@@ -189,7 +189,7 @@ func TestHTTPProxyHTTPSUpgrade(t *testing.T) {
 
 	// The cache key should use the HTTPS-upgraded URL, not the original http:// one.
 	httpsKey := cache.NewKey("https://dl.google.com/android/repository/sdkmanager.jar")
-	cr, _, err := memCache.Open(context.Background(), httpsKey)
+	cr, _, err := memCache.Open(context.Background(), httpsKey, 0, -1)
 	assert.NoError(t, err, "response should be cached under the HTTPS URL key")
 	if cr != nil {
 		cr.Close()
@@ -197,7 +197,7 @@ func TestHTTPProxyHTTPSUpgrade(t *testing.T) {
 
 	// Verify the original http:// key is NOT used for caching.
 	httpKey := cache.NewKey("http://dl.google.com/android/repository/sdkmanager.jar")
-	_, _, err = memCache.Open(context.Background(), httpKey)
+	_, _, err = memCache.Open(context.Background(), httpKey, 0, -1)
 	assert.Error(t, err, "cache key should use HTTPS, not HTTP")
 }
 

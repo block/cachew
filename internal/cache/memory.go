@@ -81,7 +81,7 @@ func (m *Memory) Stat(_ context.Context, key Key) (http.Header, error) {
 	return headers, nil
 }
 
-func (m *Memory) Open(_ context.Context, key Key) (io.ReadCloser, http.Header, error) {
+func (m *Memory) Open(_ context.Context, key Key, start, end int64) (io.ReadCloser, http.Header, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -99,9 +99,14 @@ func (m *Memory) Open(_ context.Context, key Key) (io.ReadCloser, http.Header, e
 		return nil, nil, os.ErrNotExist
 	}
 
+	start, end, err := resolveRange(start, end, int64(len(entry.data)))
+	if err != nil {
+		return nil, nil, err
+	}
+
 	headers := maps.Clone(entry.headers)
-	headers.Set("Content-Length", strconv.Itoa(len(entry.data)))
-	return io.NopCloser(bytes.NewReader(entry.data)), headers, nil
+	headers.Set("Content-Length", strconv.FormatInt(end-start, 10))
+	return io.NopCloser(bytes.NewReader(entry.data[start:end])), headers, nil
 }
 
 func (m *Memory) Create(ctx context.Context, key Key, headers http.Header, ttl time.Duration) (Writer, error) {

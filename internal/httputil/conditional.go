@@ -1,9 +1,11 @@
 package httputil
 
 import (
+	"fmt"
 	"io"
 	"maps"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/alecthomas/errors"
@@ -59,6 +61,86 @@ func ServeCacheHit(w http.ResponseWriter, r *http.Request, headers http.Header, 
 	}
 	_, copyErr := io.Copy(w, body)
 	return errors.Wrap(errors.Join(copyErr, body.Close()), "serve cache hit")
+}
+
+// ParseByteRange parses a single HTTP Range header value against the object
+// size, returning the resolved half-open [start, end) byte range. ok is false
+// when the header is absent, malformed, or specifies multiple ranges, in which
+// case callers should serve the full object. satisfiable is false when the
+// range lies entirely outside the object, in which case callers should return
+// 416 Range Not Satisfiable.
+func ParseByteRange(header string, size int64) (start, end int64, ok, satisfiable bool) {
+	spec, found := strings.CutPrefix(strings.TrimSpace(header), "bytes=")
+	if !found || strings.Contains(spec, ",") {
+		return 0, 0, false, false
+	}
+
+	from, to, found := strings.Cut(spec, "-")
+	if !found {
+		return 0, 0, false, false
+	}
+	from, to = strings.TrimSpace(from), strings.TrimSpace(to)
+
+	// Suffix range: "-N" requests the final N bytes.
+	if from == "" {
+		n, err := strconv.ParseInt(to, 10, 64)
+		if err != nil || n <= 0 {
+			return 0, 0, false, false
+		}
+		if size == 0 {
+			return 0, 0, true, false
+		}
+		return max(0, size-n), size, true, true
+	}
+
+	start, err := strconv.ParseInt(from, 10, 64)
+	if err != nil || start < 0 {
+		return 0, 0, false, false
+	}
+	if start >= size {
+		return 0, 0, true, false
+	}
+
+	if to == "" {
+		return start, size, true, true
+	}
+	last, err := strconv.ParseInt(to, 10, 64)
+	if err != nil || last < start {
+		return 0, 0, false, false
+	}
+	// Clamp before incrementing so a last value near math.MaxInt64 cannot
+	// overflow to a negative end.
+	if last >= size {
+		end = size
+	} else {
+		end = last + 1
+	}
+	return start, end, true, true
+}
+
+// ServeCachePartial serves a 206 Partial Content response for the half-open
+// [start, end) byte range of an object of the given total size. It copies the
+// stored headers (whose Content-Length already reflects the partial length),
+// sets Accept-Ranges and Content-Range, honours conditional preconditions, and
+// streams the body. The body is always closed.
+func ServeCachePartial(w http.ResponseWriter, r *http.Request, headers http.Header, body io.ReadCloser, start, end, size int64) error {
+	maps.Copy(w.Header(), headers)
+	w.Header().Set("Accept-Ranges", "bytes")
+	w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end-1, size))
+	if status := CheckConditionals(r, headers.Get(ETagHeader)); status != 0 {
+		w.WriteHeader(status)
+		return errors.WithStack(body.Close())
+	}
+	w.WriteHeader(http.StatusPartialContent)
+	_, copyErr := io.Copy(w, body)
+	return errors.Wrap(errors.Join(copyErr, body.Close()), "serve cache partial")
+}
+
+// ServeRangeNotSatisfiable writes a 416 Range Not Satisfiable response with the
+// Content-Range header set to the object size.
+func ServeRangeNotSatisfiable(w http.ResponseWriter, size int64) {
+	w.Header().Set("Content-Range", "bytes */"+strconv.FormatInt(size, 10))
+	http.Error(w, "range not satisfiable", http.StatusRequestedRangeNotSatisfiable)
 }
 
 // ServeCacheStat answers a metadata-only (HEAD) request from stored headers. It

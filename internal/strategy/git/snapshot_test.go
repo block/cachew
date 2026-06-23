@@ -211,7 +211,7 @@ func TestSnapshotGenerationViaLocalClone(t *testing.T) {
 
 	// Verify snapshot was uploaded to cache.
 	cacheKey := cache.NewKey(upstreamURL + ".snapshot")
-	_, headers, err := memCache.Open(ctx, cacheKey)
+	_, headers, err := memCache.Open(ctx, cacheKey, 0, -1)
 	assert.NoError(t, err)
 	assert.Equal(t, "application/zstd", headers.Get("Content-Type"))
 
@@ -852,7 +852,7 @@ func TestCacheBundleAbortsOnWriteFailure(t *testing.T) {
 	assert.Error(t, err)
 
 	// Verify nothing was persisted — check underlying memCache, not failCache.
-	_, _, err = memCache.Open(ctx, key)
+	_, _, err = memCache.Open(ctx, key, 0, -1)
 	assert.IsError(t, err, os.ErrNotExist)
 }
 

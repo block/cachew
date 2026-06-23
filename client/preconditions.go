@@ -1,6 +1,7 @@
 package client
 
 import (
+	"fmt"
 	"net/http"
 
 	"github.com/alecthomas/errors"
@@ -13,6 +14,10 @@ var ErrNotModified = errors.New("not modified")
 // ErrPreconditionFailed is returned when the server responds with 412
 // Precondition Failed, indicating an If-Match or If-None-Match condition was not met.
 var ErrPreconditionFailed = errors.New("precondition failed")
+
+// ErrRangeNotSatisfiable is returned when the server responds with 416 Range Not
+// Satisfiable, indicating the requested byte range lies outside the object.
+var ErrRangeNotSatisfiable = errors.New("range not satisfiable")
 
 // RequestOption configures conditional headers on an outgoing cache request.
 type RequestOption func(req *http.Request)
@@ -30,5 +35,18 @@ func IfMatch(etag string) RequestOption {
 func IfNoneMatch(etag string) RequestOption {
 	return func(req *http.Request) {
 		req.Header.Set("If-None-Match", etag)
+	}
+}
+
+// WithByteRange sets a Range header requesting the half-open [start, end) byte
+// range. An end of -1 requests from start to the end of the object. The server
+// responds with 206 Partial Content.
+func WithByteRange(start, end int64) RequestOption {
+	return func(req *http.Request) {
+		if end == -1 {
+			req.Header.Set("Range", fmt.Sprintf("bytes=%d-", start))
+			return
+		}
+		req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", start, end-1))
 	}
 }

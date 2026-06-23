@@ -149,3 +149,37 @@ func TestServeCacheStat(t *testing.T) {
 		assert.Equal(t, http.StatusNotModified, resp.StatusCode)
 	})
 }
+
+func TestParseByteRange(t *testing.T) {
+	const size = 10
+	for _, tt := range []struct {
+		name            string
+		header          string
+		start, end      int64
+		ok, satisfiable bool
+	}{
+		{name: "Prefix", header: "bytes=0-3", start: 0, end: 4, ok: true, satisfiable: true},
+		{name: "Middle", header: "bytes=3-6", start: 3, end: 7, ok: true, satisfiable: true},
+		{name: "OpenEnded", header: "bytes=5-", start: 5, end: 10, ok: true, satisfiable: true},
+		{name: "Suffix", header: "bytes=-4", start: 6, end: 10, ok: true, satisfiable: true},
+		{name: "ClampEnd", header: "bytes=8-100", start: 8, end: 10, ok: true, satisfiable: true},
+		{name: "EndOverflow", header: "bytes=8-9223372036854775807", start: 8, end: 10, ok: true, satisfiable: true},
+		{name: "StartPastSize", header: "bytes=10-", ok: true, satisfiable: false},
+		{name: "SuffixTooBig", header: "bytes=-100", start: 0, end: 10, ok: true, satisfiable: true},
+		{name: "Reversed", header: "bytes=6-3"},
+		{name: "Multiple", header: "bytes=0-1,3-4"},
+		{name: "Garbage", header: "bytes=abc"},
+		{name: "NoPrefix", header: "0-3"},
+		{name: "Empty", header: ""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			start, end, ok, satisfiable := httputil.ParseByteRange(tt.header, size)
+			assert.Equal(t, tt.ok, ok)
+			assert.Equal(t, tt.satisfiable, satisfiable)
+			if ok && satisfiable {
+				assert.Equal(t, tt.start, start)
+				assert.Equal(t, tt.end, end)
+			}
+		})
+	}
+}

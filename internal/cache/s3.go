@@ -43,8 +43,8 @@ type S3Config struct {
 	MaxTTL              time.Duration `hcl:"max-ttl,optional" help:"Maximum time-to-live for entries in the S3 cache (defaults to 1 hour)." default:"1h"`
 	UploadConcurrency   uint          `hcl:"upload-concurrency,optional" help:"Number of concurrent workers for multi-part uploads (0 = use all CPU cores, defaults to 1)." default:"1"`
 	UploadPartSizeMB    uint          `hcl:"upload-part-size-mb,optional" help:"Size of each part for multi-part uploads in megabytes (defaults to 16MB, minimum 5MB)." default:"16"`
-	DownloadConcurrency uint          `hcl:"download-concurrency,optional" help:"Number of concurrent range-GET workers for downloads (defaults to 8)." default:"8"`
-	DownloadPartSizeMB  uint          `hcl:"download-part-size-mb,optional" help:"Size of each parallel range-GET request in megabytes (defaults to 32MB)." default:"32"`
+	DownloadConcurrency uint          `hcl:"download-concurrency,optional" help:"Number of concurrent range-GET workers for downloads. CURRENTLY IGNORED; reserved for a future parallel downloader."`
+	DownloadPartSizeMB  uint          `hcl:"download-part-size-mb,optional" help:"Size of each parallel range-GET request in megabytes. CURRENTLY IGNORED; reserved for a future parallel downloader."`
 }
 
 type S3 struct {
@@ -84,24 +84,23 @@ func NewS3(ctx context.Context, config S3Config, clientProvider s3client.ClientP
 		return nil, errors.New("upload-part-size-mb must be at least 5MB (S3 minimum part size)")
 	}
 
-	if config.DownloadConcurrency == 0 {
-		config.DownloadConcurrency = 8
-	}
-
-	if config.DownloadPartSizeMB == 0 {
-		config.DownloadPartSizeMB = 32
-	}
-
 	client, err := clientProvider()
 	if err != nil {
 		return nil, errors.Errorf("failed to obtain shared S3 client: %w", err)
 	}
 
-	logging.FromContext(ctx).InfoContext(ctx, "Constructing S3 cache",
+	logger := logging.FromContext(ctx)
+	logger.InfoContext(ctx, "Constructing S3 cache",
 		"endpoint", client.EndpointURL(), "bucket", config.Bucket,
 		"max-ttl", config.MaxTTL,
-		"upload-concurrency", config.UploadConcurrency, "upload-part-size-mb", config.UploadPartSizeMB,
-		"download-concurrency", config.DownloadConcurrency, "download-part-size-mb", config.DownloadPartSizeMB)
+		"upload-concurrency", config.UploadConcurrency, "upload-part-size-mb", config.UploadPartSizeMB)
+
+	// These tune a parallel downloader that has not yet been reintroduced, so a
+	// configured value would silently have no effect.
+	if config.DownloadConcurrency != 0 || config.DownloadPartSizeMB != 0 {
+		logger.WarnContext(ctx, "S3 download-concurrency/download-part-size-mb are currently ignored; parallel range downloads are not yet implemented",
+			"download-concurrency", config.DownloadConcurrency, "download-part-size-mb", config.DownloadPartSizeMB)
+	}
 
 	// Verify bucket exists
 	exists, err := client.BucketExists(ctx, config.Bucket)
@@ -192,13 +191,17 @@ func (s *S3) Stat(ctx context.Context, key Key) (http.Header, error) {
 	return headers, nil
 }
 
-func (s *S3) Open(ctx context.Context, key Key) (io.ReadCloser, http.Header, error) {
+func (s *S3) Open(ctx context.Context, key Key, start, end int64) (io.ReadCloser, http.Header, error) {
 	objInfo, headers, meta, err := s.statAndHeaders(ctx, key)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	headers.Set("Content-Length", strconv.FormatInt(objInfo.Size, 10))
+	start, end, err = resolveRange(start, end, objInfo.Size)
+	if err != nil {
+		return nil, nil, err
+	}
+	headers.Set("Content-Length", strconv.FormatInt(end-start, 10))
 
 	objectName := s.keyToPath(s.namespace, key)
 
@@ -223,12 +226,23 @@ func (s *S3) Open(ctx context.Context, key Key) (io.ReadCloser, http.Header, err
 		}
 	}
 
-	reader, err := s.parallelGetReader(ctx, s.config.Bucket, objectName, objInfo.Size, objInfo.ETag)
-	if err != nil {
-		return nil, nil, err
+	if end == start {
+		return io.NopCloser(bytes.NewReader(nil)), headers, nil
 	}
 
-	return reader, headers, nil
+	opts := minio.GetObjectOptions{}
+	if start != 0 || end != objInfo.Size {
+		// SetRange uses inclusive bounds; our [start, end) is half-open.
+		if err := opts.SetRange(start, end-1); err != nil {
+			return nil, nil, errors.Errorf("set range %d-%d: %w", start, end-1, err)
+		}
+	}
+	obj, err := s.client.GetObject(ctx, s.config.Bucket, objectName, opts)
+	if err != nil {
+		return nil, nil, errors.Errorf("failed to get object: %w", err)
+	}
+
+	return &s3Reader{obj: obj}, headers, nil
 }
 
 func (s *S3) metaPath(namespace Namespace, key Key) string {

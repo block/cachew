@@ -110,7 +110,7 @@ func Restore(ctx context.Context, remote cache.Cache, key cache.Key, directory s
 		span.End()
 	}()
 
-	rc, _, err := remote.Open(ctx, key)
+	rc, _, err := remote.Open(ctx, key, 0, -1)
 	if err != nil {
 		return errors.Wrap(err, "failed to open object")
 	}

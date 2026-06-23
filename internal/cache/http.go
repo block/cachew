@@ -18,7 +18,7 @@ func Fetch(client *http.Client, r *http.Request, c Cache) (*http.Response, error
 	url := r.URL.String()
 	key := NewKey(url)
 
-	cr, headers, err := c.Open(r.Context(), key)
+	cr, headers, err := c.Open(r.Context(), key, 0, -1)
 	if err == nil {
 		return &http.Response{
 			Status:        "200 OK",

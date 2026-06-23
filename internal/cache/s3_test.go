@@ -67,7 +67,7 @@ func TestS3ContextCancellationAbortsUpload(t *testing.T) {
 	assert.Error(t, err)
 
 	// The object must not be retrievable.
-	_, _, err = c.Open(t.Context(), key)
+	_, _, err = c.Open(t.Context(), key, 0, -1)
 	assert.IsError(t, err, os.ErrNotExist)
 }
 

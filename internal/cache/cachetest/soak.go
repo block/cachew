@@ -248,7 +248,7 @@ func doRead(
 	keyIdx := rng.IntN(config.NumObjects)
 	key := cache.NewKey(fmt.Sprintf("soak-key-%d", keyIdx))
 
-	reader, _, err := c.Open(ctx, key)
+	reader, _, err := c.Open(ctx, key, 0, -1)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			atomic.AddInt64(&result.ReadMisses, 1)

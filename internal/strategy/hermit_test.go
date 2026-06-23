@@ -183,7 +183,7 @@ func TestHermitNonOKStatus(t *testing.T) {
 	assert.Equal(t, "not found", w.Body.String())
 
 	key := cache.NewKey("https://example.com/missing.tar.gz")
-	_, _, err := memCache.Open(context.Background(), key)
+	_, _, err := memCache.Open(context.Background(), key, 0, -1)
 	assert.Error(t, err, "non-OK responses should not be cached")
 }
 

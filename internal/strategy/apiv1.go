@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"maps"
 	"net/http"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/alecthomas/errors"
@@ -83,7 +85,13 @@ func (d *APIV1) getObject(w http.ResponseWriter, r *http.Request) {
 	}
 
 	namespacedCache := d.cache.Namespace(namespace)
-	cr, headers, err := namespacedCache.Open(r.Context(), key)
+
+	if rangeHeader := r.Header.Get("Range"); rangeHeader != "" {
+		d.getObjectRange(w, r, namespacedCache, key, rangeHeader)
+		return
+	}
+
+	cr, headers, err := namespacedCache.Open(r.Context(), key, 0, -1)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			http.Error(w, "Cache object not found", http.StatusNotFound)
@@ -95,6 +103,71 @@ func (d *APIV1) getObject(w http.ResponseWriter, r *http.Request) {
 
 	if err := httputil.ServeCacheHit(w, r, headers, cr); err != nil {
 		d.logger.Error("Failed to serve cache object", "error", err, "key", key)
+	}
+}
+
+// getObjectRange serves a byte-range request. It stats the object for its total
+// size, then opens and serves the resolved range as 206 Partial Content.
+// Unsupported or multi-range headers fall back to serving the full object.
+func (d *APIV1) getObjectRange(w http.ResponseWriter, r *http.Request, c cache.Cache, key cache.Key, rangeHeader string) {
+	statHeaders, err := c.Stat(r.Context(), key)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			http.Error(w, "Cache object not found", http.StatusNotFound)
+			return
+		}
+		d.httpError(w, http.StatusInternalServerError, err, "Failed to stat cache object", "key", key)
+		return
+	}
+
+	// Preconditions are evaluated before the Range (RFC 9110 §13.2.2), so a
+	// failed If-Match (412) or satisfied If-None-Match (304) takes precedence
+	// over both the range and a 416.
+	if status := httputil.CheckConditionals(r, statHeaders.Get(httputil.ETagHeader)); status != 0 {
+		maps.Copy(w.Header(), statHeaders)
+		w.WriteHeader(status)
+		return
+	}
+
+	// size comes from Stat and is used only to resolve the range and build the
+	// Content-Range total. If the object changes between Stat and Open the body
+	// from Open is still internally consistent (its own Content-Length); only
+	// the Content-Range total could be momentarily stale, which is acceptable
+	// for a best-effort cache.
+	size, _ := strconv.ParseInt(statHeaders.Get("Content-Length"), 10, 64) //nolint:errcheck
+	start, end, ok, satisfiable := httputil.ParseByteRange(rangeHeader, size)
+	if !ok {
+		cr, headers, err := c.Open(r.Context(), key, 0, -1)
+		if err != nil {
+			d.httpError(w, http.StatusInternalServerError, err, "Failed to open cache object", "key", key)
+			return
+		}
+		if err := httputil.ServeCacheHit(w, r, headers, cr); err != nil {
+			d.logger.Error("Failed to serve cache object", "error", err, "key", key)
+		}
+		return
+	}
+	if !satisfiable {
+		httputil.ServeRangeNotSatisfiable(w, size)
+		return
+	}
+
+	cr, headers, err := c.Open(r.Context(), key, start, end)
+	if err != nil {
+		if errors.Is(err, cache.ErrRangeNotSatisfiable) {
+			httputil.ServeRangeNotSatisfiable(w, size)
+			return
+		}
+		if errors.Is(err, os.ErrNotExist) {
+			http.Error(w, "Cache object not found", http.StatusNotFound)
+			return
+		}
+		d.httpError(w, http.StatusInternalServerError, err, "Failed to open cache object", "key", key)
+		return
+	}
+
+	if err := httputil.ServeCachePartial(w, r, headers, cr, start, end, size); err != nil {
+		d.logger.Error("Failed to serve cache object range", "error", err, "key", key)
 	}
 }
 

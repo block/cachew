@@ -265,7 +265,7 @@ func (s *Strategy) handleSnapshotRequest(w http.ResponseWriter, r *http.Request,
 		if existing, loaded := s.coldSnapshotMu.LoadOrStore(upstreamURL, entry); loaded {
 			winner := existing.(*coldSnapshotEntry)
 			<-winner.done
-			reader, _, openErr := s.cache.Open(ctx, cacheKey)
+			reader, _, openErr := s.cache.Open(ctx, cacheKey, 0, -1)
 			if openErr == nil && reader != nil {
 				winner.serving.Add(1)
 				defer func() {
@@ -289,7 +289,7 @@ func (s *Strategy) handleSnapshotRequest(w http.ResponseWriter, r *http.Request,
 				close(entry.done)
 				s.coldSnapshotMu.Delete(upstreamURL)
 			}()
-			reader, _, openErr := s.cache.Open(ctx, cacheKey)
+			reader, _, openErr := s.cache.Open(ctx, cacheKey, 0, -1)
 			if openErr == nil && reader != nil {
 				logger.InfoContext(ctx, "Serving cached snapshot while mirror warms up", "upstream", upstreamURL)
 				w.Header().Set("Content-Type", "application/zstd")
@@ -320,7 +320,7 @@ func (s *Strategy) handleSnapshotRequest(w http.ResponseWriter, r *http.Request,
 	}
 	s.maybeBackgroundFetch(repo)
 
-	reader, headers, err := s.cache.Open(ctx, cacheKey)
+	reader, headers, err := s.cache.Open(ctx, cacheKey, 0, -1)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		logger.ErrorContext(ctx, "Failed to open snapshot from cache", "upstream", upstreamURL, "error", err)
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
@@ -444,7 +444,7 @@ func (s *Strategy) handleBundleRequest(w http.ResponseWriter, r *http.Request, h
 	}()
 
 	// Try serving from cache first — works on any pod.
-	if reader, _, err := s.cache.Open(ctx, bKey); err == nil && reader != nil {
+	if reader, _, err := s.cache.Open(ctx, bKey, 0, -1); err == nil && reader != nil {
 		defer reader.Close()
 		w.Header().Set("Content-Type", "application/x-git-bundle")
 		n, err := io.Copy(w, reader)
@@ -1077,7 +1077,7 @@ func (s *Strategy) handleLFSSnapshotRequest(w http.ResponseWriter, r *http.Reque
 	cacheKey := lfsSnapshotCacheKey(upstreamURL)
 
 	// Try cache first so we can serve even when the mirror isn't ready (cold start).
-	reader, headers, err := s.cache.Open(ctx, cacheKey)
+	reader, headers, err := s.cache.Open(ctx, cacheKey, 0, -1)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		logger.ErrorContext(ctx, "Failed to open LFS snapshot from cache", "upstream", upstreamURL, "error", err)
 		http.Error(w, "Internal server error", http.StatusInternalServerError)

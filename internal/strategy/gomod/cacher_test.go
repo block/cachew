@@ -31,7 +31,7 @@ func TestGoproxyCacherPutAbortsOnReadError(t *testing.T) {
 
 	// The partial data must not be cached
 	key := cache.NewKey("example.com/mod/@v/v1.0.0.zip")
-	_, _, err = memCache.Open(ctx, key)
+	_, _, err = memCache.Open(ctx, key, 0, -1)
 	assert.IsError(t, err, os.ErrNotExist)
 }
 
