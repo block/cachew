@@ -45,26 +45,25 @@ func ParallelGet(ctx context.Context, c Cache, key Key, dst io.WriterAt, chunkSi
 	etag := headers.Get(ETagKey)
 	total, hasRange := parseContentRangeTotal(headers.Get("Content-Range"))
 
-	n, copyErr := io.Copy(io.NewOffsetWriter(dst, 0), rc)
-	if err := errors.Join(copyErr, rc.Close()); err != nil {
-		return errors.Wrap(err, "parallel get: write first chunk")
-	}
-
-	// Without a Content-Range the backend ignored the range and returned the
-	// whole object in one response, so there is nothing left to fetch.
+	// A backend that ignored the range (no Content-Range), or an object that
+	// fits within the first chunk, is delivered entirely by this response: copy
+	// it and return, as there is nothing to parallelise. A negative want skips
+	// the length check when the total size is unknown.
+	firstLen := min(chunkSize, total)
 	if !hasRange {
-		return nil
+		firstLen = -1
 	}
-	if firstLen := min(chunkSize, total); n != firstLen {
-		return errors.Errorf("parallel get: short first chunk: wrote %d of %d bytes", n, firstLen)
-	}
-	if total <= chunkSize {
-		return nil
+	if !hasRange || total <= chunkSize {
+		return errors.Wrap(writeChunkAt(dst, 0, firstLen, rc), "parallel get")
 	}
 
+	// Multiple chunks: copy the already-open first chunk concurrently with the
+	// rest rather than blocking on it here. The first goroutine is scheduled
+	// before the limit can be reached, so it never stalls holding an open body.
 	numChunks := int((total + chunkSize - 1) / chunkSize)
 	eg, egCtx := errgroup.WithContext(ctx)
 	eg.SetLimit(concurrency)
+	eg.Go(func() error { return writeChunkAt(dst, 0, firstLen, rc) })
 	for seq := 1; seq < numChunks; seq++ {
 		// Stop scheduling once a chunk has failed and cancelled the group.
 		if egCtx.Err() != nil {
@@ -85,19 +84,24 @@ func fetchChunk(ctx context.Context, c Cache, key Key, dst io.WriterAt, start, e
 	if err != nil {
 		return errors.Errorf("open range %d-%d: %w", start, end, err)
 	}
-	defer rc.Close() //nolint:errcheck // Read-only body; write/copy errors below are authoritative.
-
 	if got := headers.Get(ETagKey); got != etag {
-		return errors.Errorf("object changed during read at offset %d: etag %q != %q", start, got, etag)
+		return errors.Join(
+			errors.Errorf("object changed during read at offset %d: etag %q != %q", start, got, etag),
+			rc.Close(),
+		)
 	}
+	return writeChunkAt(dst, start, end-start, rc)
+}
 
-	want := end - start
-	n, err := io.Copy(io.NewOffsetWriter(dst, start), rc)
-	if err != nil {
-		return errors.Errorf("write range %d-%d: %w", start, end, err)
+// writeChunkAt streams src into dst at off and closes src. It fails if fewer
+// than want bytes arrive; a negative want skips that check (total size unknown).
+func writeChunkAt(dst io.WriterAt, off, want int64, src io.ReadCloser) error {
+	n, copyErr := io.Copy(io.NewOffsetWriter(dst, off), src)
+	if err := errors.Join(copyErr, src.Close()); err != nil {
+		return errors.Errorf("write chunk at offset %d: %w", off, err)
 	}
-	if n != want {
-		return errors.Errorf("short chunk at offset %d: wrote %d of %d bytes", start, n, want)
+	if want >= 0 && n != want {
+		return errors.Errorf("short chunk at offset %d: wrote %d of %d bytes", off, n, want)
 	}
 	return nil
 }
