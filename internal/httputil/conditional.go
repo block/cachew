@@ -21,8 +21,10 @@ func ConditionalOptions(r *http.Request) []client.RequestOption {
 	if v := r.Header.Get("If-None-Match"); v != "" {
 		opts = append(opts, client.IfNoneMatch(v))
 	}
+	// Forward the client's Range header verbatim so the cache can honour forms
+	// the typed client.Range API doesn't model (e.g. suffix "bytes=-N").
 	if v := r.Header.Get("Range"); v != "" {
-		opts = append(opts, client.RangeHeader(v))
+		opts = append(opts, func(o *client.RequestOptions) { o.Range = v })
 	}
 	if v := r.Header.Get("If-Range"); v != "" {
 		opts = append(opts, client.IfRange(v))

@@ -62,12 +62,7 @@ func IfNoneMatch(etag string) RequestOption {
 // object. Open returns the matching bytes with a Content-Range header, or
 // ErrRangeNotSatisfiable if the range lies outside the object.
 func Range(start, end int64) RequestOption {
-	return RangeHeader(formatByteRange(start, end))
-}
-
-// RangeHeader sets a raw HTTP Range header value (e.g. "bytes=0-499"). It is for
-// forwarding a client's Range header verbatim; prefer Range for programmatic use.
-func RangeHeader(spec string) RequestOption {
+	spec := formatByteRange(start, end)
 	return func(o *RequestOptions) { o.Range = spec }
 }
 

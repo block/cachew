@@ -48,10 +48,6 @@ func IfNoneMatch(etag string) Option { return client.IfNoneMatch(etag) }
 // the object. Stat ignores Range.
 func Range(start, end int64) Option { return client.Range(start, end) }
 
-// RangeHeader sets a raw HTTP Range header value (e.g. "bytes=0-499"), for
-// forwarding a client's Range verbatim; prefer Range for programmatic use.
-func RangeHeader(spec string) Option { return client.RangeHeader(spec) }
-
 // IfRange gates Range on the stored ETag: the range is only applied when etag
 // matches, otherwise the full object is returned.
 func IfRange(etag string) Option { return client.IfRange(etag) }

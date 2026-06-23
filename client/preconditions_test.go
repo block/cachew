@@ -8,7 +8,7 @@ import (
 	"github.com/block/cachew/client"
 )
 
-func TestRangeHeaderFormat(t *testing.T) {
+func TestRangeFormat(t *testing.T) {
 	tests := []struct {
 		name       string
 		start, end int64
@@ -60,7 +60,7 @@ func TestResolveRange(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			o := client.NewRequestOptions(client.RangeHeader(tt.spec), client.IfRange(tt.ifRange))
+			o := client.RequestOptions{Range: tt.spec, IfRange: tt.ifRange}
 			start, length, outcome := o.ResolveRange(tt.size, etag)
 			assert.Equal(t, tt.wantOutcome, outcome)
 			if outcome == client.RangeNotSatisfiable {

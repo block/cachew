@@ -575,17 +575,6 @@ func testRange(t *testing.T, c cache.Cache) {
 		assert.Equal(t, "4", headers.Get("Content-Length"))
 	})
 
-	t.Run("Suffix", func(t *testing.T) {
-		reader, headers, err := c.Open(ctx, key, cache.RangeHeader("bytes=-3"))
-		assert.NoError(t, err)
-		defer reader.Close()
-		data, err := io.ReadAll(reader)
-		assert.NoError(t, err)
-		assert.Equal(t, []byte("789"), data)
-		assert.Equal(t, "bytes 7-9/10", headers.Get("Content-Range"))
-		assert.Equal(t, "3", headers.Get("Content-Length"))
-	})
-
 	t.Run("FullSize", func(t *testing.T) {
 		reader, headers, err := c.Open(ctx, key, cache.Range(0, 10))
 		assert.NoError(t, err)
