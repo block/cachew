@@ -238,6 +238,29 @@ func TestRangeGetIfRange(t *testing.T) {
 	}
 }
 
+// TestRangeStoredContentRangeIgnored guards against a client-supplied
+// Content-Range request header being stored and later replayed, which would
+// make a plain GET spuriously answer 206.
+func TestRangeStoredContentRangeIgnored(t *testing.T) {
+	handler, ctx := testAPISetup(t)
+	key := cache.NewKey("range-stored-cr")
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/object/test/"+key.String(), strings.NewReader("0123456789"))
+	req = req.WithContext(ctx)
+	req.Header.Set("Content-Range", "bytes 0-4/10")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	req = httptest.NewRequest(http.MethodGet, "/api/v1/object/test/"+key.String(), nil)
+	req = req.WithContext(ctx)
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "", w.Header().Get("Content-Range"))
+	assert.Equal(t, "0123456789", w.Body.String())
+}
+
 func TestRangeHeadIgnoresRange(t *testing.T) {
 	handler, ctx := testAPISetup(t)
 	key := cache.NewKey("range-head")

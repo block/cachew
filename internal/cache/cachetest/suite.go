@@ -583,6 +583,18 @@ func testRange(t *testing.T, c cache.Cache) {
 		assert.NoError(t, err)
 		assert.Equal(t, []byte("789"), data)
 		assert.Equal(t, "bytes 7-9/10", headers.Get("Content-Range"))
+		assert.Equal(t, "3", headers.Get("Content-Length"))
+	})
+
+	t.Run("FullSize", func(t *testing.T) {
+		reader, headers, err := c.Open(ctx, key, cache.Range("bytes=0-9"))
+		assert.NoError(t, err)
+		defer reader.Close()
+		data, err := io.ReadAll(reader)
+		assert.NoError(t, err)
+		assert.Equal(t, content, data)
+		assert.Equal(t, "bytes 0-9/10", headers.Get("Content-Range"))
+		assert.Equal(t, "10", headers.Get("Content-Length"))
 	})
 
 	t.Run("NotSatisfiable", func(t *testing.T) {
