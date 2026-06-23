@@ -8,6 +8,26 @@ import (
 	"github.com/block/cachew/client"
 )
 
+func TestRangeHeaderFormat(t *testing.T) {
+	tests := []struct {
+		name       string
+		start, end int64
+		want       string
+	}{
+		{name: "FirstN", start: 0, end: 500, want: "bytes=0-499"},
+		{name: "Middle", start: 100, end: 200, want: "bytes=100-199"},
+		{name: "ToEnd", start: 0, end: -1, want: "bytes=0-"},
+		{name: "FromOffsetToEnd", start: 100, end: -1, want: "bytes=100-"},
+		{name: "Single", start: 5, end: 6, want: "bytes=5-5"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			o := client.NewRequestOptions(client.Range(tt.start, tt.end))
+			assert.Equal(t, tt.want, o.Range)
+		})
+	}
+}
+
 func TestResolveRange(t *testing.T) {
 	const etag = `"e"`
 	tests := []struct {
@@ -40,7 +60,7 @@ func TestResolveRange(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			o := client.NewRequestOptions(client.Range(tt.spec), client.IfRange(tt.ifRange))
+			o := client.NewRequestOptions(client.RangeHeader(tt.spec), client.IfRange(tt.ifRange))
 			start, length, outcome := o.ResolveRange(tt.size, etag)
 			assert.Equal(t, tt.wantOutcome, outcome)
 			if outcome == client.RangeNotSatisfiable {

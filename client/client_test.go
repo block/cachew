@@ -449,7 +449,7 @@ func TestOpenRange(t *testing.T) {
 	ctx := t.Context()
 	key := client.NewKey("range-test")
 
-	rc, headers, err := c.Open(ctx, key, client.Range("bytes=0-3"))
+	rc, headers, err := c.Open(ctx, key, client.Range(0, 4))
 	assert.NoError(t, err)
 	data, readErr := io.ReadAll(rc)
 	assert.NoError(t, readErr)
@@ -457,7 +457,7 @@ func TestOpenRange(t *testing.T) {
 	assert.Equal(t, "0123", string(data))
 	assert.Equal(t, "bytes 0-3/10", headers.Get("Content-Range"))
 
-	_, headers, err = c.Open(ctx, key, client.Range("bytes=50-60"))
+	_, headers, err = c.Open(ctx, key, client.Range(50, 61))
 	assert.IsError(t, err, client.ErrRangeNotSatisfiable)
 	assert.Equal(t, "bytes */10", headers.Get("Content-Range"))
 }

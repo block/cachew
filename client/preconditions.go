@@ -1,6 +1,7 @@
 package client
 
 import (
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -55,11 +56,28 @@ func IfNoneMatch(etag string) RequestOption {
 	return func(o *RequestOptions) { o.IfNoneMatch = etag }
 }
 
-// Range requests a single byte range (e.g. "bytes=0-499"). Open returns the
-// matching bytes with a 206-style Content-Range header, or
+// Range requests a single half-open byte range [start, end) from Open. A
+// negative end means "to the end of the object" (its Content-Length). For
+// example Range(0, 500) requests the first 500 bytes and Range(0, -1) the whole
+// object. Open returns the matching bytes with a Content-Range header, or
 // ErrRangeNotSatisfiable if the range lies outside the object.
-func Range(spec string) RequestOption {
+func Range(start, end int64) RequestOption {
+	return RangeHeader(formatByteRange(start, end))
+}
+
+// RangeHeader sets a raw HTTP Range header value (e.g. "bytes=0-499"). It is for
+// forwarding a client's Range header verbatim; prefer Range for programmatic use.
+func RangeHeader(spec string) RequestOption {
 	return func(o *RequestOptions) { o.Range = spec }
+}
+
+// formatByteRange renders a half-open [start, end) range as an HTTP byte-range
+// specifier. A negative end yields an open-ended range to the end of the object.
+func formatByteRange(start, end int64) string {
+	if end < 0 {
+		return fmt.Sprintf("bytes=%d-", start)
+	}
+	return fmt.Sprintf("bytes=%d-%d", start, end-1)
 }
 
 // IfRange sets the If-Range precondition: the Range is only honoured when etag

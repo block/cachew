@@ -42,10 +42,15 @@ func IfMatch(etag string) Option { return client.IfMatch(etag) }
 // ErrNotModified when the stored ETag matches.
 func IfNoneMatch(etag string) Option { return client.IfNoneMatch(etag) }
 
-// Range requests a single byte range from Open. The returned headers carry a
+// Range requests a single half-open byte range [start, end) from Open. A
+// negative end means "to the end of the object". The returned headers carry a
 // Content-Range; Open returns ErrRangeNotSatisfiable if the range lies outside
 // the object. Stat ignores Range.
-func Range(spec string) Option { return client.Range(spec) }
+func Range(start, end int64) Option { return client.Range(start, end) }
+
+// RangeHeader sets a raw HTTP Range header value (e.g. "bytes=0-499"), for
+// forwarding a client's Range verbatim; prefer Range for programmatic use.
+func RangeHeader(spec string) Option { return client.RangeHeader(spec) }
 
 // IfRange gates Range on the stored ETag: the range is only applied when etag
 // matches, otherwise the full object is returned.

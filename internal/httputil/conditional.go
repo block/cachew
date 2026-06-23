@@ -22,7 +22,7 @@ func ConditionalOptions(r *http.Request) []client.RequestOption {
 		opts = append(opts, client.IfNoneMatch(v))
 	}
 	if v := r.Header.Get("Range"); v != "" {
-		opts = append(opts, client.Range(v))
+		opts = append(opts, client.RangeHeader(v))
 	}
 	if v := r.Header.Get("If-Range"); v != "" {
 		opts = append(opts, client.IfRange(v))

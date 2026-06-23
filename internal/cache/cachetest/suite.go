@@ -565,7 +565,7 @@ func testRange(t *testing.T, c cache.Cache) {
 	assert.NoError(t, w.Close())
 
 	t.Run("PartialContent", func(t *testing.T) {
-		reader, headers, err := c.Open(ctx, key, cache.Range("bytes=2-5"))
+		reader, headers, err := c.Open(ctx, key, cache.Range(2, 6))
 		assert.NoError(t, err)
 		defer reader.Close()
 		data, err := io.ReadAll(reader)
@@ -576,7 +576,7 @@ func testRange(t *testing.T, c cache.Cache) {
 	})
 
 	t.Run("Suffix", func(t *testing.T) {
-		reader, headers, err := c.Open(ctx, key, cache.Range("bytes=-3"))
+		reader, headers, err := c.Open(ctx, key, cache.RangeHeader("bytes=-3"))
 		assert.NoError(t, err)
 		defer reader.Close()
 		data, err := io.ReadAll(reader)
@@ -587,7 +587,7 @@ func testRange(t *testing.T, c cache.Cache) {
 	})
 
 	t.Run("FullSize", func(t *testing.T) {
-		reader, headers, err := c.Open(ctx, key, cache.Range("bytes=0-9"))
+		reader, headers, err := c.Open(ctx, key, cache.Range(0, 10))
 		assert.NoError(t, err)
 		defer reader.Close()
 		data, err := io.ReadAll(reader)
@@ -598,13 +598,13 @@ func testRange(t *testing.T, c cache.Cache) {
 	})
 
 	t.Run("NotSatisfiable", func(t *testing.T) {
-		_, headers, err := c.Open(ctx, key, cache.Range("bytes=20-30"))
+		_, headers, err := c.Open(ctx, key, cache.Range(20, 31))
 		assert.IsError(t, err, cache.ErrRangeNotSatisfiable)
 		assert.Equal(t, "bytes */10", headers.Get("Content-Range"))
 	})
 
 	t.Run("IfRangeMismatchServesFull", func(t *testing.T) {
-		reader, headers, err := c.Open(ctx, key, cache.Range("bytes=2-5"), cache.IfRange(`"stale"`))
+		reader, headers, err := c.Open(ctx, key, cache.Range(2, 6), cache.IfRange(`"stale"`))
 		assert.NoError(t, err)
 		defer reader.Close()
 		data, err := io.ReadAll(reader)
@@ -614,7 +614,7 @@ func testRange(t *testing.T, c cache.Cache) {
 	})
 
 	t.Run("StatIgnoresRange", func(t *testing.T) {
-		headers, err := c.Stat(ctx, key, cache.Range("bytes=2-5"))
+		headers, err := c.Stat(ctx, key, cache.Range(2, 6))
 		assert.NoError(t, err)
 		assert.Equal(t, "", headers.Get("Content-Range"))
 		assert.Equal(t, "10", headers.Get("Content-Length"))

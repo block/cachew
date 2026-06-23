@@ -26,7 +26,7 @@ func TestRangeEmptyObject(t *testing.T) {
 	assert.NoError(t, err)
 	assert.NoError(t, w.Close())
 
-	_, headers, err := c.Open(ctx, key, cache.Range("bytes=0-0"))
+	_, headers, err := c.Open(ctx, key, cache.Range(0, 1))
 	assert.IsError(t, err, cache.ErrRangeNotSatisfiable)
 	assert.Equal(t, "bytes */0", headers.Get("Content-Range"))
 }
