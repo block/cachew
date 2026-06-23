@@ -166,9 +166,7 @@ func (c *Client) Open(ctx context.Context, key Key, opts ...RequestOption) (io.R
 	if err != nil {
 		return nil, nil, errors.Wrap(err, "failed to create request")
 	}
-	for _, opt := range opts {
-		opt(req)
-	}
+	NewRequestOptions(opts...).applyToRequest(req)
 
 	resp, err := c.http.Do(req)
 	if err != nil {
@@ -204,9 +202,7 @@ func (c *Client) Stat(ctx context.Context, key Key, opts ...RequestOption) (http
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to create request")
 	}
-	for _, opt := range opts {
-		opt(req)
-	}
+	NewRequestOptions(opts...).applyToRequest(req)
 
 	resp, err := c.http.Do(req)
 	if err != nil {

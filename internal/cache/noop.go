@@ -22,11 +22,11 @@ func NoOpCache() Cache {
 
 func (n *noOpCache) String() string { return "noop" }
 
-func (n *noOpCache) Stat(_ context.Context, _ Key) (http.Header, error) {
+func (n *noOpCache) Stat(_ context.Context, _ Key, _ ...Option) (http.Header, error) {
 	return nil, os.ErrNotExist
 }
 
-func (n *noOpCache) Open(_ context.Context, _ Key) (io.ReadCloser, http.Header, error) {
+func (n *noOpCache) Open(_ context.Context, _ Key, _ ...Option) (io.ReadCloser, http.Header, error) {
 	return nil, nil, os.ErrNotExist
 }
 

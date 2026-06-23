@@ -92,17 +92,17 @@ func (t Tiered) Delete(ctx context.Context, key Key) error {
 // Stat returns headers from the first cache that succeeds.
 //
 // If all caches fail, all errors are returned.
-func (t Tiered) Stat(ctx context.Context, key Key) (http.Header, error) {
+func (t Tiered) Stat(ctx context.Context, key Key, opts ...Option) (http.Header, error) {
 	errs := make([]error, len(t.caches))
 	for i, c := range t.caches {
-		headers, err := c.Stat(ctx, key)
+		headers, err := c.Stat(ctx, key, opts...)
 		errs[i] = err
 		if errors.Is(err, os.ErrNotExist) {
 			continue
-		} else if err != nil {
-			return nil, errors.WithStack(err)
 		}
-		return headers, nil
+		// Any other outcome (success, ErrNotModified, ErrPreconditionFailed, or a
+		// hard error) is definitive for this tier; surface it with its headers.
+		return headers, errors.WithStack(err)
 	}
 	return nil, errors.Join(errs...)
 }
@@ -113,15 +113,18 @@ func (t Tiered) Stat(ctx context.Context, key Key) (http.Header, error) {
 // subsequent Opens are served locally.
 //
 // If all caches fail, all errors are returned.
-func (t Tiered) Open(ctx context.Context, key Key) (io.ReadCloser, http.Header, error) {
+func (t Tiered) Open(ctx context.Context, key Key, opts ...Option) (io.ReadCloser, http.Header, error) {
 	errs := make([]error, len(t.caches))
 	for i, c := range t.caches {
-		r, headers, err := c.Open(ctx, key)
+		r, headers, err := c.Open(ctx, key, opts...)
 		errs[i] = err
 		if errors.Is(err, os.ErrNotExist) {
 			continue
-		} else if err != nil {
-			return nil, nil, errors.WithStack(err)
+		}
+		if err != nil {
+			// Definitive non-miss error (incl. ErrNotModified/ErrPreconditionFailed):
+			// surface headers so callers can build a 304 response. No body to backfill.
+			return nil, headers, errors.WithStack(err)
 		}
 		if i > 0 {
 			r = t.backfillReader(ctx, key, r, headers, t.caches[0])

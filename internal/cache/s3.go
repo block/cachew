@@ -183,16 +183,19 @@ func (s *S3) statAndHeaders(ctx context.Context, key Key) (minio.ObjectInfo, htt
 	return objInfo, headers, meta, nil
 }
 
-func (s *S3) Stat(ctx context.Context, key Key) (http.Header, error) {
+func (s *S3) Stat(ctx context.Context, key Key, opts ...Option) (http.Header, error) {
 	objInfo, headers, _, err := s.statAndHeaders(ctx, key)
 	if err != nil {
 		return nil, err
 	}
 	headers.Set("Content-Length", strconv.FormatInt(objInfo.Size, 10))
+	if h, err := conditionalShortCircuit(headers, opts); err != nil {
+		return h, err
+	}
 	return headers, nil
 }
 
-func (s *S3) Open(ctx context.Context, key Key) (io.ReadCloser, http.Header, error) {
+func (s *S3) Open(ctx context.Context, key Key, opts ...Option) (io.ReadCloser, http.Header, error) {
 	objInfo, headers, meta, err := s.statAndHeaders(ctx, key)
 	if err != nil {
 		return nil, nil, err
@@ -221,6 +224,10 @@ func (s *S3) Open(ctx context.Context, key Key) (io.ReadCloser, http.Header, err
 				}
 			}()
 		}
+	}
+
+	if h, err := conditionalShortCircuit(headers, opts); err != nil {
+		return nil, h, err
 	}
 
 	reader, err := s.parallelGetReader(ctx, s.config.Bucket, objectName, objInfo.Size, objInfo.ETag)

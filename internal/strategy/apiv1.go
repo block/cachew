@@ -57,17 +57,15 @@ func (d *APIV1) statObject(w http.ResponseWriter, r *http.Request) {
 	}
 
 	namespacedCache := d.cache.Namespace(namespace)
-	headers, err := namespacedCache.Stat(r.Context(), key)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			http.Error(w, "Cache object not found", http.StatusNotFound)
-			return
-		}
-		d.httpError(w, http.StatusInternalServerError, err, "Failed to open cache object", "key", key)
+	headers, err := namespacedCache.Stat(r.Context(), key, httputil.ConditionalOptions(r)...)
+	if httputil.ServeCacheStat(w, headers, err) {
 		return
 	}
-
-	httputil.ServeCacheStat(w, r, headers)
+	if errors.Is(err, os.ErrNotExist) {
+		http.Error(w, "Cache object not found", http.StatusNotFound)
+		return
+	}
+	d.httpError(w, http.StatusInternalServerError, err, "Failed to open cache object", "key", key)
 }
 
 func (d *APIV1) getObject(w http.ResponseWriter, r *http.Request) {
@@ -83,19 +81,18 @@ func (d *APIV1) getObject(w http.ResponseWriter, r *http.Request) {
 	}
 
 	namespacedCache := d.cache.Namespace(namespace)
-	cr, headers, err := namespacedCache.Open(r.Context(), key)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			http.Error(w, "Cache object not found", http.StatusNotFound)
-			return
+	cr, headers, err := namespacedCache.Open(r.Context(), key, httputil.ConditionalOptions(r)...)
+	if handled, serveErr := httputil.ServeCacheHit(w, headers, cr, err); handled {
+		if serveErr != nil {
+			d.logger.Error("Failed to serve cache object", "error", serveErr, "key", key)
 		}
-		d.httpError(w, http.StatusInternalServerError, err, "Failed to open cache object", "key", key)
 		return
 	}
-
-	if err := httputil.ServeCacheHit(w, r, headers, cr); err != nil {
-		d.logger.Error("Failed to serve cache object", "error", err, "key", key)
+	if errors.Is(err, os.ErrNotExist) {
+		http.Error(w, "Cache object not found", http.StatusNotFound)
+		return
 	}
+	d.httpError(w, http.StatusInternalServerError, err, "Failed to open cache object", "key", key)
 }
 
 func (d *APIV1) putObject(w http.ResponseWriter, r *http.Request) {

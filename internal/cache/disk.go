@@ -232,7 +232,7 @@ func (d *Disk) Delete(_ context.Context, key Key) error {
 	return nil
 }
 
-func (d *Disk) Stat(ctx context.Context, key Key) (http.Header, error) {
+func (d *Disk) Stat(ctx context.Context, key Key, opts ...Option) (http.Header, error) {
 	path := d.keyToPath(d.namespace, key)
 	fullPath := filepath.Join(d.config.Root, path)
 
@@ -256,10 +256,13 @@ func (d *Disk) Stat(ctx context.Context, key Key) (http.Header, error) {
 	}
 
 	headers.Set("Content-Length", strconv.FormatInt(info.Size(), 10))
+	if h, err := conditionalShortCircuit(headers, opts); err != nil {
+		return h, err
+	}
 	return headers, nil
 }
 
-func (d *Disk) Open(ctx context.Context, key Key) (io.ReadCloser, http.Header, error) {
+func (d *Disk) Open(ctx context.Context, key Key, opts ...Option) (io.ReadCloser, http.Header, error) {
 	path := d.keyToPath(d.namespace, key)
 	fullPath := filepath.Join(d.config.Root, path)
 
@@ -295,6 +298,10 @@ func (d *Disk) Open(ctx context.Context, key Key) (io.ReadCloser, http.Header, e
 
 	if err := d.db.setTTL(d.namespace, key, newExpiresAt); err != nil {
 		return nil, nil, errors.Join(errors.Errorf("failed to update expiration time: %w", err), f.Close())
+	}
+
+	if h, condErr := conditionalShortCircuit(headers, opts); condErr != nil {
+		return nil, h, errors.Join(condErr, f.Close())
 	}
 
 	return f, headers, nil

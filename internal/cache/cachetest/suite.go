@@ -79,6 +79,10 @@ func Suite(t *testing.T, newCache func(t *testing.T) cache.Cache) {
 	t.Run("ETag", func(t *testing.T) {
 		testETag(t, newCache(t))
 	})
+
+	t.Run("Conditional", func(t *testing.T) {
+		testConditional(t, newCache(t))
+	})
 }
 
 func testCreateAndOpen(t *testing.T, c cache.Cache) {
@@ -483,6 +487,61 @@ func testETag(t *testing.T, c cache.Cache) {
 	statHeaders, err := c.Stat(ctx, key)
 	assert.NoError(t, err)
 	assert.Equal(t, expectedETag, statHeaders.Get("ETag"))
+}
+
+// testConditional verifies that Open and Stat honour If-Match / If-None-Match
+// preconditions against the stored ETag, returning the unified sentinel errors.
+func testConditional(t *testing.T, c cache.Cache) {
+	defer c.Close()
+	ctx := t.Context()
+
+	content := []byte("conditional content")
+	key := cache.NewKey("test-conditional")
+
+	w, err := c.Create(ctx, key, nil, time.Hour)
+	assert.NoError(t, err)
+	_, err = w.Write(content)
+	assert.NoError(t, err)
+	assert.NoError(t, w.Close())
+
+	sum := sha256.Sum256(content)
+	etag := `"` + hex.EncodeToString(sum[:]) + `"`
+
+	t.Run("IfNoneMatchHitReturnsNotModified", func(t *testing.T) {
+		_, headers, err := c.Open(ctx, key, cache.IfNoneMatch(etag))
+		assert.IsError(t, err, cache.ErrNotModified)
+		assert.Equal(t, etag, headers.Get("ETag")) // headers surfaced for the 304
+
+		headers, err = c.Stat(ctx, key, cache.IfNoneMatch(etag))
+		assert.IsError(t, err, cache.ErrNotModified)
+		assert.Equal(t, etag, headers.Get("ETag"))
+	})
+
+	t.Run("IfNoneMatchMissServesBody", func(t *testing.T) {
+		reader, _, err := c.Open(ctx, key, cache.IfNoneMatch(`"other"`))
+		assert.NoError(t, err)
+		defer reader.Close()
+		data, err := io.ReadAll(reader)
+		assert.NoError(t, err)
+		assert.Equal(t, content, data)
+	})
+
+	t.Run("IfMatchHitServesBody", func(t *testing.T) {
+		reader, _, err := c.Open(ctx, key, cache.IfMatch(etag))
+		assert.NoError(t, err)
+		defer reader.Close()
+		data, err := io.ReadAll(reader)
+		assert.NoError(t, err)
+		assert.Equal(t, content, data)
+	})
+
+	t.Run("IfMatchMissReturnsPreconditionFailed", func(t *testing.T) {
+		_, _, err := c.Open(ctx, key, cache.IfMatch(`"other"`))
+		assert.IsError(t, err, cache.ErrPreconditionFailed)
+
+		_, err = c.Stat(ctx, key, cache.IfMatch(`"other"`))
+		assert.IsError(t, err, cache.ErrPreconditionFailed)
+	})
 }
 
 func testNamespaceDelete(t *testing.T, c cache.Cache) {

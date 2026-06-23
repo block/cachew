@@ -58,7 +58,7 @@ func NewMemory(ctx context.Context, config MemoryConfig) (*Memory, error) {
 
 func (m *Memory) String() string { return fmt.Sprintf("memory:%dMB", m.config.LimitMB) }
 
-func (m *Memory) Stat(_ context.Context, key Key) (http.Header, error) {
+func (m *Memory) Stat(_ context.Context, key Key, opts ...Option) (http.Header, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -78,10 +78,13 @@ func (m *Memory) Stat(_ context.Context, key Key) (http.Header, error) {
 
 	headers := maps.Clone(entry.headers)
 	headers.Set("Content-Length", strconv.Itoa(len(entry.data)))
+	if h, err := conditionalShortCircuit(headers, opts); err != nil {
+		return h, err
+	}
 	return headers, nil
 }
 
-func (m *Memory) Open(_ context.Context, key Key) (io.ReadCloser, http.Header, error) {
+func (m *Memory) Open(_ context.Context, key Key, opts ...Option) (io.ReadCloser, http.Header, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -101,6 +104,9 @@ func (m *Memory) Open(_ context.Context, key Key) (io.ReadCloser, http.Header, e
 
 	headers := maps.Clone(entry.headers)
 	headers.Set("Content-Length", strconv.Itoa(len(entry.data)))
+	if h, err := conditionalShortCircuit(headers, opts); err != nil {
+		return nil, h, err
+	}
 	return io.NopCloser(bytes.NewReader(entry.data)), headers, nil
 }
 
