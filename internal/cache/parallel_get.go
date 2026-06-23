@@ -66,6 +66,10 @@ func ParallelGet(ctx context.Context, c Cache, key Key, dst io.WriterAt, chunkSi
 	eg, egCtx := errgroup.WithContext(ctx)
 	eg.SetLimit(concurrency)
 	for seq := 1; seq < numChunks; seq++ {
+		// Stop scheduling once a chunk has failed and cancelled the group.
+		if egCtx.Err() != nil {
+			break
+		}
 		start := int64(seq) * chunkSize
 		end := min(start+chunkSize, total)
 		eg.Go(func() error { return fetchChunk(egCtx, c, key, dst, start, end, etag) })
