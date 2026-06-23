@@ -58,4 +58,10 @@ func TestRangeStaleContentRangeStripped(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, content, data)
 	assert.Equal(t, "", headers.Get("Content-Range"))
+
+	// Stat (HEAD) ignores Range and never runs rangeShortCircuit, so it must also
+	// drop the stale header rather than advertise partial metadata on a 200.
+	statHeaders, err := c.Stat(ctx, key)
+	assert.NoError(t, err)
+	assert.Equal(t, "", statHeaders.Get("Content-Range"))
 }
