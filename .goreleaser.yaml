@@ -61,6 +61,10 @@ brews:
       owner: block
       name: homebrew-tap
       token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+      pull_request:
+        enabled: true
+        base:
+          branch: main
     homepage: "https://github.com/block/cachew"
     description: "Tiered, protocol-aware, caching HTTP proxy for software engineering infrastructure"
     license: "Apache-2.0"
