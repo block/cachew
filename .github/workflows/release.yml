@@ -14,6 +14,9 @@ jobs:
         with:
           fetch-depth: 0
       - uses: cashapp/activate-hermit@e49f5cb4dd64ff0b0b659d1d8df499595451155a # v1
+      - run: goreleaser release --clean --fail-fast
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2.2.2
         id: homebrew-tap-token
         with:
@@ -21,7 +24,13 @@ jobs:
           private-key: ${{ secrets.BLOCK_HOMEBREW_TAP_PRIVATE_KEY }}
           owner: block
           repositories: homebrew-tap
-      - run: goreleaser release --clean --fail-fast
+      - name: Trigger Homebrew formula bump
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          HOMEBREW_TAP_GITHUB_TOKEN: ${{ steps.homebrew-tap-token.outputs.token }}
+          GITHUB_TOKEN: ${{ steps.homebrew-tap-token.outputs.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh workflow run bump-formula.yaml \
+            --repo block/homebrew-tap \
+            -f repo=block/cachew \
+            -f formula=cachew \
+            -f "tag=$TAG"
