@@ -265,8 +265,9 @@ func (s *Strategy) handleSnapshotRequest(w http.ResponseWriter, r *http.Request,
 		if existing, loaded := s.coldSnapshotMu.LoadOrStore(upstreamURL, entry); loaded {
 			winner := existing.(*coldSnapshotEntry)
 			<-winner.done
-			reader, _, openErr := s.cache.Open(ctx, cacheKey)
+			reader, openHeaders, openErr := s.cache.Open(ctx, cacheKey)
 			if openErr == nil && reader != nil {
+				backend := cache.BackendFromHeaders(openHeaders)
 				winner.serving.Add(1)
 				defer func() {
 					_ = reader.Close()
@@ -274,9 +275,10 @@ func (s *Strategy) handleSnapshotRequest(w http.ResponseWriter, r *http.Request,
 				}()
 				logger.InfoContext(ctx, "Serving locally cached snapshot after waiting for in-flight fill", "upstream", upstreamURL)
 				w.Header().Set("Content-Type", "application/zstd")
-				n, err := serveReaderFast(w, r, reader)
-				s.metrics.recordSnapshotServe(ctx, "cold_cache", repoName, n, time.Since(start))
-				span.SetAttributes(attribute.String("cachew.source", "cold_cache"), attribute.Int64("cachew.bytes", n))
+				n, ttfb, err := serveReaderFast(w, r, reader, start)
+				s.metrics.recordSnapshotTTFB(ctx, "cold_cache", backend, repoName, ttfb)
+				s.metrics.recordSnapshotServe(ctx, "cold_cache", backend, repoName, n, time.Since(start))
+				span.SetAttributes(attribute.String("cachew.source", "cold_cache"), attribute.String("cachew.backend", backend), attribute.Int64("cachew.bytes", n), attribute.Float64("cachew.ttfb_seconds", ttfb.Seconds()))
 				if err != nil {
 					logger.WarnContext(ctx, "Failed to stream locally cached snapshot", "upstream", upstreamURL, "error", err)
 					span.RecordError(err)
@@ -289,13 +291,15 @@ func (s *Strategy) handleSnapshotRequest(w http.ResponseWriter, r *http.Request,
 				close(entry.done)
 				s.coldSnapshotMu.Delete(upstreamURL)
 			}()
-			reader, _, openErr := s.cache.Open(ctx, cacheKey)
+			reader, openHeaders, openErr := s.cache.Open(ctx, cacheKey)
 			if openErr == nil && reader != nil {
+				backend := cache.BackendFromHeaders(openHeaders)
 				logger.InfoContext(ctx, "Serving cached snapshot while mirror warms up", "upstream", upstreamURL)
 				w.Header().Set("Content-Type", "application/zstd")
-				n, err := serveReaderFast(w, r, reader)
-				s.metrics.recordSnapshotServe(ctx, "cold_cache", repoName, n, time.Since(start))
-				span.SetAttributes(attribute.String("cachew.source", "cold_cache"), attribute.Int64("cachew.bytes", n))
+				n, ttfb, err := serveReaderFast(w, r, reader, start)
+				s.metrics.recordSnapshotTTFB(ctx, "cold_cache", backend, repoName, ttfb)
+				s.metrics.recordSnapshotServe(ctx, "cold_cache", backend, repoName, n, time.Since(start))
+				span.SetAttributes(attribute.String("cachew.source", "cold_cache"), attribute.String("cachew.backend", backend), attribute.Int64("cachew.bytes", n), attribute.Float64("cachew.ttfb_seconds", ttfb.Seconds()))
 				if err != nil {
 					logger.WarnContext(ctx, "Failed to stream cached snapshot", "upstream", upstreamURL, "error", err)
 					span.RecordError(err)
@@ -320,11 +324,19 @@ func (s *Strategy) handleSnapshotRequest(w http.ResponseWriter, r *http.Request,
 	}
 	s.maybeBackgroundFetch(repo)
 
+	openStart := time.Now()
 	reader, headers, err := s.cache.Open(ctx, cacheKey)
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
+	openElapsed := time.Since(openStart)
+	switch {
+	case err != nil && !errors.Is(err, os.ErrNotExist):
+		s.metrics.recordSnapshotCacheOpen(ctx, cache.BackendFromHeaders(headers), repoName, "error", openElapsed)
 		logger.ErrorContext(ctx, "Failed to open snapshot from cache", "upstream", upstreamURL, "error", err)
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
+	case reader == nil:
+		s.metrics.recordSnapshotCacheOpen(ctx, "", repoName, "miss", openElapsed)
+	default:
+		s.metrics.recordSnapshotCacheOpen(ctx, cache.BackendFromHeaders(headers), repoName, "hit", openElapsed)
 	}
 
 	if reader == nil {
@@ -372,7 +384,7 @@ func (s *Strategy) serveSnapshotHead(ctx context.Context, w http.ResponseWriter,
 	}
 	w.WriteHeader(status)
 
-	s.metrics.recordSnapshotServe(ctx, "head", repoName, 0, time.Since(start))
+	s.metrics.recordSnapshotServe(ctx, "head", backendNone, repoName, 0, time.Since(start))
 	if span := trace.SpanFromContext(ctx); span.SpanContext().IsValid() {
 		span.SetAttributes(attribute.String("cachew.source", "head"), attribute.Int64("cachew.bytes", 0))
 	}
@@ -384,7 +396,7 @@ func (s *Strategy) streamSnapshotArtifact(_ context.Context, w http.ResponseWrit
 			w.Header().Add(key, value)
 		}
 	}
-	if _, err := serveReaderFast(w, r, reader); err != nil {
+	if _, _, err := serveReaderFast(w, r, reader, time.Now()); err != nil {
 		return errors.Wrap(err, "streaming artifact")
 	}
 	return nil
@@ -393,20 +405,46 @@ func (s *Strategy) streamSnapshotArtifact(_ context.Context, w http.ResponseWrit
 // serveReaderFast serves the content from reader using the most efficient method
 // available. When reader is an *os.File, it uses http.ServeContent which enables
 // sendfile(2) zero-copy I/O and automatic Content-Length/Range support. For other
-// reader types it falls back to io.Copy. Returns bytes served for metrics.
-func serveReaderFast(w http.ResponseWriter, r *http.Request, reader io.Reader) (int64, error) {
+// reader types it falls back to io.Copy. Returns bytes served and the
+// server-side time-to-first-byte measured relative to start (handler entry).
+func serveReaderFast(w http.ResponseWriter, r *http.Request, reader io.Reader, start time.Time) (n int64, ttfb time.Duration, err error) {
 	if f, ok := reader.(*os.File); ok {
-		info, err := f.Stat()
-		if err != nil {
-			return 0, errors.Wrap(err, "stat file for serving")
+		info, statErr := f.Stat()
+		if statErr != nil {
+			return 0, 0, errors.Wrap(statErr, "stat file for serving")
 		}
+		// A local file is served via sendfile(2) with an effectively immediate
+		// first byte, so TTFB is just the pre-stream work already elapsed.
+		ttfb = time.Since(start)
 		// http.ServeContent handles Content-Length, Range requests, and uses
 		// sendfile(2) for zero-copy transfer from file to socket.
 		http.ServeContent(w, r, "", time.Time{}, f)
-		return info.Size(), nil
+		return info.Size(), ttfb, nil
 	}
-	n, err := io.Copy(w, reader)
-	return n, errors.Wrap(err, "copy to response")
+	fr := &firstByteReader{r: reader, start: start}
+	n, err = io.Copy(w, fr)
+	return n, fr.ttfb, errors.Wrap(err, "copy to response")
+}
+
+// firstByteReader records the wall time, relative to start, at which the
+// wrapped reader returns its first non-empty Read. For a non-file cache reader
+// (e.g. an S3 range reader whose first Read blocks until the initial chunk is
+// downloaded) this is when bytes first become available to write to the client,
+// approximating server-side time-to-first-byte.
+type firstByteReader struct {
+	r      io.Reader
+	start  time.Time
+	ttfb   time.Duration
+	marked bool
+}
+
+func (f *firstByteReader) Read(p []byte) (int, error) {
+	n, err := f.r.Read(p)
+	if !f.marked && n > 0 {
+		f.marked = true
+		f.ttfb = time.Since(f.start)
+	}
+	return n, err //nolint:wrapcheck // must return unwrapped io.EOF per io.Reader contract
 }
 
 func (s *Strategy) handleBundleRequest(w http.ResponseWriter, r *http.Request, host, pathValue string) { //nolint:funlen
@@ -517,8 +555,11 @@ func (s *Strategy) handleBundleRequest(w http.ResponseWriter, r *http.Request, h
 }
 
 func (s *Strategy) serveSnapshotWithBundle(ctx context.Context, w http.ResponseWriter, r *http.Request, reader io.ReadCloser, headers http.Header, repo *gitclone.Repository, upstreamURL, repoName string, start time.Time) error {
+	backend := cache.BackendFromHeaders(headers)
 	snapshotCommit := headers.Get("X-Cachew-Snapshot-Commit")
+	mirrorHeadStart := time.Now()
 	mirrorHead := s.getMirrorHead(ctx, repo)
+	mirrorHeadElapsed := time.Since(mirrorHeadStart)
 
 	// Forward the snapshot commit to the client so it knows whether the
 	// snapshot is fresh (no bundle URL = already at HEAD, skip freshen).
@@ -556,15 +597,23 @@ func (s *Strategy) serveSnapshotWithBundle(ctx context.Context, w http.ResponseW
 	// (S3, memory, remote) fall through to io.Copy, so revalidate explicitly to
 	// avoid streaming the full snapshot when the client already has it.
 	var n int64
+	var ttfb time.Duration
 	var err error
 	if status := httputil.CheckConditionals(r, headers.Get(cache.ETagKey)); status != 0 {
 		w.WriteHeader(status)
 	} else {
-		n, err = serveReaderFast(w, r, reader)
+		n, ttfb, err = serveReaderFast(w, r, reader, start)
+		s.metrics.recordSnapshotTTFB(ctx, "cache", backend, repoName, ttfb)
 	}
-	s.metrics.recordSnapshotServe(ctx, "cache", repoName, n, time.Since(start))
+	s.metrics.recordSnapshotServe(ctx, "cache", backend, repoName, n, time.Since(start))
 	if span := trace.SpanFromContext(ctx); span.SpanContext().IsValid() {
-		span.SetAttributes(attribute.String("cachew.source", "cache"), attribute.Int64("cachew.bytes", n))
+		span.SetAttributes(
+			attribute.String("cachew.source", "cache"),
+			attribute.String("cachew.backend", backend),
+			attribute.Int64("cachew.bytes", n),
+			attribute.Float64("cachew.ttfb_seconds", ttfb.Seconds()),
+			attribute.Float64("cachew.mirror_head_seconds", mirrorHeadElapsed.Seconds()),
+		)
 	}
 	return errors.Wrap(err, "stream snapshot")
 }
@@ -684,7 +733,7 @@ func (s *Strategy) serveSnapshotWithSpool(w http.ResponseWriter, r *http.Request
 				return errors.Wrap(err, "snapshot spool read")
 			}
 			s.metrics.recordSpoolFollowerWait(ctx, repoName, "served", wait)
-			s.metrics.recordSnapshotServe(ctx, "spool", repoName, spool.Written(), time.Since(start))
+			s.metrics.recordSnapshotServe(ctx, "spool", backendNone, repoName, spool.Written(), time.Since(start))
 			if span := trace.SpanFromContext(ctx); span.SpanContext().IsValid() {
 				span.SetAttributes(attribute.String("cachew.source", "spool"), attribute.Int64("cachew.bytes", spool.Written()),
 					attribute.Float64("cachew.spool_wait_seconds", wait.Seconds()))
@@ -698,7 +747,7 @@ func (s *Strategy) serveSnapshotWithSpool(w http.ResponseWriter, r *http.Request
 
 	err := s.writeSnapshotSpool(w, r, repo, upstreamURL, repoName, entry)
 	if err == nil {
-		s.metrics.recordSnapshotServe(ctx, "generated", repoName, entry.spool.Written(), time.Since(start))
+		s.metrics.recordSnapshotServe(ctx, "generated", backendNone, repoName, entry.spool.Written(), time.Since(start))
 		if span := trace.SpanFromContext(ctx); span.SpanContext().IsValid() {
 			span.SetAttributes(attribute.String("cachew.source", "generated"), attribute.Int64("cachew.bytes", entry.spool.Written()))
 		}

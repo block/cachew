@@ -129,6 +129,13 @@ func (t Tiered) Open(ctx context.Context, key Key, opts ...Option) (io.ReadClose
 		if i > 0 {
 			r = t.backfillReader(ctx, key, r, headers, t.caches[0])
 		}
+		// Annotate which tier served this Open so serve handlers can attribute
+		// latency to a specific backend. Set after backfillReader so the value
+		// is not persisted into the backfilled lower-tier entry.
+		if headers == nil {
+			headers = http.Header{}
+		}
+		headers.Set(ServedByHeader, BackendKind(t.caches[i]))
 		return r, headers, nil
 	}
 	return nil, nil, errors.Join(errs...)
