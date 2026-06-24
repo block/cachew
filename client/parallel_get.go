@@ -81,7 +81,10 @@ func ParallelGet(ctx context.Context, c RangeReader, key Key, dst io.WriterAt, c
 		if err != nil {
 			return errors.Wrap(err, "parallel get: full read")
 		}
-		return errors.Wrap(writeChunkAt(dst, 0, total, full), "parallel get")
+		// The full read is a fresh request whose body may be a different
+		// revision than discovery, so the discovery `total` cannot validate its
+		// length; -1 skips the check and relies on transport-level EOF detection.
+		return errors.Wrap(writeChunkAt(dst, 0, -1, full), "parallel get")
 	}
 
 	// Multiple chunks: copy the already-open first chunk concurrently with the
