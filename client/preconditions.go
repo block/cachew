@@ -9,6 +9,9 @@ import (
 	"github.com/alecthomas/errors"
 )
 
+// ETagKey is the HTTP header key used to store the ETag.
+const ETagKey = "ETag"
+
 // ErrNotModified is returned when an If-None-Match precondition is satisfied,
 // indicating the resource has not changed since the supplied ETag. Over HTTP
 // this corresponds to 304 Not Modified.
