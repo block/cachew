@@ -32,7 +32,9 @@ type RangeReader interface {
 // is likewise reported as an error, so a partially written dst must be discarded
 // by the caller on failure. An object with no ETag to pin to (e.g. one stored
 // before ETags were recorded) cannot be kept revision-safe across chunks, so it
-// falls back to a single full read instead of parallelising.
+// falls back to a single full read instead of parallelising. A concurrency of
+// 1 likewise reads the whole object in one request, since chunking a single
+// worker would only serialise ranged GETs for no benefit.
 //
 // dst is written via concurrent WriteAt calls at non-overlapping offsets; the
 // caller owns dst's lifecycle (open, close, cleanup) and need not pre-size it,
@@ -42,6 +44,13 @@ func ParallelGet(ctx context.Context, c RangeReader, key Key, dst io.WriterAt, c
 		return errors.Errorf("parallel get: chunk size must be positive, got %d", chunkSize)
 	}
 	concurrency = max(concurrency, 1)
+
+	// A single worker gains nothing from chunking — it would only serialise
+	// ranged GETs — so skip discovery entirely and read the object in one
+	// revision-consistent request.
+	if concurrency == 1 {
+		return fullRead(ctx, c, key, dst)
+	}
 
 	// Discovery: the first ranged Open delivers chunk zero and reveals the total
 	// size and ETag used to pin the rest.
@@ -77,14 +86,7 @@ func ParallelGet(ctx context.Context, c RangeReader, key Key, dst io.WriterAt, c
 		if err := rc.Close(); err != nil {
 			return errors.Wrap(err, "parallel get: close discovery reader")
 		}
-		full, _, err := c.Open(ctx, key)
-		if err != nil {
-			return errors.Wrap(err, "parallel get: full read")
-		}
-		// The full read is a fresh request whose body may be a different
-		// revision than discovery, so the discovery `total` cannot validate its
-		// length; -1 skips the check and relies on transport-level EOF detection.
-		return errors.Wrap(writeChunkAt(dst, 0, -1, full), "parallel get")
+		return fullRead(ctx, c, key, dst)
 	}
 
 	// Multiple chunks: copy the already-open first chunk concurrently with the
@@ -104,6 +106,19 @@ func ParallelGet(ctx context.Context, c RangeReader, key Key, dst io.WriterAt, c
 		eg.Go(func() error { return fetchChunk(egCtx, c, key, dst, start, end, etag) })
 	}
 	return errors.Wrap(eg.Wait(), "parallel get")
+}
+
+// fullRead downloads the entire object in a single request and writes it at
+// offset zero. It is used when chunking would add no value (a single worker) or
+// cannot be made revision-safe (no ETag to pin). The body is a single
+// consistent revision, but its length is unknown up front, so writeChunkAt's
+// length check is skipped (-1).
+func fullRead(ctx context.Context, c RangeReader, key Key, dst io.WriterAt) error {
+	rc, _, err := c.Open(ctx, key)
+	if err != nil {
+		return errors.Wrap(err, "parallel get: full read")
+	}
+	return errors.Wrap(writeChunkAt(dst, 0, -1, rc), "parallel get")
 }
 
 // fetchChunk opens the [start, end) range pinned to etag and writes it at start.
