@@ -57,7 +57,7 @@ func TestParallelGet(t *testing.T) {
 		{name: "UnevenChunks", chunkSize: 300, concurrency: 3},
 		{name: "SingleByteChunks", chunkSize: 1, concurrency: 8},
 		{name: "ChunkLargerThanObject", chunkSize: 5000, concurrency: 4},
-		{name: "SerialFastPath", chunkSize: 100, concurrency: 1},
+		{name: "SingleWorkerFullRead", chunkSize: 100, concurrency: 1},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -80,9 +80,13 @@ func TestParallelGetEmptyObject(t *testing.T) {
 	assert.NoError(t, err)
 	assert.NoError(t, w.Close())
 
-	var dst bufferAt
-	assert.NoError(t, cache.ParallelGet(ctx, c, key, &dst, 100, 4))
-	assert.Equal(t, 0, len(dst.buf))
+	// concurrency 4 takes the ranged discovery path (ErrRangeNotSatisfiable),
+	// concurrency 1 takes the up-front full-read path; both must yield nothing.
+	for _, concurrency := range []int{4, 1} {
+		var dst bufferAt
+		assert.NoError(t, cache.ParallelGet(ctx, c, key, &dst, 100, concurrency))
+		assert.Equal(t, 0, len(dst.buf))
+	}
 }
 
 func TestParallelGetNotFound(t *testing.T) {

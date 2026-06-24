@@ -147,6 +147,55 @@ func (c *changingSizeReader) Open(_ context.Context, _ client.Key, opts ...clien
 	return io.NopCloser(bytes.NewReader(c.discovery[start : start+length])), headers, nil
 }
 
+// recordingReader serves byte ranges and records the Range option of every
+// Open call ("" for a full, non-ranged read), so tests can assert how the
+// object was fetched.
+type recordingReader struct {
+	data []byte
+	etag string
+
+	mu    sync.Mutex
+	opens []string
+}
+
+func (r *recordingReader) Open(_ context.Context, _ client.Key, opts ...client.RequestOption) (io.ReadCloser, http.Header, error) {
+	o := client.NewRequestOptions(opts...)
+	r.mu.Lock()
+	r.opens = append(r.opens, o.Range)
+	r.mu.Unlock()
+
+	size := int64(len(r.data))
+	start, length, outcome := o.ResolveRange(size, r.etag)
+	headers := http.Header{}
+	if outcome == client.RangeNotSatisfiable {
+		headers.Set("Content-Range", fmt.Sprintf("bytes */%d", size))
+		return nil, headers, client.ErrRangeNotSatisfiable
+	}
+	if r.etag != "" {
+		headers.Set(client.ETagKey, r.etag)
+	}
+	headers.Set("Content-Length", strconv.FormatInt(length, 10))
+	if outcome == client.RangePartial {
+		headers.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, start+length-1, size))
+	}
+	return io.NopCloser(bytes.NewReader(r.data[start : start+length])), headers, nil
+}
+
+func TestParallelGetSingleWorkerFullRead(t *testing.T) {
+	// A concurrency of 1 gains nothing from chunking, so it must issue a single
+	// non-ranged read rather than discovering and serialising ranged GETs.
+	data := make([]byte, 1000)
+	for i := range data {
+		data[i] = byte(i % 251)
+	}
+	c := &recordingReader{data: data, etag: `"v1"`}
+	var dst bufferAt
+	err := client.ParallelGet(context.Background(), c, client.NewKey("k"), &dst, 100, 1)
+	assert.NoError(t, err)
+	assert.Equal(t, data, dst.buf)
+	assert.Equal(t, []string{""}, c.opens)
+}
+
 func TestParallelGetNoETagSizeChangedBetweenRequests(t *testing.T) {
 	// A no-ETag multi-chunk object falls back to a single full read. If it is
 	// rewritten to a different size between discovery and that read, the
