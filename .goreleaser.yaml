@@ -56,24 +56,5 @@ changelog:
       - "^docs:"
       - "^test:"
 
-brews:
-  - repository:
-      owner: block
-      name: homebrew-tap
-      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
-      # Push the formula to a per-release branch and open a PR; the tap's
-      # default branch is protected and rejects direct writes.
-      branch: "cachew-{{ .Version }}"
-      pull_request:
-        enabled: true
-        base:
-          branch: main
-    homepage: "https://github.com/block/cachew"
-    description: "Tiered, protocol-aware, caching HTTP proxy for software engineering infrastructure"
-    license: "Apache-2.0"
-    install: |
-      bin.install "cachew"
-      bin.install "cachewd"
-
 # yaml-language-server: $schema=https://goreleaser.com/static/schema.json
 # vim: set ts=2 sw=2 tw=0 fo=cnqoj
