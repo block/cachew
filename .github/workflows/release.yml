@@ -1,14 +1,12 @@
 on:
-  workflow_run:
-    workflows: ["CI"]
-    types:
-      - completed
-    branches:
-      - main
+  push:
+    tags:
+      - "v*"
 name: Release
+permissions:
+  contents: write
 jobs:
   release:
-    if: github.event.workflow_run.conclusion == 'success' && startsWith(github.event.workflow_run.head_branch, 'refs/tags/v')
     name: Release
     runs-on: ubuntu-latest
     steps:
@@ -16,6 +14,14 @@ jobs:
         with:
           fetch-depth: 0
       - uses: cashapp/activate-hermit@e49f5cb4dd64ff0b0b659d1d8df499595451155a # v1
-      - run: goreleaser release --fail-fast
+      - uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2.2.2
+        id: homebrew-tap-token
+        with:
+          app-id: ${{ secrets.BLOCK_HOMEBREW_TAP_APP_ID }}
+          private-key: ${{ secrets.BLOCK_HOMEBREW_TAP_PRIVATE_KEY }}
+          owner: block
+          repositories: homebrew-tap
+      - run: goreleaser release --clean --fail-fast
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HOMEBREW_TAP_GITHUB_TOKEN: ${{ steps.homebrew-tap-token.outputs.token }}

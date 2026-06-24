@@ -18,7 +18,17 @@ import (
 	"github.com/block/cachew/internal/tracing"
 )
 
+// Populated via -ldflags at build time.
+//
+//nolint:gochecknoglobals
+var (
+	version   = "dev"
+	gitCommit = "unknown"
+)
+
 type CLI struct {
+	Version kong.VersionFlag `help:"Print version information and quit."`
+
 	LoggingConfig logging.Config `embed:"" prefix:"log-"`
 
 	URL           string `help:"Remote cache server URL." default:"http://127.0.0.1:8080"`
@@ -43,7 +53,8 @@ func main() { os.Exit(run()) }
 
 func run() int {
 	cli := CLI{}
-	kctx := kong.Parse(&cli, kong.UsageOnError(), kong.HelpOptions{Compact: true}, kong.DefaultEnvars("CACHEW"), kong.Bind(&cli))
+	kctx := kong.Parse(&cli, kong.UsageOnError(), kong.HelpOptions{Compact: true}, kong.DefaultEnvars("CACHEW"), kong.Bind(&cli),
+		kong.Vars{"version": fmt.Sprintf("%s (%s)", version, gitCommit)})
 	ctx := context.Background()
 	_, ctx = logging.Configure(ctx, cli.LoggingConfig)
 

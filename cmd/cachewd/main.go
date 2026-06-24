@@ -57,7 +57,17 @@ type GlobalConfig struct {
 	OPAConfig        opa.Config          `hcl:"opa,block"`
 }
 
+// Populated via -ldflags at build time.
+//
+//nolint:gochecknoglobals
+var (
+	version   = "dev"
+	gitCommit = "unknown"
+)
+
 type CLI struct {
+	Version kong.VersionFlag `help:"Print version information and quit."`
+
 	Schema bool `help:"Print the configuration file schema." xor:"command"`
 
 	Config *os.File `hcl:"-" help:"Configuration file path." required:"" default:"cachew.hcl"`
@@ -71,7 +81,8 @@ type CLI struct {
 
 func main() {
 	var cli CLI
-	kctx := kong.Parse(&cli, kong.DefaultEnvars("CACHEW"))
+	kctx := kong.Parse(&cli, kong.DefaultEnvars("CACHEW"),
+		kong.Vars{"version": fmt.Sprintf("%s (%s)", version, gitCommit)})
 
 	defer cli.Config.Close()
 	ast, err := hcl.Parse(cli.Config)

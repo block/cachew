@@ -1,7 +1,9 @@
+version: 2
+
 builds:
   - main: ./cmd/cachew
-    binary: sfptc
-    id: sfptc
+    binary: cachew
+    id: cachew
     env:
       - CGO_ENABLED=0
     goos:
@@ -10,9 +12,13 @@ builds:
     goarch:
       - amd64
       - arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X main.version={{ .Version }} -X main.gitCommit={{ .Commit }}
   - main: ./cmd/cachewd
-    id: sfptcd
-    binary: sfptcd
+    binary: cachewd
+    id: cachewd
     env:
       - CGO_ENABLED=0
     goos:
@@ -21,9 +27,13 @@ builds:
     goarch:
       - amd64
       - arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X main.version={{ .Version }} -X main.gitCommit={{ .Commit }}
 
 archives:
-  - format: tar.gz
+  - formats: [tar.gz]
     # this name template makes the OS and Arch compatible with the results of uname.
     name_template: >-
       {{ .ProjectName }}-
@@ -31,16 +41,32 @@ archives:
       {{- .Arch }}
     format_overrides:
       - goos: windows
-        format: zip
+        formats: [zip]
+
 checksum:
   name_template: "checksums.txt"
+
 snapshot:
-  name_template: "{{ incpatch .Version }}-next"
+  version_template: "{{ incpatch .Version }}-next"
+
 changelog:
   sort: asc
   filters:
     exclude:
       - "^docs:"
       - "^test:"
+
+brews:
+  - repository:
+      owner: block
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    homepage: "https://github.com/block/cachew"
+    description: "Tiered, protocol-aware, caching HTTP proxy for software engineering infrastructure"
+    license: "Apache-2.0"
+    install: |
+      bin.install "cachew"
+      bin.install "cachewd"
+
 # yaml-language-server: $schema=https://goreleaser.com/static/schema.json
 # vim: set ts=2 sw=2 tw=0 fo=cnqoj
