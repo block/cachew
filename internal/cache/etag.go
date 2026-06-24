@@ -5,10 +5,12 @@ import (
 	"encoding/hex"
 	"hash"
 	"net/http"
+
+	"github.com/block/cachew/client"
 )
 
 // ETagKey is the HTTP header key used to store the ETag.
-const ETagKey = "ETag"
+const ETagKey = client.ETagKey
 
 // etagWriter computes a SHA256 hash of all written data. After all data has
 // been written, call SetETag to populate the ETag header.
