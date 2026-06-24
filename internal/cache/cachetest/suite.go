@@ -83,6 +83,10 @@ func Suite(t *testing.T, newCache func(t *testing.T) cache.Cache) {
 	t.Run("Conditional", func(t *testing.T) {
 		testConditional(t, newCache(t))
 	})
+
+	t.Run("Range", func(t *testing.T) {
+		testRange(t, newCache(t))
+	})
 }
 
 func testCreateAndOpen(t *testing.T, c cache.Cache) {
@@ -541,6 +545,68 @@ func testConditional(t *testing.T, c cache.Cache) {
 
 		_, err = c.Stat(ctx, key, cache.IfMatch(`"other"`))
 		assert.IsError(t, err, cache.ErrPreconditionFailed)
+	})
+}
+
+// testRange verifies that Open honours a single byte range, sets Content-Range
+// and a range-sized Content-Length, returns ErrRangeNotSatisfiable for an
+// out-of-bounds range, and that Stat ignores Range.
+func testRange(t *testing.T, c cache.Cache) {
+	defer c.Close()
+	ctx := t.Context()
+
+	content := []byte("0123456789")
+	key := cache.NewKey("test-range")
+
+	w, err := c.Create(ctx, key, nil, time.Hour)
+	assert.NoError(t, err)
+	_, err = w.Write(content)
+	assert.NoError(t, err)
+	assert.NoError(t, w.Close())
+
+	t.Run("PartialContent", func(t *testing.T) {
+		reader, headers, err := c.Open(ctx, key, cache.Range(2, 6))
+		assert.NoError(t, err)
+		defer reader.Close()
+		data, err := io.ReadAll(reader)
+		assert.NoError(t, err)
+		assert.Equal(t, []byte("2345"), data)
+		assert.Equal(t, "bytes 2-5/10", headers.Get("Content-Range"))
+		assert.Equal(t, "4", headers.Get("Content-Length"))
+	})
+
+	t.Run("FullSize", func(t *testing.T) {
+		reader, headers, err := c.Open(ctx, key, cache.Range(0, 10))
+		assert.NoError(t, err)
+		defer reader.Close()
+		data, err := io.ReadAll(reader)
+		assert.NoError(t, err)
+		assert.Equal(t, content, data)
+		assert.Equal(t, "bytes 0-9/10", headers.Get("Content-Range"))
+		assert.Equal(t, "10", headers.Get("Content-Length"))
+	})
+
+	t.Run("NotSatisfiable", func(t *testing.T) {
+		_, headers, err := c.Open(ctx, key, cache.Range(20, 31))
+		assert.IsError(t, err, cache.ErrRangeNotSatisfiable)
+		assert.Equal(t, "bytes */10", headers.Get("Content-Range"))
+	})
+
+	t.Run("IfRangeMismatchServesFull", func(t *testing.T) {
+		reader, headers, err := c.Open(ctx, key, cache.Range(2, 6), cache.IfRange(`"stale"`))
+		assert.NoError(t, err)
+		defer reader.Close()
+		data, err := io.ReadAll(reader)
+		assert.NoError(t, err)
+		assert.Equal(t, content, data)
+		assert.Equal(t, "", headers.Get("Content-Range"))
+	})
+
+	t.Run("StatIgnoresRange", func(t *testing.T) {
+		headers, err := c.Stat(ctx, key, cache.Range(2, 6))
+		assert.NoError(t, err)
+		assert.Equal(t, "", headers.Get("Content-Range"))
+		assert.Equal(t, "10", headers.Get("Content-Length"))
 	})
 }
 

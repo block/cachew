@@ -10,8 +10,9 @@ import (
 	"github.com/block/cachew/client"
 )
 
-// ConditionalOptions extracts conditional-request options from an incoming
-// request, for forwarding to a cache Open or Stat.
+// ConditionalOptions extracts conditional-request and range options from an
+// incoming request, for forwarding to a cache Open or Stat. Range/If-Range are
+// honoured by Open and ignored by Stat.
 func ConditionalOptions(r *http.Request) []client.RequestOption {
 	var opts []client.RequestOption
 	if v := r.Header.Get("If-Match"); v != "" {
@@ -19,6 +20,14 @@ func ConditionalOptions(r *http.Request) []client.RequestOption {
 	}
 	if v := r.Header.Get("If-None-Match"); v != "" {
 		opts = append(opts, client.IfNoneMatch(v))
+	}
+	// Forward the client's Range header verbatim so the cache can honour forms
+	// the typed client.Range API doesn't model (e.g. suffix "bytes=-N").
+	if v := r.Header.Get("Range"); v != "" {
+		opts = append(opts, func(o *client.RequestOptions) { o.Range = v })
+	}
+	if v := r.Header.Get("If-Range"); v != "" {
+		opts = append(opts, client.IfRange(v))
 	}
 	return opts
 }
@@ -51,6 +60,11 @@ func ServeCacheHit(w http.ResponseWriter, headers http.Header, body io.ReadClose
 	switch {
 	case openErr == nil:
 		maps.Copy(w.Header(), headers)
+		w.Header().Set("Accept-Ranges", "bytes")
+		// A Content-Range set by the cache signals a satisfied byte range.
+		if headers.Get("Content-Range") != "" {
+			w.WriteHeader(http.StatusPartialContent)
+		}
 		_, copyErr := io.Copy(w, body)
 		return true, errors.Wrap(errors.Join(copyErr, body.Close()), "serve cache hit")
 
@@ -61,6 +75,12 @@ func ServeCacheHit(w http.ResponseWriter, headers http.Header, body io.ReadClose
 
 	case errors.Is(openErr, client.ErrPreconditionFailed):
 		w.WriteHeader(http.StatusPreconditionFailed)
+		return true, nil
+
+	case errors.Is(openErr, client.ErrRangeNotSatisfiable):
+		maps.Copy(w.Header(), headers)
+		w.Header().Set("Accept-Ranges", "bytes")
+		w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
 		return true, nil
 
 	default:
@@ -77,6 +97,7 @@ func ServeCacheStat(w http.ResponseWriter, headers http.Header, statErr error) (
 	switch {
 	case statErr == nil:
 		maps.Copy(w.Header(), headers)
+		w.Header().Set("Accept-Ranges", "bytes")
 		w.WriteHeader(http.StatusOK)
 		return true
 

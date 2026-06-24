@@ -114,6 +114,9 @@ func (t Tiered) Stat(ctx context.Context, key Key, opts ...Option) (http.Header,
 //
 // If all caches fail, all errors are returned.
 func (t Tiered) Open(ctx context.Context, key Key, opts ...Option) (io.ReadCloser, http.Header, error) {
+	// A Range request yields a partial body, which must never be backfilled
+	// into a lower tier as if it were the whole object.
+	partial := NewRequestOptions(opts...).Range != ""
 	errs := make([]error, len(t.caches))
 	for i, c := range t.caches {
 		r, headers, err := c.Open(ctx, key, opts...)
@@ -122,11 +125,12 @@ func (t Tiered) Open(ctx context.Context, key Key, opts ...Option) (io.ReadClose
 			continue
 		}
 		if err != nil {
-			// Definitive non-miss error (incl. ErrNotModified/ErrPreconditionFailed):
-			// surface headers so callers can build a 304 response. No body to backfill.
+			// Definitive non-miss error (incl. ErrNotModified/ErrPreconditionFailed/
+			// ErrRangeNotSatisfiable): surface headers so callers can build the
+			// conditional response. No body to backfill.
 			return nil, headers, errors.WithStack(err)
 		}
-		if i > 0 {
+		if i > 0 && !partial {
 			r = t.backfillReader(ctx, key, r, headers, t.caches[0])
 		}
 		return r, headers, nil

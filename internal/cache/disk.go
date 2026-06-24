@@ -5,7 +5,6 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
-	"maps"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -16,6 +15,7 @@ import (
 
 	"github.com/alecthomas/errors"
 
+	"github.com/block/cachew/internal/httputil"
 	"github.com/block/cachew/internal/logging"
 )
 
@@ -160,9 +160,8 @@ func (d *Disk) Create(ctx context.Context, key Key, headers http.Header, ttl tim
 	}
 
 	now := time.Now()
-	// Clone headers to avoid concurrent map writes
-	clonedHeaders := make(http.Header)
-	maps.Copy(clonedHeaders, headers)
+	// Clone (to avoid concurrent map writes) and drop transport headers.
+	clonedHeaders := httputil.FilterHeaders(headers, httputil.TransportHeaders...)
 	if clonedHeaders.Get("Last-Modified") == "" {
 		clonedHeaders.Set("Last-Modified", now.UTC().Format(http.TimeFormat))
 	}
@@ -302,6 +301,17 @@ func (d *Disk) Open(ctx context.Context, key Key, opts ...Option) (io.ReadCloser
 
 	if h, condErr := conditionalShortCircuit(headers, opts); condErr != nil {
 		return nil, h, errors.Join(condErr, f.Close())
+	}
+
+	start, length, partial, rangeErr := rangeShortCircuit(headers, finfo.Size(), opts)
+	if rangeErr != nil {
+		return nil, headers, errors.Join(rangeErr, f.Close())
+	}
+	if partial {
+		if _, err := f.Seek(start, io.SeekStart); err != nil {
+			return nil, headers, errors.Join(errors.Errorf("failed to seek for range: %w", err), f.Close())
+		}
+		return newLimitedReadCloser(f, length), headers, nil
 	}
 
 	return f, headers, nil

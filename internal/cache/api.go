@@ -34,6 +34,26 @@ var ErrNotFound = errors.New("cache backend not found")
 // Option configures conditional parameters on a cache Open or Stat.
 type Option = client.RequestOption
 
+// RequestOptions is the resolved set of conditional and range parameters for an
+// Open or Stat.
+type RequestOptions = client.RequestOptions
+
+// NewRequestOptions applies opts and returns the resulting RequestOptions.
+func NewRequestOptions(opts ...Option) RequestOptions { return client.NewRequestOptions(opts...) }
+
+// RangeOutcome classifies how a Range request should be answered, as returned by
+// RequestOptions.ResolveRange.
+type RangeOutcome = client.RangeOutcome
+
+const (
+	// RangeFull indicates the full object should be served.
+	RangeFull = client.RangeFull
+	// RangePartial indicates a single satisfiable byte range.
+	RangePartial = client.RangePartial
+	// RangeNotSatisfiable indicates the range lies outside the object.
+	RangeNotSatisfiable = client.RangeNotSatisfiable
+)
+
 // IfMatch sets the If-Match precondition. Open/Stat return ErrPreconditionFailed
 // if the stored ETag does not match.
 func IfMatch(etag string) Option { return client.IfMatch(etag) }
@@ -42,6 +62,16 @@ func IfMatch(etag string) Option { return client.IfMatch(etag) }
 // ErrNotModified when the stored ETag matches.
 func IfNoneMatch(etag string) Option { return client.IfNoneMatch(etag) }
 
+// Range requests a single half-open byte range [start, end) from Open. A
+// negative end means "to the end of the object". The returned headers carry a
+// Content-Range; Open returns ErrRangeNotSatisfiable if the range lies outside
+// the object. Stat ignores Range.
+func Range(start, end int64) Option { return client.Range(start, end) }
+
+// IfRange gates Range on the stored ETag: the range is only applied when etag
+// matches, otherwise the full object is returned.
+func IfRange(etag string) Option { return client.IfRange(etag) }
+
 // ErrNotModified is returned by Open/Stat when an If-None-Match precondition is
 // satisfied.
 var ErrNotModified = client.ErrNotModified
@@ -49,6 +79,10 @@ var ErrNotModified = client.ErrNotModified
 // ErrPreconditionFailed is returned by Open/Stat when an If-Match precondition
 // is not met.
 var ErrPreconditionFailed = client.ErrPreconditionFailed
+
+// ErrRangeNotSatisfiable is returned by Open when a requested Range lies outside
+// the object.
+var ErrRangeNotSatisfiable = client.ErrRangeNotSatisfiable
 
 // ErrStatsUnavailable is returned when a cache backend cannot provide statistics.
 var ErrStatsUnavailable = client.ErrStatsUnavailable
@@ -166,6 +200,11 @@ type Cache interface {
 	// Conditional opts are evaluated against the stored ETag: a satisfied
 	// If-None-Match returns ErrNotModified (with headers, no body); a failed
 	// If-Match returns ErrPreconditionFailed.
+	//
+	// A Range opt requests a single byte range: on success the returned
+	// headers carry Content-Range and a Content-Length of the range, and the
+	// reader yields only those bytes. A range outside the object returns
+	// ErrRangeNotSatisfiable (with headers carrying Content-Range: bytes */N).
 	Open(ctx context.Context, key Key, opts ...Option) (io.ReadCloser, http.Header, error)
 	// Create a new file in the cache.
 	//

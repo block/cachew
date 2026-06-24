@@ -15,6 +15,7 @@ import (
 
 	"github.com/alecthomas/errors"
 
+	"github.com/block/cachew/internal/httputil"
 	"github.com/block/cachew/internal/logging"
 )
 
@@ -107,7 +108,16 @@ func (m *Memory) Open(_ context.Context, key Key, opts ...Option) (io.ReadCloser
 	if h, err := conditionalShortCircuit(headers, opts); err != nil {
 		return nil, h, err
 	}
-	return io.NopCloser(bytes.NewReader(entry.data)), headers, nil
+
+	start, length, partial, rangeErr := rangeShortCircuit(headers, int64(len(entry.data)), opts)
+	if rangeErr != nil {
+		return nil, headers, rangeErr
+	}
+	data := entry.data
+	if partial {
+		data = data[start : start+length]
+	}
+	return io.NopCloser(bytes.NewReader(data)), headers, nil
 }
 
 func (m *Memory) Create(ctx context.Context, key Key, headers http.Header, ttl time.Duration) (Writer, error) {
@@ -116,9 +126,8 @@ func (m *Memory) Create(ctx context.Context, key Key, headers http.Header, ttl t
 	}
 
 	now := time.Now()
-	// Clone headers to avoid concurrent map writes
-	clonedHeaders := make(http.Header)
-	maps.Copy(clonedHeaders, headers)
+	// Clone (to avoid concurrent map writes) and drop transport headers.
+	clonedHeaders := httputil.FilterHeaders(headers, httputil.TransportHeaders...)
 	if clonedHeaders.Get("Last-Modified") == "" {
 		clonedHeaders.Set("Last-Modified", now.UTC().Format(http.TimeFormat))
 	}

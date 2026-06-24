@@ -38,6 +38,23 @@ func (s *S3) parallelGetReader(ctx context.Context, bucket, objectName string, s
 	return &cancelReadCloser{ReadCloser: pr, cancel: cancel}, nil
 }
 
+// rangeGetReader returns an io.ReadCloser for a single byte range of an S3
+// object, pinned to etag so the read sees a consistent object revision.
+func (s *S3) rangeGetReader(ctx context.Context, bucket, objectName string, start, length int64, etag string) (io.ReadCloser, error) {
+	opts := minio.GetObjectOptions{}
+	if err := opts.SetRange(start, start+length-1); err != nil {
+		return nil, errors.Errorf("set range %d-%d: %w", start, start+length-1, err)
+	}
+	if err := opts.SetMatchETag(etag); err != nil {
+		return nil, errors.Errorf("set etag %s: %w", etag, err)
+	}
+	obj, err := s.client.GetObject(ctx, bucket, objectName, opts)
+	if err != nil {
+		return nil, errors.Errorf("failed to get object range: %w", err)
+	}
+	return &s3Reader{obj: obj}, nil
+}
+
 // cancelReadCloser wraps an io.ReadCloser and cancels a context on Close,
 // ensuring background goroutines are cleaned up when the consumer is done.
 type cancelReadCloser struct {

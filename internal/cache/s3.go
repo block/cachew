@@ -18,6 +18,7 @@ import (
 	"github.com/alecthomas/errors"
 	"github.com/minio/minio-go/v7"
 
+	"github.com/block/cachew/internal/httputil"
 	"github.com/block/cachew/internal/logging"
 	"github.com/block/cachew/internal/s3client"
 )
@@ -230,6 +231,18 @@ func (s *S3) Open(ctx context.Context, key Key, opts ...Option) (io.ReadCloser, 
 		return nil, h, err
 	}
 
+	start, length, partial, rangeErr := rangeShortCircuit(headers, objInfo.Size, opts)
+	if rangeErr != nil {
+		return nil, headers, rangeErr
+	}
+	if partial {
+		reader, err := s.rangeGetReader(ctx, s.config.Bucket, objectName, start, length, objInfo.ETag)
+		if err != nil {
+			return nil, nil, err
+		}
+		return reader, headers, nil
+	}
+
 	reader, err := s.parallelGetReader(ctx, s.config.Bucket, objectName, objInfo.Size, objInfo.ETag)
 	if err != nil {
 		return nil, nil, err
@@ -322,9 +335,8 @@ func (s *S3) Create(ctx context.Context, key Key, headers http.Header, ttl time.
 		ttl = s.config.MaxTTL
 	}
 
-	// Clone headers to avoid concurrent access issues
-	clonedHeaders := make(http.Header)
-	maps.Copy(clonedHeaders, headers)
+	// Clone (to avoid concurrent access) and drop transport headers.
+	clonedHeaders := httputil.FilterHeaders(headers, httputil.TransportHeaders...)
 
 	expiresAt := ceilSecond(time.Now().Add(ttl))
 
