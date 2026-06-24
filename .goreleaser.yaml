@@ -61,6 +61,9 @@ brews:
       owner: block
       name: homebrew-tap
       token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+      # Push the formula to a per-release branch and open a PR; the tap's
+      # default branch is protected and rejects direct writes.
+      branch: "cachew-{{ .Version }}"
       pull_request:
         enabled: true
         base:
