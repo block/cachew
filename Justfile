@@ -51,6 +51,18 @@ build GOOS=(GOOS) GOARCH=(GOARCH):
       echo "✓ Done"
     done
 
+# Tag and push the next semantic version, triggering a release
+release:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    next="$(svu next)"
+    if [ "${next}" = "$(svu current 2>/dev/null)" ]; then
+      echo "No releasable changes since ${next}"; exit 1
+    fi
+    echo "Tagging release ${next}"
+    git tag "${next}"
+    git push origin "${next}"
+
 # Build all platforms
 build-all:
     @mkdir -p {{ RELEASE }}
