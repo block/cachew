@@ -58,10 +58,12 @@ func SmallCountBuckets() []float64 {
 
 // BandwidthMbpsBuckets is for per-request throughput in MiB/s, covering
 // everything from slow long-tail clients (a few MiB/s) up through saturated
-// 10 GbE links (~1.2 GiB/s) and the parallel-stream-on-localhost ceiling.
+// 10 GbE workstations (~1.2 GiB/s) and into the ~12 GiB/s range of 100 Gbps
+// server NICs. Top bucket leaves headroom past the theoretical max so we
+// can spot misattribution.
 func BandwidthMbpsBuckets() []float64 {
 	return []float64{
-		1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000,
+		1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 15000,
 	}
 }
 
