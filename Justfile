@@ -55,6 +55,14 @@ build GOOS=(GOOS) GOARCH=(GOARCH):
 release:
     #!/usr/bin/env bash
     set -euo pipefail
+    branch="$(git rev-parse --abbrev-ref HEAD)"
+    if [ "${branch}" != "main" ]; then
+      echo "Releases must be tagged on main, not ${branch}"; exit 1
+    fi
+    git fetch origin main
+    if [ "$(git rev-parse HEAD)" != "$(git rev-parse origin/main)" ]; then
+      echo "Local main is not up to date with origin/main"; exit 1
+    fi
     next="$(svu next)"
     if [ "${next}" = "$(svu current 2>/dev/null)" ]; then
       echo "No releasable changes since ${next}"; exit 1
