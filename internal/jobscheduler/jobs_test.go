@@ -263,6 +263,38 @@ func TestJobSchedulerPeriodicJob(t *testing.T) {
 	}, "periodic job should execute multiple times")
 }
 
+func TestJobSchedulerPeriodicJobStopsOnIdle(t *testing.T) {
+	_, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelError})
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	scheduler, err := jobscheduler.New(ctx, jobscheduler.Config{Concurrency: 1})
+	assert.NoError(t, err)
+	t.Cleanup(func() { scheduler.Close() })
+
+	var executions atomic.Int32
+	done := make(chan struct{})
+
+	// Submit with a nanosecond idle timeout. The initial SubmitPeriodicJob
+	// touches the queue so the first execution runs. By the time the re-arm
+	// check fires, the nanosecond timeout has elapsed and the job stops.
+	scheduler.SubmitPeriodicJob("queue1", "idle-job", time.Nanosecond, func(_ context.Context) error {
+		executions.Add(1)
+		close(done)
+		return nil
+	}, time.Nanosecond)
+
+	<-done
+
+	// Cancel and drain the scheduler. If the job was re-armed, the worker
+	// would execute it before Wait returns because concurrency is 1.
+	cancel()
+	scheduler.Wait()
+
+	assert.Equal(t, int32(1), executions.Load(),
+		"periodic job should not re-arm after idle timeout")
+}
+
 func TestJobSchedulerPeriodicJobWithError(t *testing.T) {
 	_, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelError})
 	ctx, cancel := context.WithCancel(ctx)

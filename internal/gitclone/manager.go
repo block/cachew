@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -85,6 +86,19 @@ type Repository struct {
 	refCheckValid      bool
 	fetchSem           chan struct{}
 	credentialProvider CredentialProvider
+	lastAccessed       atomic.Int64
+}
+
+func (r *Repository) TouchAccessed() {
+	r.lastAccessed.Store(time.Now().UnixNano())
+}
+
+func (r *Repository) LastAccessed() time.Time {
+	ns := r.lastAccessed.Load()
+	if ns == 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, ns)
 }
 
 type Manager struct {
@@ -199,6 +213,7 @@ func (m *Manager) GetOrCreate(_ context.Context, upstreamURL string) (*Repositor
 		fetchSem:           make(chan struct{}, 1),
 		credentialProvider: m.credentialProvider,
 	}
+	repo.lastAccessed.Store(time.Now().UnixNano())
 
 	headFile := filepath.Join(clonePath, "HEAD")
 	if _, err := os.Stat(headFile); err == nil {

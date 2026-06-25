@@ -54,7 +54,7 @@ func (s *Strategy) scheduleRepackJobs(repo *gitclone.Repository) {
 		}
 
 		return errors.Wrap(err, "repack")
-	})
+	}, s.config.IdleTimeout)
 }
 
 // countPackFiles returns the number of .pack files in the mirror's
