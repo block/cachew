@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -929,4 +930,109 @@ func TestSnapshotRemoteURLUsesUpstreamURL(t *testing.T) {
 	output, err := cmd.CombinedOutput()
 	assert.NoError(t, err, string(output))
 	assert.Equal(t, upstreamURL+"\n", string(output))
+}
+
+func TestSnapshotGetHonorsRange(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not found in PATH")
+	}
+
+	_, ctx := logging.Configure(context.Background(), logging.Config{})
+	tmpDir := t.TempDir()
+	mirrorRoot := filepath.Join(tmpDir, "mirrors")
+	upstreamURL := "https://github.com/org/repo"
+	mirrorPath := filepath.Join(mirrorRoot, "github.com", "org", "repo")
+	createTestMirrorRepo(t, mirrorPath)
+
+	// The memory cache returns a non-*os.File reader, so range handling must come
+	// from the strategy forwarding Range to Open rather than http.ServeContent.
+	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: time.Hour})
+	assert.NoError(t, err)
+	mux := newTestMux()
+
+	cm := gitclone.NewManagerProvider(ctx, gitclone.Config{MirrorRoot: mirrorRoot}, nil)
+	s, err := git.New(ctx, git.Config{}, newTestScheduler(ctx, t), memCache, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
+	assert.NoError(t, err)
+
+	manager, err := cm()
+	assert.NoError(t, err)
+	repo, err := manager.GetOrCreate(ctx, upstreamURL)
+	assert.NoError(t, err)
+
+	waitForReady(t, s)
+	err = s.GenerateAndUploadSnapshot(ctx, repo)
+	assert.NoError(t, err)
+
+	handler := mux.handlers["GET /git/{host}/{path...}"]
+	assert.NotZero(t, handler)
+
+	get := func(rangeHeader string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, "/git/github.com/org/repo/snapshot.tar.zst", nil)
+		req = req.WithContext(ctx)
+		req.SetPathValue("host", "github.com")
+		req.SetPathValue("path", "org/repo/snapshot.tar.zst")
+		if rangeHeader != "" {
+			req.Header.Set("Range", rangeHeader)
+		}
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+		return w
+	}
+
+	// Full GET advertises range support and yields the whole body.
+	full := get("")
+	assert.Equal(t, 200, full.Code)
+	assert.Equal(t, "bytes", full.Header().Get("Accept-Ranges"))
+	body := full.Body.Bytes()
+	assert.True(t, len(body) > 4, "snapshot body should be larger than the test range")
+	commit := full.Header().Get("X-Cachew-Snapshot-Commit")
+	assert.NotZero(t, commit, "full GET should advertise the snapshot commit")
+
+	// A satisfiable range returns 206 with the matching bytes and Content-Range.
+	partial := get("bytes=0-3")
+	assert.Equal(t, http.StatusPartialContent, partial.Code)
+	assert.Equal(t, "bytes", partial.Header().Get("Accept-Ranges"))
+	assert.Equal(t, "bytes 0-3/"+strconv.Itoa(len(body)), partial.Header().Get("Content-Range"))
+	assert.Equal(t, body[:4], partial.Body.Bytes())
+	// Ranged clients must receive the same freshen metadata as a full GET so
+	// they can apply a delta bundle after a parallel download.
+	assert.Equal(t, commit, partial.Header().Get("X-Cachew-Snapshot-Commit"))
+
+	// A range beyond the object is not satisfiable.
+	tooBig := get("bytes=" + strconv.Itoa(len(body)+10) + "-" + strconv.Itoa(len(body)+20))
+	assert.Equal(t, http.StatusRequestedRangeNotSatisfiable, tooBig.Code)
+	assert.Equal(t, "bytes */"+strconv.Itoa(len(body)), tooBig.Header().Get("Content-Range"))
+
+	etag := full.Header().Get("ETag")
+	assert.NotZero(t, etag, "snapshot should advertise an ETag")
+
+	getCond := func(rangeHeader string, condHeaders map[string]string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, "/git/github.com/org/repo/snapshot.tar.zst", nil)
+		req = req.WithContext(ctx)
+		req.SetPathValue("host", "github.com")
+		req.SetPathValue("path", "org/repo/snapshot.tar.zst")
+		req.Header.Set("Range", rangeHeader)
+		for k, v := range condHeaders {
+			req.Header.Set(k, v)
+		}
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+		return w
+	}
+
+	// Conditional validators take precedence over the range: a matching
+	// If-None-Match revalidates to 304 and a stale If-Match fails with 412,
+	// rather than returning a 206 body the client would discard.
+	notModified := getCond("bytes=0-3", map[string]string{"If-None-Match": etag})
+	assert.Equal(t, http.StatusNotModified, notModified.Code)
+	assert.Equal(t, 0, notModified.Body.Len())
+
+	preconditionFailed := getCond("bytes=0-3", map[string]string{"If-Match": `"stale-etag"`})
+	assert.Equal(t, http.StatusPreconditionFailed, preconditionFailed.Code)
+
+	// An unsatisfiable range with a stale If-Match is a precondition failure
+	// (412), not a 416.
+	beyond := strconv.Itoa(len(body)+10) + "-" + strconv.Itoa(len(body)+20)
+	rangeWithStaleIfMatch := getCond("bytes="+beyond, map[string]string{"If-Match": `"stale-etag"`})
+	assert.Equal(t, http.StatusPreconditionFailed, rangeWithStaleIfMatch.Code)
 }

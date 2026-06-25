@@ -32,6 +32,23 @@ func ConditionalOptions(r *http.Request) []client.RequestOption {
 	return opts
 }
 
+// RangeOptions extracts only the Range/If-Range options from r, for callers
+// that evaluate If-Match/If-None-Match separately (e.g. via CheckConditionals)
+// and so must not double-handle them by forwarding the full set to Open.
+// If-Range is only meaningful alongside Range, so it is dropped when Range is
+// absent.
+func RangeOptions(r *http.Request) []client.RequestOption {
+	v := r.Header.Get("Range")
+	if v == "" {
+		return nil
+	}
+	opts := []client.RequestOption{func(o *client.RequestOptions) { o.Range = v }}
+	if ir := r.Header.Get("If-Range"); ir != "" {
+		opts = append(opts, client.IfRange(ir))
+	}
+	return opts
+}
+
 // CheckConditionals evaluates RFC 7232 If-Match and If-None-Match precondition
 // headers on r against etag. It returns 0 when all preconditions pass,
 // otherwise the HTTP status the caller should send: 412 Precondition Failed for
