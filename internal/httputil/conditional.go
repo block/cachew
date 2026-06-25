@@ -32,23 +32,6 @@ func ConditionalOptions(r *http.Request) []client.RequestOption {
 	return opts
 }
 
-// RangeOptions extracts only the Range/If-Range options from r, for callers
-// that evaluate If-Match/If-None-Match separately (e.g. via CheckConditionals)
-// and so must not double-handle them by forwarding the full set to Open.
-// If-Range is only meaningful alongside Range, so it is dropped when Range is
-// absent.
-func RangeOptions(r *http.Request) []client.RequestOption {
-	v := r.Header.Get("Range")
-	if v == "" {
-		return nil
-	}
-	opts := []client.RequestOption{func(o *client.RequestOptions) { o.Range = v }}
-	if ir := r.Header.Get("If-Range"); ir != "" {
-		opts = append(opts, client.IfRange(ir))
-	}
-	return opts
-}
-
 // CheckConditionals evaluates RFC 7232 If-Match and If-None-Match precondition
 // headers on r against etag. It returns 0 when all preconditions pass,
 // otherwise the HTTP status the caller should send: 412 Precondition Failed for
@@ -66,42 +49,74 @@ func CheckConditionals(r *http.Request, etag string) int {
 	}
 }
 
+// ServeOption configures ServeCacheHit.
+type ServeOption func(*serveConfig)
+
+type serveConfig struct {
+	decorate func(http.ResponseWriter, http.Header)
+}
+
+// WithResponseDecorator registers fn to run after the stored headers have been
+// copied to the response but before the status line is written, on the 200, 206
+// and 416 paths. It lets endpoints that delegate range/conditional resolution to
+// the cache still override or augment the response (e.g. force a Content-Type or
+// advertise endpoint-specific metadata) uniformly across full and partial
+// responses. fn is given the stored headers (so it can branch on, say, a
+// Content-Range) and must not write the body or call WriteHeader.
+func WithResponseDecorator(fn func(w http.ResponseWriter, stored http.Header)) ServeOption {
+	return func(c *serveConfig) { c.decorate = fn }
+}
+
 // ServeCacheHit writes the outcome of a cache Open to w. headers and body are
 // the Open return values and openErr its error. It handles the success and
 // conditional cases: a nil error streams the body (always closing it), a
 // satisfied If-None-Match (ErrNotModified) writes 304 with the stored headers,
 // and a failed If-Match (ErrPreconditionFailed) writes 412. It returns
 // handled=false for any other error (e.g. os.ErrNotExist) so the caller can map
-// it to its own status.
-func ServeCacheHit(w http.ResponseWriter, headers http.Header, body io.ReadCloser, openErr error) (handled bool, err error) {
+// it to its own status, and n is the number of body bytes written (0 for
+// bodiless responses).
+func ServeCacheHit(w http.ResponseWriter, headers http.Header, body io.ReadCloser, openErr error, opts ...ServeOption) (handled bool, n int64, err error) {
+	var cfg serveConfig
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+	decorate := func() {
+		if cfg.decorate != nil {
+			cfg.decorate(w, headers)
+		}
+	}
+
 	switch {
 	case openErr == nil:
 		maps.Copy(w.Header(), headers)
 		w.Header().Set("Accept-Ranges", "bytes")
+		decorate()
 		// A Content-Range set by the cache signals a satisfied byte range.
 		if headers.Get("Content-Range") != "" {
 			w.WriteHeader(http.StatusPartialContent)
 		}
-		_, copyErr := io.Copy(w, body)
-		return true, errors.Wrap(errors.Join(copyErr, body.Close()), "serve cache hit")
+		var copyErr error
+		n, copyErr = io.Copy(w, body)
+		return true, n, errors.Wrap(errors.Join(copyErr, body.Close()), "serve cache hit")
 
 	case errors.Is(openErr, client.ErrNotModified):
 		maps.Copy(w.Header(), headers)
 		w.WriteHeader(http.StatusNotModified)
-		return true, nil
+		return true, 0, nil
 
 	case errors.Is(openErr, client.ErrPreconditionFailed):
 		w.WriteHeader(http.StatusPreconditionFailed)
-		return true, nil
+		return true, 0, nil
 
 	case errors.Is(openErr, client.ErrRangeNotSatisfiable):
 		maps.Copy(w.Header(), headers)
 		w.Header().Set("Accept-Ranges", "bytes")
+		decorate()
 		w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
-		return true, nil
+		return true, 0, nil
 
 	default:
-		return false, nil
+		return false, 0, nil
 	}
 }
 
