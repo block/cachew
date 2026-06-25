@@ -82,7 +82,7 @@ func (d *APIV1) getObject(w http.ResponseWriter, r *http.Request) {
 
 	namespacedCache := d.cache.Namespace(namespace)
 	cr, headers, err := namespacedCache.Open(r.Context(), key, httputil.ConditionalOptions(r)...)
-	if handled, serveErr := httputil.ServeCacheHit(w, headers, cr, err); handled {
+	if handled, _, serveErr := httputil.ServeCacheHit(w, headers, cr, err); handled {
 		if serveErr != nil {
 			d.logger.Error("Failed to serve cache object", "error", serveErr, "key", key)
 		}

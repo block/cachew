@@ -162,7 +162,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) serveCached(w http.ResponseWriter, r *http.Request, key cache.Key) (bool, error) {
 	cr, headers, err := h.cache.Open(r.Context(), key, httputil.ConditionalOptions(r)...)
-	if handled, serveErr := httputil.ServeCacheHit(w, headers, cr, err); handled {
+	if handled, _, serveErr := httputil.ServeCacheHit(w, headers, cr, err); handled {
 		logging.FromContext(r.Context()).DebugContext(r.Context(), "Cache hit")
 		return true, errors.WithStack(serveErr)
 	}

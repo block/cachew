@@ -320,44 +320,30 @@ func (s *Strategy) handleSnapshotRequest(w http.ResponseWriter, r *http.Request,
 	}
 	s.maybeBackgroundFetch(repo)
 
-	// Forward only Range/If-Range here; If-Match/If-None-Match are evaluated
-	// against the served body below via CheckConditionals.
-	reader, headers, err := s.cache.Open(ctx, cacheKey, httputil.RangeOptions(r)...)
-	if errors.Is(err, cache.ErrRangeNotSatisfiable) {
-		// A failed If-Match (412) or satisfied If-None-Match (304) takes
-		// precedence over an unsatisfiable range (RFC 7232 §3, RFC 7233 §3.1).
-		if status := httputil.CheckConditionals(r, headers.Get(cache.ETagKey)); status != 0 {
-			w.WriteHeader(status)
-			return
+	// Forward the full conditional/range set: the cache resolves If-Match /
+	// If-None-Match before Range, so 304/412 already take precedence over a
+	// satisfied range or a 416 (RFC 7232 §3, RFC 7233 §3.1), and ServeCacheHit
+	// maps each outcome to its status.
+	reader, headers, err := s.cache.Open(ctx, cacheKey, httputil.ConditionalOptions(r)...)
+	switch {
+	case err == nil,
+		errors.Is(err, cache.ErrNotModified),
+		errors.Is(err, cache.ErrPreconditionFailed),
+		errors.Is(err, cache.ErrRangeNotSatisfiable):
+		if serveErr := s.serveSnapshotWithBundle(ctx, w, r, reader, headers, err, repo, upstreamURL, repoName, start); serveErr != nil {
+			logger.ErrorContext(ctx, "Failed to serve snapshot", "upstream", upstreamURL, "error", serveErr)
+			span.RecordError(serveErr)
+			span.SetStatus(codes.Error, serveErr.Error())
 		}
-		w.Header().Set("Content-Type", "application/zstd")
-		w.Header().Set("Accept-Ranges", "bytes")
-		if cr := headers.Get("Content-Range"); cr != "" {
-			w.Header().Set("Content-Range", cr)
+	case errors.Is(err, os.ErrNotExist):
+		if spoolErr := s.serveSnapshotWithSpool(w, r, repo, upstreamURL, repoName, start); spoolErr != nil {
+			logger.ErrorContext(ctx, "Failed to serve snapshot via spool", "upstream", upstreamURL, "error", spoolErr)
+			span.RecordError(spoolErr)
+			span.SetStatus(codes.Error, spoolErr.Error())
 		}
-		w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
-		return
-	}
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
+	default:
 		logger.ErrorContext(ctx, "Failed to open snapshot from cache", "upstream", upstreamURL, "error", err)
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
-		return
-	}
-
-	if reader == nil {
-		if err := s.serveSnapshotWithSpool(w, r, repo, upstreamURL, repoName, start); err != nil {
-			logger.ErrorContext(ctx, "Failed to serve snapshot via spool", "upstream", upstreamURL, "error", err)
-			span.RecordError(err)
-			span.SetStatus(codes.Error, err.Error())
-		}
-		return
-	}
-	defer reader.Close()
-
-	if err := s.serveSnapshotWithBundle(ctx, w, r, reader, headers, repo, upstreamURL, repoName, start); err != nil {
-		logger.ErrorContext(ctx, "Failed to serve snapshot", "upstream", upstreamURL, "error", err)
-		span.RecordError(err)
-		span.SetStatus(codes.Error, err.Error())
 	}
 }
 
@@ -460,16 +446,24 @@ func (s *Strategy) handleBundleRequest(w http.ResponseWriter, r *http.Request, h
 		s.metrics.recordBundleServe(ctx, source, repoName, bytes, time.Since(start))
 	}()
 
-	// Try serving from cache first — works on any pod.
-	if reader, _, err := s.cache.Open(ctx, bKey); err == nil && reader != nil {
-		defer reader.Close()
-		w.Header().Set("Content-Type", "application/x-git-bundle")
-		n, err := io.Copy(w, reader)
+	// Try serving from cache first — works on any pod. Forwarding the
+	// conditional/range set lets clients revalidate and fetch large bundles with
+	// bounded parallel range requests, just like snapshots.
+	reader, headers, openErr := s.cache.Open(ctx, bKey, httputil.ConditionalOptions(r)...)
+	switch {
+	case openErr == nil,
+		errors.Is(openErr, cache.ErrNotModified),
+		errors.Is(openErr, cache.ErrPreconditionFailed),
+		errors.Is(openErr, cache.ErrRangeNotSatisfiable):
+		decorate := func(rw http.ResponseWriter, _ http.Header) {
+			rw.Header().Set("Content-Type", "application/x-git-bundle")
+		}
+		_, n, serveErr := httputil.ServeCacheHit(w, headers, reader, openErr, httputil.WithResponseDecorator(decorate))
 		bytes = n
 		source = "cache"
-		if err != nil {
-			logger.WarnContext(ctx, "Failed to stream cached bundle", "upstream", upstreamURL, "error", err)
-			span.RecordError(err)
+		if serveErr != nil {
+			logger.WarnContext(ctx, "Failed to stream cached bundle", "upstream", upstreamURL, "error", serveErr)
+			span.RecordError(serveErr)
 		}
 		return
 	}
@@ -533,83 +527,74 @@ func (s *Strategy) handleBundleRequest(w http.ResponseWriter, r *http.Request, h
 	}
 }
 
-func (s *Strategy) serveSnapshotWithBundle(ctx context.Context, w http.ResponseWriter, r *http.Request, reader io.ReadCloser, headers http.Header, repo *gitclone.Repository, upstreamURL, repoName string, start time.Time) error {
-	// If-Match/If-None-Match are evaluated before serving any body: a satisfied
-	// If-None-Match (304) or a failed If-Match (412) takes precedence over a
-	// range response, so revalidating clients are not handed a 206 they would
-	// have to discard (RFC 7232 §3, RFC 7233 §3.1).
-	if status := httputil.CheckConditionals(r, headers.Get(cache.ETagKey)); status != 0 {
-		w.WriteHeader(status)
-		s.metrics.recordSnapshotServe(ctx, "cache", repoName, 0, time.Since(start))
-		if span := trace.SpanFromContext(ctx); span.SpanContext().IsValid() {
-			span.SetAttributes(attribute.String("cachew.source", "cache"), attribute.Int64("cachew.bytes", 0))
+func (s *Strategy) serveSnapshotWithBundle(ctx context.Context, w http.ResponseWriter, _ *http.Request, reader io.ReadCloser, headers http.Header, openErr error, repo *gitclone.Repository, upstreamURL, repoName string, start time.Time) error {
+	// The snapshot commit is stored alongside the object and surfaces via the
+	// copied headers; only the delta-bundle URL is computed per request. Both are
+	// advertised on full (200) and ranged (206) responses so a client.ParallelGet
+	// learns from its discovery chunk whether to apply a bundle after downloading.
+	var snapshotCommit, bundleURL string
+	if openErr == nil {
+		snapshotCommit, bundleURL = s.snapshotMetadata(ctx, headers, repo, upstreamURL)
+	}
+
+	decorate := func(rw http.ResponseWriter, _ http.Header) {
+		// Content-Type is fixed for snapshots regardless of what the backend recorded.
+		rw.Header().Set("Content-Type", "application/zstd")
+		if bundleURL != "" {
+			rw.Header().Set("X-Cachew-Bundle-Url", bundleURL)
 		}
-		return nil
 	}
 
-	// A satisfied byte range is served as-is. Bundle negotiation applies only to
-	// whole-snapshot downloads, so a partial read (e.g. a client.ParallelGet
-	// chunk) skips it and returns 206 directly.
-	if cr := headers.Get("Content-Range"); cr != "" {
-		applySnapshotCacheHeaders(w, headers)
-		w.Header().Set("Accept-Ranges", "bytes")
-		w.Header().Set("Content-Range", cr)
-		// Ranged clients (client.ParallelGet) read the freshen metadata from the
-		// discovery chunk, so it must be present on partial responses too.
-		s.setSnapshotMetadataHeaders(ctx, w, headers, repo, upstreamURL)
-		w.WriteHeader(http.StatusPartialContent)
-		n, err := io.Copy(w, reader)
-		s.metrics.recordSnapshotServe(ctx, "cache_range", repoName, n, time.Since(start))
-		if span := trace.SpanFromContext(ctx); span.SpanContext().IsValid() {
-			span.SetAttributes(attribute.String("cachew.source", "cache_range"), attribute.Int64("cachew.bytes", n))
-		}
-		return errors.Wrap(err, "stream snapshot range")
+	// Bundle negotiation applies only to whole-snapshot downloads: a ranged chunk
+	// (Content-Range present) skips it and is served as-is.
+	if openErr == nil && bundleURL != "" && headers.Get("Content-Range") == "" {
+		s.pregenerateBundle(ctx, repo, upstreamURL, snapshotCommit)
 	}
 
-	snapshotCommit, bundleURL := s.setSnapshotMetadataHeaders(ctx, w, headers, repo, upstreamURL)
-
-	// Proactively generate and cache the advertised bundle so any pod can serve it.
-	if bundleURL != "" {
-		go func() {
-			bgCtx := context.WithoutCancel(ctx)
-			logger := logging.FromContext(bgCtx)
-			bundleFile, err := s.createBundle(bgCtx, repo, snapshotCommit)
-			if err != nil {
-				logger.WarnContext(bgCtx, "Failed to pre-generate bundle", "upstream", upstreamURL, "error", err)
-				return
-			}
-			defer bundleFile.Close()
-			if err := s.cacheBundle(bgCtx, bundleCacheKey(upstreamURL, snapshotCommit), bundleFile); err != nil {
-				logger.WarnContext(bgCtx, "Failed to cache bundle", "upstream", upstreamURL, "error", err)
-			}
-		}()
+	handled, n, err := httputil.ServeCacheHit(w, headers, reader, openErr, httputil.WithResponseDecorator(decorate))
+	if !handled {
+		return errors.Wrap(openErr, "serve snapshot")
 	}
 
-	applySnapshotCacheHeaders(w, headers)
-	w.Header().Set("Accept-Ranges", "bytes")
-
-	n, err := serveReaderFast(w, r, reader)
-	s.metrics.recordSnapshotServe(ctx, "cache", repoName, n, time.Since(start))
+	source := "cache"
+	if headers.Get("Content-Range") != "" {
+		source = "cache_range"
+	}
+	s.metrics.recordSnapshotServe(ctx, source, repoName, n, time.Since(start))
 	if span := trace.SpanFromContext(ctx); span.SpanContext().IsValid() {
-		span.SetAttributes(attribute.String("cachew.source", "cache"), attribute.Int64("cachew.bytes", n))
+		span.SetAttributes(attribute.String("cachew.source", source), attribute.Int64("cachew.bytes", n))
 	}
-	return errors.Wrap(err, "stream snapshot")
+	return errors.Wrap(err, "serve snapshot")
 }
 
-// setSnapshotMetadataHeaders advertises the snapshot's commit and, when the
-// snapshot trails the mirror's HEAD, the delta-bundle URL clients use to
-// fast-forward. Shared by the full and ranged serve paths so ranged clients
-// (client.ParallelGet) receive the same freshen metadata on the discovery
-// chunk. It returns the snapshot commit and the bundle URL it set (empty when
-// the snapshot is already at HEAD), so callers can decide whether to
-// pre-generate the bundle.
-func (s *Strategy) setSnapshotMetadataHeaders(ctx context.Context, w http.ResponseWriter, headers http.Header, repo *gitclone.Repository, upstreamURL string) (snapshotCommit, bundleURL string) {
+// pregenerateBundle builds and caches the delta bundle for snapshotCommit in the
+// background so any pod can later serve it without regenerating.
+func (s *Strategy) pregenerateBundle(ctx context.Context, repo *gitclone.Repository, upstreamURL, snapshotCommit string) {
+	go func() {
+		bgCtx := context.WithoutCancel(ctx)
+		logger := logging.FromContext(bgCtx)
+		bundleFile, err := s.createBundle(bgCtx, repo, snapshotCommit)
+		if err != nil {
+			logger.WarnContext(bgCtx, "Failed to pre-generate bundle", "upstream", upstreamURL, "error", err)
+			return
+		}
+		defer bundleFile.Close()
+		if err := s.cacheBundle(bgCtx, bundleCacheKey(upstreamURL, snapshotCommit), bundleFile); err != nil {
+			logger.WarnContext(bgCtx, "Failed to cache bundle", "upstream", upstreamURL, "error", err)
+		}
+	}()
+}
+
+// snapshotMetadata reports the snapshot's commit and, when the snapshot trails
+// the mirror's HEAD, the delta-bundle URL clients use to fast-forward (empty
+// when the snapshot is already at HEAD). It performs no response mutation so the
+// full and ranged serve paths can advertise the same freshen metadata via a
+// shared response decorator.
+func (s *Strategy) snapshotMetadata(ctx context.Context, headers http.Header, repo *gitclone.Repository, upstreamURL string) (snapshotCommit, bundleURL string) {
 	snapshotCommit = headers.Get("X-Cachew-Snapshot-Commit")
 	if snapshotCommit == "" {
 		return "", ""
 	}
-	w.Header().Set("X-Cachew-Snapshot-Commit", snapshotCommit)
-
 	mirrorHead := s.getMirrorHead(ctx, repo)
 	if mirrorHead == "" || snapshotCommit == mirrorHead {
 		return snapshotCommit, ""
@@ -618,9 +603,7 @@ func (s *Strategy) setSnapshotMetadataHeaders(ctx context.Context, w http.Respon
 	if err != nil {
 		return snapshotCommit, ""
 	}
-	bundleURL = fmt.Sprintf("/git/%s/snapshot.bundle?base=%s", repoPath, snapshotCommit)
-	w.Header().Set("X-Cachew-Bundle-Url", bundleURL)
-	return snapshotCommit, bundleURL
+	return snapshotCommit, fmt.Sprintf("/git/%s/snapshot.bundle?base=%s", repoPath, snapshotCommit)
 }
 
 // applySnapshotCacheHeaders forwards the cached snapshot's validators so clients
