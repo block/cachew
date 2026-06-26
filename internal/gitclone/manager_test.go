@@ -209,6 +209,39 @@ func TestManager_DiscoverExisting(t *testing.T) {
 	}
 }
 
+func TestManager_DiscoverExisting_SkipsAndRemovesLeftoverCloneTempDirs(t *testing.T) {
+	_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelError})
+	tmpDir := t.TempDir()
+	config := Config{
+		MirrorRoot:       tmpDir,
+		FetchInterval:    15 * time.Minute,
+		RefCheckInterval: 10 * time.Second,
+	}
+
+	manager, err := NewManager(ctx, config, nil)
+	assert.NoError(t, err)
+
+	upstreamPath := createBareRepo(t, t.TempDir())
+
+	realRepo := filepath.Join(tmpDir, "github.com", "user1", "repo1")
+	assert.NoError(t, os.MkdirAll(filepath.Dir(realRepo), 0o755))
+	assert.NoError(t, exec.Command("git", "clone", "--bare", upstreamPath, realRepo).Run())
+
+	// Simulate an interrupted clone: a leftover .clone-* temp dir containing a
+	// mirror clone at its "repo" subdirectory, alongside the real repo.
+	leftover := filepath.Join(tmpDir, "github.com", "user1", cloneTempPrefix+"123456")
+	assert.NoError(t, os.MkdirAll(leftover, 0o755))
+	assert.NoError(t, exec.Command("git", "clone", "--bare", upstreamPath, filepath.Join(leftover, "repo")).Run())
+
+	discovered, err := manager.DiscoverExisting(context.Background())
+	assert.NoError(t, err)
+	assert.Equal(t, 1, len(discovered))
+	assert.Equal(t, "https://github.com/user1/repo1", discovered[0].UpstreamURL())
+
+	_, statErr := os.Stat(leftover)
+	assert.True(t, os.IsNotExist(statErr), "leftover clone temp dir should be removed")
+}
+
 func TestRepository_StateTransitions(t *testing.T) {
 	repo := &Repository{
 		state:       StateEmpty,
