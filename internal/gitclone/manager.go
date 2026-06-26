@@ -71,7 +71,16 @@ type Config struct {
 	LsRemoteTimeout  time.Duration `hcl:"ls-remote-timeout,optional" help:"Upper bound for 'git ls-remote' so a slow upstream cannot block the request path indefinitely." default:"1m"`
 	RepackTimeout    time.Duration `hcl:"repack-timeout,optional" help:"Upper bound for 'git repack' so a slow repack on a large repository cannot block the scheduler queue indefinitely." default:"10m"`
 	RepackThreads    int           `hcl:"repack-threads,optional" help:"Threads for git repack operations. Limits memory since windowMemory and deltaCacheSize are per-thread. 0 = pack-threads." default:"4"`
+
+	FullRepackTimeout time.Duration `hcl:"full-repack-timeout,optional" help:"Upper bound for the full (delta-recomputing) repack, which is far slower than the geometric repack on large repositories. Size it to complete the largest mirror, since a timeout kills the job and wastes the work; it also holds a scheduler slot for its whole duration, so pair it with a slow full-repack-interval. 0 falls back to repack-timeout." default:"6h"`
 }
+
+// Delta search window and chain depth for the full repack. A wider window finds
+// tighter deltas (smaller packs) at the cost of more CPU.
+const (
+	fullRepackWindow = 100
+	fullRepackDepth  = 50
+)
 
 // CredentialProvider provides credentials for git operations.
 type CredentialProvider interface {
@@ -821,8 +830,46 @@ func (r *Repository) GetUpstreamRefs(ctx context.Context) (map[string]string, er
 func (r *Repository) Repack(ctx context.Context) error {
 	logger := logging.FromContext(ctx)
 	logger.InfoContext(ctx, "Geometric repack started", "upstream", r.upstreamURL)
+	if err := r.runRepack(ctx, r.config.RepackTimeout,
+		"-d", "--geometric=2", "--write-midx", "--write-bitmap-index"); err != nil {
+		return err
+	}
+	logger.InfoContext(ctx, "Geometric repack completed", "upstream", r.upstreamURL)
+	return nil
+}
 
-	repackCtx, cancel := context.WithTimeout(ctx, r.config.RepackTimeout)
+// RepackFull runs a full repack that re-selects deltas across all objects with
+// a wide search window (-a -d -f --window --depth). Unlike the geometric
+// Repack, which reuses existing deltas and only consolidates packs, this
+// recovers the cross-pack redundancy that accumulates from incremental fetches
+// — materially shrinking the mirror, and therefore the snapshots derived from
+// it, at the cost of significant one-time CPU. It is meant to run on a slow
+// cadence in between the frequent geometric repacks.
+func (r *Repository) RepackFull(ctx context.Context) error {
+	logger := logging.FromContext(ctx)
+
+	timeout := r.config.FullRepackTimeout
+	if timeout <= 0 {
+		timeout = r.config.RepackTimeout
+	}
+
+	logger.InfoContext(ctx, "Full repack started", "upstream", r.upstreamURL, "window", fullRepackWindow, "depth", fullRepackDepth)
+	if err := r.runRepack(ctx, timeout,
+		"-a", "-d", "-f",
+		"--window="+strconv.Itoa(fullRepackWindow), "--depth="+strconv.Itoa(fullRepackDepth),
+		"--write-midx", "--write-bitmap-index"); err != nil {
+		return err
+	}
+	logger.InfoContext(ctx, "Full repack completed", "upstream", r.upstreamURL)
+	return nil
+}
+
+// runRepack executes "git repack <args>" with bounded threads/memory and a
+// timeout, cleaning up a stale multi-pack-index.lock on failure.
+func (r *Repository) runRepack(ctx context.Context, timeout time.Duration, repackArgs ...string) error {
+	logger := logging.FromContext(ctx)
+
+	repackCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	threads := r.config.RepackThreads
@@ -834,12 +881,15 @@ func (r *Repository) Repack(ctx context.Context) error {
 	// config uses high values (512m deltaCacheSize, 1g windowMemory) tuned for
 	// serving performance with many threads. Repack is a background task that
 	// can afford to be slower in exchange for bounded memory.
-	// #nosec G204 - r.path is controlled by us
-	cmd := exec.CommandContext(repackCtx, "git", "-C", r.path,
-		"-c", "pack.threads="+strconv.Itoa(threads),
+	args := []string{"-C", r.path,
+		"-c", "pack.threads=" + strconv.Itoa(threads),
 		"-c", "pack.windowMemory=256m",
 		"-c", "pack.deltaCacheSize=128m",
-		"repack", "-d", "--geometric=2", "--write-midx", "--write-bitmap-index")
+		"repack"}
+	args = append(args, repackArgs...)
+
+	// #nosec G204 - r.path is controlled by us
+	cmd := exec.CommandContext(repackCtx, "git", args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error {
 		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
@@ -856,8 +906,6 @@ func (r *Repository) Repack(ctx context.Context) error {
 		}
 		return errors.Wrapf(err, "git repack: %s", string(output))
 	}
-
-	logger.InfoContext(ctx, "Geometric repack completed", "upstream", r.upstreamURL)
 	return nil
 }
 

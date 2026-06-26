@@ -20,16 +20,25 @@ func TestRepackInterval(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	tests := []struct {
-		name           string
-		repackInterval time.Duration
+		name               string
+		repackInterval     time.Duration
+		fullRepackInterval time.Duration
 	}{
 		{
-			name:           "Enabled",
+			name:           "GeometricEnabled",
 			repackInterval: 24 * time.Hour,
 		},
 		{
-			name:           "Disabled",
-			repackInterval: 0,
+			name:               "FullEnabled",
+			fullRepackInterval: 7 * 24 * time.Hour,
+		},
+		{
+			name:               "BothEnabled",
+			repackInterval:     24 * time.Hour,
+			fullRepackInterval: 7 * 24 * time.Hour,
+		},
+		{
+			name: "Disabled",
 		},
 	}
 
@@ -40,7 +49,8 @@ func TestRepackInterval(t *testing.T) {
 				MirrorRoot: filepath.Join(tmpDir, tt.name),
 			}, nil)
 			s, err := git.New(ctx, git.Config{
-				RepackInterval: tt.repackInterval,
+				RepackInterval:     tt.repackInterval,
+				FullRepackInterval: tt.fullRepackInterval,
 			}, newTestScheduler(ctx, t), nil, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
 			assert.NoError(t, err)
 			assert.True(t, s != nil)

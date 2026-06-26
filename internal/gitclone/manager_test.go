@@ -463,6 +463,35 @@ func TestRepository_Repack(t *testing.T) {
 	assert.NoError(t, err)
 }
 
+func TestRepository_RepackFull(t *testing.T) {
+	_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelError})
+	tmpDir := t.TempDir()
+	upstreamPath := createBareRepo(t, tmpDir)
+
+	clonePath := filepath.Join(tmpDir, "mirror")
+	cmd := exec.Command("git", "clone", "--mirror", upstreamPath, clonePath)
+	assert.NoError(t, cmd.Run())
+
+	repo := &Repository{
+		state:       StateReady,
+		config:      testRepoConfig(),
+		path:        clonePath,
+		upstreamURL: upstreamPath,
+		fetchSem:    make(chan struct{}, 1),
+	}
+	repo.fetchSem <- struct{}{}
+
+	// Unset full-repack-timeout exercises the fallback to repack-timeout.
+	assert.NoError(t, repo.RepackFull(ctx))
+
+	packs, err := filepath.Glob(filepath.Join(clonePath, "objects", "pack", "*.pack"))
+	assert.NoError(t, err)
+	assert.True(t, len(packs) > 0, "expected at least one pack file after full repack")
+
+	_, err = os.Stat(filepath.Join(clonePath, "objects", "pack", "multi-pack-index"))
+	assert.NoError(t, err)
+}
+
 func TestRepository_Repack_CleansUpStaleLockOnFailure(t *testing.T) {
 	_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelError})
 	tmpDir := t.TempDir()
