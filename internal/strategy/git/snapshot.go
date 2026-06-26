@@ -265,48 +265,37 @@ func (s *Strategy) handleSnapshotRequest(w http.ResponseWriter, r *http.Request,
 		if existing, loaded := s.coldSnapshotMu.LoadOrStore(upstreamURL, entry); loaded {
 			winner := existing.(*coldSnapshotEntry)
 			<-winner.done
-			reader, _, openErr := s.cache.Open(ctx, cacheKey)
-			if openErr == nil && reader != nil {
+			reader, headers, openErr := s.cache.Open(ctx, cacheKey, httputil.ConditionalOptions(r)...)
+			if !errors.Is(openErr, os.ErrNotExist) {
 				winner.serving.Add(1)
-				defer func() {
-					_ = reader.Close()
-					winner.serving.Done()
-				}()
-				logger.InfoContext(ctx, "Serving locally cached snapshot after waiting for in-flight fill", "upstream", upstreamURL)
-				w.Header().Set("Content-Type", "application/zstd")
-				n, err := serveReaderFast(w, r, reader)
-				s.metrics.recordSnapshotServe(ctx, "cold_cache", repoName, n, time.Since(start))
-				span.SetAttributes(attribute.String("cachew.source", "cold_cache"), attribute.Int64("cachew.bytes", n))
-				if err != nil {
-					logger.WarnContext(ctx, "Failed to stream locally cached snapshot", "upstream", upstreamURL, "error", err)
-					span.RecordError(err)
-					span.SetStatus(codes.Error, err.Error())
+				served, serveErr := s.serveOpenedSnapshot(ctx, w, reader, headers, openErr, repoName, "cold_cache", start)
+				winner.serving.Done()
+				if serveErr != nil {
+					logger.WarnContext(ctx, "Failed to serve locally cached snapshot after waiting for in-flight fill", "upstream", upstreamURL, "error", serveErr)
+					span.RecordError(serveErr)
 				}
-				return
+				if served {
+					logger.InfoContext(ctx, "Served locally cached snapshot after waiting for in-flight fill", "upstream", upstreamURL)
+					return
+				}
 			}
 		} else {
 			defer func() {
 				close(entry.done)
 				s.coldSnapshotMu.Delete(upstreamURL)
 			}()
-			reader, _, openErr := s.cache.Open(ctx, cacheKey)
-			if openErr == nil && reader != nil {
-				logger.InfoContext(ctx, "Serving cached snapshot while mirror warms up", "upstream", upstreamURL)
-				w.Header().Set("Content-Type", "application/zstd")
-				n, err := serveReaderFast(w, r, reader)
-				s.metrics.recordSnapshotServe(ctx, "cold_cache", repoName, n, time.Since(start))
-				span.SetAttributes(attribute.String("cachew.source", "cold_cache"), attribute.Int64("cachew.bytes", n))
-				if err != nil {
-					logger.WarnContext(ctx, "Failed to stream cached snapshot", "upstream", upstreamURL, "error", err)
-					span.RecordError(err)
-					span.SetStatus(codes.Error, err.Error())
+			reader, headers, openErr := s.cache.Open(ctx, cacheKey, httputil.ConditionalOptions(r)...)
+			if !errors.Is(openErr, os.ErrNotExist) {
+				served, serveErr := s.serveOpenedSnapshot(ctx, w, reader, headers, openErr, repoName, "cold_cache", start)
+				if serveErr != nil {
+					logger.WarnContext(ctx, "Failed to serve cached snapshot while mirror warms up", "upstream", upstreamURL, "error", serveErr)
+					span.RecordError(serveErr)
 				}
-				_ = reader.Close()
-				s.scheduleDeferredMirrorRestore(ctx, repo, entry)
-				return
-			}
-			if reader != nil {
-				_ = reader.Close()
+				if served {
+					logger.InfoContext(ctx, "Served cached snapshot while mirror warms up", "upstream", upstreamURL)
+					s.scheduleDeferredMirrorRestore(ctx, repo, entry)
+					return
+				}
 			}
 		}
 	}
@@ -556,15 +545,48 @@ func (s *Strategy) serveSnapshotWithBundle(ctx context.Context, w http.ResponseW
 		return errors.Wrap(openErr, "serve snapshot")
 	}
 
-	source := "cache"
-	if headers.Get("Content-Range") != "" {
-		source = "cache_range"
-	}
+	source := snapshotServeSource("cache", headers)
 	s.metrics.recordSnapshotServe(ctx, source, repoName, n, time.Since(start))
 	if span := trace.SpanFromContext(ctx); span.SpanContext().IsValid() {
 		span.SetAttributes(attribute.String("cachew.source", source), attribute.Int64("cachew.bytes", n))
 	}
 	return errors.Wrap(err, "serve snapshot")
+}
+
+// serveOpenedSnapshot writes an already-opened cached snapshot to w, honouring
+// Range and conditional requests and forcing the snapshot Content-Type. It is
+// the cold-start serve path (no mirror, so no bundle negotiation); source labels
+// the serve in metrics and traces. reader/headers/openErr are the cache Open
+// results; callers must not pass an os.ErrNotExist miss. It returns served=false
+// when the cache returned an unexpected error, so the caller can fall through to
+// generation, and closes reader on every path.
+func (s *Strategy) serveOpenedSnapshot(ctx context.Context, w http.ResponseWriter, reader io.ReadCloser, headers http.Header, openErr error, repoName, source string, start time.Time) (served bool, err error) {
+	decorate := func(rw http.ResponseWriter, _ http.Header) {
+		rw.Header().Set("Content-Type", "application/zstd")
+	}
+	handled, n, serveErr := httputil.ServeCacheHit(w, headers, reader, openErr, httputil.WithResponseDecorator(decorate))
+	if !handled {
+		if reader != nil {
+			serveErr = errors.Join(serveErr, reader.Close())
+		}
+		return false, errors.Wrap(errors.Join(openErr, serveErr), "open cached snapshot")
+	}
+	source = snapshotServeSource(source, headers)
+	s.metrics.recordSnapshotServe(ctx, source, repoName, n, time.Since(start))
+	if span := trace.SpanFromContext(ctx); span.SpanContext().IsValid() {
+		span.SetAttributes(attribute.String("cachew.source", source), attribute.Int64("cachew.bytes", n))
+	}
+	return true, errors.Wrap(serveErr, "serve cached snapshot")
+}
+
+// snapshotServeSource appends a "_range" suffix to the metric source label when
+// the response carried a satisfied byte range, so full and partial serves are
+// distinguishable.
+func snapshotServeSource(base string, headers http.Header) string {
+	if headers.Get("Content-Range") != "" {
+		return base + "_range"
+	}
+	return base
 }
 
 // pregenerateBundle builds and caches the delta bundle for snapshotCommit in the

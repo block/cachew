@@ -52,6 +52,11 @@ type GitRestoreCmd struct {
 	Commit      []string          `help:"Required commit SHAs that must exist on the server, regardless of which ref points at them. May be repeated."`
 	NoBundle    bool              `help:"Skip applying delta bundle."`
 	ZstdThreads int               `help:"Threads for zstd decompression (0 = all CPU cores)." default:"0"`
+	// DownloadConcurrency > 1 fetches the snapshot with that many concurrent
+	// range requests (requires server range support; falls back to a single
+	// request otherwise). 1 keeps the streaming single-request download.
+	DownloadConcurrency int `help:"Concurrent range requests for the snapshot download (1 = single streaming request)." default:"1"`
+	DownloadChunkSizeMB int `help:"Chunk size in MiB for parallel snapshot downloads." default:"8"`
 }
 
 func (c *GitRestoreCmd) Run(ctx context.Context, api *client.Client) error {
@@ -72,56 +77,22 @@ func (c *GitRestoreCmd) Run(ctx context.Context, api *client.Client) error {
 
 	fmt.Fprintf(os.Stderr, "Fetching snapshot for %s\n", c.RepoURL) //nolint:forbidigo
 
-	var snap *client.GitSnapshot
-	if err := inSpan(ctx, "cachew.download_snapshot",
-		[]attribute.KeyValue{attribute.String("cachew.repo_url", c.RepoURL)},
-		func(ctx context.Context) error {
-			downloadStart := time.Now()
-			s, err := api.OpenGitSnapshot(ctx, c.RepoURL)
-			if err != nil {
-				return err //nolint:wrapcheck // wrapped by caller
-			}
-			snap = s
-			trace.SpanFromContext(ctx).SetAttributes(
-				attribute.String("cachew.snapshot_commit", s.Commit),
-				attribute.String("cachew.bundle_url", s.BundleURL),
-				attribute.Float64("cachew.elapsed_seconds", time.Since(downloadStart).Seconds()),
-			)
-			return nil
-		}); err != nil {
+	commit, bundleURL, err := c.fetchAndExtractSnapshot(ctx, api)
+	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return errors.Errorf("no snapshot available for %s", c.RepoURL)
 		}
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
-		return errors.Wrap(err, "fetch snapshot")
+		return errors.Wrap(err, "restore snapshot")
 	}
-	defer snap.Close()
-	span.SetAttributes(attribute.String("cachew.snapshot_commit", snap.Commit))
-
-	fmt.Fprintf(os.Stderr, "Extracting to %s...\n", c.Directory) //nolint:forbidigo
-	if err := inSpan(ctx, "cachew.extract",
-		[]attribute.KeyValue{attribute.String("cachew.directory", c.Directory)},
-		func(ctx context.Context) error {
-			extractStart := time.Now()
-			if err := snapshot.Extract(ctx, snap.Body, c.Directory, c.ZstdThreads); err != nil {
-				return err //nolint:wrapcheck // wrapped by caller
-			}
-			elapsed := time.Since(extractStart)
-			trace.SpanFromContext(ctx).SetAttributes(attribute.Float64("cachew.elapsed_seconds", elapsed.Seconds()))
-			fmt.Fprintf(os.Stderr, "Snapshot extracted in %s\n", elapsed) //nolint:forbidigo
-			return nil
-		}); err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, err.Error())
-		return errors.Wrap(err, "extract snapshot")
-	}
+	span.SetAttributes(attribute.String("cachew.snapshot_commit", commit))
 	fmt.Fprintf(os.Stderr, "Snapshot restored to %s\n", c.Directory) //nolint:forbidigo
 
-	if snap.BundleURL != "" && !c.NoBundle {
+	if bundleURL != "" && !c.NoBundle {
 		fmt.Fprintf(os.Stderr, "Applying delta bundle...\n") //nolint:forbidigo
 		bundleStart := time.Now()
-		if err := applyBundle(ctx, api, snap.BundleURL, c.Directory); err != nil {
+		if err := applyBundle(ctx, api, bundleURL, c.Directory); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: failed to apply delta bundle: %v\n", err) //nolint:forbidigo
 			span.RecordError(err)
 		} else {
@@ -142,6 +113,112 @@ func (c *GitRestoreCmd) Run(ctx context.Context, api *client.Client) error {
 	}
 
 	return nil
+}
+
+// fetchAndExtractSnapshot downloads the snapshot and extracts it into the target
+// directory, returning its freshen metadata (commit and bundle URL). With a
+// download concurrency above 1 it downloads in parallel into a temp file, since
+// ParallelGet needs a WriterAt; otherwise it streams the single response
+// directly into extraction.
+func (c *GitRestoreCmd) fetchAndExtractSnapshot(ctx context.Context, api *client.Client) (commit, bundleURL string, err error) {
+	if c.DownloadConcurrency > 1 {
+		return c.parallelFetchAndExtract(ctx, api)
+	}
+	return c.streamFetchAndExtract(ctx, api)
+}
+
+// streamFetchAndExtract downloads the snapshot in a single request and pipes the
+// response body straight into extraction, overlapping download and extraction.
+func (c *GitRestoreCmd) streamFetchAndExtract(ctx context.Context, api *client.Client) (string, string, error) {
+	var snap *client.GitSnapshot
+	if err := inSpan(ctx, "cachew.download_snapshot",
+		[]attribute.KeyValue{attribute.String("cachew.repo_url", c.RepoURL)},
+		func(ctx context.Context) error {
+			downloadStart := time.Now()
+			s, err := api.OpenGitSnapshot(ctx, c.RepoURL)
+			if err != nil {
+				return err //nolint:wrapcheck // wrapped by caller
+			}
+			snap = s
+			trace.SpanFromContext(ctx).SetAttributes(
+				attribute.String("cachew.snapshot_commit", s.Commit),
+				attribute.String("cachew.bundle_url", s.BundleURL),
+				attribute.Float64("cachew.elapsed_seconds", time.Since(downloadStart).Seconds()),
+			)
+			return nil
+		}); err != nil {
+		return "", "", err
+	}
+	defer snap.Close()
+
+	if err := c.extract(ctx, snap.Body); err != nil {
+		return "", "", err
+	}
+	return snap.Commit, snap.BundleURL, nil
+}
+
+// parallelFetchAndExtract downloads the snapshot into a temp file using bounded
+// concurrent range requests, then extracts from the file. ParallelGet writes via
+// WriteAt so it cannot stream into extraction; the temp file is removed on
+// return.
+func (c *GitRestoreCmd) parallelFetchAndExtract(ctx context.Context, api *client.Client) (string, string, error) {
+	tmp, err := os.CreateTemp("", "cachew-snapshot-*.tar.zst")
+	if err != nil {
+		return "", "", errors.Wrap(err, "create snapshot temp file")
+	}
+	defer func() {
+		_ = tmp.Close()
+		_ = os.Remove(tmp.Name()) //nolint:gosec // name is from os.CreateTemp, not external input
+	}()
+
+	var meta client.GitSnapshotMetadata
+	if err := inSpan(ctx, "cachew.download_snapshot",
+		[]attribute.KeyValue{
+			attribute.String("cachew.repo_url", c.RepoURL),
+			attribute.Int("cachew.download_concurrency", c.DownloadConcurrency),
+			attribute.Int("cachew.download_chunk_size_mb", c.DownloadChunkSizeMB),
+		},
+		func(ctx context.Context) error {
+			downloadStart := time.Now()
+			m, err := api.DownloadGitSnapshot(ctx, c.RepoURL, tmp, int64(c.DownloadChunkSizeMB)<<20, c.DownloadConcurrency)
+			if err != nil {
+				return err //nolint:wrapcheck // wrapped by caller
+			}
+			meta = m
+			trace.SpanFromContext(ctx).SetAttributes(
+				attribute.String("cachew.snapshot_commit", m.Commit),
+				attribute.String("cachew.bundle_url", m.BundleURL),
+				attribute.Float64("cachew.elapsed_seconds", time.Since(downloadStart).Seconds()),
+			)
+			return nil
+		}); err != nil {
+		return "", "", err
+	}
+
+	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
+		return "", "", errors.Wrap(err, "rewind snapshot temp file")
+	}
+	if err := c.extract(ctx, tmp); err != nil {
+		return "", "", err
+	}
+	return meta.Commit, meta.BundleURL, nil
+}
+
+// extract decompresses and unpacks the snapshot body into the target directory.
+func (c *GitRestoreCmd) extract(ctx context.Context, body io.Reader) error {
+	fmt.Fprintf(os.Stderr, "Extracting to %s...\n", c.Directory) //nolint:forbidigo,gosec // c.Directory is an operator-supplied CLI path
+	return inSpan(ctx, "cachew.extract",
+		[]attribute.KeyValue{attribute.String("cachew.directory", c.Directory)},
+		func(ctx context.Context) error {
+			extractStart := time.Now()
+			if err := snapshot.Extract(ctx, body, c.Directory, c.ZstdThreads); err != nil {
+				return err //nolint:wrapcheck // wrapped by caller
+			}
+			elapsed := time.Since(extractStart)
+			trace.SpanFromContext(ctx).SetAttributes(attribute.Float64("cachew.elapsed_seconds", elapsed.Seconds()))
+			fmt.Fprintf(os.Stderr, "Snapshot extracted in %s\n", elapsed) //nolint:forbidigo
+			return nil
+		})
 }
 
 // satisfyRefs ensures the working tree contains every requested ref and

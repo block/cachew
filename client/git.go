@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 
 	"github.com/alecthomas/errors"
 )
@@ -181,6 +182,94 @@ func (c *Client) openGitArtifact(ctx context.Context, repoURL, suffix string) (*
 		Commit:    resp.Header.Get(SnapshotCommitHeader),
 		BundleURL: resp.Header.Get(BundleURLHeader),
 	}, nil
+}
+
+// GitSnapshotMetadata carries the freshen metadata returned alongside a
+// parallel snapshot download. Commit is the mirror's HEAD SHA at snapshot time
+// (empty for cold serves); BundleURL, when non-empty, points at a delta bundle
+// that brings the snapshot up to the mirror's current HEAD.
+type GitSnapshotMetadata struct {
+	Commit    string
+	BundleURL string
+}
+
+// DownloadGitSnapshot fetches the working-tree snapshot for repoURL into dst,
+// using up to concurrency concurrent range requests of chunkSize bytes each.
+// When concurrency is 1, or the server does not support ranges, it transparently
+// falls back to a single full download. dst is written at non-overlapping
+// offsets via WriteAt (e.g. an *os.File) and the caller owns its lifecycle. It
+// returns the snapshot's freshen metadata, read from the discovery response.
+// Returns os.ErrNotExist when the server has no snapshot available.
+func (c *Client) DownloadGitSnapshot(ctx context.Context, repoURL string, dst io.WriterAt, chunkSize int64, concurrency int) (GitSnapshotMetadata, error) {
+	endpoint, err := gitEndpointURL(c.baseURL, repoURL, "snapshot.tar.zst")
+	if err != nil {
+		return GitSnapshotMetadata{}, err
+	}
+	reader := &gitArtifactRangeReader{client: c, endpoint: endpoint}
+	if err := ParallelGet(ctx, reader, NewKey(repoURL), dst, chunkSize, concurrency); err != nil {
+		return GitSnapshotMetadata{}, errors.Wrap(err, "download snapshot")
+	}
+	return reader.metadata(), nil
+}
+
+// gitArtifactRangeReader adapts a git artifact endpoint to the RangeReader
+// interface so ParallelGet can fetch it with concurrent range requests. The
+// object's identity is the endpoint URL, so the Key argument is ignored. It
+// records the first response's headers, which carry the snapshot's freshen
+// metadata (delivered on the discovery chunk) that ParallelGet does not surface.
+type gitArtifactRangeReader struct {
+	client   *Client
+	endpoint string
+
+	mu        sync.Mutex
+	discovery http.Header
+}
+
+func (g *gitArtifactRangeReader) Open(ctx context.Context, _ Key, opts ...RequestOption) (io.ReadCloser, http.Header, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, g.endpoint, nil)
+	if err != nil {
+		return nil, nil, errors.Wrap(err, "create request")
+	}
+	NewRequestOptions(opts...).applyToRequest(req)
+
+	resp, err := g.client.http.Do(req)
+	if err != nil {
+		return nil, nil, errors.Wrap(err, "execute request")
+	}
+	switch resp.StatusCode {
+	case http.StatusOK, http.StatusPartialContent:
+		g.recordDiscovery(resp.Header)
+		return resp.Body, resp.Header, nil
+	case http.StatusNotFound:
+		_, _ = io.Copy(io.Discard, resp.Body) //nolint:errcheck,gosec
+		return nil, nil, errors.Join(os.ErrNotExist, resp.Body.Close())
+	case http.StatusRequestedRangeNotSatisfiable:
+		_, _ = io.Copy(io.Discard, resp.Body) //nolint:errcheck,gosec
+		g.recordDiscovery(resp.Header)
+		return nil, resp.Header, errors.Join(ErrRangeNotSatisfiable, resp.Body.Close())
+	default:
+		_, _ = io.Copy(io.Discard, resp.Body) //nolint:errcheck,gosec
+		return nil, nil, errors.Join(errors.WithStack(&HTTPStatusError{StatusCode: resp.StatusCode}), resp.Body.Close())
+	}
+}
+
+// recordDiscovery stores the first response's headers so the freshen metadata
+// they carry survives after the bodies are consumed.
+func (g *gitArtifactRangeReader) recordDiscovery(h http.Header) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.discovery == nil {
+		g.discovery = h.Clone()
+	}
+}
+
+func (g *gitArtifactRangeReader) metadata() GitSnapshotMetadata {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return GitSnapshotMetadata{
+		Commit:    g.discovery.Get(SnapshotCommitHeader),
+		BundleURL: g.discovery.Get(BundleURLHeader),
+	}
 }
 
 // gitEndpointURL builds a /git/{host}/{repoPath}/{suffix} URL from a cachew
