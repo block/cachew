@@ -204,6 +204,9 @@ func (s *Strategy) generateAndUploadMirrorSnapshot(ctx context.Context, repo *gi
 
 func (s *Strategy) scheduleSnapshotJobs(repo *gitclone.Repository) {
 	s.scheduler.SubmitPeriodicJob(repo.UpstreamURL(), "snapshot-periodic", s.config.SnapshotInterval, func(ctx context.Context) error {
+		if err := s.doFetch(ctx, repo); err != nil {
+			logging.FromContext(ctx).WarnContext(ctx, "Pre-snapshot fetch failed", "upstream", repo.UpstreamURL(), "error", err)
+		}
 		return s.generateAndUploadSnapshot(ctx, repo)
 	})
 	s.scheduler.SubmitPeriodicJob(repo.UpstreamURL(), "lfs-snapshot-periodic", s.config.SnapshotInterval, func(ctx context.Context) error {
@@ -307,7 +310,6 @@ func (s *Strategy) handleSnapshotRequest(w http.ResponseWriter, r *http.Request,
 		http.Error(w, "Repository unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	s.maybeBackgroundFetch(repo)
 
 	// Forward the full conditional/range set: the cache resolves If-Match /
 	// If-None-Match before Range, so 304/412 already take precedence over a
