@@ -16,6 +16,18 @@ import (
 	"github.com/block/cachew/internal/logging"
 )
 
+// TestMain drops the GIT_* variables git exports under hooks so test git
+// commands target their temp dirs, not the ambient repository.
+func TestMain(m *testing.M) {
+	for _, v := range []string{
+		"GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE",
+		"GIT_COMMON_DIR", "GIT_PREFIX", "GIT_NAMESPACE",
+	} {
+		_ = os.Unsetenv(v)
+	}
+	os.Exit(m.Run())
+}
+
 // testRepoConfig returns a Config with timeouts populated, suitable for
 // constructing Repository values directly in tests that bypass NewManager.
 func testRepoConfig() Config {
@@ -207,6 +219,39 @@ func TestManager_DiscoverExisting(t *testing.T) {
 			assert.Equal(t, kv[1], strings.TrimSpace(string(output)), "config key %s in %s", kv[0], repoPath)
 		}
 	}
+}
+
+func TestManager_DiscoverExisting_SkipsAndRemovesLeftoverCloneTempDirs(t *testing.T) {
+	_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelError})
+	tmpDir := t.TempDir()
+	config := Config{
+		MirrorRoot:       tmpDir,
+		FetchInterval:    15 * time.Minute,
+		RefCheckInterval: 10 * time.Second,
+	}
+
+	manager, err := NewManager(ctx, config, nil)
+	assert.NoError(t, err)
+
+	upstreamPath := createBareRepo(t, t.TempDir())
+
+	realRepo := filepath.Join(tmpDir, "github.com", "user1", "repo1")
+	assert.NoError(t, os.MkdirAll(filepath.Dir(realRepo), 0o755))
+	assert.NoError(t, exec.Command("git", "clone", "--bare", upstreamPath, realRepo).Run())
+
+	// Simulate an interrupted clone: a leftover .clone-* temp dir containing a
+	// mirror clone at its "repo" subdirectory, alongside the real repo.
+	leftover := filepath.Join(tmpDir, "github.com", "user1", cloneTempPrefix+"123456")
+	assert.NoError(t, os.MkdirAll(leftover, 0o755))
+	assert.NoError(t, exec.Command("git", "clone", "--bare", upstreamPath, filepath.Join(leftover, "repo")).Run())
+
+	discovered, err := manager.DiscoverExisting(ctx)
+	assert.NoError(t, err)
+	assert.Equal(t, 1, len(discovered))
+	assert.Equal(t, "https://github.com/user1/repo1", discovered[0].UpstreamURL())
+
+	_, statErr := os.Stat(leftover)
+	assert.True(t, os.IsNotExist(statErr), "leftover clone temp dir should be removed")
 }
 
 func TestRepository_StateTransitions(t *testing.T) {

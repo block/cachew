@@ -27,6 +27,12 @@ const (
 	StateReady                // Ready to use
 )
 
+// cloneTempPrefix is the prefix for the temporary directory created during a
+// clone before it is atomically renamed into place. Interrupted clones (e.g. a
+// killed process) can leave these behind, so they are skipped and removed by
+// DiscoverExisting on startup.
+const cloneTempPrefix = ".clone-"
+
 func (s State) String() string {
 	switch s {
 	case StateEmpty:
@@ -226,6 +232,14 @@ func (m *Manager) DiscoverExisting(ctx context.Context) ([]*Repository, error) {
 
 		if !info.IsDir() {
 			return nil
+		}
+
+		if strings.HasPrefix(info.Name(), cloneTempPrefix) {
+			logging.FromContext(ctx).InfoContext(ctx, "Removing leftover clone temp dir", "path", path)
+			if rmErr := os.RemoveAll(path); rmErr != nil {
+				return errors.Wrapf(rmErr, "remove leftover clone temp dir %s", path)
+			}
+			return fs.SkipDir
 		}
 
 		headPath := filepath.Join(path, "HEAD")
@@ -499,7 +513,7 @@ func (r *Repository) executeClone(ctx context.Context) error {
 		return errors.Wrap(err, "create clone directory")
 	}
 
-	tmpDir, err := os.MkdirTemp(parentDir, ".clone-*")
+	tmpDir, err := os.MkdirTemp(parentDir, cloneTempPrefix+"*")
 	if err != nil {
 		return errors.Wrap(err, "create temp clone directory")
 	}
