@@ -179,6 +179,10 @@ func main() {
 		stopSignals()
 	}
 
+	// Stop scheduling new work once shutdown begins; cancelScheduler below
+	// performs the hard teardown after in-flight jobs drain.
+	drainSchedulerIntake(schedulerProvider)
+
 	gracefulShutdown(ctx, logger, server, &shuttingDown, globalConfig.ShutdownReadinessDelay, globalConfig.ShutdownTimeout)
 
 	cancelScheduler()
@@ -209,6 +213,14 @@ func gracefulShutdown(
 	} else {
 		logger.InfoContext(shutdownCtx, "Server shut down cleanly")
 	}
+}
+
+func drainSchedulerIntake(provider jobscheduler.Provider) {
+	scheduler, err := provider()
+	if err != nil {
+		return
+	}
+	scheduler.Drain()
 }
 
 const schedulerDrainTimeout = 10 * time.Second

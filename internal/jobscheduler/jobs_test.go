@@ -335,6 +335,66 @@ func TestJobSchedulerSubmitDroppedAfterShutdown(t *testing.T) {
 	assert.False(t, executed.Load(), "submissions after shutdown should be dropped")
 }
 
+func TestJobSchedulerDrainStopsNewWork(t *testing.T) {
+	_, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelError})
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	scheduler, err := jobscheduler.New(ctx, jobscheduler.Config{Concurrency: 2})
+	assert.NoError(t, err)
+	t.Cleanup(func() { scheduler.Close() })
+
+	var periodicExecutions atomic.Int32
+	scheduler.SubmitPeriodicJob("queue1", "periodic", 50*time.Millisecond, func(_ context.Context) error {
+		periodicExecutions.Add(1)
+		return nil
+	})
+	eventually(t, time.Second, func() bool { return periodicExecutions.Load() >= 2 },
+		"periodic job should fire before drain")
+
+	scheduler.Drain()
+	time.Sleep(150 * time.Millisecond)
+	before := periodicExecutions.Load()
+	time.Sleep(300 * time.Millisecond)
+	assert.Equal(t, before, periodicExecutions.Load(),
+		"periodic job should not re-arm after drain")
+
+	var executed atomic.Bool
+	scheduler.Submit("queue2", "post-drain", func(_ context.Context) error {
+		executed.Store(true)
+		return nil
+	})
+	time.Sleep(100 * time.Millisecond)
+	assert.False(t, executed.Load(), "submissions after drain should be dropped")
+}
+
+func TestJobSchedulerDrainLetsInFlightFinish(t *testing.T) {
+	_, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelError})
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	scheduler, err := jobscheduler.New(ctx, jobscheduler.Config{Concurrency: 2})
+	assert.NoError(t, err)
+	t.Cleanup(func() { scheduler.Close() })
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var finished atomic.Bool
+	scheduler.Submit("queue1", "in-flight", func(_ context.Context) error {
+		close(started)
+		<-release
+		finished.Store(true)
+		return nil
+	})
+
+	<-started
+	scheduler.Drain()
+	close(release)
+
+	eventually(t, time.Second, finished.Load,
+		"in-flight job should finish after drain")
+}
+
 // TestJobSchedulerSurvivesParentCancel verifies the shutdown ordering fix:
 // when the scheduler is created with context.WithoutCancel, cancelling the
 // parent (simulating SIGTERM) does NOT kill workers. Jobs submitted after the

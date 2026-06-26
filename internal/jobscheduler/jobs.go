@@ -78,15 +78,18 @@ type RootScheduler struct {
 	cond                *sync.Cond
 	lock                sync.Mutex
 	done                bool
+	draining            bool
 	queue               []queueJob
 	active              map[string]string // queue -> job id
 	activeClones        int
 	maxCloneConcurrency int
-	// ctx is cancelled when the scheduler is shutting down. Periodic re-arm
-	// goroutines select on it so they exit cleanly instead of submitting to a
-	// dead scheduler.
-	ctx     context.Context //nolint:containedctx
-	cancel  context.CancelFunc
+	// ctx is cancelled when the scheduler is torn down; periodic re-arm
+	// goroutines select on it so they exit instead of submitting to a dead
+	// scheduler.
+	ctx    context.Context //nolint:containedctx
+	cancel context.CancelFunc
+	// drain is closed by Drain so intake stops while workers keep running.
+	drain   chan struct{}
 	wg      sync.WaitGroup
 	store   ScheduleStore
 	metrics *schedulerMetrics
@@ -127,6 +130,7 @@ func New(ctx context.Context, config Config) (*RootScheduler, error) {
 		maxCloneConcurrency: maxClones,
 		store:               store,
 		metrics:             m,
+		drain:               make(chan struct{}),
 	}
 	q.cond = sync.NewCond(&q.lock)
 	ctx, cancel := context.WithCancel(ctx)
@@ -147,6 +151,19 @@ func New(ctx context.Context, config Config) (*RootScheduler, error) {
 	return q, nil
 }
 
+// Drain stops the scheduler accepting new submissions and re-arming periodic
+// jobs, while leaving workers running to finish in-flight and queued jobs. The
+// worker pool is torn down later by cancelling the context passed to New.
+func (q *RootScheduler) Drain() {
+	q.lock.Lock()
+	defer q.lock.Unlock()
+	if q.draining {
+		return
+	}
+	q.draining = true
+	close(q.drain)
+}
+
 func (q *RootScheduler) Close() error {
 	if q.store != nil {
 		return errors.WithStack(q.store.Close())
@@ -163,7 +180,7 @@ func (q *RootScheduler) WithQueuePrefix(prefix string) Scheduler {
 
 func (q *RootScheduler) Submit(queue, id string, run func(ctx context.Context) error) {
 	q.lock.Lock()
-	if q.done {
+	if q.done || q.draining {
 		q.lock.Unlock()
 		return
 	}
@@ -174,7 +191,7 @@ func (q *RootScheduler) Submit(queue, id string, run func(ctx context.Context) e
 }
 
 func (q *RootScheduler) SubmitPeriodicJob(queue, id string, interval time.Duration, run func(ctx context.Context) error) {
-	if q.ctx.Err() != nil {
+	if q.ctx.Err() != nil || q.isDraining() {
 		return
 	}
 	key := jobKey(queue, id)
@@ -204,13 +221,21 @@ func (q *RootScheduler) SubmitPeriodicJob(queue, id string, interval time.Durati
 	go q.sleepThenSubmit(delay, submit)
 }
 
-// sleepThenSubmit waits for d, then runs fn — unless the scheduler is
-// shutting down, in which case it returns immediately.
+func (q *RootScheduler) isDraining() bool {
+	q.lock.Lock()
+	defer q.lock.Unlock()
+	return q.draining
+}
+
+// sleepThenSubmit waits for d, then runs fn — unless the scheduler is draining
+// or being torn down, in which case it returns immediately.
 func (q *RootScheduler) sleepThenSubmit(d time.Duration, fn func()) {
 	timer := time.NewTimer(d)
 	defer timer.Stop()
 	select {
 	case <-q.ctx.Done():
+		return
+	case <-q.drain:
 		return
 	case <-timer.C:
 		fn()
