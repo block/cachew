@@ -19,6 +19,18 @@ import (
 	"github.com/block/cachew/client"
 )
 
+// TestMain drops the GIT_* variables git exports under hooks so test git
+// commands target their temp dirs, not the ambient repository.
+func TestMain(m *testing.M) {
+	for _, v := range []string{
+		"GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE",
+		"GIT_COMMON_DIR", "GIT_PREFIX", "GIT_NAMESPACE",
+	} {
+		_ = os.Unsetenv(v)
+	}
+	os.Exit(m.Run())
+}
+
 func initGitRepo(t *testing.T, dir string, files map[string]string) {
 	t.Helper()
 	run := func(args ...string) {

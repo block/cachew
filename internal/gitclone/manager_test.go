@@ -16,6 +16,18 @@ import (
 	"github.com/block/cachew/internal/logging"
 )
 
+// TestMain drops the GIT_* variables git exports under hooks so test git
+// commands target their temp dirs, not the ambient repository.
+func TestMain(m *testing.M) {
+	for _, v := range []string{
+		"GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE",
+		"GIT_COMMON_DIR", "GIT_PREFIX", "GIT_NAMESPACE",
+	} {
+		_ = os.Unsetenv(v)
+	}
+	os.Exit(m.Run())
+}
+
 // testRepoConfig returns a Config with timeouts populated, suitable for
 // constructing Repository values directly in tests that bypass NewManager.
 func testRepoConfig() Config {
@@ -233,7 +245,7 @@ func TestManager_DiscoverExisting_SkipsAndRemovesLeftoverCloneTempDirs(t *testin
 	assert.NoError(t, os.MkdirAll(leftover, 0o755))
 	assert.NoError(t, exec.Command("git", "clone", "--bare", upstreamPath, filepath.Join(leftover, "repo")).Run())
 
-	discovered, err := manager.DiscoverExisting(context.Background())
+	discovered, err := manager.DiscoverExisting(ctx)
 	assert.NoError(t, err)
 	assert.Equal(t, 1, len(discovered))
 	assert.Equal(t, "https://github.com/user1/repo1", discovered[0].UpstreamURL())
