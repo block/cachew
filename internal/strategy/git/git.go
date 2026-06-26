@@ -377,7 +377,6 @@ func (s *Strategy) serveReadyRepo(w http.ResponseWriter, r *http.Request, repo *
 		s.forwardToUpstream(w, r, host, pathValue)
 		return nil
 	}
-	s.maybeBackgroundFetch(repo)
 
 	// Buffer the request body so it can be replayed if serveFromBackend
 	// signals a fallback to upstream (e.g. on "not our ref").
@@ -706,13 +705,6 @@ func (s *Strategy) tryRestoreSnapshot(ctx context.Context, repo *gitclone.Reposi
 
 	logger.InfoContext(ctx, "Repository restored from snapshot", "upstream", repo.UpstreamURL())
 	return nil
-}
-
-func (s *Strategy) maybeBackgroundFetch(repo *gitclone.Repository) {
-	if !repo.NeedsFetch(s.cloneManager.Config().FetchInterval) {
-		return
-	}
-	s.submitFetch(repo)
 }
 
 // submitFetch schedules a fetch unconditionally. Use this when ls-remote has
