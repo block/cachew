@@ -129,6 +129,54 @@ func TestGitRestoreSnapshot(t *testing.T) {
 	assert.Equal(t, "nested content", string(content))
 }
 
+func TestGitRestoreSnapshotParallel(t *testing.T) {
+	srcDir := t.TempDir()
+	initGitRepo(t, srcDir, map[string]string{
+		"hello.txt":         "hello world",
+		"subdir/nested.txt": "nested content",
+	})
+	snapshotData := createTarZst(t, srcDir)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/snapshot.tar.zst") {
+			w.Header().Set("Content-Type", "application/zstd")
+			w.Header().Set("ETag", `"snap-v1"`)
+			// ServeContent honours Range/If-Range against the ETag, so ParallelGet
+			// fetches the snapshot in concurrent chunks.
+			http.ServeContent(w, r, "snapshot.tar.zst", time.Time{}, bytes.NewReader(snapshotData))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	// A nested, not-yet-existing target exercises temp-dir creation on the
+	// target filesystem.
+	dstDir := filepath.Join(t.TempDir(), "nested", "restored")
+	cmd := &GitRestoreCmd{
+		RepoURL:             "https://github.com/test/repo",
+		Directory:           dstDir,
+		DownloadConcurrency: 4,
+		DownloadChunkSizeMB: 8,
+	}
+	api := client.NewWithHTTPClient(srv.URL, srv.Client())
+	assert.NoError(t, cmd.Run(context.Background(), api))
+
+	content, err := os.ReadFile(filepath.Join(dstDir, "hello.txt"))
+	assert.NoError(t, err)
+	assert.Equal(t, "hello world", string(content))
+	content, err = os.ReadFile(filepath.Join(dstDir, "subdir", "nested.txt"))
+	assert.NoError(t, err)
+	assert.Equal(t, "nested content", string(content))
+
+	// The temp snapshot is staged on the target filesystem and cleaned up.
+	entries, err := os.ReadDir(filepath.Dir(dstDir))
+	assert.NoError(t, err)
+	for _, e := range entries {
+		assert.False(t, strings.HasPrefix(e.Name(), ".cachew-snapshot-"), "temp snapshot left behind: %s", e.Name())
+	}
+}
+
 func TestGitRestoreWithBundle(t *testing.T) {
 	srcDir := t.TempDir()
 	initGitRepo(t, srcDir, map[string]string{"file.txt": "v1"})

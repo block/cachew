@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -162,7 +163,15 @@ func (c *GitRestoreCmd) streamFetchAndExtract(ctx context.Context, api *client.C
 // WriteAt so it cannot stream into extraction; the temp file is removed on
 // return.
 func (c *GitRestoreCmd) parallelFetchAndExtract(ctx context.Context, api *client.Client) (string, string, error) {
-	tmp, err := os.CreateTemp("", "cachew-snapshot-*.tar.zst")
+	// Stage the temp snapshot on the same filesystem as the restore target so a
+	// small or separate /tmp can't fail a restore the target directory has room
+	// for. The parent of c.Directory shares its filesystem and is created by
+	// extraction anyway.
+	tmpDir := filepath.Dir(c.Directory)
+	if err := os.MkdirAll(tmpDir, 0o750); err != nil {
+		return "", "", errors.Wrap(err, "create snapshot temp dir")
+	}
+	tmp, err := os.CreateTemp(tmpDir, ".cachew-snapshot-*.tar.zst")
 	if err != nil {
 		return "", "", errors.Wrap(err, "create snapshot temp file")
 	}
