@@ -6,7 +6,6 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -116,27 +115,22 @@ func (c *GitRestoreCmd) Run(ctx context.Context, api *client.Client) error {
 	return nil
 }
 
-// fetchAndExtractSnapshot downloads the snapshot and extracts it into the target
-// directory, returning its freshen metadata (commit and bundle URL). With a
-// download concurrency above 1 it downloads in parallel into a temp file, since
-// ParallelGet needs a WriterAt; otherwise it streams the single response
-// directly into extraction.
+// fetchAndExtractSnapshot downloads the snapshot and pipes it straight into
+// extraction, overlapping download and extraction, and returns its freshen
+// metadata (commit and bundle URL). A DownloadConcurrency above 1 fetches the
+// snapshot with that many concurrent range requests reassembled in order; 1 (or
+// a server without range support) streams a single request.
 func (c *GitRestoreCmd) fetchAndExtractSnapshot(ctx context.Context, api *client.Client) (commit, bundleURL string, err error) {
-	if c.DownloadConcurrency > 1 {
-		return c.parallelFetchAndExtract(ctx, api)
-	}
-	return c.streamFetchAndExtract(ctx, api)
-}
-
-// streamFetchAndExtract downloads the snapshot in a single request and pipes the
-// response body straight into extraction, overlapping download and extraction.
-func (c *GitRestoreCmd) streamFetchAndExtract(ctx context.Context, api *client.Client) (string, string, error) {
 	var snap *client.GitSnapshot
 	if err := inSpan(ctx, "cachew.download_snapshot",
-		[]attribute.KeyValue{attribute.String("cachew.repo_url", c.RepoURL)},
+		[]attribute.KeyValue{
+			attribute.String("cachew.repo_url", c.RepoURL),
+			attribute.Int("cachew.download_concurrency", c.DownloadConcurrency),
+			attribute.Int("cachew.download_chunk_size_mb", c.DownloadChunkSizeMB),
+		},
 		func(ctx context.Context) error {
 			downloadStart := time.Now()
-			s, err := api.OpenGitSnapshot(ctx, c.RepoURL)
+			s, err := api.OpenGitSnapshotParallel(ctx, c.RepoURL, int64(c.DownloadChunkSizeMB)<<20, c.DownloadConcurrency)
 			if err != nil {
 				return err //nolint:wrapcheck // wrapped by caller
 			}
@@ -156,61 +150,6 @@ func (c *GitRestoreCmd) streamFetchAndExtract(ctx context.Context, api *client.C
 		return "", "", err
 	}
 	return snap.Commit, snap.BundleURL, nil
-}
-
-// parallelFetchAndExtract downloads the snapshot into a temp file using bounded
-// concurrent range requests, then extracts from the file. ParallelGet writes via
-// WriteAt so it cannot stream into extraction; the temp file is removed on
-// return.
-func (c *GitRestoreCmd) parallelFetchAndExtract(ctx context.Context, api *client.Client) (string, string, error) {
-	// Stage the temp snapshot on the same filesystem as the restore target so a
-	// small or separate /tmp can't fail a restore the target directory has room
-	// for. The parent of c.Directory shares its filesystem and is created by
-	// extraction anyway.
-	tmpDir := filepath.Dir(c.Directory)
-	if err := os.MkdirAll(tmpDir, 0o750); err != nil {
-		return "", "", errors.Wrap(err, "create snapshot temp dir")
-	}
-	tmp, err := os.CreateTemp(tmpDir, ".cachew-snapshot-*.tar.zst")
-	if err != nil {
-		return "", "", errors.Wrap(err, "create snapshot temp file")
-	}
-	defer func() {
-		_ = tmp.Close()
-		_ = os.Remove(tmp.Name()) //nolint:gosec // name is from os.CreateTemp, not external input
-	}()
-
-	var meta client.GitSnapshotMetadata
-	if err := inSpan(ctx, "cachew.download_snapshot",
-		[]attribute.KeyValue{
-			attribute.String("cachew.repo_url", c.RepoURL),
-			attribute.Int("cachew.download_concurrency", c.DownloadConcurrency),
-			attribute.Int("cachew.download_chunk_size_mb", c.DownloadChunkSizeMB),
-		},
-		func(ctx context.Context) error {
-			downloadStart := time.Now()
-			m, err := api.DownloadGitSnapshot(ctx, c.RepoURL, tmp, int64(c.DownloadChunkSizeMB)<<20, c.DownloadConcurrency)
-			if err != nil {
-				return err //nolint:wrapcheck // wrapped by caller
-			}
-			meta = m
-			trace.SpanFromContext(ctx).SetAttributes(
-				attribute.String("cachew.snapshot_commit", m.Commit),
-				attribute.String("cachew.bundle_url", m.BundleURL),
-				attribute.Float64("cachew.elapsed_seconds", time.Since(downloadStart).Seconds()),
-			)
-			return nil
-		}); err != nil {
-		return "", "", err
-	}
-
-	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
-		return "", "", errors.Wrap(err, "rewind snapshot temp file")
-	}
-	if err := c.extract(ctx, tmp); err != nil {
-		return "", "", err
-	}
-	return meta.Commit, meta.BundleURL, nil
 }
 
 // extract decompresses and unpacks the snapshot body into the target directory.
