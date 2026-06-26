@@ -59,6 +59,19 @@ type GitRestoreCmd struct {
 	DownloadChunkSizeMB int `help:"Chunk size in MiB for parallel snapshot downloads." default:"8"`
 }
 
+// logFunc writes a status line to stderr prefixed with the time elapsed since
+// the restore started, so every step is timestamped on its own line.
+type logFunc func(format string, args ...any)
+
+// newLogFunc returns a logFunc that prefixes each line with the elapsed time
+// since start.
+func newLogFunc(start time.Time) logFunc {
+	return func(format string, args ...any) {
+		elapsed := time.Since(start).Round(time.Millisecond)
+		fmt.Fprintf(os.Stderr, "[%9s] %s", elapsed, fmt.Sprintf(format, args...)) //nolint:forbidigo,gosec // operator-facing CLI status output
+	}
+}
+
 func (c *GitRestoreCmd) Run(ctx context.Context, api *client.Client) error {
 	ctx, span := tracer.Start(ctx, "cachew.git_restore",
 		trace.WithAttributes(
@@ -70,14 +83,11 @@ func (c *GitRestoreCmd) Run(ctx context.Context, api *client.Client) error {
 	)
 	defer span.End()
 
-	totalStart := time.Now()
-	defer func() {
-		fmt.Fprintf(os.Stderr, "cachew git restore total elapsed=%s\n", time.Since(totalStart)) //nolint:forbidigo
-	}()
+	log := newLogFunc(time.Now())
 
-	fmt.Fprintf(os.Stderr, "Fetching snapshot for %s\n", c.RepoURL) //nolint:forbidigo
+	log("Fetching snapshot for %s\n", c.RepoURL)
 
-	commit, bundleURL, err := c.fetchAndExtractSnapshot(ctx, api)
+	commit, bundleURL, err := c.fetchAndExtractSnapshot(ctx, api, log)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return errors.Errorf("no snapshot available for %s", c.RepoURL)
@@ -87,16 +97,15 @@ func (c *GitRestoreCmd) Run(ctx context.Context, api *client.Client) error {
 		return errors.Wrap(err, "restore snapshot")
 	}
 	span.SetAttributes(attribute.String("cachew.snapshot_commit", commit))
-	fmt.Fprintf(os.Stderr, "Snapshot restored to %s\n", c.Directory) //nolint:forbidigo
+	log("Snapshot restored to %s\n", c.Directory)
 
 	if bundleURL != "" && !c.NoBundle {
-		fmt.Fprintf(os.Stderr, "Applying delta bundle...\n") //nolint:forbidigo
-		bundleStart := time.Now()
+		log("Applying delta bundle...\n")
 		if err := applyBundle(ctx, api, bundleURL, c.Directory); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to apply delta bundle: %v\n", err) //nolint:forbidigo
+			log("Warning: failed to apply delta bundle: %v\n", err)
 			span.RecordError(err)
 		} else {
-			fmt.Fprintf(os.Stderr, "Delta bundle applied in %s\n", time.Since(bundleStart)) //nolint:forbidigo
+			log("Delta bundle applied\n")
 		}
 	}
 
@@ -105,7 +114,7 @@ func (c *GitRestoreCmd) Run(ctx context.Context, api *client.Client) error {
 	// the caller asked for specific refs or commits to be fresh, freshen
 	// the mirror (if needed) and pull from origin (if needed) to catch up.
 	if len(c.Ref) > 0 || len(c.Commit) > 0 {
-		if err := c.satisfyRefs(ctx, api); err != nil {
+		if err := c.satisfyRefs(ctx, api, log); err != nil {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, err.Error())
 			return err
@@ -120,16 +129,16 @@ func (c *GitRestoreCmd) Run(ctx context.Context, api *client.Client) error {
 // download concurrency above 1 it downloads in parallel into a temp file, since
 // ParallelGet needs a WriterAt; otherwise it streams the single response
 // directly into extraction.
-func (c *GitRestoreCmd) fetchAndExtractSnapshot(ctx context.Context, api *client.Client) (commit, bundleURL string, err error) {
+func (c *GitRestoreCmd) fetchAndExtractSnapshot(ctx context.Context, api *client.Client, log logFunc) (commit, bundleURL string, err error) {
 	if c.DownloadConcurrency > 1 {
-		return c.parallelFetchAndExtract(ctx, api)
+		return c.parallelFetchAndExtract(ctx, api, log)
 	}
-	return c.streamFetchAndExtract(ctx, api)
+	return c.streamFetchAndExtract(ctx, api, log)
 }
 
 // streamFetchAndExtract downloads the snapshot in a single request and pipes the
 // response body straight into extraction, overlapping download and extraction.
-func (c *GitRestoreCmd) streamFetchAndExtract(ctx context.Context, api *client.Client) (string, string, error) {
+func (c *GitRestoreCmd) streamFetchAndExtract(ctx context.Context, api *client.Client, log logFunc) (string, string, error) {
 	var snap *client.GitSnapshot
 	if err := inSpan(ctx, "cachew.download_snapshot",
 		[]attribute.KeyValue{attribute.String("cachew.repo_url", c.RepoURL)},
@@ -151,7 +160,7 @@ func (c *GitRestoreCmd) streamFetchAndExtract(ctx context.Context, api *client.C
 	}
 	defer snap.Close()
 
-	if err := c.extract(ctx, snap.Body); err != nil {
+	if err := c.extract(ctx, snap.Body, log); err != nil {
 		return "", "", err
 	}
 	return snap.Commit, snap.BundleURL, nil
@@ -161,7 +170,7 @@ func (c *GitRestoreCmd) streamFetchAndExtract(ctx context.Context, api *client.C
 // concurrent range requests, then extracts from the file. ParallelGet writes via
 // WriteAt so it cannot stream into extraction; the temp file is removed on
 // return.
-func (c *GitRestoreCmd) parallelFetchAndExtract(ctx context.Context, api *client.Client) (string, string, error) {
+func (c *GitRestoreCmd) parallelFetchAndExtract(ctx context.Context, api *client.Client, log logFunc) (string, string, error) {
 	tmp, err := os.CreateTemp("", "cachew-snapshot-*.tar.zst")
 	if err != nil {
 		return "", "", errors.Wrap(err, "create snapshot temp file")
@@ -198,15 +207,15 @@ func (c *GitRestoreCmd) parallelFetchAndExtract(ctx context.Context, api *client
 	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
 		return "", "", errors.Wrap(err, "rewind snapshot temp file")
 	}
-	if err := c.extract(ctx, tmp); err != nil {
+	if err := c.extract(ctx, tmp, log); err != nil {
 		return "", "", err
 	}
 	return meta.Commit, meta.BundleURL, nil
 }
 
 // extract decompresses and unpacks the snapshot body into the target directory.
-func (c *GitRestoreCmd) extract(ctx context.Context, body io.Reader) error {
-	fmt.Fprintf(os.Stderr, "Extracting to %s...\n", c.Directory) //nolint:forbidigo,gosec // c.Directory is an operator-supplied CLI path
+func (c *GitRestoreCmd) extract(ctx context.Context, body io.Reader, log logFunc) error {
+	log("Extracting to %s...\n", c.Directory)
 	return inSpan(ctx, "cachew.extract",
 		[]attribute.KeyValue{attribute.String("cachew.directory", c.Directory)},
 		func(ctx context.Context) error {
@@ -214,9 +223,8 @@ func (c *GitRestoreCmd) extract(ctx context.Context, body io.Reader) error {
 			if err := snapshot.Extract(ctx, body, c.Directory, c.ZstdThreads); err != nil {
 				return err //nolint:wrapcheck // wrapped by caller
 			}
-			elapsed := time.Since(extractStart)
-			trace.SpanFromContext(ctx).SetAttributes(attribute.Float64("cachew.elapsed_seconds", elapsed.Seconds()))
-			fmt.Fprintf(os.Stderr, "Snapshot extracted in %s\n", elapsed) //nolint:forbidigo
+			trace.SpanFromContext(ctx).SetAttributes(attribute.Float64("cachew.elapsed_seconds", time.Since(extractStart).Seconds()))
+			log("Snapshot extracted\n")
 			return nil
 		})
 }
@@ -225,7 +233,7 @@ func (c *GitRestoreCmd) extract(ctx context.Context, body io.Reader) error {
 // commit. It short-circuits whenever the local clone already has what was
 // asked for, avoiding both /ensure-refs and git pull when the snapshot+bundle
 // already brought down the required SHAs.
-func (c *GitRestoreCmd) satisfyRefs(ctx context.Context, api *client.Client) error {
+func (c *GitRestoreCmd) satisfyRefs(ctx context.Context, api *client.Client, log logFunc) error {
 	ctx, span := tracer.Start(ctx, "cachew.satisfy_refs",
 		trace.WithAttributes(
 			attribute.Int("cachew.requested_refs", len(c.Ref)),
@@ -239,13 +247,12 @@ func (c *GitRestoreCmd) satisfyRefs(ctx context.Context, api *client.Client) err
 	if allPinned(c.Ref) &&
 		localHasAllRefSHAs(ctx, c.Directory, c.Ref) &&
 		localHasAllSHAs(ctx, c.Directory, c.Commit) {
-		fmt.Fprintf(os.Stderr, "All requested refs/commits already present locally\n") //nolint:forbidigo
+		log("All requested refs/commits already present locally\n")
 		span.SetAttributes(attribute.String("cachew.result", "local_hit"))
 		return nil
 	}
 
-	fmt.Fprintf(os.Stderr, "Ensuring %d ref(s) and %d commit(s) are fresh for %s\n", //nolint:forbidigo
-		len(c.Ref), len(c.Commit), c.RepoURL)
+	log("Ensuring %d ref(s) and %d commit(s) are fresh for %s\n", len(c.Ref), len(c.Commit), c.RepoURL)
 	var resp client.EnsureGitRefsResponse
 	if err := inSpan(ctx, "cachew.ensure_refs", nil, func(ctx context.Context) error {
 		r, err := api.EnsureGitRefs(ctx, c.RepoURL, client.EnsureGitRefsRequest{
@@ -267,7 +274,7 @@ func (c *GitRestoreCmd) satisfyRefs(ctx context.Context, api *client.Client) err
 		return errors.Wrap(err, "ensure refs")
 	}
 	if resp.Fetched {
-		fmt.Fprintf(os.Stderr, "Server fetched fresh refs from upstream\n") //nolint:forbidigo
+		log("Server fetched fresh refs from upstream\n")
 	}
 	if len(resp.MissingCommits) > 0 {
 		return errors.Errorf("server is missing %d commit(s) after fetch: %v",
@@ -283,11 +290,11 @@ func (c *GitRestoreCmd) satisfyRefs(ctx context.Context, api *client.Client) err
 		(len(resp.Refs) == len(c.Ref) && localHasAllRefSHAs(ctx, c.Directory, resp.Refs))
 	commitsSatisfied := localHasAllSHAs(ctx, c.Directory, c.Commit)
 	if refsSatisfied && commitsSatisfied {
-		fmt.Fprintf(os.Stderr, "Local clone already contains the server's resolved refs and commits\n") //nolint:forbidigo
+		log("Local clone already contains the server's resolved refs and commits\n")
 		return nil
 	}
 
-	fmt.Fprintf(os.Stderr, "Pulling from origin...\n") //nolint:forbidigo
+	log("Pulling from origin...\n")
 	if err := gitPullOrigin(ctx, c.Directory); err != nil {
 		return errors.Wrap(err, "git pull from origin")
 	}
