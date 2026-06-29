@@ -1,5 +1,5 @@
 # Runtime image - binaries are pre-built on the host
-FROM alpine:3.23
+FROM alpine:3.24
 
 ARG TARGETARCH
 
