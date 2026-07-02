@@ -94,7 +94,8 @@ func (t Tiered) Delete(ctx context.Context, key Key) error {
 // A tier that fails an If-Match precondition holds a different version of the
 // object, not a definitive answer: deeper tiers are consulted for the version
 // the validator names, and ErrPreconditionFailed is only returned when none
-// holds it.
+// holds it. A tier that errored while being probed takes precedence, so
+// outages are not misreported as missing versions.
 //
 // If all caches fail, all errors are returned.
 func (t Tiered) Stat(ctx context.Context, key Key, opts ...Option) (http.Header, error) {
@@ -137,7 +138,9 @@ func (t Tiered) Stat(ctx context.Context, key Key, opts ...Option) (http.Header,
 // consulted for the named version, so a replica whose local tier has diverged
 // can still satisfy a pinned request from a shared tier. When no tier holds
 // it, the first tier's outcome stands: the full representation for an If-Range
-// miss (per RFC 9110), ErrPreconditionFailed for a failed If-Match.
+// miss (per RFC 9110), ErrPreconditionFailed for a failed If-Match. A tier
+// that errored while being probed takes precedence over both, so outages are
+// not misreported as missing versions.
 //
 // If all caches fail, all errors are returned.
 func (t Tiered) Open(ctx context.Context, key Key, opts ...Option) (io.ReadCloser, http.Header, error) {
@@ -177,9 +180,10 @@ func (t Tiered) Open(ctx context.Context, key Key, opts ...Option) (io.ReadClose
 			}
 			return nil, headers, errors.WithStack(err)
 		case err != nil:
-			// A hard error only fails the request when no earlier tier produced
-			// a servable outcome; probing deeper tiers is opportunistic and must
-			// not make the response worse.
+			// A hard error is definitive when no earlier tier produced a
+			// servable outcome. Otherwise defer it: a deeper tier may still
+			// satisfy the validator, but if none does the error is surfaced in
+			// preference to the degraded fallback/412.
 			if fallback == nil && !rejected {
 				return nil, headers, errors.WithStack(err)
 			}

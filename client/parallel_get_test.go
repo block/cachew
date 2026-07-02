@@ -249,8 +249,6 @@ func TestParallelGetSingleWorkerFullRead(t *testing.T) {
 }
 
 func TestParallelGetPinsChunksWithIfMatch(t *testing.T) {
-	// Every chunk after discovery must carry the discovery ETag as an If-Match
-	// precondition, so a version change is rejected server-side without a body.
 	data := make([]byte, 1000)
 	for i := range data {
 		data[i] = byte(i % 251)
