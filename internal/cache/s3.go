@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -60,9 +62,33 @@ var _ Cache = (*S3)(nil)
 // s3Meta stores mutable metadata in a companion object alongside the
 // data object, avoiding expensive server-side copies when updating
 // headers or refreshing expiry.
+//
+// Tag correlates the metadata with the data object it describes. The data
+// object and its companion are written in two separate, non-atomic S3
+// operations, so concurrent writers to the same key can interleave and leave
+// the metadata describing a different data object than the one actually
+// stored. Stamping both objects with the same random tag lets readers detect
+// this mismatch (see statAndHeaders) and treat it as a cache miss.
 type s3Meta struct {
 	Headers   http.Header `json:"headers,omitempty"`
 	ExpiresAt time.Time   `json:"expires_at"`
+	Tag       string      `json:"tag,omitempty"`
+}
+
+// s3TagMetadataKey is the data object's user-metadata key holding the tag that
+// must match the companion s3Meta.Tag. Objects written before tagging was
+// introduced carry no tag on either object, so an empty-to-empty comparison
+// keeps them readable.
+const s3TagMetadataKey = "Tag"
+
+// newS3Tag returns a random hex tag used to correlate a data object with its
+// companion metadata object.
+func newS3Tag() (string, error) {
+	var buf [16]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		return "", errors.Wrap(err, "generate tag")
+	}
+	return hex.EncodeToString(buf[:]), nil
 }
 
 // NewS3 creates a new S3-based cache instance.
@@ -166,6 +192,15 @@ func (s *S3) statAndHeaders(ctx context.Context, key Key) (minio.ObjectInfo, htt
 	if err != nil {
 		return minio.ObjectInfo{}, nil, s3Meta{}, err
 	}
+
+	// Reject metadata that describes a different data object than the one
+	// stored (e.g. interleaved concurrent writes to the same key, or a data
+	// object whose companion has not been written yet). Treating this as a
+	// miss lets the caller fall back to upstream; the next write reconciles.
+	if objInfo.UserMetadata[s3TagMetadataKey] != meta.Tag {
+		return minio.ObjectInfo{}, nil, s3Meta{}, os.ErrNotExist
+	}
+
 	maps.Copy(headers, meta.Headers)
 
 	// Companion expiry takes precedence over the data object's Expires header.
@@ -217,7 +252,7 @@ func (s *S3) Open(ctx context.Context, key Key, opts ...Option) (io.ReadCloser, 
 			if etag := meta.Headers.Get(ETagKey); etag != "" {
 				refreshHeaders.Set(ETagKey, etag)
 			}
-			refreshMeta := s3Meta{Headers: refreshHeaders, ExpiresAt: newExpiresAt}
+			refreshMeta := s3Meta{Headers: refreshHeaders, ExpiresAt: newExpiresAt, Tag: meta.Tag}
 			go func() {
 				bgCtx := context.WithoutCancel(ctx)
 				if err := s.writeMeta(bgCtx, s.namespace, key, refreshMeta); err != nil {
@@ -340,6 +375,11 @@ func (s *S3) Create(ctx context.Context, key Key, headers http.Header, ttl time.
 
 	expiresAt := ceilSecond(time.Now().Add(ttl))
 
+	tag, err := newS3Tag()
+	if err != nil {
+		return nil, err
+	}
+
 	ctx, cancel := context.WithCancelCause(ctx)
 
 	pr, pw := io.Pipe()
@@ -351,6 +391,7 @@ func (s *S3) Create(ctx context.Context, key Key, headers http.Header, ttl time.
 		pipe:      pw,
 		expiresAt: expiresAt,
 		headers:   clonedHeaders,
+		tag:       tag,
 		etag:      newETagWriter(),
 		ctx:       ctx,
 		cancel:    cancel,
@@ -392,6 +433,7 @@ type s3Writer struct {
 	pipe      *io.PipeWriter
 	expiresAt time.Time
 	headers   http.Header
+	tag       string
 	etag      *etagWriter
 	ctx       context.Context
 	cancel    context.CancelCauseFunc
@@ -452,7 +494,7 @@ func (w *s3Writer) Close() error {
 		w.etag.SetETag(w.headers)
 		metaHeaders := make(http.Header)
 		metaHeaders.Set(ETagKey, w.headers.Get(ETagKey))
-		return w.s3.writeMeta(w.ctx, w.namespace, w.key, s3Meta{Headers: metaHeaders, ExpiresAt: w.expiresAt})
+		return w.s3.writeMeta(w.ctx, w.namespace, w.key, s3Meta{Headers: metaHeaders, ExpiresAt: w.expiresAt, Tag: w.tag})
 	}
 	return nil
 }
@@ -466,7 +508,7 @@ func (w *s3Writer) upload(pr *io.PipeReader, r io.Reader) {
 
 	objectName := w.s3.keyToPath(w.namespace, w.key)
 
-	userMetadata := make(map[string]string)
+	userMetadata := map[string]string{s3TagMetadataKey: w.tag}
 	if len(w.headers) > 0 {
 		headersJSON, err := json.Marshal(w.headers)
 		if err != nil {
