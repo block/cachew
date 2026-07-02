@@ -91,18 +91,36 @@ func (t Tiered) Delete(ctx context.Context, key Key) error {
 
 // Stat returns headers from the first cache that succeeds.
 //
+// A tier that fails an If-Match precondition holds a different version of the
+// object, not a definitive answer: deeper tiers are consulted for the version
+// the validator names, and ErrPreconditionFailed is only returned when none
+// holds it.
+//
 // If all caches fail, all errors are returned.
 func (t Tiered) Stat(ctx context.Context, key Key, opts ...Option) (http.Header, error) {
+	rejected := false
 	errs := make([]error, len(t.caches))
 	for i, c := range t.caches {
 		headers, err := c.Stat(ctx, key, opts...)
 		errs[i] = err
-		if errors.Is(err, os.ErrNotExist) {
+		switch {
+		case errors.Is(err, os.ErrNotExist):
+			continue
+		case errors.Is(err, ErrPreconditionFailed):
+			rejected = true
+			continue
+		case err != nil && !errors.Is(err, ErrNotModified) && rejected:
+			// Probing deeper tiers is opportunistic: a hard error must not make
+			// the response worse than the 412 already in hand.
+			logging.FromContext(ctx).WarnContext(ctx, "Tiered: tier probe failed, continuing", "tier", c.String(), "key", key, "error", err)
 			continue
 		}
-		// Any other outcome (success, ErrNotModified, ErrPreconditionFailed, or a
-		// hard error) is definitive for this tier; surface it with its headers.
+		// Any other outcome (success, ErrNotModified, or a hard error) is
+		// definitive for this tier; surface it with its headers.
 		return headers, errors.WithStack(err)
+	}
+	if rejected {
+		return nil, errors.WithStack(ErrPreconditionFailed)
 	}
 	return nil, errors.Join(errs...)
 }
@@ -112,28 +130,81 @@ func (t Tiered) Stat(ctx context.Context, key Key, opts ...Option) (http.Header,
 // transparently backfills the lowest tier as the caller reads, so that
 // subsequent Opens are served locally.
 //
+// A tier that holds a different version than the request's validators name —
+// a failed If-Match, or an If-Range miss — is not definitive: deeper tiers are
+// consulted for the named version, so a replica whose local tier has diverged
+// can still satisfy a pinned request from a shared tier. When no tier holds
+// it, the first tier's outcome stands: the full representation for an If-Range
+// miss (per RFC 9110), ErrPreconditionFailed for a failed If-Match.
+//
 // If all caches fail, all errors are returned.
 func (t Tiered) Open(ctx context.Context, key Key, opts ...Option) (io.ReadCloser, http.Header, error) {
+	ro := NewRequestOptions(opts...)
 	// A Range request yields a partial body, which must never be backfilled
 	// into a lower tier as if it were the whole object.
-	partial := NewRequestOptions(opts...).Range != ""
+	partial := ro.Range != ""
+
+	// The first tier whose version missed If-Range supplies the full-body
+	// fallback, served only if no deeper tier holds the pinned version.
+	var fallback io.ReadCloser
+	var fallbackHeaders http.Header
+	rejected := false // a tier failed If-Match; deeper tiers may hold the named version
+	discard := func(r io.ReadCloser) {
+		if err := r.Close(); err != nil {
+			logging.FromContext(ctx).WarnContext(ctx, "Tiered: failed to close superseded reader", "key", key, "error", err)
+		}
+	}
+
 	errs := make([]error, len(t.caches))
 	for i, c := range t.caches {
 		r, headers, err := c.Open(ctx, key, opts...)
 		errs[i] = err
-		if errors.Is(err, os.ErrNotExist) {
+		switch {
+		case errors.Is(err, os.ErrNotExist):
+			continue
+		case errors.Is(err, ErrPreconditionFailed):
+			rejected = true
+			continue
+		case errors.Is(err, ErrNotModified), errors.Is(err, ErrRangeNotSatisfiable):
+			// This tier's version satisfies the request's validator, so the
+			// outcome is definitive. Surface headers so callers can build the
+			// conditional response. No body to backfill.
+			if fallback != nil {
+				discard(fallback)
+			}
+			return nil, headers, errors.WithStack(err)
+		case err != nil:
+			// A hard error only fails the request when no earlier tier produced
+			// a servable outcome; probing deeper tiers is opportunistic and must
+			// not make the response worse.
+			if fallback == nil && !rejected {
+				return nil, headers, errors.WithStack(err)
+			}
+			logging.FromContext(ctx).WarnContext(ctx, "Tiered: tier probe failed, continuing", "tier", c.String(), "key", key, "error", err)
+			continue
+		case ro.IfRangeMisses(headers.Get(ETagKey)):
+			// This tier holds a different version than the range is pinned to:
+			// hold its full body as the fallback and probe deeper tiers.
+			if fallback != nil {
+				discard(r)
+				continue
+			}
+			fallback, fallbackHeaders = r, headers
 			continue
 		}
-		if err != nil {
-			// Definitive non-miss error (incl. ErrNotModified/ErrPreconditionFailed/
-			// ErrRangeNotSatisfiable): surface headers so callers can build the
-			// conditional response. No body to backfill.
-			return nil, headers, errors.WithStack(err)
+		if fallback != nil {
+			discard(fallback)
 		}
 		if i > 0 && !partial {
 			r = t.backfillReader(ctx, key, r, headers, t.caches[0])
 		}
 		return r, headers, nil
+	}
+	if fallback != nil {
+		return fallback, fallbackHeaders, nil
+	}
+	if rejected {
+		return nil, nil, errors.WithStack(ErrPreconditionFailed)
 	}
 	return nil, nil, errors.Join(errs...)
 }

@@ -1,6 +1,9 @@
 package cache_test
 
 import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"log/slog"
@@ -16,6 +19,30 @@ import (
 	"github.com/block/cachew/internal/s3client"
 	"github.com/block/cachew/internal/s3client/s3clienttest"
 )
+
+// seedTier writes content to a single tier directly, so tests can diverge the
+// versions held by each tier.
+func seedTier(ctx context.Context, t *testing.T, c cache.Cache, key cache.Key, content []byte) {
+	t.Helper()
+	w, err := c.Create(ctx, key, nil, time.Minute)
+	assert.NoError(t, err)
+	_, err = w.Write(content)
+	assert.NoError(t, err)
+	assert.NoError(t, w.Close())
+}
+
+func contentETag(content []byte) string {
+	sum := sha256.Sum256(content)
+	return `"` + hex.EncodeToString(sum[:]) + `"`
+}
+
+func readAllAndClose(t *testing.T, r io.ReadCloser) []byte {
+	t.Helper()
+	data, err := io.ReadAll(r)
+	assert.NoError(t, err)
+	assert.NoError(t, r.Close())
+	return data
+}
 
 type cacheFactory struct {
 	name string
@@ -118,31 +145,134 @@ func TestTieredBackfillPermutations(t *testing.T) {
 			content := []byte("hello backfill")
 
 			// Write only to upper tier, simulating a lower-tier miss.
-			w, err := upper.Create(ctx, key, nil, time.Minute)
-			assert.NoError(t, err)
-			_, err = w.Write(content)
-			assert.NoError(t, err)
-			assert.NoError(t, w.Close())
+			seedTier(ctx, t, upper, key, content)
 
 			// Verify lower tier does not have it.
-			_, _, err = lower.Open(ctx, key)
+			_, _, err := lower.Open(ctx, key)
 			assert.IsError(t, err, os.ErrNotExist)
 
 			// Open through tiered — should hit upper and backfill lower.
 			r, _, err := tiered.Open(ctx, key)
 			assert.NoError(t, err)
-			data, err := io.ReadAll(r)
-			assert.NoError(t, err)
-			assert.NoError(t, r.Close())
-			assert.Equal(t, content, data)
+			assert.Equal(t, content, readAllAndClose(t, r))
 
 			// Now lower tier should have the entry via backfill.
 			r2, _, err := lower.Open(ctx, key)
 			assert.NoError(t, err)
-			data2, err := io.ReadAll(r2)
-			assert.NoError(t, err)
-			assert.NoError(t, r2.Close())
-			assert.Equal(t, content, data2)
+			assert.Equal(t, content, readAllAndClose(t, r2))
+		})
+	}
+}
+
+// TestTieredDivergentValidatorPermutations covers a replica whose local (lower)
+// tier holds a different version of an object than the shared (upper) tier:
+// requests pinned to a version via If-Range or If-Match must be satisfied by
+// whichever tier holds that version rather than answered from the first tier
+// that has any version.
+func TestTieredDivergentValidatorPermutations(t *testing.T) {
+	stale := []byte("0123456789")
+	pinned := []byte("abcdefghij")
+	staleETag := contentETag(stale)
+	pinnedETag := contentETag(pinned)
+
+	for _, perm := range tieredPermutations(t) {
+		t.Run(perm.name, func(t *testing.T) {
+			_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelDebug})
+			lower := perm.lower.new(t)
+			upper := perm.upper.new(t)
+			tiered := cache.MaybeNewTiered(ctx, []cache.Cache{lower, upper})
+			defer tiered.Close()
+
+			keyBoth := cache.NewKey("divergent-both")
+			seedTier(ctx, t, lower, keyBoth, stale)
+			seedTier(ctx, t, upper, keyBoth, pinned)
+
+			keyLowerOnly := cache.NewKey("divergent-lower-only")
+			seedTier(ctx, t, lower, keyLowerOnly, stale)
+
+			t.Run("IfRangePinnedToUpperServesRangeFromUpper", func(t *testing.T) {
+				r, headers, err := tiered.Open(ctx, keyBoth, cache.Range(2, 6), cache.IfRange(pinnedETag))
+				assert.NoError(t, err)
+				assert.Equal(t, []byte("cdef"), readAllAndClose(t, r))
+				assert.Equal(t, "bytes 2-5/10", headers.Get("Content-Range"))
+				assert.Equal(t, pinnedETag, headers.Get(cache.ETagKey))
+			})
+
+			t.Run("IfRangePinnedToLowerServesRangeFromLower", func(t *testing.T) {
+				r, headers, err := tiered.Open(ctx, keyBoth, cache.Range(2, 6), cache.IfRange(staleETag))
+				assert.NoError(t, err)
+				assert.Equal(t, []byte("2345"), readAllAndClose(t, r))
+				assert.Equal(t, staleETag, headers.Get(cache.ETagKey))
+			})
+
+			t.Run("IfRangeMissingEverywhereServesFullFromLower", func(t *testing.T) {
+				r, headers, err := tiered.Open(ctx, keyBoth, cache.Range(2, 6), cache.IfRange(`"unknown"`))
+				assert.NoError(t, err)
+				assert.Equal(t, stale, readAllAndClose(t, r))
+				assert.Equal(t, "", headers.Get("Content-Range"))
+				assert.Equal(t, staleETag, headers.Get(cache.ETagKey))
+			})
+
+			t.Run("IfRangePinnedUpperMissingServesFullFromLower", func(t *testing.T) {
+				r, headers, err := tiered.Open(ctx, keyLowerOnly, cache.Range(2, 6), cache.IfRange(pinnedETag))
+				assert.NoError(t, err)
+				assert.Equal(t, stale, readAllAndClose(t, r))
+				assert.Equal(t, "", headers.Get("Content-Range"))
+			})
+
+			t.Run("IfMatchPinnedToUpperServesRangeFromUpper", func(t *testing.T) {
+				r, headers, err := tiered.Open(ctx, keyBoth, cache.Range(2, 6), cache.IfMatch(pinnedETag))
+				assert.NoError(t, err)
+				assert.Equal(t, []byte("cdef"), readAllAndClose(t, r))
+				assert.Equal(t, "bytes 2-5/10", headers.Get("Content-Range"))
+				assert.Equal(t, pinnedETag, headers.Get(cache.ETagKey))
+
+				// A partial body must never be backfilled: the lower tier keeps
+				// its own version.
+				r2, _, err := lower.Open(ctx, keyBoth)
+				assert.NoError(t, err)
+				assert.Equal(t, stale, readAllAndClose(t, r2))
+			})
+
+			t.Run("IfMatchMissingEverywhereReturnsPreconditionFailed", func(t *testing.T) {
+				_, _, err := tiered.Open(ctx, keyBoth, cache.Range(2, 6), cache.IfMatch(`"unknown"`))
+				assert.IsError(t, err, cache.ErrPreconditionFailed)
+				_, err = tiered.Stat(ctx, keyBoth, cache.IfMatch(`"unknown"`))
+				assert.IsError(t, err, cache.ErrPreconditionFailed)
+			})
+
+			t.Run("IfMatchPinnedUpperMissingReturnsPreconditionFailed", func(t *testing.T) {
+				_, _, err := tiered.Open(ctx, keyLowerOnly, cache.Range(2, 6), cache.IfMatch(pinnedETag))
+				assert.IsError(t, err, cache.ErrPreconditionFailed)
+			})
+
+			t.Run("StatIfMatchPinnedToUpperReturnsUpperHeaders", func(t *testing.T) {
+				headers, err := tiered.Stat(ctx, keyBoth, cache.IfMatch(pinnedETag))
+				assert.NoError(t, err)
+				assert.Equal(t, pinnedETag, headers.Get(cache.ETagKey))
+			})
+
+			t.Run("IfNoneMatchLowerRemainsDefinitive", func(t *testing.T) {
+				_, _, err := tiered.Open(ctx, keyBoth, cache.IfNoneMatch(staleETag))
+				assert.IsError(t, err, cache.ErrNotModified)
+			})
+
+			t.Run("IfMatchFullReadBackfillsLower", func(t *testing.T) {
+				keyHeal := cache.NewKey("divergent-heal")
+				seedTier(ctx, t, lower, keyHeal, stale)
+				seedTier(ctx, t, upper, keyHeal, pinned)
+
+				r, headers, err := tiered.Open(ctx, keyHeal, cache.IfMatch(pinnedETag))
+				assert.NoError(t, err)
+				assert.Equal(t, pinned, readAllAndClose(t, r))
+				assert.Equal(t, pinnedETag, headers.Get(cache.ETagKey))
+
+				// A full-body serve from the upper tier heals the divergent
+				// lower tier via the usual backfill.
+				r2, _, err := lower.Open(ctx, keyHeal)
+				assert.NoError(t, err)
+				assert.Equal(t, pinned, readAllAndClose(t, r2))
+			})
 		})
 	}
 }
@@ -160,11 +290,7 @@ func TestTieredDeletePermutations(t *testing.T) {
 			content := []byte("delete me")
 
 			// Write through tiered so both tiers have the entry.
-			w, err := tiered.Create(ctx, key, nil, time.Minute)
-			assert.NoError(t, err)
-			_, err = w.Write(content)
-			assert.NoError(t, err)
-			assert.NoError(t, w.Close())
+			seedTier(ctx, t, tiered, key, content)
 
 			// Verify both tiers have it.
 			r, _, err := lower.Open(ctx, key)

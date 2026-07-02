@@ -28,6 +28,28 @@ func TestRangeFormat(t *testing.T) {
 	}
 }
 
+func TestIfRangeMisses(t *testing.T) {
+	tests := []struct {
+		name    string
+		spec    string
+		ifRange string
+		etag    string
+		want    bool
+	}{
+		{name: "NoRange", ifRange: `"e"`, etag: `"e"`, want: false},
+		{name: "NoIfRange", spec: "bytes=0-4", etag: `"e"`, want: false},
+		{name: "Match", spec: "bytes=0-4", ifRange: `"e"`, etag: `"e"`, want: false},
+		{name: "Mismatch", spec: "bytes=0-4", ifRange: `"e"`, etag: `"other"`, want: true},
+		{name: "NoStoredETag", spec: "bytes=0-4", ifRange: `"e"`, etag: "", want: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			o := client.RequestOptions{Range: tt.spec, IfRange: tt.ifRange}
+			assert.Equal(t, tt.want, o.IfRangeMisses(tt.etag))
+		})
+	}
+}
+
 func TestResolveRange(t *testing.T) {
 	const etag = `"e"`
 	tests := []struct {
