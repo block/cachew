@@ -293,6 +293,89 @@ func TestTieredDivergentValidatorPermutations(t *testing.T) {
 	}
 }
 
+func TestTieredDiscoveryResolvesFromDeepestTier(t *testing.T) {
+	stale := []byte("0123456789")
+	pinned := []byte("abcdefghij")
+	staleETag := contentETag(stale)
+	pinnedETag := contentETag(pinned)
+
+	newTiered := func(t *testing.T) (context.Context, cache.Cache, cache.Cache, cache.Cache) {
+		t.Helper()
+		_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelDebug})
+		lower, err := cache.NewMemory(ctx, cache.MemoryConfig{LimitMB: 1024, MaxTTL: time.Hour})
+		assert.NoError(t, err)
+		upper, err := cache.NewMemory(ctx, cache.MemoryConfig{LimitMB: 1024, MaxTTL: time.Hour})
+		assert.NoError(t, err)
+		return ctx, cache.MaybeNewTiered(ctx, []cache.Cache{lower, upper}), lower, upper
+	}
+
+	t.Run("UnpinnedRangePinsDeepestETag", func(t *testing.T) {
+		ctx, tiered, lower, upper := newTiered(t)
+		defer tiered.Close()
+		key := cache.NewKey("discovery-divergent")
+		seedTier(ctx, t, lower, key, stale)
+		seedTier(ctx, t, upper, key, pinned)
+
+		r, headers, err := tiered.Open(ctx, key, cache.Range(0, 4))
+		assert.NoError(t, err)
+		assert.Equal(t, []byte("abcd"), readAllAndClose(t, r))
+		assert.Equal(t, pinnedETag, headers.Get(cache.ETagKey))
+	})
+
+	t.Run("FullReadStaysOnLocalTier", func(t *testing.T) {
+		ctx, tiered, lower, upper := newTiered(t)
+		defer tiered.Close()
+		key := cache.NewKey("discovery-full")
+		seedTier(ctx, t, lower, key, stale)
+		seedTier(ctx, t, upper, key, pinned)
+
+		r, headers, err := tiered.Open(ctx, key)
+		assert.NoError(t, err)
+		assert.Equal(t, stale, readAllAndClose(t, r))
+		assert.Equal(t, staleETag, headers.Get(cache.ETagKey))
+	})
+
+	t.Run("PinnedRangeStaysOnLocalTier", func(t *testing.T) {
+		ctx, tiered, lower, upper := newTiered(t)
+		defer tiered.Close()
+		key := cache.NewKey("discovery-pinned")
+		seedTier(ctx, t, lower, key, stale)
+		seedTier(ctx, t, upper, key, pinned)
+
+		r, headers, err := tiered.Open(ctx, key, cache.Range(0, 4), cache.IfMatch(staleETag))
+		assert.NoError(t, err)
+		assert.Equal(t, []byte("0123"), readAllAndClose(t, r))
+		assert.Equal(t, staleETag, headers.Get(cache.ETagKey))
+	})
+
+	t.Run("FallsBackToLocalOnDeepestMiss", func(t *testing.T) {
+		ctx, tiered, lower, _ := newTiered(t)
+		defer tiered.Close()
+		key := cache.NewKey("discovery-lower-only")
+		seedTier(ctx, t, lower, key, stale)
+
+		r, headers, err := tiered.Open(ctx, key, cache.Range(0, 4))
+		assert.NoError(t, err)
+		assert.Equal(t, []byte("0123"), readAllAndClose(t, r))
+		assert.Equal(t, staleETag, headers.Get(cache.ETagKey))
+	})
+
+	t.Run("FallsBackToLocalOnDeepestOutage", func(t *testing.T) {
+		_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelDebug})
+		lower, err := cache.NewMemory(ctx, cache.MemoryConfig{LimitMB: 1024, MaxTTL: time.Hour})
+		assert.NoError(t, err)
+		tiered := cache.MaybeNewTiered(ctx, []cache.Cache{lower, newFailingCache(errors.New("backend unavailable"))})
+		defer tiered.Close()
+		key := cache.NewKey("discovery-outage")
+		seedTier(ctx, t, lower, key, stale)
+
+		r, headers, err := tiered.Open(ctx, key, cache.Range(0, 4))
+		assert.NoError(t, err)
+		assert.Equal(t, []byte("0123"), readAllAndClose(t, r))
+		assert.Equal(t, staleETag, headers.Get(cache.ETagKey))
+	})
+}
+
 func TestTieredDivergentValidatorProbeErrors(t *testing.T) {
 	_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelDebug})
 	lower, err := cache.NewMemory(ctx, cache.MemoryConfig{LimitMB: 1024, MaxTTL: time.Hour})

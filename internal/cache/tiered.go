@@ -142,9 +142,19 @@ func (t Tiered) Stat(ctx context.Context, key Key, opts ...Option) (http.Header,
 // that errored while being probed takes precedence over both, so outages are
 // not misreported as missing versions.
 //
+// An unpinned ranged read (a Range with no If-Match or If-Range) is treated as
+// a discovery read and resolved from the deepest (shared) tier so its validator
+// is consistent across replicas, falling back to normal tiering only if that
+// tier misses or is unavailable.
+//
 // If all caches fail, all errors are returned.
 func (t Tiered) Open(ctx context.Context, key Key, opts ...Option) (io.ReadCloser, http.Header, error) {
 	ro := NewRequestOptions(opts...)
+
+	if r, headers, handled, err := t.openDiscovery(ctx, ro, key, opts...); handled {
+		return r, headers, err
+	}
+
 	// A Range request yields a partial body, which must never be backfilled
 	// into a lower tier as if it were the whole object.
 	partial := ro.Range != ""
@@ -220,6 +230,31 @@ func (t Tiered) Open(ctx context.Context, key Key, opts ...Option) (io.ReadClose
 		return nil, nil, errors.WithStack(ErrPreconditionFailed)
 	}
 	return nil, nil, errors.Join(errs...)
+}
+
+// openDiscovery resolves an unpinned ranged read from the deepest (shared) tier
+// so its validator is consistent across replicas, regardless of what local
+// tiers hold. Such a read is a discovery read: the caller will pin subsequent
+// reads to the ETag it returns, and the only pin consistent across replicas is
+// the shared tier's. A hit, or a definitive range outcome, is handled here
+// (handled=true); a request that is not an unpinned range, a miss, or a
+// transient failure at the shared tier returns handled=false so Open falls back
+// to normal tiering and a healthy local tier can still serve.
+func (t Tiered) openDiscovery(ctx context.Context, ro RequestOptions, key Key, opts ...Option) (io.ReadCloser, http.Header, bool, error) {
+	if ro.Range == "" || ro.IfMatch != "" || ro.IfRange != "" {
+		return nil, nil, false, nil
+	}
+	deepest := t.caches[len(t.caches)-1]
+	r, headers, err := deepest.Open(ctx, key, opts...)
+	switch {
+	case err == nil:
+		return r, headers, true, nil
+	case errors.Is(err, ErrRangeNotSatisfiable):
+		return nil, headers, true, errors.WithStack(err)
+	default:
+		logging.FromContext(ctx).WarnContext(ctx, "Tiered: discovery open falling back to local tiers", "key", key, "error", err)
+		return nil, nil, false, nil
+	}
 }
 
 // backfillReader wraps src so that every byte read is also written to dst.

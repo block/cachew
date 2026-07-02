@@ -26,8 +26,10 @@ type RangeReader interface {
 //
 // The first chunk is fetched with a ranged Open, whose response yields both the
 // total size (from Content-Range) and the object's ETag; every remaining chunk
-// is then requested with IfMatch pinned to that ETag. If the object changes
-// mid-download, the chunk is rejected with a bodiless ErrPreconditionFailed
+// is then requested with IfMatch pinned to that ETag. As an unpinned ranged
+// read, the discovery request is a tiered backend's signal to resolve it from
+// the shared tier, so the pin avoids cross-replica precondition churn. If the
+// object changes mid-download, the chunk is rejected with a bodiless ErrPreconditionFailed
 // (412) and ParallelGet returns an error rather than splicing bytes from two
 // revisions; a server that ignores If-Match is caught by verifying each chunk's
 // response ETag. A missing or truncated chunk is likewise reported as an error,
@@ -54,7 +56,10 @@ func ParallelGet(ctx context.Context, c RangeReader, key Key, dst io.WriterAt, c
 	}
 
 	// Discovery: the first ranged Open delivers chunk zero and reveals the total
-	// size and ETag used to pin the rest.
+	// size and ETag used to pin the rest. It carries no validator, which a tiered
+	// backend takes as the signal to resolve the pin from its shared tier,
+	// keeping every chunk on the revision the shared tier holds rather than an
+	// arbitrary local replica's.
 	rc, headers, err := c.Open(ctx, key, Range(0, chunkSize))
 	if errors.Is(err, ErrRangeNotSatisfiable) {
 		return nil // Empty object: nothing to write.
