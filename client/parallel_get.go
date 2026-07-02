@@ -26,11 +26,12 @@ type RangeReader interface {
 //
 // The first chunk is fetched with a ranged Open, whose response yields both the
 // total size (from Content-Range) and the object's ETag; every remaining chunk
-// is then requested with IfRange pinned to that ETag. If the object changes
-// mid-download, a chunk's ETag will differ and ParallelGet returns an error
-// rather than splicing bytes from two revisions. A missing or truncated chunk
-// is likewise reported as an error, so a partially written dst must be discarded
-// by the caller on failure. An object with no ETag to pin to (e.g. one stored
+// is then requested with IfMatch pinned to that ETag. If the object changes
+// mid-download, the chunk is rejected with a bodiless ErrPreconditionFailed
+// (412) and ParallelGet returns an error rather than splicing bytes from two
+// revisions; a server that ignores If-Match is caught by verifying each chunk's
+// response ETag. A missing or truncated chunk is likewise reported as an error,
+// so a partially written dst must be discarded by the caller on failure. An object with no ETag to pin to (e.g. one stored
 // before ETags were recorded) cannot be kept revision-safe across chunks, so it
 // falls back to a single full read instead of parallelising. A concurrency of
 // 1 likewise reads the whole object in one request, since chunking a single
@@ -77,11 +78,11 @@ func ParallelGet(ctx context.Context, c RangeReader, key Key, dst io.WriterAt, c
 		return errors.Wrap(writeChunkAt(dst, 0, firstLen, rc), "parallel get")
 	}
 
-	// Subsequent chunks are pinned to the discovery ETag via IfRange. Without a
-	// validator there is nothing to pin to (IfRange("") is a no-op and an empty
-	// ETag matches an empty ETag), so chunks could be spliced across a rewrite
-	// undetected. Objects stored before ETags were recorded fall here, so fall
-	// back to a single, revision-consistent read rather than parallelising.
+	// Subsequent chunks are pinned to the discovery ETag via IfMatch. Without a
+	// validator there is nothing to pin to (IfMatch("") is a no-op), so chunks
+	// could be spliced across a rewrite undetected. Objects stored before ETags
+	// were recorded fall here, so fall back to a single, revision-consistent
+	// read rather than parallelising.
 	if etag == "" {
 		if err := rc.Close(); err != nil {
 			return errors.Wrap(err, "parallel get: close discovery reader")
@@ -121,11 +122,16 @@ func fullRead(ctx context.Context, c RangeReader, key Key, dst io.WriterAt) erro
 	return errors.Wrap(writeChunkAt(dst, 0, -1, rc), "parallel get")
 }
 
-// fetchChunk opens the [start, end) range pinned to etag and writes it at start.
-// An ETag change (the object was rewritten mid-download) or a short read is
-// reported as an error.
+// fetchChunk opens the [start, end) range pinned to etag via If-Match and
+// writes it at start. An ETag change (the object was rewritten mid-download)
+// surfaces as ErrPreconditionFailed, or as a response-ETag mismatch when the
+// server ignores If-Match; either way it is reported as an error, as is a
+// short read.
 func fetchChunk(ctx context.Context, c RangeReader, key Key, dst io.WriterAt, start, end int64, etag string) error {
-	rc, headers, err := c.Open(ctx, key, Range(start, end), IfRange(etag))
+	rc, headers, err := c.Open(ctx, key, Range(start, end), IfMatch(etag))
+	if errors.Is(err, ErrPreconditionFailed) {
+		return errors.Errorf("open range %d-%d: object changed during read: %w", start, end, err)
+	}
 	if err != nil {
 		return errors.Errorf("open range %d-%d: %w", start, end, err)
 	}

@@ -135,16 +135,18 @@ const (
 	RangeNotSatisfiable
 )
 
+// IfRangeMisses reports whether a requested Range is dropped because the
+// If-Range validator does not match etag, in which case the full
+// representation is served in place of the range.
+func (o RequestOptions) IfRangeMisses(etag string) bool {
+	return o.Range != "" && o.IfRange != "" && o.IfRange != etag
+}
+
 // ResolveRange evaluates the Range/If-Range options against an object of the
 // given size and ETag. On RangePartial it returns the [start, start+length)
 // window to serve.
 func (o RequestOptions) ResolveRange(size int64, etag string) (start, length int64, outcome RangeOutcome) {
-	if o.Range == "" {
-		return 0, size, RangeFull
-	}
-	// If-Range only applies the range when its validator matches the stored
-	// ETag; otherwise the client is told to serve the full representation.
-	if o.IfRange != "" && o.IfRange != etag {
+	if o.Range == "" || o.IfRangeMisses(etag) {
 		return 0, size, RangeFull
 	}
 	return resolveByteRange(o.Range, size)
