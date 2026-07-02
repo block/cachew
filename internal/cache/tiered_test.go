@@ -7,11 +7,13 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"testing"
 	"time"
 
 	"github.com/alecthomas/assert/v2"
+	"github.com/alecthomas/errors"
 
 	"github.com/block/cachew/internal/cache"
 	"github.com/block/cachew/internal/cache/cachetest"
@@ -42,6 +44,25 @@ func readAllAndClose(t *testing.T, r io.ReadCloser) []byte {
 	assert.NoError(t, err)
 	assert.NoError(t, r.Close())
 	return data
+}
+
+type failingCache struct {
+	cache.Cache
+	err error
+}
+
+func newFailingCache(err error) cache.Cache {
+	return failingCache{Cache: cache.NoOpCache(), err: err}
+}
+
+func (c failingCache) String() string { return "failing" }
+
+func (c failingCache) Stat(_ context.Context, _ cache.Key, _ ...cache.Option) (http.Header, error) {
+	return nil, c.err
+}
+
+func (c failingCache) Open(_ context.Context, _ cache.Key, _ ...cache.Option) (io.ReadCloser, http.Header, error) {
+	return nil, nil, c.err
 }
 
 type cacheFactory struct {
@@ -164,11 +185,6 @@ func TestTieredBackfillPermutations(t *testing.T) {
 	}
 }
 
-// TestTieredDivergentValidatorPermutations covers a replica whose local (lower)
-// tier holds a different version of an object than the shared (upper) tier:
-// requests pinned to a version via If-Range or If-Match must be satisfied by
-// whichever tier holds that version rather than answered from the first tier
-// that has any version.
 func TestTieredDivergentValidatorPermutations(t *testing.T) {
 	stale := []byte("0123456789")
 	pinned := []byte("abcdefghij")
@@ -274,6 +290,50 @@ func TestTieredDivergentValidatorPermutations(t *testing.T) {
 				assert.Equal(t, pinned, readAllAndClose(t, r2))
 			})
 		})
+	}
+}
+
+func TestTieredDivergentValidatorProbeErrors(t *testing.T) {
+	_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelDebug})
+	lower, err := cache.NewMemory(ctx, cache.MemoryConfig{LimitMB: 1024, MaxTTL: time.Hour})
+	assert.NoError(t, err)
+	outage := errors.New("backend unavailable")
+	tiered := cache.MaybeNewTiered(ctx, []cache.Cache{lower, newFailingCache(outage)})
+	defer tiered.Close()
+
+	key := cache.NewKey("divergent-probe-error")
+	stale := []byte("0123456789")
+	seedTier(ctx, t, lower, key, stale)
+
+	pinnedETag := contentETag([]byte("abcdefghij"))
+	tests := []struct {
+		name string
+		run  func(t *testing.T)
+	}{
+		{
+			name: "OpenIfMatchReturnsProbeError",
+			run: func(t *testing.T) {
+				_, _, err := tiered.Open(ctx, key, cache.IfMatch(pinnedETag))
+				assert.IsError(t, err, outage)
+			},
+		},
+		{
+			name: "StatIfMatchReturnsProbeError",
+			run: func(t *testing.T) {
+				_, err := tiered.Stat(ctx, key, cache.IfMatch(pinnedETag))
+				assert.IsError(t, err, outage)
+			},
+		},
+		{
+			name: "OpenIfRangeReturnsProbeError",
+			run: func(t *testing.T) {
+				_, _, err := tiered.Open(ctx, key, cache.Range(2, 6), cache.IfRange(pinnedETag))
+				assert.IsError(t, err, outage)
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, tt.run)
 	}
 }
 

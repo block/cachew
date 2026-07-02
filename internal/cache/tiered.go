@@ -99,6 +99,7 @@ func (t Tiered) Delete(ctx context.Context, key Key) error {
 // If all caches fail, all errors are returned.
 func (t Tiered) Stat(ctx context.Context, key Key, opts ...Option) (http.Header, error) {
 	rejected := false
+	var probeErrs []error
 	errs := make([]error, len(t.caches))
 	for i, c := range t.caches {
 		headers, err := c.Stat(ctx, key, opts...)
@@ -110,14 +111,15 @@ func (t Tiered) Stat(ctx context.Context, key Key, opts ...Option) (http.Header,
 			rejected = true
 			continue
 		case err != nil && !errors.Is(err, ErrNotModified) && rejected:
-			// Probing deeper tiers is opportunistic: a hard error must not make
-			// the response worse than the 412 already in hand.
-			logging.FromContext(ctx).WarnContext(ctx, "Tiered: tier probe failed, continuing", "tier", c.String(), "key", key, "error", err)
+			probeErrs = append(probeErrs, errors.WithStack(err))
 			continue
 		}
 		// Any other outcome (success, ErrNotModified, or a hard error) is
 		// definitive for this tier; surface it with its headers.
 		return headers, errors.WithStack(err)
+	}
+	if len(probeErrs) > 0 {
+		return nil, errors.Join(probeErrs...)
 	}
 	if rejected {
 		return nil, errors.WithStack(ErrPreconditionFailed)
@@ -148,6 +150,7 @@ func (t Tiered) Open(ctx context.Context, key Key, opts ...Option) (io.ReadClose
 	// fallback, served only if no deeper tier holds the pinned version.
 	var fallback io.ReadCloser
 	var fallbackHeaders http.Header
+	var probeErrs []error
 	rejected := false // a tier failed If-Match; deeper tiers may hold the named version
 	discard := func(r io.ReadCloser) {
 		if err := r.Close(); err != nil {
@@ -180,7 +183,7 @@ func (t Tiered) Open(ctx context.Context, key Key, opts ...Option) (io.ReadClose
 			if fallback == nil && !rejected {
 				return nil, headers, errors.WithStack(err)
 			}
-			logging.FromContext(ctx).WarnContext(ctx, "Tiered: tier probe failed, continuing", "tier", c.String(), "key", key, "error", err)
+			probeErrs = append(probeErrs, errors.WithStack(err))
 			continue
 		case ro.IfRangeMisses(headers.Get(ETagKey)):
 			// This tier holds a different version than the range is pinned to:
@@ -199,6 +202,12 @@ func (t Tiered) Open(ctx context.Context, key Key, opts ...Option) (io.ReadClose
 			r = t.backfillReader(ctx, key, r, headers, t.caches[0])
 		}
 		return r, headers, nil
+	}
+	if len(probeErrs) > 0 {
+		if fallback != nil {
+			probeErrs = append(probeErrs, fallback.Close())
+		}
+		return nil, nil, errors.Join(probeErrs...)
 	}
 	if fallback != nil {
 		return fallback, fallbackHeaders, nil
