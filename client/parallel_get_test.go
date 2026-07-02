@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 
@@ -36,8 +38,10 @@ func (b *bufferAt) WriteAt(p []byte, off int64) (int, error) {
 	return len(p), nil
 }
 
-// rangeFlipReader serves correct byte ranges but reports a different ETag for
-// any chunk past the first, simulating an object rewritten mid-download.
+// rangeFlipReader serves correct byte ranges but ignores If-Match and reports
+// a different ETag for any chunk past the first, simulating an object
+// rewritten mid-download behind a server that does not honour preconditions.
+// It exercises the client-side response-ETag guard.
 type rangeFlipReader struct {
 	data      []byte
 	firstETag string
@@ -70,6 +74,47 @@ func TestParallelGetETagMismatch(t *testing.T) {
 	var dst bufferAt
 	err := client.ParallelGet(context.Background(), c, client.NewKey("k"), &dst, 100, 4)
 	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "object changed during read")
+}
+
+// ifMatchFlipReader honours If-Match like a conforming server whose object is
+// rewritten after the discovery request, so every pinned chunk fails its
+// precondition with a bodiless rejection.
+type ifMatchFlipReader struct {
+	data      []byte
+	firstETag string
+	restETag  string
+}
+
+func (f *ifMatchFlipReader) Open(_ context.Context, _ client.Key, opts ...client.RequestOption) (io.ReadCloser, http.Header, error) {
+	o := client.NewRequestOptions(opts...)
+	etag := f.firstETag
+	if o.IfMatch != "" {
+		etag = f.restETag
+	}
+	if err := o.Check(etag); err != nil {
+		return nil, nil, err
+	}
+	size := int64(len(f.data))
+	start, length, outcome := o.ResolveRange(size, etag)
+	headers := http.Header{}
+	if outcome == client.RangeNotSatisfiable {
+		headers.Set("Content-Range", fmt.Sprintf("bytes */%d", size))
+		return nil, headers, client.ErrRangeNotSatisfiable
+	}
+	headers.Set(client.ETagKey, etag)
+	headers.Set("Content-Length", strconv.FormatInt(length, 10))
+	if outcome == client.RangePartial {
+		headers.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, start+length-1, size))
+	}
+	return io.NopCloser(bytes.NewReader(f.data[start : start+length])), headers, nil
+}
+
+func TestParallelGetPreconditionFailedOnRewrite(t *testing.T) {
+	c := &ifMatchFlipReader{data: make([]byte, 1000), firstETag: `"v1"`, restETag: `"v2"`}
+	var dst bufferAt
+	err := client.ParallelGet(context.Background(), c, client.NewKey("k"), &dst, 100, 4)
+	assert.IsError(t, err, client.ErrPreconditionFailed)
 	assert.Contains(t, err.Error(), "object changed during read")
 }
 
@@ -147,21 +192,28 @@ func (c *changingSizeReader) Open(_ context.Context, _ client.Key, opts ...clien
 	return io.NopCloser(bytes.NewReader(c.discovery[start : start+length])), headers, nil
 }
 
-// recordingReader serves byte ranges and records the Range option of every
-// Open call ("" for a full, non-ranged read), so tests can assert how the
-// object was fetched.
+// openRecord captures the fetch-shaping options of a single Open call: the
+// Range requested ("" for a full read) and the If-Match validator it was
+// pinned to.
+type openRecord struct {
+	Range   string
+	IfMatch string
+}
+
+// recordingReader serves byte ranges and records an openRecord for every Open
+// call, so tests can assert how the object was fetched.
 type recordingReader struct {
 	data []byte
 	etag string
 
 	mu    sync.Mutex
-	opens []string
+	opens []openRecord
 }
 
 func (r *recordingReader) Open(_ context.Context, _ client.Key, opts ...client.RequestOption) (io.ReadCloser, http.Header, error) {
 	o := client.NewRequestOptions(opts...)
 	r.mu.Lock()
-	r.opens = append(r.opens, o.Range)
+	r.opens = append(r.opens, openRecord{Range: o.Range, IfMatch: o.IfMatch})
 	r.mu.Unlock()
 
 	size := int64(len(r.data))
@@ -193,7 +245,26 @@ func TestParallelGetSingleWorkerFullRead(t *testing.T) {
 	err := client.ParallelGet(context.Background(), c, client.NewKey("k"), &dst, 100, 1)
 	assert.NoError(t, err)
 	assert.Equal(t, data, dst.buf)
-	assert.Equal(t, []string{""}, c.opens)
+	assert.Equal(t, []openRecord{{}}, c.opens)
+}
+
+func TestParallelGetPinsChunksWithIfMatch(t *testing.T) {
+	data := make([]byte, 1000)
+	for i := range data {
+		data[i] = byte(i % 251)
+	}
+	c := &recordingReader{data: data, etag: `"v1"`}
+	var dst bufferAt
+	err := client.ParallelGet(context.Background(), c, client.NewKey("k"), &dst, 100, 4)
+	assert.NoError(t, err)
+	assert.Equal(t, data, dst.buf)
+
+	expected := []openRecord{{Range: "bytes=0-99"}}
+	for seq := 1; seq < 10; seq++ {
+		expected = append(expected, openRecord{Range: fmt.Sprintf("bytes=%d-%d", seq*100, seq*100+99), IfMatch: `"v1"`})
+	}
+	slices.SortFunc(c.opens, func(a, b openRecord) int { return strings.Compare(a.Range, b.Range) })
+	assert.Equal(t, expected, c.opens)
 }
 
 func TestParallelGetNoETagSizeChangedBetweenRequests(t *testing.T) {

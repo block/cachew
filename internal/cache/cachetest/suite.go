@@ -602,6 +602,24 @@ func testRange(t *testing.T, c cache.Cache) {
 		assert.Equal(t, "", headers.Get("Content-Range"))
 	})
 
+	sum := sha256.Sum256(content)
+	etag := `"` + hex.EncodeToString(sum[:]) + `"`
+
+	t.Run("IfMatchHitServesRange", func(t *testing.T) {
+		reader, headers, err := c.Open(ctx, key, cache.Range(2, 6), cache.IfMatch(etag))
+		assert.NoError(t, err)
+		defer reader.Close()
+		data, err := io.ReadAll(reader)
+		assert.NoError(t, err)
+		assert.Equal(t, []byte("2345"), data)
+		assert.Equal(t, "bytes 2-5/10", headers.Get("Content-Range"))
+	})
+
+	t.Run("IfMatchMissRejectsRange", func(t *testing.T) {
+		_, _, err := c.Open(ctx, key, cache.Range(2, 6), cache.IfMatch(`"stale"`))
+		assert.IsError(t, err, cache.ErrPreconditionFailed)
+	})
+
 	t.Run("StatIgnoresRange", func(t *testing.T) {
 		headers, err := c.Stat(ctx, key, cache.Range(2, 6))
 		assert.NoError(t, err)
