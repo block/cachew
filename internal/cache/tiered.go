@@ -13,6 +13,7 @@ import (
 	"github.com/alecthomas/errors"
 
 	"github.com/block/cachew/internal/logging"
+	"github.com/block/cachew/internal/metadatadb"
 )
 
 // The Tiered cache combines multiple caches.
@@ -20,13 +21,15 @@ import (
 // It is not directly selectable from configuration, but instead is automatically used if multiple caches are
 // configured.
 type Tiered struct {
-	caches []Cache
+	caches    []Cache
+	metadata  *metadatadb.Store
+	namespace Namespace
 }
 
 // MaybeNewTiered creates a [Tiered] cache from one or more caches.
 //
 // If no caches are passed it will panic.
-func MaybeNewTiered(ctx context.Context, caches []Cache) Cache {
+func MaybeNewTiered(ctx context.Context, caches []Cache, metadata *metadatadb.Store) Cache {
 	logging.FromContext(ctx).InfoContext(ctx, "Constructing tiered cache", "tiers", len(caches))
 	if len(caches) == 0 {
 		panic("Tiered cache requires at least one backing cache")
@@ -34,7 +37,10 @@ func MaybeNewTiered(ctx context.Context, caches []Cache) Cache {
 	if len(caches) == 1 {
 		return authoritativeCache{Cache: caches[0]}
 	}
-	return Tiered{caches}
+	if metadata == nil {
+		panic("Tiered cache requires a metadata store")
+	}
+	return Tiered{caches: caches, metadata: metadata}
 }
 
 type authoritativeCache struct {
@@ -73,7 +79,13 @@ func (t Tiered) Create(ctx context.Context, key Key, headers http.Header, ttl ti
 	// The first error will cancel all outstanding writes.
 	ctx, cancel := context.WithCancelCause(ctx)
 
-	tw := &tieredWriter{writers: make([]Writer, len(t.caches)), cancel: cancel}
+	tw := &tieredWriter{
+		writers: make([]Writer, len(t.caches)),
+		cancel:  cancel,
+		etags:   t.etags(),
+		key:     key,
+		rawETag: rawETag,
+	}
 	// Note: we can't use errgroup here because we do not want to cancel the context on Wait().
 	wg := sync.WaitGroup{}
 	for i, cache := range t.caches {
@@ -104,7 +116,11 @@ func (t Tiered) Delete(ctx context.Context, key Key) error {
 		wg.Go(func() { errs[i] = errors.WithStack(cache.Delete(ctx, key)) })
 	}
 	wg.Wait()
-	return errors.Join(errs...)
+	err := errors.Join(errs...)
+	if err == nil {
+		t.deleteETag(key)
+	}
+	return err
 }
 
 // Invalidate evicts stale local copies from every non-authoritative tier.
@@ -148,6 +164,11 @@ func (t Tiered) Stat(ctx context.Context, key Key, opts ...Option) (http.Header,
 		case err != nil && !errors.Is(err, ErrNotModified) && rejected:
 			probeErrs = append(probeErrs, errors.WithStack(err))
 			continue
+		case err != nil && !errors.Is(err, ErrNotModified):
+			return headers, errors.WithStack(err)
+		}
+		if i < len(t.caches)-1 && t.invalidateStale(ctx, c, key, headers) {
+			continue
 		}
 		// Any other outcome (success, ErrNotModified, or a hard error) is
 		// definitive for this tier; surface it with its headers.
@@ -189,11 +210,6 @@ func (t Tiered) Open(ctx context.Context, key Key, opts ...Option) (io.ReadClose
 	var fallbackHeaders http.Header
 	var probeErrs []error
 	rejected := false // a tier failed If-Match; deeper tiers may hold the named version
-	discard := func(r io.ReadCloser) {
-		if err := r.Close(); err != nil {
-			logging.FromContext(ctx).WarnContext(ctx, "Tiered: failed to close superseded reader", "key", key, "error", err)
-		}
-	}
 
 	errs := make([]error, len(t.caches))
 	for i, c := range t.caches {
@@ -205,12 +221,14 @@ func (t Tiered) Open(ctx context.Context, key Key, opts ...Option) (io.ReadClose
 		case errors.Is(err, ErrPreconditionFailed):
 			rejected = true
 			continue
+		case t.invalidateStaleConditional(ctx, i, c, key, headers, err, errs):
+			continue
 		case errors.Is(err, ErrNotModified), errors.Is(err, ErrRangeNotSatisfiable):
 			// This tier's version satisfies the request's validator, so the
 			// outcome is definitive. Surface headers so callers can build the
 			// conditional response. No body to backfill.
 			if fallback != nil {
-				discard(fallback)
+				discardTieredReader(ctx, key, fallback)
 			}
 			return nil, headers, errors.WithStack(err)
 		case err != nil:
@@ -223,18 +241,21 @@ func (t Tiered) Open(ctx context.Context, key Key, opts ...Option) (io.ReadClose
 			}
 			probeErrs = append(probeErrs, errors.WithStack(err))
 			continue
+		case i < len(t.caches)-1 && t.invalidateStale(ctx, c, key, headers):
+			discardTieredReader(ctx, key, r)
+			continue
 		case ro.IfRangeMisses(headers.Get(ETagKey)):
 			// This tier holds a different version than the range is pinned to:
 			// hold its full body as the fallback and probe deeper tiers.
 			if fallback != nil {
-				discard(r)
+				discardTieredReader(ctx, key, r)
 				continue
 			}
 			fallback, fallbackHeaders = r, headers
 			continue
 		}
 		if fallback != nil {
-			discard(fallback)
+			discardTieredReader(ctx, key, fallback)
 		}
 		if i > 0 && !partial {
 			r = t.backfillReader(ctx, key, r, headers, t.caches[0])
@@ -256,6 +277,12 @@ func (t Tiered) Open(ctx context.Context, key Key, opts ...Option) (io.ReadClose
 	return nil, nil, errors.Join(errs...)
 }
 
+func discardTieredReader(ctx context.Context, key Key, r io.ReadCloser) {
+	if err := r.Close(); err != nil {
+		logging.FromContext(ctx).WarnContext(ctx, "Tiered: failed to close superseded reader", "key", key, "error", err)
+	}
+}
+
 // backfillReader wraps src so that every byte read is also written to dst.
 // On successful close the dst entry becomes available for future reads.
 // On error or partial read the dst entry is discarded per the Cache contract
@@ -273,6 +300,46 @@ func (t Tiered) backfillReader(ctx context.Context, key Key, src io.ReadCloser, 
 		return src
 	}
 	return newBackfillReadCloser(ctx, src, w, cancel)
+}
+
+const tieredETagsMap = "cache-etags"
+
+func (t Tiered) etags() *metadatadb.Map[Key, string] {
+	return metadatadb.NewMap[Key, string](t.metadata.Namespace(string(t.namespace)), tieredETagsMap)
+}
+
+func (t Tiered) deleteETag(key Key) {
+	t.etags().Delete(key)
+}
+
+func (t Tiered) invalidateStale(ctx context.Context, c Cache, key Key, headers http.Header) bool {
+	want, ok := t.etags().Get(key)
+	if !ok || want == headers.Get(ETagKey) {
+		return false
+	}
+	if err := c.Invalidate(ctx, key); err != nil {
+		logging.FromContext(ctx).WarnContext(ctx, "Tiered: failed to invalidate stale tier", "key", key, "error", err)
+	}
+	return true
+}
+
+func (t Tiered) invalidateStaleConditional(
+	ctx context.Context,
+	tier int,
+	c Cache,
+	key Key,
+	headers http.Header,
+	err error,
+	errs []error,
+) bool {
+	if tier == len(t.caches)-1 || (!errors.Is(err, ErrNotModified) && !errors.Is(err, ErrRangeNotSatisfiable)) {
+		return false
+	}
+	if !t.invalidateStale(ctx, c, key, headers) {
+		return false
+	}
+	errs[tier] = os.ErrNotExist
+	return true
 }
 
 func backfillCreateOptions(headers http.Header) []Option {
@@ -405,12 +472,17 @@ func (t Tiered) Stats(ctx context.Context) (Stats, error) {
 type tieredWriter struct {
 	writers []Writer
 	cancel  context.CancelCauseFunc
+	etags   *metadatadb.Map[Key, string]
+	key     Key
+	rawETag string
 	closed  bool
+	aborted bool
 }
 
 var _ Writer = (*tieredWriter)(nil)
 
 func (t *tieredWriter) Abort(err error) error {
+	t.aborted = true
 	t.cancel(err)
 	return t.Close()
 }
@@ -428,7 +500,15 @@ func (t *tieredWriter) Close() error {
 		wg.Go(func() { errs[i] = errors.WithStack(cache.Close()) })
 	}
 	wg.Wait()
-	return errors.Join(errs...)
+	err := errors.Join(errs...)
+	if err == nil && !t.aborted && t.etags != nil {
+		quoted, qerr := FormatETag(t.rawETag)
+		if qerr != nil {
+			return errors.WithStack(qerr)
+		}
+		t.etags.Set(t.key, quoted)
+	}
+	return err
 }
 
 func (t *tieredWriter) Write(p []byte) (n int, err error) {
@@ -451,7 +531,7 @@ func (t Tiered) Namespace(namespace Namespace) Cache {
 	for i, c := range t.caches {
 		namespaced[i] = c.Namespace(namespace)
 	}
-	return Tiered{caches: namespaced}
+	return Tiered{caches: namespaced, metadata: t.metadata, namespace: namespace}
 }
 
 // ListNamespaces returns unique namespaces from all underlying caches.
