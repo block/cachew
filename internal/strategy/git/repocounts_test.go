@@ -31,15 +31,19 @@ func newTestRepoCounts(t *testing.T, now func() time.Time) *RepoCounts {
 
 func TestRepoCountsNilSafe(t *testing.T) {
 	var rc *RepoCounts
-	rc.IncrementClone("https://github.com/foo/bar")
-	assert.Equal(t, 0, rc.Reap())
+	assert.NoError(t, rc.IncrementClone("https://github.com/foo/bar"))
+	deleted, err := rc.Reap()
+	assert.NoError(t, err)
+	assert.Equal(t, 0, deleted)
 	assert.Zero(t, len(rc.TopRepos(0, 0)))
 	assert.Zero(t, NewRepoCounts(nil))
 }
 
 func TestRepoCountsReapEmpty(t *testing.T) {
 	rc := newTestRepoCounts(t, nil)
-	assert.Equal(t, 0, rc.Reap(), "reap on an empty namespace should report zero deletions")
+	deleted, err := rc.Reap()
+	assert.NoError(t, err)
+	assert.Equal(t, 0, deleted, "reap on an empty namespace should report zero deletions")
 }
 
 func TestRepoCountsIncrementAndAggregate(t *testing.T) {
@@ -47,15 +51,15 @@ func TestRepoCountsIncrementAndAggregate(t *testing.T) {
 	rc := newTestRepoCounts(t, func() time.Time { return clock })
 
 	for range 5 {
-		rc.IncrementClone("https://github.com/foo/popular")
+		assert.NoError(t, rc.IncrementClone("https://github.com/foo/popular"))
 	}
 	for range 2 {
-		rc.IncrementClone("https://github.com/foo/quiet")
+		assert.NoError(t, rc.IncrementClone("https://github.com/foo/quiet"))
 	}
 	// Bump the popular repo on a previous day too.
 	clock = clock.AddDate(0, 0, -1)
 	for range 3 {
-		rc.IncrementClone("https://github.com/foo/popular")
+		assert.NoError(t, rc.IncrementClone("https://github.com/foo/popular"))
 	}
 	clock = clock.AddDate(0, 0, 1)
 
@@ -73,11 +77,11 @@ func TestRepoCountsWindowFilter(t *testing.T) {
 	// 10 days ago: only "old" repo gets hits.
 	clock = time.Date(2026, 4, 25, 12, 0, 0, 0, time.UTC)
 	for range 4 {
-		rc.IncrementClone("https://github.com/foo/old")
+		assert.NoError(t, rc.IncrementClone("https://github.com/foo/old"))
 	}
 	// Today: only "new" repo gets hits.
 	clock = time.Date(2026, 5, 5, 12, 0, 0, 0, time.UTC)
-	rc.IncrementClone("https://github.com/foo/new")
+	assert.NoError(t, rc.IncrementClone("https://github.com/foo/new"))
 
 	all := rc.TopRepos(0, 0)
 	assert.Equal(t, 2, len(all), "no window includes both repos")
@@ -92,7 +96,7 @@ func TestRepoCountsLimit(t *testing.T) {
 
 	for i, repo := range []string{"alpha", "bravo", "charlie", "delta"} {
 		for j := 0; j <= i; j++ {
-			rc.IncrementClone("https://github.com/foo/" + repo)
+			assert.NoError(t, rc.IncrementClone("https://github.com/foo/"+repo))
 		}
 	}
 
@@ -110,13 +114,15 @@ func TestRepoCountsReap(t *testing.T) {
 
 	// Old entry: 100 days ago.
 	clock = time.Date(2026, 1, 25, 12, 0, 0, 0, time.UTC)
-	rc.IncrementClone("https://github.com/foo/ancient")
+	assert.NoError(t, rc.IncrementClone("https://github.com/foo/ancient"))
 	// Recent entry: 5 days ago.
 	clock = time.Date(2026, 4, 30, 12, 0, 0, 0, time.UTC)
-	rc.IncrementClone("https://github.com/foo/fresh")
+	assert.NoError(t, rc.IncrementClone("https://github.com/foo/fresh"))
 
 	clock = time.Date(2026, 5, 5, 12, 0, 0, 0, time.UTC)
-	assert.Equal(t, 1, rc.Reap(), "one stale bucket should be deleted")
+	deleted, err := rc.Reap()
+	assert.NoError(t, err)
+	assert.Equal(t, 1, deleted, "one stale bucket should be deleted")
 
 	remaining := rc.TopRepos(0, 0)
 	assert.Equal(t, []RepoCount{{Repo: "https://github.com/foo/fresh", Count: 1}}, remaining)
@@ -127,10 +133,12 @@ func TestRepoCountsReapMalformedKeys(t *testing.T) {
 	rc := newTestRepoCounts(t, func() time.Time { return clock })
 
 	// Inject a malformed key directly via Add.
-	rc.counts.Add("not-a-real-key", 7)
-	rc.IncrementClone("https://github.com/foo/valid")
+	assert.NoError(t, rc.counts.Add("not-a-real-key", 7))
+	assert.NoError(t, rc.IncrementClone("https://github.com/foo/valid"))
 
-	assert.Equal(t, 1, rc.Reap(), "the malformed key should be deleted, the valid one preserved")
+	deleted, err := rc.Reap()
+	assert.NoError(t, err)
+	assert.Equal(t, 1, deleted, "the malformed key should be deleted, the valid one preserved")
 	remaining := rc.TopRepos(0, 0)
 	assert.Equal(t, []RepoCount{{Repo: "https://github.com/foo/valid", Count: 1}}, remaining)
 }

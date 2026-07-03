@@ -1,7 +1,5 @@
-// Package metadatadb provides an eventually consistent metadata store for
-// coordinating state across cachew replicas. Mutations are applied to local
-// state immediately and synced periodically to a shared backend. Last flush
-// wins — the lock serialises all writes.
+// Package metadatadb provides a metadata store for coordinating state across
+// cachew replicas.
 package metadatadb
 
 import (
@@ -18,16 +16,17 @@ import (
 )
 
 // Backend is the pluggable storage layer for the metadata store. Implementations
-// handle write operations (Apply), read queries (Query), and persistence (Flush).
+// handle write operations (Apply), read queries (Query), and remote state
+// refreshes (Flush).
 type Backend interface {
 	// Apply applies one or more write operations to the given namespace.
 	Apply(ctx context.Context, namespace string, ops ...Op) error
 	// Query executes a read query and unmarshals the result into target.
 	// Target must be a pointer to the expected result type.
 	Query(ctx context.Context, namespace string, q ReadOp, target any) error
-	// Flush forces pending state to be persisted for the given namespace.
+	// Flush forces the namespace to refresh from the backend.
 	Flush(ctx context.Context, namespace string) error
-	// Close shuts down the backend, flushing any pending state.
+	// Close shuts down the backend.
 	Close(ctx context.Context) error
 }
 
@@ -75,13 +74,13 @@ type Namespace struct {
 	name    string
 }
 
-// Flush forces an immediate sync with the backend.
+// Flush forces an immediate refresh from the backend.
 func (n *Namespace) Flush(ctx context.Context) error {
 	return errors.Wrap(n.backend.Flush(ctx, n.name), "flush namespace")
 }
 
-func (n *Namespace) apply(ops ...Op) {
-	_ = n.backend.Apply(context.Background(), n.name, ops...) //nolint:errcheck // local backends never fail
+func (n *Namespace) apply(ops ...Op) error {
+	return errors.Wrap(n.backend.Apply(context.Background(), n.name, ops...), "apply metadata op")
 }
 
 func (n *Namespace) query(q ReadOp, target any) {
@@ -99,8 +98,12 @@ func NewScalar[V any](ns *Namespace, name string) *Scalar[V] {
 	return &Scalar[V]{ns: ns, name: name}
 }
 
-func (s *Scalar[V]) Set(value V) { s.ns.apply(ScalarSet{Key: s.name, Value: value}) }
-func (s *Scalar[V]) Delete()     { s.ns.apply(ScalarDelete{Key: s.name}) }
+func (s *Scalar[V]) Set(value V) error {
+	return s.ns.apply(ScalarSet{Key: s.name, Value: value})
+}
+func (s *Scalar[V]) Delete() error {
+	return s.ns.apply(ScalarDelete{Key: s.name})
+}
 
 func (s *Scalar[V]) Get() (V, bool) {
 	var result struct {
@@ -122,10 +125,18 @@ func NewInt(ns *Namespace, name string) *Int {
 	return &Int{ns: ns, name: name}
 }
 
-func (i *Int) Set(value int64)   { i.ns.apply(IntSet{Key: i.name, Value: value}) }
-func (i *Int) Add(delta int64)   { i.ns.apply(IntAdd{Key: i.name, Delta: delta}) }
-func (i *Int) Mul(factor int64)  { i.ns.apply(IntMul{Key: i.name, Factor: factor}) }
-func (i *Int) Div(divisor int64) { i.ns.apply(IntDiv{Key: i.name, Divisor: divisor}) }
+func (i *Int) Set(value int64) error {
+	return i.ns.apply(IntSet{Key: i.name, Value: value})
+}
+func (i *Int) Add(delta int64) error {
+	return i.ns.apply(IntAdd{Key: i.name, Delta: delta})
+}
+func (i *Int) Mul(factor int64) error {
+	return i.ns.apply(IntMul{Key: i.name, Factor: factor})
+}
+func (i *Int) Div(divisor int64) error {
+	return i.ns.apply(IntDiv{Key: i.name, Divisor: divisor})
+}
 
 func (i *Int) Get() int64 {
 	var v int64
@@ -144,20 +155,20 @@ func NewIntMap[K comparable](ns *Namespace, name string) *IntMap[K] {
 	return &IntMap[K]{ns: ns, name: name}
 }
 
-func (m *IntMap[K]) Set(key K, value int64) {
-	m.ns.apply(IntMapSet{Key: m.name, MapKey: key, Value: value})
+func (m *IntMap[K]) Set(key K, value int64) error {
+	return m.ns.apply(IntMapSet{Key: m.name, MapKey: key, Value: value})
 }
-func (m *IntMap[K]) Add(key K, delta int64) {
-	m.ns.apply(IntMapAdd{Key: m.name, MapKey: key, Delta: delta})
+func (m *IntMap[K]) Add(key K, delta int64) error {
+	return m.ns.apply(IntMapAdd{Key: m.name, MapKey: key, Delta: delta})
 }
-func (m *IntMap[K]) Mul(key K, factor int64) {
-	m.ns.apply(IntMapMul{Key: m.name, MapKey: key, Factor: factor})
+func (m *IntMap[K]) Mul(key K, factor int64) error {
+	return m.ns.apply(IntMapMul{Key: m.name, MapKey: key, Factor: factor})
 }
-func (m *IntMap[K]) Div(key K, divisor int64) {
-	m.ns.apply(IntMapDiv{Key: m.name, MapKey: key, Divisor: divisor})
+func (m *IntMap[K]) Div(key K, divisor int64) error {
+	return m.ns.apply(IntMapDiv{Key: m.name, MapKey: key, Divisor: divisor})
 }
-func (m *IntMap[K]) Delete(key K) {
-	m.ns.apply(IntMapDelete{Key: m.name, MapKey: key})
+func (m *IntMap[K]) Delete(key K) error {
+	return m.ns.apply(IntMapDelete{Key: m.name, MapKey: key})
 }
 
 func (m *IntMap[K]) Get(key K) int64 {
@@ -190,8 +201,12 @@ func NewSet[V comparable](ns *Namespace, name string) *Set[V] {
 	return &Set[V]{ns: ns, name: name}
 }
 
-func (s *Set[V]) Add(member V)    { s.ns.apply(SetAdd{Key: s.name, Member: member}) }
-func (s *Set[V]) Remove(member V) { s.ns.apply(SetRemove{Key: s.name, Member: member}) }
+func (s *Set[V]) Add(member V) error {
+	return s.ns.apply(SetAdd{Key: s.name, Member: member})
+}
+func (s *Set[V]) Remove(member V) error {
+	return s.ns.apply(SetRemove{Key: s.name, Member: member})
+}
 
 func (s *Set[V]) Contains(member V) bool {
 	var v bool
@@ -217,12 +232,12 @@ func NewMap[K comparable, V any](ns *Namespace, name string) *Map[K, V] {
 	return &Map[K, V]{ns: ns, name: name}
 }
 
-func (m *Map[K, V]) Set(key K, value V) {
-	m.ns.apply(MapSet{Key: m.name, MapKey: key, Value: value})
+func (m *Map[K, V]) Set(key K, value V) error {
+	return m.ns.apply(MapSet{Key: m.name, MapKey: key, Value: value})
 }
 
-func (m *Map[K, V]) Delete(key K) {
-	m.ns.apply(MapDelete{Key: m.name, MapKey: key})
+func (m *Map[K, V]) Delete(key K) error {
+	return m.ns.apply(MapDelete{Key: m.name, MapKey: key})
 }
 
 func (m *Map[K, V]) Get(key K) (V, bool) {
@@ -258,8 +273,8 @@ func NewList[V any](ns *Namespace, name string) *List[V] {
 	return &List[V]{ns: ns, name: name}
 }
 
-func (l *List[V]) Append(value V) {
-	l.ns.apply(ListAppend{Key: l.name, Value: value})
+func (l *List[V]) Append(value V) error {
+	return l.ns.apply(ListAppend{Key: l.name, Value: value})
 }
 
 func (l *List[V]) Entries() []V {

@@ -150,33 +150,36 @@ func soakWorker(
 		switch {
 		// Chaotic ops (not tracked for invariants).
 		case op < 10:
-			metadatadb.NewScalar[string](ns, "sc-"+key).Set(fmt.Sprintf("val-%d", rng.IntN(1000)))
+			recordSoakWrite(result, metadatadb.NewScalar[string](ns, "sc-"+key).Set(fmt.Sprintf("val-%d", rng.IntN(1000))))
 		case op < 15:
-			metadatadb.NewScalar[string](ns, "sc-"+key).Delete()
+			recordSoakWrite(result, metadatadb.NewScalar[string](ns, "sc-"+key).Delete())
 		case op < 20:
-			metadatadb.NewInt(ns, "int-"+key).Set(int64(rng.IntN(1000)))
+			recordSoakWrite(result, metadatadb.NewInt(ns, "int-"+key).Set(int64(rng.IntN(1000))))
 		case op < 25:
-			metadatadb.NewSet[string](ns, "set-"+key).Add(fmt.Sprintf("m-%d", rng.IntN(20)))
+			recordSoakWrite(result, metadatadb.NewSet[string](ns, "set-"+key).Add(fmt.Sprintf("m-%d", rng.IntN(20))))
 		case op < 28:
-			metadatadb.NewSet[string](ns, "set-"+key).Remove(fmt.Sprintf("m-%d", rng.IntN(20)))
+			recordSoakWrite(result, metadatadb.NewSet[string](ns, "set-"+key).Remove(fmt.Sprintf("m-%d", rng.IntN(20))))
 		case op < 35:
-			metadatadb.NewMap[string, string](ns, "map-"+key).Set(
+			recordSoakWrite(result, metadatadb.NewMap[string, string](ns, "map-"+key).Set(
 				fmt.Sprintf("k-%d", rng.IntN(20)),
 				fmt.Sprintf("v-%d", rng.IntN(1000)),
-			)
+			))
 
 		// Monotonic ops (tracked for invariant verification).
 		case op < 50:
 			delta := int64(rng.IntN(100) + 1) // always positive
-			metadatadb.NewInt(ns, "mono-int-"+key).Add(delta)
-			tr.addCounter("mono-int-"+key, delta)
+			if recordSoakWrite(result, metadatadb.NewInt(ns, "mono-int-"+key).Add(delta)) {
+				tr.addCounter("mono-int-"+key, delta)
+			}
 		case op < 65:
 			member := fmt.Sprintf("m-%d", rng.IntN(50))
-			metadatadb.NewSet[string](ns, "mono-set-"+key).Add(member)
-			tr.addSetMember("mono-set-"+key, member)
+			if recordSoakWrite(result, metadatadb.NewSet[string](ns, "mono-set-"+key).Add(member)) {
+				tr.addSetMember("mono-set-"+key, member)
+			}
 		case op < 75:
-			metadatadb.NewList[string](ns, "mono-list-"+key).Append(fmt.Sprintf("e-%d", rng.IntN(1000)))
-			tr.appendList("mono-list-" + key)
+			if recordSoakWrite(result, metadatadb.NewList[string](ns, "mono-list-"+key).Append(fmt.Sprintf("e-%d", rng.IntN(1000)))) {
+				tr.appendList("mono-list-" + key)
+			}
 
 		// Reads.
 		case op < 80:
@@ -198,6 +201,14 @@ func soakWorker(
 		}
 		atomic.AddInt64(&result.Ops, 1)
 	}
+}
+
+func recordSoakWrite(result *SoakResult, err error) bool {
+	if err == nil {
+		return true
+	}
+	atomic.AddInt64(&result.Errors, 1)
+	return false
 }
 
 func verifyMonotonicInvariants(t *testing.T, ns *metadatadb.Namespace, tr *tracker) {
