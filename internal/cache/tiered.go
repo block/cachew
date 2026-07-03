@@ -31,7 +31,22 @@ func MaybeNewTiered(ctx context.Context, caches []Cache) Cache {
 	if len(caches) == 0 {
 		panic("Tiered cache requires at least one backing cache")
 	}
+	if len(caches) == 1 {
+		return authoritativeCache{Cache: caches[0]}
+	}
 	return Tiered{caches}
+}
+
+type authoritativeCache struct {
+	Cache
+}
+
+func (c authoritativeCache) Invalidate(context.Context, Key) error {
+	return nil
+}
+
+func (c authoritativeCache) Namespace(namespace Namespace) Cache {
+	return authoritativeCache{Cache: c.Cache.Namespace(namespace)}
 }
 
 var _ Cache = (*Tiered)(nil)
