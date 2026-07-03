@@ -55,6 +55,10 @@ func (r *Remote) Delete(ctx context.Context, key Key) error {
 	return errors.WithStack(r.c.Delete(ctx, key))
 }
 
+func (r *Remote) Invalidate(ctx context.Context, key Key) error {
+	return errors.WithStack(r.c.Invalidate(ctx, key))
+}
+
 func (r *Remote) Stats(ctx context.Context) (Stats, error) {
 	return errors.WithStack2(r.c.Stats(ctx))
 }

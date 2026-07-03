@@ -218,6 +218,11 @@ type Cache interface {
 	//
 	// MUST be atomic.
 	Delete(ctx context.Context, key Key) error
+	// Invalidate evicts a stale local copy from the cache.
+	//
+	// Unlike Delete, invalidation MUST NOT remove authoritative shared storage.
+	// Missing objects are treated as successfully invalidated.
+	Invalidate(ctx context.Context, key Key) error
 	// Stats returns health and usage statistics for the cache.
 	Stats(ctx context.Context) (Stats, error)
 	// ListNamespaces returns all unique namespaces in the cache in order.

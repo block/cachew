@@ -44,6 +44,7 @@ func newFakeServer(stats *client.Stats) *httptest.Server {
 	mux.HandleFunc("HEAD /api/v1/object/{namespace}/{key}", fs.stat)
 	mux.HandleFunc("POST /api/v1/object/{namespace}/{key}", fs.put)
 	mux.HandleFunc("DELETE /api/v1/object/{namespace}/{key}", fs.delete)
+	mux.HandleFunc("POST /api/v1/object/{namespace}/{key}/invalidate", fs.invalidate)
 	mux.HandleFunc("GET /api/v1/namespaces", fs.namespaces)
 	mux.HandleFunc("GET /api/v1/stats", fs.getStats)
 	return httptest.NewServer(mux)
@@ -145,6 +146,13 @@ func (fs *fakeServer) delete(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
+func (fs *fakeServer) invalidate(w http.ResponseWriter, r *http.Request) {
+	fs.mu.Lock()
+	delete(fs.objects, fs.key(r))
+	fs.mu.Unlock()
+	w.WriteHeader(http.StatusOK)
+}
+
 func (fs *fakeServer) namespaces(w http.ResponseWriter, _ *http.Request) {
 	fs.mu.Lock()
 	seen := make(map[string]struct{})
@@ -201,6 +209,30 @@ func TestObjectRoundTrip(t *testing.T) {
 	assert.Equal(t, "text/plain", headers.Get("Content-Type"))
 
 	assert.NoError(t, c.Delete(ctx, key))
+	_, err = c.Stat(ctx, key)
+	assert.Error(t, err)
+	assert.True(t, isNotExist(err))
+}
+
+func TestInvalidate(t *testing.T) {
+	srv := newFakeServer(nil)
+	defer srv.Close()
+
+	c := client.New(srv.URL, nil).Namespace("test")
+	defer c.Close()
+
+	ctx := t.Context()
+	key := client.NewKey("invalidate")
+
+	wc, err := c.Create(ctx, key, nil, 0)
+	assert.NoError(t, err)
+	_, err = wc.Write([]byte("stale"))
+	assert.NoError(t, err)
+	assert.NoError(t, wc.Close())
+
+	assert.NoError(t, c.Invalidate(ctx, key))
+	assert.NoError(t, c.Invalidate(ctx, client.NewKey("missing-invalidate")))
+
 	_, err = c.Stat(ctx, key)
 	assert.Error(t, err)
 	assert.True(t, isNotExist(err))

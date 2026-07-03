@@ -233,6 +233,14 @@ func (d *Disk) Delete(_ context.Context, key Key) error {
 	return nil
 }
 
+func (d *Disk) Invalidate(ctx context.Context, key Key) error {
+	err := d.Delete(ctx, key)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	return errors.WithStack(err)
+}
+
 func (d *Disk) Stat(ctx context.Context, key Key, opts ...Option) (http.Header, error) {
 	path := d.keyToPath(d.namespace, key)
 	fullPath := filepath.Join(d.config.Root, path)

@@ -23,16 +23,13 @@ type Tiered struct {
 	caches []Cache
 }
 
-// MaybeNewTiered creates a [Tiered] cache if multiple are provided, or if there is only one it will return that cache.
+// MaybeNewTiered creates a [Tiered] cache from one or more caches.
 //
 // If no caches are passed it will panic.
 func MaybeNewTiered(ctx context.Context, caches []Cache) Cache {
 	logging.FromContext(ctx).InfoContext(ctx, "Constructing tiered cache", "tiers", len(caches))
 	if len(caches) == 0 {
 		panic("Tiered cache requires at least one backing cache")
-	}
-	if len(caches) == 1 {
-		return caches[0]
 	}
 	return Tiered{caches}
 }
@@ -90,6 +87,22 @@ func (t Tiered) Delete(ctx context.Context, key Key) error {
 	errs := make([]error, len(t.caches))
 	for i, cache := range t.caches {
 		wg.Go(func() { errs[i] = errors.WithStack(cache.Delete(ctx, key)) })
+	}
+	wg.Wait()
+	return errors.Join(errs...)
+}
+
+// Invalidate evicts stale local copies from every non-authoritative tier.
+// The final tier is authoritative by construction, so invalidation leaves it
+// intact even if that backend's own Invalidate method would remove the object.
+func (t Tiered) Invalidate(ctx context.Context, key Key) error {
+	if len(t.caches) <= 1 {
+		return nil
+	}
+	wg := sync.WaitGroup{}
+	errs := make([]error, len(t.caches)-1)
+	for i, cache := range t.caches[:len(t.caches)-1] {
+		wg.Go(func() { errs[i] = errors.WithStack(cache.Invalidate(ctx, key)) })
 	}
 	wg.Wait()
 	return errors.Join(errs...)
