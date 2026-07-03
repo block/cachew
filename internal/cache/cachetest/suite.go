@@ -2,8 +2,6 @@ package cachetest
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"io"
 	"net/http"
 	"os"
@@ -13,6 +11,7 @@ import (
 
 	"github.com/alecthomas/assert/v2"
 	"github.com/alecthomas/errors"
+	"github.com/google/uuid"
 
 	"github.com/block/cachew/internal/cache"
 )
@@ -478,19 +477,17 @@ func testETag(t *testing.T, c cache.Cache) {
 	assert.NoError(t, err)
 	assert.NoError(t, w.Close())
 
-	sum := sha256.Sum256(content)
-	expectedETag := `"` + hex.EncodeToString(sum[:]) + `"`
-
-	// Verify ETag from Open
 	reader, openHeaders, err := c.Open(ctx, key)
 	assert.NoError(t, err)
 	defer reader.Close()
-	assert.Equal(t, expectedETag, openHeaders.Get("ETag"))
+	rawETag, err := cache.RawETagFromHeader(openHeaders.Get("ETag"))
+	assert.NoError(t, err)
+	_, err = uuid.Parse(rawETag)
+	assert.NoError(t, err)
 
-	// Verify ETag from Stat is consistent
 	statHeaders, err := c.Stat(ctx, key)
 	assert.NoError(t, err)
-	assert.Equal(t, expectedETag, statHeaders.Get("ETag"))
+	assert.Equal(t, openHeaders.Get("ETag"), statHeaders.Get("ETag"))
 }
 
 // testConditional verifies that Open and Stat honour If-Match / If-None-Match
@@ -502,14 +499,13 @@ func testConditional(t *testing.T, c cache.Cache) {
 	content := []byte("conditional content")
 	key := cache.NewKey("test-conditional")
 
-	w, err := c.Create(ctx, key, nil, time.Hour)
+	w, err := c.Create(ctx, key, nil, time.Hour, cache.WithETag("conditional-etag"))
 	assert.NoError(t, err)
 	_, err = w.Write(content)
 	assert.NoError(t, err)
 	assert.NoError(t, w.Close())
 
-	sum := sha256.Sum256(content)
-	etag := `"` + hex.EncodeToString(sum[:]) + `"`
+	etag := `"conditional-etag"`
 
 	t.Run("IfNoneMatchHitReturnsNotModified", func(t *testing.T) {
 		_, headers, err := c.Open(ctx, key, cache.IfNoneMatch(etag))
@@ -558,7 +554,7 @@ func testRange(t *testing.T, c cache.Cache) {
 	content := []byte("0123456789")
 	key := cache.NewKey("test-range")
 
-	w, err := c.Create(ctx, key, nil, time.Hour)
+	w, err := c.Create(ctx, key, nil, time.Hour, cache.WithETag("range-etag"))
 	assert.NoError(t, err)
 	_, err = w.Write(content)
 	assert.NoError(t, err)
@@ -602,8 +598,7 @@ func testRange(t *testing.T, c cache.Cache) {
 		assert.Equal(t, "", headers.Get("Content-Range"))
 	})
 
-	sum := sha256.Sum256(content)
-	etag := `"` + hex.EncodeToString(sum[:]) + `"`
+	etag := `"range-etag"`
 
 	t.Run("IfMatchHitServesRange", func(t *testing.T) {
 		reader, headers, err := c.Open(ctx, key, cache.Range(2, 6), cache.IfMatch(etag))

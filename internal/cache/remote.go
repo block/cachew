@@ -47,8 +47,8 @@ func (r *Remote) Stat(ctx context.Context, key Key, opts ...Option) (http.Header
 	return errors.WithStack2(r.c.Stat(ctx, key, opts...))
 }
 
-func (r *Remote) Create(ctx context.Context, key Key, headers http.Header, ttl time.Duration) (Writer, error) {
-	return errors.WithStack2(r.c.Create(ctx, key, headers, ttl))
+func (r *Remote) Create(ctx context.Context, key Key, headers http.Header, ttl time.Duration, opts ...Option) (Writer, error) {
+	return errors.WithStack2(r.c.Create(ctx, key, headers, ttl, opts...))
 }
 
 func (r *Remote) Delete(ctx context.Context, key Key) error {

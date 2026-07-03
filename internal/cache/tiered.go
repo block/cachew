@@ -51,7 +51,13 @@ func (t Tiered) Close() error {
 }
 
 // Create a new object. All underlying caches will be written to in sequence.
-func (t Tiered) Create(ctx context.Context, key Key, headers http.Header, ttl time.Duration) (Writer, error) {
+func (t Tiered) Create(ctx context.Context, key Key, headers http.Header, ttl time.Duration, opts ...Option) (Writer, error) {
+	rawETag, _, err := createETag(opts...)
+	if err != nil {
+		return nil, errors.WithStack(err)
+	}
+	createOpts := []Option{WithETag(rawETag)}
+
 	// The first error will cancel all outstanding writes.
 	ctx, cancel := context.WithCancelCause(ctx)
 
@@ -60,7 +66,7 @@ func (t Tiered) Create(ctx context.Context, key Key, headers http.Header, ttl ti
 	wg := sync.WaitGroup{}
 	for i, cache := range t.caches {
 		wg.Go(func() {
-			w, err := cache.Create(ctx, key, headers, ttl)
+			w, err := cache.Create(ctx, key, headers, ttl, createOpts...)
 			if err != nil {
 				cancel(err)
 			}
@@ -231,13 +237,22 @@ func (t Tiered) backfillReader(ctx context.Context, key Key, src io.ReadCloser, 
 	// Use a cancellable context so we can abort the write on failure.
 	// The Cache contract guarantees that cancelled-context writes are discarded.
 	writeCtx, cancel := context.WithCancel(ctx)
-	w, err := dst.Create(writeCtx, key, headers, 0) // 0 → use the cache's max TTL
+	createOpts := backfillCreateOptions(headers)
+	w, err := dst.Create(writeCtx, key, headers, 0, createOpts...) // 0 → use the cache's max TTL
 	if err != nil {
 		cancel()
 		logger.WarnContext(ctx, "Tier backfill: failed to create writer, skipping", "error", err)
 		return src
 	}
 	return newBackfillReadCloser(ctx, src, w, cancel)
+}
+
+func backfillCreateOptions(headers http.Header) []Option {
+	rawETag, err := RawETagFromHeader(headers.Get(ETagKey))
+	if err != nil {
+		return nil
+	}
+	return []Option{WithETag(rawETag)}
 }
 
 // backfillReadCloser tees reads from src into dst asynchronously. Chunks are

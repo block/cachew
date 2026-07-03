@@ -30,7 +30,7 @@ func (n *noOpCache) Open(_ context.Context, _ Key, _ ...Option) (io.ReadCloser, 
 	return nil, nil, os.ErrNotExist
 }
 
-func (n *noOpCache) Create(_ context.Context, _ Key, _ http.Header, _ time.Duration) (Writer, error) {
+func (n *noOpCache) Create(_ context.Context, _ Key, _ http.Header, _ time.Duration, _ ...Option) (Writer, error) {
 	// Return a discard writer that does nothing
 	return &noOpWriter{}, nil
 }

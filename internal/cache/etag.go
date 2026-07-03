@@ -1,10 +1,10 @@
 package cache
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
-	"hash"
 	"net/http"
+
+	"github.com/alecthomas/errors"
+	"github.com/google/uuid"
 
 	"github.com/block/cachew/client"
 )
@@ -12,22 +12,38 @@ import (
 // ETagKey is the HTTP header key used to store the ETag.
 const ETagKey = client.ETagKey
 
-// etagWriter computes a SHA256 hash of all written data. After all data has
-// been written, call SetETag to populate the ETag header.
-type etagWriter struct {
-	hash hash.Hash
+// ValidateRawETag verifies that etag is an unquoted cache ETag value.
+func ValidateRawETag(etag string) error { return errors.WithStack(client.ValidateRawETag(etag)) }
+
+// FormatETag formats a raw ETag value as a strong HTTP ETag.
+func FormatETag(etag string) (string, error) { return errors.WithStack2(client.FormatETag(etag)) }
+
+// RawETagFromHeader extracts a raw ETag value from a strong HTTP ETag header.
+func RawETagFromHeader(etag string) (string, error) {
+	return errors.WithStack2(client.RawETagFromHeader(etag))
 }
 
-func newETagWriter() *etagWriter {
-	return &etagWriter{hash: sha256.New()}
+// WithETag sets the raw ETag value to store on Create.
+func WithETag(etag string) Option { return client.WithETag(etag) }
+
+func createETag(opts ...Option) (string, string, error) {
+	ro := NewRequestOptions(opts...)
+	raw := ro.ETag
+	if !ro.ETagSet {
+		raw = uuid.NewString()
+	}
+	quoted, err := FormatETag(raw)
+	if err != nil {
+		return "", "", err
+	}
+	return raw, quoted, nil
 }
 
-// WriteBytes feeds p into the running hash. sha256 never returns an error.
-func (e *etagWriter) WriteBytes(p []byte) {
-	_, _ = e.hash.Write(p)
-}
-
-// SetETag sets the ETag header on the given headers from the accumulated hash.
-func (e *etagWriter) SetETag(headers http.Header) {
-	headers.Set(ETagKey, `"`+hex.EncodeToString(e.hash.Sum(nil))+`"`)
+func setCreateETag(headers http.Header, opts ...Option) error {
+	_, quoted, err := createETag(opts...)
+	if err != nil {
+		return errors.WithStack(err)
+	}
+	headers.Set(ETagKey, quoted)
+	return nil
 }

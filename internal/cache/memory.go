@@ -120,7 +120,7 @@ func (m *Memory) Open(_ context.Context, key Key, opts ...Option) (io.ReadCloser
 	return io.NopCloser(bytes.NewReader(data)), headers, nil
 }
 
-func (m *Memory) Create(ctx context.Context, key Key, headers http.Header, ttl time.Duration) (Writer, error) {
+func (m *Memory) Create(ctx context.Context, key Key, headers http.Header, ttl time.Duration, opts ...Option) (Writer, error) {
 	if ttl == 0 {
 		ttl = m.config.MaxTTL
 	}
@@ -130,6 +130,9 @@ func (m *Memory) Create(ctx context.Context, key Key, headers http.Header, ttl t
 	clonedHeaders := httputil.FilterHeaders(headers, httputil.TransportHeaders...)
 	if clonedHeaders.Get("Last-Modified") == "" {
 		clonedHeaders.Set("Last-Modified", now.UTC().Format(http.TimeFormat))
+	}
+	if err := setCreateETag(clonedHeaders, opts...); err != nil {
+		return nil, err
 	}
 
 	ctx, cancel := context.WithCancelCause(ctx)
@@ -141,7 +144,6 @@ func (m *Memory) Create(ctx context.Context, key Key, headers http.Header, ttl t
 		buf:       &bytes.Buffer{},
 		expiresAt: now.Add(ttl),
 		headers:   clonedHeaders,
-		etag:      newETagWriter(),
 		ctx:       ctx,
 		cancel:    cancel,
 	}
@@ -238,7 +240,6 @@ type memoryWriter struct {
 	buf       *bytes.Buffer
 	expiresAt time.Time
 	headers   http.Header
-	etag      *etagWriter
 	closed    bool
 	ctx       context.Context
 	cancel    context.CancelCauseFunc
@@ -249,7 +250,6 @@ func (w *memoryWriter) Write(p []byte) (int, error) {
 		return 0, errors.New("writer closed")
 	}
 	n, err := w.buf.Write(p)
-	w.etag.WriteBytes(p[:n])
 	return n, errors.WithStack(err)
 }
 
@@ -294,8 +294,6 @@ func (w *memoryWriter) Close() error {
 			w.cache.evictOldest(neededSpace)
 		}
 	}
-
-	w.etag.SetETag(w.headers)
 
 	w.cache.currentSize.Add(-oldSize)
 	// Copy the buffer data to avoid holding a reference to the buffer's internal slice

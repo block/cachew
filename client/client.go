@@ -233,7 +233,7 @@ func (c *Client) Stat(ctx context.Context, key Key, opts ...RequestOption) (http
 // Create stores a new object in the cache server. The returned CacheWriter
 // must be closed to commit the upload. Call Abort instead of Close to discard
 // the in-progress write and ensure the object is never made visible.
-func (c *Client) Create(ctx context.Context, key Key, headers http.Header, ttl time.Duration) (CacheWriter, error) {
+func (c *Client) Create(ctx context.Context, key Key, headers http.Header, ttl time.Duration, opts ...RequestOption) (CacheWriter, error) {
 	ctx, cancel := context.WithCancelCause(ctx)
 	pr, pw := io.Pipe()
 
@@ -244,6 +244,16 @@ func (c *Client) Create(ctx context.Context, key Key, headers http.Header, ttl t
 	}
 
 	maps.Copy(req.Header, headers)
+	req.Header.Del(ETagKey)
+	ro := NewRequestOptions(opts...)
+	if ro.ETagSet {
+		etag, err := FormatETag(ro.ETag)
+		if err != nil {
+			cancel(err)
+			return nil, errors.Join(errors.WithStack(err), pr.Close(), pw.Close())
+		}
+		req.Header.Set(ETagKey, etag)
+	}
 
 	if ttl > 0 {
 		req.Header.Set("Time-To-Live", ttl.String())

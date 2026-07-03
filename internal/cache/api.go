@@ -213,7 +213,7 @@ type Cache interface {
 	// The file MUST NOT be available for read until completely written and closed.
 	//
 	// If the context is cancelled the object MUST NOT be made available in the cache.
-	Create(ctx context.Context, key Key, headers http.Header, ttl time.Duration) (Writer, error)
+	Create(ctx context.Context, key Key, headers http.Header, ttl time.Duration, opts ...Option) (Writer, error)
 	// Delete a file from the cache.
 	//
 	// MUST be atomic.
@@ -229,8 +229,8 @@ type Cache interface {
 // WriteFunc is a convenience wrapper around Cache.Create that handles aborting
 // the write on error. The provided function receives a writer; if it returns an
 // error the cache entry is discarded. On success the entry is committed.
-func WriteFunc(ctx context.Context, c Cache, key Key, headers http.Header, ttl time.Duration, fn func(w io.Writer) error) error {
-	w, err := c.Create(ctx, key, headers, ttl)
+func WriteFunc(ctx context.Context, c Cache, key Key, headers http.Header, ttl time.Duration, fn func(w io.Writer) error, opts ...Option) error {
+	w, err := c.Create(ctx, key, headers, ttl, opts...)
 	if err != nil {
 		return errors.WithStack(err)
 	}

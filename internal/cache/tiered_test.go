@@ -2,8 +2,6 @@ package cache_test
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"io"
 	"log/slog"
@@ -24,18 +22,17 @@ import (
 
 // seedTier writes content to a single tier directly, so tests can diverge the
 // versions held by each tier.
-func seedTier(ctx context.Context, t *testing.T, c cache.Cache, key cache.Key, content []byte) {
+func seedTier(ctx context.Context, t *testing.T, c cache.Cache, key cache.Key, content []byte, rawETag ...string) {
 	t.Helper()
-	w, err := c.Create(ctx, key, nil, time.Minute)
+	var opts []cache.Option
+	if len(rawETag) > 0 {
+		opts = append(opts, cache.WithETag(rawETag[0]))
+	}
+	w, err := c.Create(ctx, key, nil, time.Minute, opts...)
 	assert.NoError(t, err)
 	_, err = w.Write(content)
 	assert.NoError(t, err)
 	assert.NoError(t, w.Close())
-}
-
-func contentETag(content []byte) string {
-	sum := sha256.Sum256(content)
-	return `"` + hex.EncodeToString(sum[:]) + `"`
 }
 
 func readAllAndClose(t *testing.T, r io.ReadCloser) []byte {
@@ -140,8 +137,39 @@ func tieredPermutations(t *testing.T) []struct {
 	return perms
 }
 
+func tieredMemoryDiskPermutations() []struct {
+	name  string
+	lower cacheFactory
+	upper cacheFactory
+} {
+	newMemory := cacheFactory{"Memory", func(t *testing.T) cache.Cache {
+		t.Helper()
+		_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelDebug})
+		c, err := cache.NewMemory(ctx, cache.MemoryConfig{LimitMB: 1024, MaxTTL: time.Hour})
+		assert.NoError(t, err)
+		return c
+	}}
+
+	newDisk := cacheFactory{"Disk", func(t *testing.T) cache.Cache {
+		t.Helper()
+		_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelDebug})
+		c, err := cache.NewDisk(ctx, cache.DiskConfig{Root: t.TempDir(), LimitMB: 1024, MaxTTL: time.Hour})
+		assert.NoError(t, err)
+		return c
+	}}
+
+	return []struct {
+		name  string
+		lower cacheFactory
+		upper cacheFactory
+	}{
+		{name: "Memory+Disk", lower: newMemory, upper: newDisk},
+		{name: "Disk+Memory", lower: newDisk, upper: newMemory},
+	}
+}
+
 func TestTieredCachePermutations(t *testing.T) {
-	for _, perm := range tieredPermutations(t) {
+	for _, perm := range tieredMemoryDiskPermutations() {
 		t.Run(perm.name, func(t *testing.T) {
 			cachetest.Suite(t, func(t *testing.T) cache.Cache {
 				_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelDebug})
@@ -154,7 +182,7 @@ func TestTieredCachePermutations(t *testing.T) {
 }
 
 func TestTieredBackfillPermutations(t *testing.T) {
-	for _, perm := range tieredPermutations(t) {
+	for _, perm := range tieredMemoryDiskPermutations() {
 		t.Run(perm.name, func(t *testing.T) {
 			_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelDebug})
 			lower := perm.lower.new(t)
@@ -164,32 +192,56 @@ func TestTieredBackfillPermutations(t *testing.T) {
 
 			key := cache.NewKey("backfill-test")
 			content := []byte("hello backfill")
+			etag := `"backfill-etag"`
 
 			// Write only to upper tier, simulating a lower-tier miss.
-			seedTier(ctx, t, upper, key, content)
+			seedTier(ctx, t, upper, key, content, "backfill-etag")
 
 			// Verify lower tier does not have it.
 			_, _, err := lower.Open(ctx, key)
 			assert.IsError(t, err, os.ErrNotExist)
 
 			// Open through tiered — should hit upper and backfill lower.
-			r, _, err := tiered.Open(ctx, key)
+			r, headers, err := tiered.Open(ctx, key)
 			assert.NoError(t, err)
 			assert.Equal(t, content, readAllAndClose(t, r))
+			assert.Equal(t, etag, headers.Get(cache.ETagKey))
 
 			// Now lower tier should have the entry via backfill.
-			r2, _, err := lower.Open(ctx, key)
+			r2, lowerHeaders, err := lower.Open(ctx, key)
 			assert.NoError(t, err)
 			assert.Equal(t, content, readAllAndClose(t, r2))
+			assert.Equal(t, etag, lowerHeaders.Get(cache.ETagKey))
 		})
 	}
+}
+
+func TestTieredCreateUsesSameETagInEveryTier(t *testing.T) {
+	_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelDebug})
+	lower, err := cache.NewMemory(ctx, cache.MemoryConfig{LimitMB: 1024, MaxTTL: time.Hour})
+	assert.NoError(t, err)
+	upper, err := cache.NewMemory(ctx, cache.MemoryConfig{LimitMB: 1024, MaxTTL: time.Hour})
+	assert.NoError(t, err)
+	tiered := cache.MaybeNewTiered(ctx, []cache.Cache{lower, upper})
+	defer tiered.Close()
+
+	key := cache.NewKey("tiered-create-etag")
+	seedTier(ctx, t, tiered, key, []byte("same etag"))
+
+	lowerReader, lowerHeaders, err := lower.Open(ctx, key)
+	assert.NoError(t, err)
+	assert.NoError(t, lowerReader.Close())
+	upperReader, upperHeaders, err := upper.Open(ctx, key)
+	assert.NoError(t, err)
+	assert.NoError(t, upperReader.Close())
+	assert.Equal(t, lowerHeaders.Get(cache.ETagKey), upperHeaders.Get(cache.ETagKey))
 }
 
 func TestTieredDivergentValidatorPermutations(t *testing.T) {
 	stale := []byte("0123456789")
 	pinned := []byte("abcdefghij")
-	staleETag := contentETag(stale)
-	pinnedETag := contentETag(pinned)
+	const staleETag = `"stale-etag"`
+	const pinnedETag = `"pinned-etag"`
 
 	for _, perm := range tieredPermutations(t) {
 		t.Run(perm.name, func(t *testing.T) {
@@ -200,11 +252,11 @@ func TestTieredDivergentValidatorPermutations(t *testing.T) {
 			defer tiered.Close()
 
 			keyBoth := cache.NewKey("divergent-both")
-			seedTier(ctx, t, lower, keyBoth, stale)
-			seedTier(ctx, t, upper, keyBoth, pinned)
+			seedTier(ctx, t, lower, keyBoth, stale, "stale-etag")
+			seedTier(ctx, t, upper, keyBoth, pinned, "pinned-etag")
 
 			keyLowerOnly := cache.NewKey("divergent-lower-only")
-			seedTier(ctx, t, lower, keyLowerOnly, stale)
+			seedTier(ctx, t, lower, keyLowerOnly, stale, "stale-etag")
 
 			t.Run("IfRangePinnedToUpperServesRangeFromUpper", func(t *testing.T) {
 				r, headers, err := tiered.Open(ctx, keyBoth, cache.Range(2, 6), cache.IfRange(pinnedETag))
@@ -275,8 +327,8 @@ func TestTieredDivergentValidatorPermutations(t *testing.T) {
 
 			t.Run("IfMatchFullReadBackfillsLower", func(t *testing.T) {
 				keyHeal := cache.NewKey("divergent-heal")
-				seedTier(ctx, t, lower, keyHeal, stale)
-				seedTier(ctx, t, upper, keyHeal, pinned)
+				seedTier(ctx, t, lower, keyHeal, stale, "stale-etag")
+				seedTier(ctx, t, upper, keyHeal, pinned, "pinned-etag")
 
 				r, headers, err := tiered.Open(ctx, keyHeal, cache.IfMatch(pinnedETag))
 				assert.NoError(t, err)
@@ -305,7 +357,7 @@ func TestTieredDivergentValidatorProbeErrors(t *testing.T) {
 	stale := []byte("0123456789")
 	seedTier(ctx, t, lower, key, stale)
 
-	pinnedETag := contentETag([]byte("abcdefghij"))
+	const pinnedETag = `"pinned-etag"`
 	tests := []struct {
 		name string
 		run  func(t *testing.T)

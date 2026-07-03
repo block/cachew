@@ -122,7 +122,9 @@ func (fs *fakeServer) put(w http.ResponseWriter, r *http.Request) {
 		}
 		headers[k] = v
 	}
-	headers.Set("ETag", fakeETag(body))
+	if headers.Get("ETag") == "" {
+		headers.Set("ETag", fakeETag(body))
+	}
 	fs.mu.Lock()
 	fs.objects[fs.key(r)] = fakeObject{body: body, headers: headers}
 	fs.mu.Unlock()
@@ -202,6 +204,38 @@ func TestObjectRoundTrip(t *testing.T) {
 	_, err = c.Stat(ctx, key)
 	assert.Error(t, err)
 	assert.True(t, isNotExist(err))
+}
+
+func TestCreateWithETag(t *testing.T) {
+	srv := newFakeServer(nil)
+	defer srv.Close()
+
+	c := client.New(srv.URL, nil).Namespace("test")
+	defer c.Close()
+
+	ctx := t.Context()
+	key := client.NewKey("explicit-etag")
+
+	wc, err := c.Create(ctx, key, nil, 0, client.WithETag("caller-etag"))
+	assert.NoError(t, err)
+	_, err = wc.Write([]byte("hello"))
+	assert.NoError(t, err)
+	assert.NoError(t, wc.Close())
+
+	headers, err := c.Stat(ctx, key)
+	assert.NoError(t, err)
+	assert.Equal(t, `"caller-etag"`, headers.Get("ETag"))
+}
+
+func TestCreateWithInvalidETag(t *testing.T) {
+	srv := newFakeServer(nil)
+	defer srv.Close()
+
+	c := client.New(srv.URL, nil).Namespace("test")
+	defer c.Close()
+
+	_, err := c.Create(t.Context(), client.NewKey("invalid-etag"), nil, 0, client.WithETag(`"quoted"`))
+	assert.Error(t, err)
 }
 
 func isNotExist(err error) bool { return err != nil && os.IsNotExist(err) }
