@@ -275,7 +275,7 @@ func TestTieredRequiresMetadataStore(t *testing.T) {
 	})
 }
 
-func TestTieredCreatePublishesMetadataETag(t *testing.T) {
+func TestTieredCreateDoesNotPublishMetadataETagForNewKey(t *testing.T) {
 	_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelDebug})
 	store := newMetadataStore(ctx)
 	lower, err := cache.NewMemory(ctx, cache.MemoryConfig{LimitMB: 1024, MaxTTL: time.Hour})
@@ -292,9 +292,55 @@ func TestTieredCreatePublishesMetadataETag(t *testing.T) {
 	assert.NoError(t, err)
 	assert.NoError(t, w.Close())
 
+	_, ok := tieredETags(store, "").Get(key)
+	assert.False(t, ok)
+}
+
+func TestTieredCreatePublishesMetadataETagForReplacement(t *testing.T) {
+	_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelDebug})
+	store := newMetadataStore(ctx)
+	lower, err := cache.NewMemory(ctx, cache.MemoryConfig{LimitMB: 1024, MaxTTL: time.Hour})
+	assert.NoError(t, err)
+	upper, err := cache.NewMemory(ctx, cache.MemoryConfig{LimitMB: 1024, MaxTTL: time.Hour})
+	assert.NoError(t, err)
+	tiered := cache.MaybeNewTiered(ctx, []cache.Cache{lower, upper}, store)
+	defer tiered.Close()
+
+	key := cache.NewKey("tiered-replace-metadata-etag")
+	seedTier(ctx, t, tiered, key, []byte("old"), "old-etag")
+
+	w, err := tiered.Create(ctx, key, nil, time.Minute, cache.WithETag("new-etag"))
+	assert.NoError(t, err)
+	_, err = w.Write([]byte("new"))
+	assert.NoError(t, err)
+	assert.NoError(t, w.Close())
+
 	etag, ok := tieredETags(store, "").Get(key)
 	assert.True(t, ok)
-	assert.Equal(t, `"metadata-etag"`, etag)
+	assert.Equal(t, `"new-etag"`, etag)
+}
+
+func TestTieredCreateDoesNotPublishMetadataETagForSameETagReplacement(t *testing.T) {
+	_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelDebug})
+	store := newMetadataStore(ctx)
+	lower, err := cache.NewMemory(ctx, cache.MemoryConfig{LimitMB: 1024, MaxTTL: time.Hour})
+	assert.NoError(t, err)
+	upper, err := cache.NewMemory(ctx, cache.MemoryConfig{LimitMB: 1024, MaxTTL: time.Hour})
+	assert.NoError(t, err)
+	tiered := cache.MaybeNewTiered(ctx, []cache.Cache{lower, upper}, store)
+	defer tiered.Close()
+
+	key := cache.NewKey("tiered-same-metadata-etag")
+	seedTier(ctx, t, tiered, key, []byte("old"), "same-etag")
+
+	w, err := tiered.Create(ctx, key, nil, time.Minute, cache.WithETag("same-etag"))
+	assert.NoError(t, err)
+	_, err = w.Write([]byte("new"))
+	assert.NoError(t, err)
+	assert.NoError(t, w.Close())
+
+	_, ok := tieredETags(store, "").Get(key)
+	assert.False(t, ok)
 }
 
 func TestTieredAbortDoesNotPublishMetadataETag(t *testing.T) {
@@ -461,9 +507,15 @@ func TestTieredMetadataIsNamespaced(t *testing.T) {
 
 	key := cache.NewKey("tiered-namespaced-metadata")
 	namespaced := tiered.Namespace("alpha")
-	w, err := namespaced.Create(ctx, key, nil, time.Minute, cache.WithETag("alpha-etag"))
+	w, err := namespaced.Create(ctx, key, nil, time.Minute, cache.WithETag("old-alpha-etag"))
 	assert.NoError(t, err)
-	_, err = w.Write([]byte("content"))
+	_, err = w.Write([]byte("old"))
+	assert.NoError(t, err)
+	assert.NoError(t, w.Close())
+
+	w, err = namespaced.Create(ctx, key, nil, time.Minute, cache.WithETag("alpha-etag"))
+	assert.NoError(t, err)
+	_, err = w.Write([]byte("new"))
 	assert.NoError(t, err)
 	assert.NoError(t, w.Close())
 
