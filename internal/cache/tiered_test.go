@@ -469,6 +469,19 @@ func TestSingleTierInvalidateIsNoop(t *testing.T) {
 	assert.Equal(t, content, readAllAndClose(t, r))
 }
 
+func TestSingleTierDelegatesUnsupportedOperations(t *testing.T) {
+	_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelDebug})
+	tiered := cache.MaybeNewTiered(ctx, []cache.Cache{cache.NoOpCache()})
+	defer tiered.Close()
+
+	_, err := tiered.Stats(ctx)
+	assert.IsError(t, err, cache.ErrStatsUnavailable)
+
+	namespaces, err := tiered.ListNamespaces(ctx)
+	assert.NoError(t, err)
+	assert.Equal(t, []string{}, namespaces)
+}
+
 func TestTieredCacheSoak(t *testing.T) {
 	if os.Getenv("SOAK_TEST") == "" {
 		t.Skip("Skipping soak test; set SOAK_TEST=1 to run")
