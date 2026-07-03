@@ -169,6 +169,14 @@ func (m *Memory) Delete(_ context.Context, key Key) error {
 	return nil
 }
 
+func (m *Memory) Invalidate(ctx context.Context, key Key) error {
+	err := m.Delete(ctx, key)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	return errors.WithStack(err)
+}
+
 func (m *Memory) Close() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()

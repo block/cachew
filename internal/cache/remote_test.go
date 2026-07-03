@@ -1,6 +1,7 @@
 package cache_test
 
 import (
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -35,6 +36,49 @@ func TestRemoteCache(t *testing.T) {
 		client := cache.NewRemote(ts.URL, nil)
 		return client.Namespace("test")
 	})
+}
+
+func TestRemoteInvalidateSkipsRemoteAuthoritativeTier(t *testing.T) {
+	ctx := t.Context()
+	_, ctx = logging.Configure(ctx, logging.Config{Level: slog.LevelError})
+
+	lower, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: time.Hour})
+	assert.NoError(t, err)
+	t.Cleanup(func() { lower.Close() })
+
+	authoritative, err := cache.NewDisk(ctx, cache.DiskConfig{Root: t.TempDir(), MaxTTL: time.Hour})
+	assert.NoError(t, err)
+	t.Cleanup(func() { authoritative.Close() })
+
+	tiered := cache.MaybeNewTiered(ctx, []cache.Cache{lower, authoritative})
+	mux := http.NewServeMux()
+	_, err = strategy.NewAPIV1(ctx, struct{}{}, tiered, mux)
+	assert.NoError(t, err)
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+
+	remote := cache.NewRemote(ts.URL, nil).Namespace("test")
+	t.Cleanup(func() { remote.Close() })
+
+	key := cache.NewKey("remote-invalidate")
+	content := []byte("authoritative content")
+	w, err := remote.Create(ctx, key, nil, time.Minute)
+	assert.NoError(t, err)
+	_, err = w.Write(content)
+	assert.NoError(t, err)
+	assert.NoError(t, w.Close())
+
+	assert.NoError(t, remote.Invalidate(ctx, key))
+
+	_, _, err = lower.Namespace("test").Open(ctx, key)
+	assert.IsError(t, err, os.ErrNotExist)
+
+	r, _, err := authoritative.Namespace("test").Open(ctx, key)
+	assert.NoError(t, err)
+	data, err := io.ReadAll(r)
+	assert.NoError(t, err)
+	assert.NoError(t, r.Close())
+	assert.Equal(t, content, data)
 }
 
 func TestRemoteCacheSoak(t *testing.T) {

@@ -16,9 +16,26 @@ import (
 	"github.com/block/cachew/internal/cache"
 )
 
+// SuiteOption configures which cache contract checks Suite runs.
+type SuiteOption func(*suiteConfig)
+
+type suiteConfig struct {
+	skipInvalidate bool
+}
+
+// WithoutInvalidate skips the generic backend-local invalidation check.
+func WithoutInvalidate() SuiteOption {
+	return func(c *suiteConfig) { c.skipInvalidate = true }
+}
+
 // Suite runs a comprehensive test suite against a cache.Cache implementation.
 // All cache implementations should pass this test suite to ensure consistent semantics.
-func Suite(t *testing.T, newCache func(t *testing.T) cache.Cache) {
+func Suite(t *testing.T, newCache func(t *testing.T) cache.Cache, opts ...SuiteOption) {
+	var config suiteConfig
+	for _, opt := range opts {
+		opt(&config)
+	}
+
 	t.Run("CreateAndOpen", func(t *testing.T) {
 		testCreateAndOpen(t, newCache(t))
 	})
@@ -38,6 +55,12 @@ func Suite(t *testing.T, newCache func(t *testing.T) cache.Cache) {
 	t.Run("Delete", func(t *testing.T) {
 		testDelete(t, newCache(t))
 	})
+
+	if !config.skipInvalidate {
+		t.Run("Invalidate", func(t *testing.T) {
+			testInvalidate(t, newCache(t))
+		})
+	}
 
 	t.Run("MultipleWrites", func(t *testing.T) {
 		testMultipleWrites(t, newCache(t))
@@ -187,6 +210,31 @@ func testDelete(t *testing.T, c cache.Cache) {
 
 	_, _, err = c.Open(ctx, key)
 	assert.IsError(t, err, os.ErrNotExist)
+}
+
+func testInvalidate(t *testing.T, c cache.Cache) {
+	defer c.Close()
+	ctx := t.Context()
+
+	key := cache.NewKey("test-key")
+
+	writer, err := c.Create(ctx, key, nil, time.Hour)
+	assert.NoError(t, err)
+
+	_, err = writer.Write([]byte("test data"))
+	assert.NoError(t, err)
+
+	err = writer.Close()
+	assert.NoError(t, err)
+
+	err = c.Invalidate(ctx, key)
+	assert.NoError(t, err)
+
+	_, _, err = c.Open(ctx, key)
+	assert.IsError(t, err, os.ErrNotExist)
+
+	err = c.Invalidate(ctx, cache.NewKey("missing-key"))
+	assert.NoError(t, err)
 }
 
 func testMultipleWrites(t *testing.T, c cache.Cache) {

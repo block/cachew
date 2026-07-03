@@ -422,6 +422,10 @@ func (s *S3) Delete(ctx context.Context, key Key) error {
 	return nil
 }
 
+func (s *S3) Invalidate(ctx context.Context, key Key) error {
+	return errors.WithStack(s.Delete(ctx, key))
+}
+
 func (s *S3) Stats(_ context.Context) (Stats, error) {
 	// S3 doesn't provide efficient count/size operations without listing the entire bucket,
 	// which would be prohibitively slow and expensive.

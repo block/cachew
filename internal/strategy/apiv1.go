@@ -37,6 +37,7 @@ func NewAPIV1(ctx context.Context, _ struct{}, cache cache.Cache, mux Mux) (*API
 	mux.Handle("HEAD /api/v1/object/{namespace}/{key}", http.HandlerFunc(s.statObject))
 	mux.Handle("POST /api/v1/object/{namespace}/{key}", http.HandlerFunc(s.putObject))
 	mux.Handle("DELETE /api/v1/object/{namespace}/{key}", http.HandlerFunc(s.deleteObject))
+	mux.Handle("POST /api/v1/object/{namespace}/{key}/invalidate", http.HandlerFunc(s.invalidateObject))
 	mux.Handle("GET /api/v1/stats", http.HandlerFunc(s.getStats))
 	mux.Handle("GET /api/v1/namespaces", http.HandlerFunc(s.getNamespaces))
 	return s, nil
@@ -168,6 +169,25 @@ func (d *APIV1) deleteObject(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		d.httpError(w, http.StatusInternalServerError, err, "Failed to delete cache object", "key", key)
+		return
+	}
+}
+
+func (d *APIV1) invalidateObject(w http.ResponseWriter, r *http.Request) {
+	namespace, err := cache.ParseNamespace(r.PathValue("namespace"))
+	if err != nil {
+		d.httpError(w, http.StatusBadRequest, err, "Invalid namespace")
+		return
+	}
+	key, err := cache.ParseKey(r.PathValue("key"))
+	if err != nil {
+		d.httpError(w, http.StatusBadRequest, err, "Invalid key")
+		return
+	}
+
+	namespacedCache := d.cache.Namespace(namespace)
+	if err := namespacedCache.Invalidate(r.Context(), key); err != nil {
+		d.httpError(w, http.StatusInternalServerError, err, "Failed to invalidate cache object", "key", key)
 		return
 	}
 }

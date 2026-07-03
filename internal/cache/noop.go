@@ -39,6 +39,10 @@ func (n *noOpCache) Delete(_ context.Context, _ Key) error {
 	return nil
 }
 
+func (n *noOpCache) Invalidate(_ context.Context, _ Key) error {
+	return nil
+}
+
 func (n *noOpCache) Stats(_ context.Context) (Stats, error) {
 	return Stats{}, ErrStatsUnavailable
 }

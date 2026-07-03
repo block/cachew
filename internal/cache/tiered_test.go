@@ -176,7 +176,7 @@ func TestTieredCachePermutations(t *testing.T) {
 				lower := perm.lower.new(t)
 				upper := perm.upper.new(t)
 				return cache.MaybeNewTiered(ctx, []cache.Cache{lower, upper})
-			})
+			}, cachetest.WithoutInvalidate())
 		})
 	}
 }
@@ -423,6 +423,50 @@ func TestTieredDeletePermutations(t *testing.T) {
 			assert.IsError(t, err, os.ErrNotExist)
 		})
 	}
+}
+
+func TestTieredInvalidateSkipsAuthoritativeTier(t *testing.T) {
+	for _, perm := range tieredPermutations(t) {
+		t.Run(perm.name, func(t *testing.T) {
+			_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelDebug})
+			lower := perm.lower.new(t)
+			authoritative := perm.upper.new(t)
+			tiered := cache.MaybeNewTiered(ctx, []cache.Cache{lower, authoritative})
+			defer tiered.Close()
+
+			key := cache.NewKey("invalidate-test")
+			content := []byte("keep authoritative")
+			seedTier(ctx, t, tiered, key, content)
+
+			assert.NoError(t, tiered.Invalidate(ctx, key))
+			assert.NoError(t, tiered.Invalidate(ctx, cache.NewKey("missing-invalidate-test")))
+
+			_, _, err := lower.Open(ctx, key)
+			assert.IsError(t, err, os.ErrNotExist)
+
+			r, _, err := authoritative.Open(ctx, key)
+			assert.NoError(t, err)
+			assert.Equal(t, content, readAllAndClose(t, r))
+		})
+	}
+}
+
+func TestSingleTierInvalidateIsNoop(t *testing.T) {
+	_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelDebug})
+	authoritative, err := cache.NewMemory(ctx, cache.MemoryConfig{LimitMB: 1024, MaxTTL: time.Hour})
+	assert.NoError(t, err)
+	tiered := cache.MaybeNewTiered(ctx, []cache.Cache{authoritative})
+	defer tiered.Close()
+
+	key := cache.NewKey("single-tier-invalidate")
+	content := []byte("single authoritative")
+	seedTier(ctx, t, tiered, key, content)
+
+	assert.NoError(t, tiered.Invalidate(ctx, key))
+
+	r, _, err := authoritative.Open(ctx, key)
+	assert.NoError(t, err)
+	assert.Equal(t, content, readAllAndClose(t, r))
 }
 
 func TestTieredCacheSoak(t *testing.T) {

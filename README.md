@@ -105,7 +105,10 @@ proxy {}
 
 ## Cache Backends
 
-Multiple backends can be configured simultaneously — they are automatically combined into a tiered cache. Reads check each tier in order and backfill lower tiers on a hit. Writes go to all tiers in parallel.
+Multiple backends can be configured simultaneously — they are automatically combined into a tiered cache. Cache blocks
+are ordered from lowest/nearest to highest/authoritative. Reads check each tier in order and backfill lower tiers on a
+hit. Writes go to all tiers in parallel. Replica invalidations evict only non-authoritative tiers; the final cache block
+is authoritative.
 
 ### Memory
 

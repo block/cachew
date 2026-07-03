@@ -161,6 +161,10 @@ func (c *Client) objectURL(key Key) string {
 	return fmt.Sprintf("%s/api/v1/object/%s/%s", c.baseURL, c.resolvedNamespace(), key.String())
 }
 
+func (c *Client) invalidateURL(key Key) string {
+	return c.objectURL(key) + "/invalidate"
+}
+
 // Open retrieves an object from the cache server. Accepts optional
 // [RequestOption]s such as [IfNoneMatch] for conditional requests.
 func (c *Client) Open(ctx context.Context, key Key, opts ...RequestOption) (io.ReadCloser, http.Header, error) {
@@ -302,6 +306,26 @@ func (c *Client) Delete(ctx context.Context, key Key) error {
 	if resp.StatusCode == http.StatusNotFound {
 		return os.ErrNotExist
 	}
+
+	if resp.StatusCode != http.StatusOK {
+		return errors.WithStack(&HTTPStatusError{StatusCode: resp.StatusCode})
+	}
+
+	return nil
+}
+
+// Invalidate evicts a stale local copy from the cache server.
+func (c *Client) Invalidate(ctx context.Context, key Key) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.invalidateURL(key), nil)
+	if err != nil {
+		return errors.Wrap(err, "failed to create request")
+	}
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return errors.Wrap(err, "failed to execute request")
+	}
+	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		return errors.WithStack(&HTTPStatusError{StatusCode: resp.StatusCode})
