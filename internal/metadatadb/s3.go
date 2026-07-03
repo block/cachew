@@ -18,33 +18,30 @@ import (
 // RegisterS3 registers the S3 metadata backend. The clientProvider supplies the
 // shared minio client constructed from the global s3 config block.
 func RegisterS3(r *Registry, clientProvider s3client.ClientProvider) {
-	Register(r, "s3", "Stores metadata state in S3 with periodic sync",
+	Register(r, "s3", "Stores metadata state in S3 with synchronous writes",
 		func(ctx context.Context, config S3BackendConfig) (*S3Backend, error) {
 			return NewS3Backend(ctx, clientProvider, config)
 		},
 	)
 }
 
-// S3Backend stores metadata state as JSON objects in S3 with periodic sync.
-// Writes are applied to local state immediately and queued for the next flush.
+// S3Backend stores metadata state as JSON objects in S3.
+// Writes are applied to S3 before local state is updated.
 // Locking uses a separate lock object with TTL-based expiry for stale lock
 // recovery. The idempotence token maps to the S3 object ETag.
 type S3Backend struct {
-	client       *minio.Client
-	bucket       string
-	lockTTL      time.Duration
-	syncInterval time.Duration
-	mu           sync.Mutex
-	ns           map[string]*s3Namespace
-	ctx          context.Context
-	cancel       context.CancelFunc
+	client  *minio.Client
+	bucket  string
+	lockTTL time.Duration
+	mu      sync.Mutex
+	ns      map[string]*s3Namespace
 }
 
 // S3BackendConfig configures the S3 metadata backend.
 type S3BackendConfig struct {
 	Bucket       string        `hcl:"bucket" help:"S3 bucket name."`
 	LockTTL      time.Duration `hcl:"lock-ttl,optional" help:"TTL for namespace locks." default:"30s"`
-	SyncInterval time.Duration `hcl:"sync-interval,optional" help:"Interval between periodic syncs." default:"30s"`
+	SyncInterval time.Duration `hcl:"sync-interval,optional" help:"Deprecated; writes are synchronous."`
 }
 
 // s3MetadataPrefix is the fixed key prefix for all metadata objects in S3.
@@ -55,9 +52,6 @@ const s3MetadataPrefix = ".metadata"
 func NewS3Backend(ctx context.Context, clientProvider s3client.ClientProvider, config S3BackendConfig) (*S3Backend, error) {
 	if config.LockTTL == 0 {
 		config.LockTTL = 30 * time.Second
-	}
-	if config.SyncInterval == 0 {
-		config.SyncInterval = 30 * time.Second
 	}
 	client, err := clientProvider()
 	if err != nil {
@@ -72,17 +66,13 @@ func NewS3Backend(ctx context.Context, clientProvider s3client.ClientProvider, c
 	}
 
 	logging.FromContext(ctx).InfoContext(ctx, "Constructing S3 metadata backend",
-		"bucket", config.Bucket, "prefix", s3MetadataPrefix, "lock-ttl", config.LockTTL, "sync-interval", config.SyncInterval)
+		"bucket", config.Bucket, "prefix", s3MetadataPrefix, "lock-ttl", config.LockTTL)
 
-	ctx, cancel := context.WithCancel(ctx)
 	return &S3Backend{
-		client:       client,
-		bucket:       config.Bucket,
-		lockTTL:      config.LockTTL,
-		syncInterval: config.SyncInterval,
-		ns:           make(map[string]*s3Namespace),
-		ctx:          ctx,
-		cancel:       cancel,
+		client:  client,
+		bucket:  config.Bucket,
+		lockTTL: config.LockTTL,
+		ns:      make(map[string]*s3Namespace),
 	}, nil
 }
 
@@ -96,22 +86,16 @@ func (s *S3Backend) namespace(name string) *s3Namespace {
 		backend: s,
 		name:    name,
 		state:   make(map[string]any),
-		done:    make(chan struct{}),
 	}
-	go ns.syncLoop()
 	s.ns[name] = ns
 	return ns
 }
 
-func (s *S3Backend) Apply(_ context.Context, namespace string, ops ...Op) error {
-	ns := s.namespace(namespace)
-	ns.mu.Lock()
-	defer ns.mu.Unlock()
-	for _, o := range ops {
-		applyOp(ns.state, o)
+func (s *S3Backend) Apply(ctx context.Context, namespace string, ops ...Op) error {
+	if len(ops) == 0 {
+		return nil
 	}
-	ns.pending = append(ns.pending, ops...)
-	return nil
+	return s.namespace(namespace).apply(ctx, ops)
 }
 
 func (s *S3Backend) Query(_ context.Context, namespace string, q ReadOp, target any) error {
@@ -123,18 +107,10 @@ func (s *S3Backend) Query(_ context.Context, namespace string, q ReadOp, target 
 }
 
 func (s *S3Backend) Flush(ctx context.Context, namespace string) error {
-	return s.namespace(namespace).doSync(ctx)
+	return s.namespace(namespace).reload(ctx)
 }
 
-func (s *S3Backend) Close(_ context.Context) error {
-	s.cancel()
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for _, ns := range s.ns {
-		<-ns.done
-	}
-	return nil
-}
+func (s *S3Backend) Close(_ context.Context) error { return nil }
 
 // S3 object key helpers
 
@@ -248,48 +224,56 @@ type s3Namespace struct {
 	name    string
 	mu      sync.RWMutex
 	state   map[string]any
-	pending []Op
 	syncMu  sync.Mutex
-	done    chan struct{}
 }
 
 const maxTokenRetries = 3
 
-func (n *s3Namespace) doSync(ctx context.Context) error {
+func (n *s3Namespace) reload(ctx context.Context) error {
 	n.syncMu.Lock()
 	defer n.syncMu.Unlock()
 
-	n.mu.Lock()
-	pending := n.pending
-	n.pending = nil
-	n.mu.Unlock()
-
-	if len(pending) > 0 {
-		if err := n.backend.lockNamespace(ctx, n.name); err != nil {
-			n.restorePending(pending)
-			return errors.Wrap(err, "lock namespace")
-		}
-		defer func() {
-			if err := n.backend.unlockNamespace(ctx, n.name); err != nil {
-				logging.FromContext(ctx).WarnContext(ctx, "unlock failed", "namespace", n.name, "error", err)
-			}
-		}()
-	}
-
-	remote, err := n.loadReplayStore(ctx, pending)
+	remote, err := n.load(ctx)
 	if err != nil {
-		n.restorePending(pending)
 		return err
 	}
 
 	n.mu.Lock()
 	n.state = remote
-	for _, o := range n.pending {
-		applyOp(n.state, o)
+	n.mu.Unlock()
+	return nil
+}
+
+func (n *s3Namespace) apply(ctx context.Context, ops []Op) error {
+	n.syncMu.Lock()
+	defer n.syncMu.Unlock()
+
+	if err := n.backend.lockNamespace(ctx, n.name); err != nil {
+		return errors.Wrap(err, "lock namespace")
 	}
+
+	remote, err := n.loadReplayStore(ctx, ops)
+	unlockErr := n.backend.unlockNamespace(ctx, n.name)
+	if err != nil {
+		return err
+	}
+	if unlockErr != nil {
+		return errors.Wrap(unlockErr, "unlock namespace")
+	}
+
+	n.mu.Lock()
+	n.state = remote
 	n.mu.Unlock()
 
 	return nil
+}
+
+func (n *s3Namespace) load(ctx context.Context) (map[string]any, error) {
+	data, _, err := n.backend.load(ctx, n.name)
+	if err != nil {
+		return nil, errors.Wrap(err, "load namespace")
+	}
+	return unmarshalState(data)
 }
 
 func (n *s3Namespace) loadReplayStore(ctx context.Context, pending []Op) (map[string]any, error) {
@@ -309,11 +293,9 @@ func (n *s3Namespace) tryLoadReplayStore(ctx context.Context, pending []Op) (map
 		return nil, errors.Wrap(err, "load namespace")
 	}
 
-	remote := make(map[string]any)
-	if data != nil {
-		if err := json.Unmarshal(data, &remote); err != nil {
-			return nil, errors.Wrap(err, "unmarshal state")
-		}
+	remote, err := unmarshalState(data)
+	if err != nil {
+		return nil, err
 	}
 
 	for _, o := range pending {
@@ -333,28 +315,12 @@ func (n *s3Namespace) tryLoadReplayStore(ctx context.Context, pending []Op) (map
 	return remote, nil
 }
 
-func (n *s3Namespace) restorePending(ops []Op) {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	n.pending = append(ops, n.pending...)
-}
-
-func (n *s3Namespace) syncLoop() {
-	defer close(n.done)
-	ctx := n.backend.ctx
-	logger := logging.FromContext(ctx).With("namespace", n.name)
-	ticker := time.NewTicker(n.backend.syncInterval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			if err := n.doSync(ctx); err != nil {
-				logger.WarnContext(ctx, "sync failed", "error", err)
-			}
-		}
+func unmarshalState(data json.RawMessage) (map[string]any, error) {
+	state := make(map[string]any)
+	if data == nil {
+		return state, nil
 	}
+	return state, errors.Wrap(json.Unmarshal(data, &state), "unmarshal state")
 }
 
 func isNotFound(err error) bool {

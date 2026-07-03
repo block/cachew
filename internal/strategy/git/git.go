@@ -207,7 +207,11 @@ func (s *Strategy) SetMetadataStore(store *metadatadb.Store) {
 	logging.FromContext(s.ctx).InfoContext(s.ctx, "Per-repo clone histogram enabled",
 		"retention_days", s.repoCounts.retentionDays)
 	s.scheduler.SubmitPeriodicJob("repo-counts-reaper", "reap-repo-counts", defaultRepoCountsReapInterval, func(ctx context.Context) error {
-		if deleted := s.repoCounts.Reap(); deleted > 0 {
+		deleted, err := s.repoCounts.Reap()
+		if err != nil {
+			return err
+		}
+		if deleted > 0 {
 			logging.FromContext(ctx).InfoContext(ctx, "Reaped stale repo clone counts", "deleted", deleted)
 		}
 		return nil
@@ -337,7 +341,9 @@ func (s *Strategy) handleGitRequest(w http.ResponseWriter, r *http.Request, host
 	if isClone, cerr := RequestIsClone(pathValue, r); cerr != nil {
 		logger.WarnContext(ctx, "Failed to inspect upload-pack body for clone counting", "error", cerr)
 	} else if isClone {
-		s.repoCounts.IncrementClone(upstreamURL)
+		if err := s.repoCounts.IncrementClone(upstreamURL); err != nil {
+			logger.WarnContext(ctx, "Failed to increment repo clone count", "error", err)
+		}
 	}
 
 	state := repo.State()

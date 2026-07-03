@@ -44,11 +44,11 @@ func NewRepoCounts(ns *metadatadb.Namespace) *RepoCounts {
 }
 
 // IncrementClone bumps today's bucket (UTC) for upstreamURL.
-func (r *RepoCounts) IncrementClone(upstreamURL string) {
+func (r *RepoCounts) IncrementClone(upstreamURL string) error {
 	if r == nil || upstreamURL == "" {
-		return
+		return nil
 	}
-	r.counts.Add(repoCountsKey(upstreamURL, r.now()), 1)
+	return errors.Wrap(r.counts.Add(repoCountsKey(upstreamURL, r.now()), 1), "increment repo count")
 }
 
 // uploadPackBodyInspectLimit bounds CPU spend on hostile bodies; real bodies
@@ -161,29 +161,33 @@ func (r *RepoCounts) TopRepos(windowDays, limit int) []RepoCount {
 
 // Reap deletes buckets older than the retention window and any malformed keys,
 // returning the number of entries deleted.
-func (r *RepoCounts) Reap() int {
+func (r *RepoCounts) Reap() (int, error) {
 	if r == nil {
-		return 0
+		return 0, nil
 	}
 	entries := r.counts.Entries()
 	if len(entries) == 0 {
-		return 0
+		return 0, nil
 	}
 	cutoff := r.now().UTC().AddDate(0, 0, -r.retentionDays).Truncate(24 * time.Hour)
 	var deleted int
 	for k := range entries {
 		_, day, ok := splitRepoCountsKey(k)
 		if !ok {
-			r.counts.Delete(k)
+			if err := r.counts.Delete(k); err != nil {
+				return deleted, errors.Wrap(err, "delete malformed repo count")
+			}
 			deleted++
 			continue
 		}
 		if day.Before(cutoff) {
-			r.counts.Delete(k)
+			if err := r.counts.Delete(k); err != nil {
+				return deleted, errors.Wrap(err, "delete stale repo count")
+			}
 			deleted++
 		}
 	}
-	return deleted
+	return deleted, nil
 }
 
 func repoCountsKey(upstreamURL string, now time.Time) string {

@@ -137,7 +137,7 @@ func (t Tiered) Delete(ctx context.Context, key Key) error {
 	wg.Wait()
 	err := errors.Join(errs...)
 	if err == nil {
-		t.etags.Delete(key)
+		err = errors.Wrap(t.etags.Delete(key), "delete tiered etag")
 	}
 	return err
 }
@@ -518,7 +518,7 @@ func (t *tieredWriter) Close() error {
 	wg.Wait()
 	err := errors.Join(errs...)
 	if err == nil && !t.aborted && t.replaceETag {
-		t.etags.Set(t.key, t.etag)
+		err = errors.Wrap(t.etags.Set(t.key, t.etag), "set tiered etag")
 	}
 	return err
 }

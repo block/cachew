@@ -377,7 +377,7 @@ func TestTieredMetadataInvalidatesStaleLowerOnStat(t *testing.T) {
 	key := cache.NewKey("tiered-stale-stat")
 	seedTier(ctx, t, lower, key, []byte("stale"), "stale-etag")
 	seedTier(ctx, t, upper, key, []byte("fresh"), "fresh-etag")
-	tieredETags(store, "").Set(key, `"fresh-etag"`)
+	assert.NoError(t, tieredETags(store, "").Set(key, `"fresh-etag"`))
 
 	headers, err := tiered.Stat(ctx, key)
 	assert.NoError(t, err)
@@ -399,7 +399,7 @@ func TestTieredMetadataInvalidatesStaleLowerBeforeNotModified(t *testing.T) {
 	key := cache.NewKey("tiered-stale-not-modified")
 	seedTier(ctx, t, lower, key, []byte("stale"), "stale-etag")
 	seedTier(ctx, t, upper, key, []byte("fresh"), "fresh-etag")
-	tieredETags(store, "").Set(key, `"fresh-etag"`)
+	assert.NoError(t, tieredETags(store, "").Set(key, `"fresh-etag"`))
 
 	r, headers, err := tiered.Open(ctx, key, cache.IfNoneMatch(`"stale-etag"`))
 	assert.NoError(t, err)
@@ -425,7 +425,7 @@ func TestTieredMetadataReturnsHardStatErrorBeforeInvalidating(t *testing.T) {
 	key := cache.NewKey("tiered-stale-hard-stat-error")
 	seedTier(ctx, t, lower, key, []byte("lower"), "lower-etag")
 	seedTier(ctx, t, upper, key, []byte("upper"), "upper-etag")
-	tieredETags(store, "").Set(key, `"upper-etag"`)
+	assert.NoError(t, tieredETags(store, "").Set(key, `"upper-etag"`))
 
 	_, err = tiered.Stat(ctx, key)
 	assert.IsError(t, err, statErr)
@@ -447,7 +447,7 @@ func TestTieredMetadataClearsDiscardedConditionalError(t *testing.T) {
 
 	key := cache.NewKey("tiered-clears-stale-conditional")
 	seedTier(ctx, t, lower, key, []byte("stale"), "stale-etag")
-	tieredETags(store, "").Set(key, `"fresh-etag"`)
+	assert.NoError(t, tieredETags(store, "").Set(key, `"fresh-etag"`))
 
 	_, _, err = tiered.Open(ctx, key, cache.IfNoneMatch(`"stale-etag"`))
 	assert.IsError(t, err, os.ErrNotExist)
@@ -467,7 +467,7 @@ func TestTieredMetadataAllowsMatchingLower(t *testing.T) {
 	key := cache.NewKey("tiered-matching-lower")
 	seedTier(ctx, t, lower, key, []byte("lower"), "lower-etag")
 	seedTier(ctx, t, upper, key, []byte("upper"), "upper-etag")
-	tieredETags(store, "").Set(key, `"lower-etag"`)
+	assert.NoError(t, tieredETags(store, "").Set(key, `"lower-etag"`))
 
 	r, headers, err := tiered.Open(ctx, key)
 	assert.NoError(t, err)
