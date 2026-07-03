@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"slices"
 	"strconv"
 	"strings"
@@ -17,12 +18,8 @@ import (
 	"github.com/block/cachew/client"
 )
 
-// Compile-time assertion that the concrete Client satisfies the narrow
-// interface ParallelGet drives.
 var _ client.RangeReader = (*client.Client)(nil)
 
-// bufferAt is an in-memory io.WriterAt that extends like a file, zero-filling
-// any gap, so tests can assert reassembly without touching disk.
 type bufferAt struct {
 	mu  sync.Mutex
 	buf []byte
@@ -38,10 +35,6 @@ func (b *bufferAt) WriteAt(p []byte, off int64) (int, error) {
 	return len(p), nil
 }
 
-// rangeFlipReader serves correct byte ranges but ignores If-Match and reports
-// a different ETag for any chunk past the first, simulating an object
-// rewritten mid-download behind a server that does not honour preconditions.
-// It exercises the client-side response-ETag guard.
 type rangeFlipReader struct {
 	data      []byte
 	firstETag string
@@ -77,9 +70,6 @@ func TestParallelGetETagMismatch(t *testing.T) {
 	assert.Contains(t, err.Error(), "object changed during read")
 }
 
-// ifMatchFlipReader honours If-Match like a conforming server whose object is
-// rewritten after the discovery request, so every pinned chunk fails its
-// precondition with a bodiless rejection.
 type ifMatchFlipReader struct {
 	data      []byte
 	firstETag string
@@ -118,8 +108,6 @@ func TestParallelGetPreconditionFailedOnRewrite(t *testing.T) {
 	assert.Contains(t, err.Error(), "object changed during read")
 }
 
-// noETagReader serves byte ranges but never sets an ETag, modelling a legacy
-// entry or a RangeReader implementation that omits it.
 type noETagReader struct {
 	data []byte
 }
@@ -140,8 +128,6 @@ func (n *noETagReader) Open(_ context.Context, _ client.Key, opts ...client.Requ
 }
 
 func TestParallelGetNoETagMultiChunk(t *testing.T) {
-	// A multi-chunk object with no ETag can't be pinned, so it falls back to a
-	// single full read (backwards compatible with objects stored before ETags).
 	data := make([]byte, 1000)
 	for i := range data {
 		data[i] = byte(i % 251)
@@ -154,8 +140,6 @@ func TestParallelGetNoETagMultiChunk(t *testing.T) {
 }
 
 func TestParallelGetNoETagSingleChunk(t *testing.T) {
-	// A no-ETag object delivered entirely by the discovery request is a single
-	// revision, so it succeeds without pinning.
 	data := []byte("0123456789")
 	c := &noETagReader{data: data}
 	var dst bufferAt
@@ -164,9 +148,6 @@ func TestParallelGetNoETagSingleChunk(t *testing.T) {
 	assert.Equal(t, data, dst.buf)
 }
 
-// changingSizeReader serves a multi-chunk body with no ETag on the ranged
-// discovery request, then a differently sized body on the subsequent full
-// (non-range) read, modelling an object rewritten between the two requests.
 type changingSizeReader struct {
 	discovery []byte
 	rewritten []byte
@@ -192,16 +173,11 @@ func (c *changingSizeReader) Open(_ context.Context, _ client.Key, opts ...clien
 	return io.NopCloser(bytes.NewReader(c.discovery[start : start+length])), headers, nil
 }
 
-// openRecord captures the fetch-shaping options of a single Open call: the
-// Range requested ("" for a full read) and the If-Match validator it was
-// pinned to.
 type openRecord struct {
 	Range   string
 	IfMatch string
 }
 
-// recordingReader serves byte ranges and records an openRecord for every Open
-// call, so tests can assert how the object was fetched.
 type recordingReader struct {
 	data []byte
 	etag string
@@ -234,8 +210,6 @@ func (r *recordingReader) Open(_ context.Context, _ client.Key, opts ...client.R
 }
 
 func TestParallelGetSingleWorkerFullRead(t *testing.T) {
-	// A concurrency of 1 gains nothing from chunking, so it must issue a single
-	// non-ranged read rather than discovering and serialising ranged GETs.
 	data := make([]byte, 1000)
 	for i := range data {
 		data[i] = byte(i % 251)
@@ -268,13 +242,77 @@ func TestParallelGetPinsChunksWithIfMatch(t *testing.T) {
 }
 
 func TestParallelGetNoETagSizeChangedBetweenRequests(t *testing.T) {
-	// A no-ETag multi-chunk object falls back to a single full read. If it is
-	// rewritten to a different size between discovery and that read, the
-	// discovery total must not be used to validate the full body: the full read
-	// is itself a consistent revision and should be accepted in its entirety.
 	c := &changingSizeReader{discovery: make([]byte, 1000), rewritten: []byte("changed")}
 	var dst bufferAt
 	err := client.ParallelGet(context.Background(), c, client.NewKey("k"), &dst, 100, 4)
 	assert.NoError(t, err)
 	assert.Equal(t, c.rewritten, dst.buf)
+}
+
+func TestParallelGetClient(t *testing.T) {
+	content := make([]byte, 1000)
+	for i := range content {
+		content[i] = byte(i % 251)
+	}
+	etag := fakeETag(content)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/v1/object/{namespace}/{key}", func(w http.ResponseWriter, r *http.Request) {
+		if ifMatch := r.Header.Get("If-Match"); ifMatch != "" && ifMatch != etag {
+			w.Header().Set(client.ETagKey, etag)
+			w.WriteHeader(http.StatusPreconditionFailed)
+			return
+		}
+
+		w.Header().Set(client.ETagKey, etag)
+		rangeHeader := r.Header.Get("Range")
+		if rangeHeader == "" {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(content)
+			return
+		}
+
+		start, end, ok := parseTestByteRange(rangeHeader)
+		assert.True(t, ok)
+		if start >= int64(len(content)) {
+			w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", len(content)))
+			w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
+			return
+		}
+		end = min(end, int64(len(content)-1))
+		body := content[start : end+1]
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, len(content)))
+		w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+		w.WriteHeader(http.StatusPartialContent)
+		_, _ = w.Write(body)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	c := client.New(srv.URL, nil).Namespace("test")
+	defer c.Close()
+	var dst bufferAt
+	err := client.ParallelGet(context.Background(), c, client.NewKey("parallel-client"), &dst, 100, 4)
+	assert.NoError(t, err)
+	assert.Equal(t, content, dst.buf)
+}
+
+func parseTestByteRange(header string) (start, end int64, ok bool) {
+	spec, ok := strings.CutPrefix(header, "bytes=")
+	if !ok {
+		return 0, 0, false
+	}
+	startSpec, endSpec, ok := strings.Cut(spec, "-")
+	if !ok || endSpec == "" {
+		return 0, 0, false
+	}
+	start, err := strconv.ParseInt(startSpec, 10, 64)
+	if err != nil {
+		return 0, 0, false
+	}
+	end, err = strconv.ParseInt(endSpec, 10, 64)
+	if err != nil {
+		return 0, 0, false
+	}
+	return start, end, true
 }

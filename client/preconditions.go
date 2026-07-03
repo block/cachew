@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/alecthomas/errors"
 )
@@ -44,6 +45,11 @@ type RequestOptions struct {
 	// IfRange matches the stored ETag, otherwise the full representation is
 	// served. Only the entity-tag form is supported.
 	IfRange string
+	// ETag is the raw ETag value to store on Create. It is formatted as a
+	// strong HTTP ETag when carried over HTTP or stored in cache metadata.
+	ETag string
+	// ETagSet reports whether ETag was explicitly configured.
+	ETagSet bool
 }
 
 // RequestOption configures conditional request parameters.
@@ -82,6 +88,14 @@ func formatByteRange(start, end int64) string {
 // matches the stored ETag, otherwise the full representation is served.
 func IfRange(etag string) RequestOption {
 	return func(o *RequestOptions) { o.IfRange = etag }
+}
+
+// WithETag sets the raw ETag value to store on Create.
+func WithETag(etag string) RequestOption {
+	return func(o *RequestOptions) {
+		o.ETag = etag
+		o.ETagSet = true
+	}
 }
 
 // NewRequestOptions applies opts and returns the resulting RequestOptions.
@@ -218,4 +232,44 @@ func etagListMatches(headerValue, etag string) bool {
 		}
 	}
 	return false
+}
+
+// ValidateRawETag verifies that etag is an unquoted cache ETag value.
+func ValidateRawETag(etag string) error {
+	if etag == "" {
+		return errors.New("etag must not be empty")
+	}
+	for _, r := range etag {
+		if r > unicode.MaxASCII || !isRawETagChar(r) {
+			return errors.Errorf("etag %q contains invalid character %q", etag, r)
+		}
+	}
+	return nil
+}
+
+func isRawETagChar(r rune) bool {
+	return 'a' <= r && r <= 'z' ||
+		'A' <= r && r <= 'Z' ||
+		'0' <= r && r <= '9' ||
+		strings.ContainsRune("._-:/+=", r)
+}
+
+// FormatETag formats a raw ETag value as a strong HTTP ETag.
+func FormatETag(etag string) (string, error) {
+	if err := ValidateRawETag(etag); err != nil {
+		return "", errors.WithStack(err)
+	}
+	return `"` + etag + `"`, nil
+}
+
+// RawETagFromHeader extracts a raw ETag value from a strong HTTP ETag header.
+func RawETagFromHeader(etag string) (string, error) {
+	if len(etag) < 2 || etag[0] != '"' || etag[len(etag)-1] != '"' {
+		return "", errors.Errorf("etag header %q must be a strong quoted etag", etag)
+	}
+	raw := etag[1 : len(etag)-1]
+	if err := ValidateRawETag(raw); err != nil {
+		return "", errors.WithStack(err)
+	}
+	return raw, nil
 }

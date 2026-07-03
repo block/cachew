@@ -365,13 +365,16 @@ func (r *s3Reader) Close() error {
 	return errors.WithStack(r.obj.Close())
 }
 
-func (s *S3) Create(ctx context.Context, key Key, headers http.Header, ttl time.Duration) (Writer, error) {
+func (s *S3) Create(ctx context.Context, key Key, headers http.Header, ttl time.Duration, opts ...Option) (Writer, error) {
 	if ttl > s.config.MaxTTL || ttl == 0 {
 		ttl = s.config.MaxTTL
 	}
 
 	// Clone (to avoid concurrent access) and drop transport headers.
 	clonedHeaders := httputil.FilterHeaders(headers, httputil.TransportHeaders...)
+	if err := setCreateETag(clonedHeaders, opts...); err != nil {
+		return nil, err
+	}
 
 	expiresAt := ceilSecond(time.Now().Add(ttl))
 
@@ -392,7 +395,6 @@ func (s *S3) Create(ctx context.Context, key Key, headers http.Header, ttl time.
 		expiresAt: expiresAt,
 		headers:   clonedHeaders,
 		tag:       tag,
-		etag:      newETagWriter(),
 		ctx:       ctx,
 		cancel:    cancel,
 		errCh:     make(chan error, 1),
@@ -434,7 +436,6 @@ type s3Writer struct {
 	expiresAt time.Time
 	headers   http.Header
 	tag       string
-	etag      *etagWriter
 	ctx       context.Context
 	cancel    context.CancelCauseFunc
 	errCh     chan error
@@ -444,9 +445,6 @@ type s3Writer struct {
 
 func (w *s3Writer) Write(p []byte) (int, error) {
 	n, err := w.pipe.Write(p)
-	if n > 0 {
-		w.etag.WriteBytes(p[:n])
-	}
 	if err != nil {
 		// Check if upload failed - if so, return that error instead
 		select {
@@ -488,10 +486,8 @@ func (w *s3Writer) Close() error {
 		return err
 	}
 
-	// Update stored headers with the computed ETag via server-side copy.
-	// Skip if the context was cancelled (via Abort).
+	// Skip companion metadata if the context was cancelled via Abort.
 	if w.ctx.Err() == nil {
-		w.etag.SetETag(w.headers)
 		metaHeaders := make(http.Header)
 		metaHeaders.Set(ETagKey, w.headers.Get(ETagKey))
 		return w.s3.writeMeta(w.ctx, w.namespace, w.key, s3Meta{Headers: metaHeaders, ExpiresAt: w.expiresAt, Tag: w.tag})

@@ -119,9 +119,19 @@ func (d *APIV1) putObject(w http.ResponseWriter, r *http.Request) {
 
 	// Extract and filter headers from request
 	headers := httputil.FilterHeaders(r.Header, httputil.TransportHeaders...)
+	var opts []cache.Option
+	if etag := headers.Get(cache.ETagKey); etag != "" {
+		rawETag, err := cache.RawETagFromHeader(etag)
+		if err != nil {
+			d.httpError(w, http.StatusBadRequest, err, "Invalid ETag header")
+			return
+		}
+		opts = append(opts, cache.WithETag(rawETag))
+		headers.Del(cache.ETagKey)
+	}
 
 	namespacedCache := d.cache.Namespace(namespace)
-	cw, err := namespacedCache.Create(r.Context(), key, headers, ttl)
+	cw, err := namespacedCache.Create(r.Context(), key, headers, ttl, opts...)
 	if err != nil {
 		d.httpError(w, http.StatusInternalServerError, err, "Failed to create cache writer", "key", key)
 		return

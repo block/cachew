@@ -863,8 +863,8 @@ type failWriteCache struct {
 	cache.Cache
 }
 
-func (f *failWriteCache) Create(ctx context.Context, key cache.Key, headers http.Header, ttl time.Duration) (cache.Writer, error) {
-	wc, err := f.Cache.Create(ctx, key, headers, ttl)
+func (f *failWriteCache) Create(ctx context.Context, key cache.Key, headers http.Header, ttl time.Duration, opts ...cache.Option) (cache.Writer, error) {
+	wc, err := f.Cache.Create(ctx, key, headers, ttl, opts...)
 	if err != nil {
 		return nil, err
 	}

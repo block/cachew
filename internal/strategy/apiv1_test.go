@@ -109,6 +109,49 @@ func TestConditionalGetIfNoneMatch(t *testing.T) {
 	}
 }
 
+func TestPutObjectWithETag(t *testing.T) {
+	handler, ctx := testAPISetup(t)
+	key := cache.NewKey("put-explicit-etag")
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/object/test/"+key.String(), strings.NewReader("test data"))
+	req = req.WithContext(ctx)
+	req.Header.Set("ETag", `"caller-etag"`)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	req = httptest.NewRequest(http.MethodHead, "/api/v1/object/test/"+key.String(), nil)
+	req = req.WithContext(ctx)
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, `"caller-etag"`, w.Header().Get("ETag"))
+}
+
+func TestPutObjectRejectsInvalidETag(t *testing.T) {
+	handler, ctx := testAPISetup(t)
+	key := cache.NewKey("put-invalid-etag")
+
+	tests := []struct {
+		name string
+		etag string
+	}{
+		{name: "Raw", etag: "raw-etag"},
+		{name: "Weak", etag: `W/"weak"`},
+		{name: "Space", etag: `"has space"`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/object/test/"+key.String(), strings.NewReader("test data"))
+			req = req.WithContext(ctx)
+			req.Header.Set("ETag", tt.etag)
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, req)
+			assert.Equal(t, http.StatusBadRequest, w.Code)
+		})
+	}
+}
+
 func TestConditionalHeadIfNoneMatch(t *testing.T) {
 	handler, ctx := testAPISetup(t)
 	key := cache.NewKey("cond-head")
