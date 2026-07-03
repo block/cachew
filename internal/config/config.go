@@ -191,11 +191,10 @@ func Load(
 		return nil, nil, errors.Errorf("%s: %w", classified.metadata.Pos, err)
 	}
 
-	cache := cache.MaybeNewTiered(ctx, caches)
+	metadataStore := metadatadb.New(ctx, metadata)
+	cache := cache.MaybeNewTiered(ctx, caches, metadataStore)
 
 	logger.DebugContext(ctx, "Cache backend", "cache", cache)
-
-	metadataStore := metadatadb.New(ctx, metadata)
 
 	// Second pass, instantiate strategies and bind them to the mux.
 	// Collect strategies that implement Interceptor separately — they need

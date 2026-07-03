@@ -108,7 +108,8 @@ proxy {}
 Multiple backends can be configured simultaneously — they are automatically combined into a tiered cache. Cache blocks
 are ordered from lowest/nearest to highest/authoritative. Reads check each tier in order and backfill lower tiers on a
 hit. Writes go to all tiers in parallel. Replica invalidations evict only non-authoritative tiers; the final cache block
-is authoritative.
+is authoritative. Tiered caches use the metadata backend to track authoritative ETags and invalidate stale lower-tier
+copies before falling through to the authoritative tier.
 
 ### Memory
 

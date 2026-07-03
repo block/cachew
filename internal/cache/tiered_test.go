@@ -16,6 +16,7 @@ import (
 	"github.com/block/cachew/internal/cache"
 	"github.com/block/cachew/internal/cache/cachetest"
 	"github.com/block/cachew/internal/logging"
+	"github.com/block/cachew/internal/metadatadb"
 	"github.com/block/cachew/internal/s3client"
 	"github.com/block/cachew/internal/s3client/s3clienttest"
 )
@@ -43,6 +44,18 @@ func readAllAndClose(t *testing.T, r io.ReadCloser) []byte {
 	return data
 }
 
+func newMetadataStore(ctx context.Context) *metadatadb.Store {
+	return metadatadb.New(ctx, metadatadb.NewMemoryBackend())
+}
+
+func tieredETags(store *metadatadb.Store, namespace cache.Namespace) *metadatadb.Map[cache.Key, string] {
+	return metadatadb.NewMap[cache.Key, string](store.Namespace(string(namespace)), "cache-etags")
+}
+
+func newTiered(ctx context.Context, caches ...cache.Cache) cache.Cache {
+	return cache.MaybeNewTiered(ctx, caches, newMetadataStore(ctx))
+}
+
 type failingCache struct {
 	cache.Cache
 	err error
@@ -60,6 +73,19 @@ func (c failingCache) Stat(_ context.Context, _ cache.Key, _ ...cache.Option) (h
 
 func (c failingCache) Open(_ context.Context, _ cache.Key, _ ...cache.Option) (io.ReadCloser, http.Header, error) {
 	return nil, nil, c.err
+}
+
+type statFailingCache struct {
+	cache.Cache
+	err error
+}
+
+func newStatFailingCache(c cache.Cache, err error) cache.Cache {
+	return statFailingCache{Cache: c, err: err}
+}
+
+func (c statFailingCache) Stat(_ context.Context, _ cache.Key, _ ...cache.Option) (http.Header, error) {
+	return nil, c.err
 }
 
 type cacheFactory struct {
@@ -175,7 +201,7 @@ func TestTieredCachePermutations(t *testing.T) {
 				_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelDebug})
 				lower := perm.lower.new(t)
 				upper := perm.upper.new(t)
-				return cache.MaybeNewTiered(ctx, []cache.Cache{lower, upper})
+				return newTiered(ctx, lower, upper)
 			}, cachetest.WithoutInvalidate())
 		})
 	}
@@ -187,7 +213,7 @@ func TestTieredBackfillPermutations(t *testing.T) {
 			_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelDebug})
 			lower := perm.lower.new(t)
 			upper := perm.upper.new(t)
-			tiered := cache.MaybeNewTiered(ctx, []cache.Cache{lower, upper})
+			tiered := newTiered(ctx, lower, upper)
 			defer tiered.Close()
 
 			key := cache.NewKey("backfill-test")
@@ -222,7 +248,7 @@ func TestTieredCreateUsesSameETagInEveryTier(t *testing.T) {
 	assert.NoError(t, err)
 	upper, err := cache.NewMemory(ctx, cache.MemoryConfig{LimitMB: 1024, MaxTTL: time.Hour})
 	assert.NoError(t, err)
-	tiered := cache.MaybeNewTiered(ctx, []cache.Cache{lower, upper})
+	tiered := newTiered(ctx, lower, upper)
 	defer tiered.Close()
 
 	key := cache.NewKey("tiered-create-etag")
@@ -237,6 +263,217 @@ func TestTieredCreateUsesSameETagInEveryTier(t *testing.T) {
 	assert.Equal(t, lowerHeaders.Get(cache.ETagKey), upperHeaders.Get(cache.ETagKey))
 }
 
+func TestTieredRequiresMetadataStore(t *testing.T) {
+	_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelDebug})
+	lower, err := cache.NewMemory(ctx, cache.MemoryConfig{LimitMB: 1024, MaxTTL: time.Hour})
+	assert.NoError(t, err)
+	upper, err := cache.NewMemory(ctx, cache.MemoryConfig{LimitMB: 1024, MaxTTL: time.Hour})
+	assert.NoError(t, err)
+
+	assert.Panics(t, func() {
+		cache.MaybeNewTiered(ctx, []cache.Cache{lower, upper}, nil)
+	})
+}
+
+func TestTieredCreatePublishesMetadataETag(t *testing.T) {
+	_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelDebug})
+	store := newMetadataStore(ctx)
+	lower, err := cache.NewMemory(ctx, cache.MemoryConfig{LimitMB: 1024, MaxTTL: time.Hour})
+	assert.NoError(t, err)
+	upper, err := cache.NewMemory(ctx, cache.MemoryConfig{LimitMB: 1024, MaxTTL: time.Hour})
+	assert.NoError(t, err)
+	tiered := cache.MaybeNewTiered(ctx, []cache.Cache{lower, upper}, store)
+	defer tiered.Close()
+
+	key := cache.NewKey("tiered-create-metadata-etag")
+	w, err := tiered.Create(ctx, key, nil, time.Minute, cache.WithETag("metadata-etag"))
+	assert.NoError(t, err)
+	_, err = w.Write([]byte("content"))
+	assert.NoError(t, err)
+	assert.NoError(t, w.Close())
+
+	etag, ok := tieredETags(store, "").Get(key)
+	assert.True(t, ok)
+	assert.Equal(t, `"metadata-etag"`, etag)
+}
+
+func TestTieredAbortDoesNotPublishMetadataETag(t *testing.T) {
+	_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelDebug})
+	store := newMetadataStore(ctx)
+	lower, err := cache.NewMemory(ctx, cache.MemoryConfig{LimitMB: 1024, MaxTTL: time.Hour})
+	assert.NoError(t, err)
+	upper, err := cache.NewMemory(ctx, cache.MemoryConfig{LimitMB: 1024, MaxTTL: time.Hour})
+	assert.NoError(t, err)
+	tiered := cache.MaybeNewTiered(ctx, []cache.Cache{lower, upper}, store)
+	defer tiered.Close()
+
+	key := cache.NewKey("tiered-abort-metadata-etag")
+	w, err := tiered.Create(ctx, key, nil, time.Minute, cache.WithETag("aborted-etag"))
+	assert.NoError(t, err)
+	_, err = w.Write([]byte("partial"))
+	assert.NoError(t, err)
+	assert.Error(t, w.Abort(errors.New("abort write")))
+
+	_, ok := tieredETags(store, "").Get(key)
+	assert.False(t, ok)
+}
+
+func TestTieredMetadataInvalidatesStaleLowerOnStat(t *testing.T) {
+	_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelDebug})
+	store := newMetadataStore(ctx)
+	lower, err := cache.NewMemory(ctx, cache.MemoryConfig{LimitMB: 1024, MaxTTL: time.Hour})
+	assert.NoError(t, err)
+	upper, err := cache.NewMemory(ctx, cache.MemoryConfig{LimitMB: 1024, MaxTTL: time.Hour})
+	assert.NoError(t, err)
+	tiered := cache.MaybeNewTiered(ctx, []cache.Cache{lower, upper}, store)
+	defer tiered.Close()
+
+	key := cache.NewKey("tiered-stale-stat")
+	seedTier(ctx, t, lower, key, []byte("stale"), "stale-etag")
+	seedTier(ctx, t, upper, key, []byte("fresh"), "fresh-etag")
+	tieredETags(store, "").Set(key, `"fresh-etag"`)
+
+	headers, err := tiered.Stat(ctx, key)
+	assert.NoError(t, err)
+	assert.Equal(t, `"fresh-etag"`, headers.Get(cache.ETagKey))
+	_, _, err = lower.Open(ctx, key)
+	assert.IsError(t, err, os.ErrNotExist)
+}
+
+func TestTieredMetadataInvalidatesStaleLowerBeforeNotModified(t *testing.T) {
+	_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelDebug})
+	store := newMetadataStore(ctx)
+	lower, err := cache.NewMemory(ctx, cache.MemoryConfig{LimitMB: 1024, MaxTTL: time.Hour})
+	assert.NoError(t, err)
+	upper, err := cache.NewMemory(ctx, cache.MemoryConfig{LimitMB: 1024, MaxTTL: time.Hour})
+	assert.NoError(t, err)
+	tiered := cache.MaybeNewTiered(ctx, []cache.Cache{lower, upper}, store)
+	defer tiered.Close()
+
+	key := cache.NewKey("tiered-stale-not-modified")
+	seedTier(ctx, t, lower, key, []byte("stale"), "stale-etag")
+	seedTier(ctx, t, upper, key, []byte("fresh"), "fresh-etag")
+	tieredETags(store, "").Set(key, `"fresh-etag"`)
+
+	r, headers, err := tiered.Open(ctx, key, cache.IfNoneMatch(`"stale-etag"`))
+	assert.NoError(t, err)
+	assert.Equal(t, []byte("fresh"), readAllAndClose(t, r))
+	assert.Equal(t, `"fresh-etag"`, headers.Get(cache.ETagKey))
+	r, headers, err = lower.Open(ctx, key)
+	assert.NoError(t, err)
+	assert.Equal(t, []byte("fresh"), readAllAndClose(t, r))
+	assert.Equal(t, `"fresh-etag"`, headers.Get(cache.ETagKey))
+}
+
+func TestTieredMetadataReturnsHardStatErrorBeforeInvalidating(t *testing.T) {
+	_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelDebug})
+	store := newMetadataStore(ctx)
+	statErr := errors.New("stat unavailable")
+	lower, err := cache.NewMemory(ctx, cache.MemoryConfig{LimitMB: 1024, MaxTTL: time.Hour})
+	assert.NoError(t, err)
+	upper, err := cache.NewMemory(ctx, cache.MemoryConfig{LimitMB: 1024, MaxTTL: time.Hour})
+	assert.NoError(t, err)
+	tiered := cache.MaybeNewTiered(ctx, []cache.Cache{newStatFailingCache(lower, statErr), upper}, store)
+	defer tiered.Close()
+
+	key := cache.NewKey("tiered-stale-hard-stat-error")
+	seedTier(ctx, t, lower, key, []byte("lower"), "lower-etag")
+	seedTier(ctx, t, upper, key, []byte("upper"), "upper-etag")
+	tieredETags(store, "").Set(key, `"upper-etag"`)
+
+	_, err = tiered.Stat(ctx, key)
+	assert.IsError(t, err, statErr)
+	r, headers, err := lower.Open(ctx, key)
+	assert.NoError(t, err)
+	assert.Equal(t, []byte("lower"), readAllAndClose(t, r))
+	assert.Equal(t, `"lower-etag"`, headers.Get(cache.ETagKey))
+}
+
+func TestTieredMetadataClearsDiscardedConditionalError(t *testing.T) {
+	_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelDebug})
+	store := newMetadataStore(ctx)
+	lower, err := cache.NewMemory(ctx, cache.MemoryConfig{LimitMB: 1024, MaxTTL: time.Hour})
+	assert.NoError(t, err)
+	upper, err := cache.NewMemory(ctx, cache.MemoryConfig{LimitMB: 1024, MaxTTL: time.Hour})
+	assert.NoError(t, err)
+	tiered := cache.MaybeNewTiered(ctx, []cache.Cache{lower, upper}, store)
+	defer tiered.Close()
+
+	key := cache.NewKey("tiered-clears-stale-conditional")
+	seedTier(ctx, t, lower, key, []byte("stale"), "stale-etag")
+	tieredETags(store, "").Set(key, `"fresh-etag"`)
+
+	_, _, err = tiered.Open(ctx, key, cache.IfNoneMatch(`"stale-etag"`))
+	assert.IsError(t, err, os.ErrNotExist)
+	assert.False(t, errors.Is(err, cache.ErrNotModified))
+}
+
+func TestTieredMetadataAllowsMatchingLower(t *testing.T) {
+	_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelDebug})
+	store := newMetadataStore(ctx)
+	lower, err := cache.NewMemory(ctx, cache.MemoryConfig{LimitMB: 1024, MaxTTL: time.Hour})
+	assert.NoError(t, err)
+	upper, err := cache.NewMemory(ctx, cache.MemoryConfig{LimitMB: 1024, MaxTTL: time.Hour})
+	assert.NoError(t, err)
+	tiered := cache.MaybeNewTiered(ctx, []cache.Cache{lower, upper}, store)
+	defer tiered.Close()
+
+	key := cache.NewKey("tiered-matching-lower")
+	seedTier(ctx, t, lower, key, []byte("lower"), "lower-etag")
+	seedTier(ctx, t, upper, key, []byte("upper"), "upper-etag")
+	tieredETags(store, "").Set(key, `"lower-etag"`)
+
+	r, headers, err := tiered.Open(ctx, key)
+	assert.NoError(t, err)
+	assert.Equal(t, []byte("lower"), readAllAndClose(t, r))
+	assert.Equal(t, `"lower-etag"`, headers.Get(cache.ETagKey))
+}
+
+func TestTieredMissingMetadataPreservesExistingBehavior(t *testing.T) {
+	_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelDebug})
+	store := newMetadataStore(ctx)
+	lower, err := cache.NewMemory(ctx, cache.MemoryConfig{LimitMB: 1024, MaxTTL: time.Hour})
+	assert.NoError(t, err)
+	upper, err := cache.NewMemory(ctx, cache.MemoryConfig{LimitMB: 1024, MaxTTL: time.Hour})
+	assert.NoError(t, err)
+	tiered := cache.MaybeNewTiered(ctx, []cache.Cache{lower, upper}, store)
+	defer tiered.Close()
+
+	key := cache.NewKey("tiered-missing-metadata")
+	seedTier(ctx, t, lower, key, []byte("lower"), "lower-etag")
+	seedTier(ctx, t, upper, key, []byte("upper"), "upper-etag")
+
+	r, headers, err := tiered.Open(ctx, key)
+	assert.NoError(t, err)
+	assert.Equal(t, []byte("lower"), readAllAndClose(t, r))
+	assert.Equal(t, `"lower-etag"`, headers.Get(cache.ETagKey))
+}
+
+func TestTieredMetadataIsNamespaced(t *testing.T) {
+	_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelDebug})
+	store := newMetadataStore(ctx)
+	lower, err := cache.NewMemory(ctx, cache.MemoryConfig{LimitMB: 1024, MaxTTL: time.Hour})
+	assert.NoError(t, err)
+	upper, err := cache.NewMemory(ctx, cache.MemoryConfig{LimitMB: 1024, MaxTTL: time.Hour})
+	assert.NoError(t, err)
+	tiered := cache.MaybeNewTiered(ctx, []cache.Cache{lower, upper}, store)
+	defer tiered.Close()
+
+	key := cache.NewKey("tiered-namespaced-metadata")
+	namespaced := tiered.Namespace("alpha")
+	w, err := namespaced.Create(ctx, key, nil, time.Minute, cache.WithETag("alpha-etag"))
+	assert.NoError(t, err)
+	_, err = w.Write([]byte("content"))
+	assert.NoError(t, err)
+	assert.NoError(t, w.Close())
+
+	etag, ok := tieredETags(store, "alpha").Get(key)
+	assert.True(t, ok)
+	assert.Equal(t, `"alpha-etag"`, etag)
+	_, ok = tieredETags(store, "beta").Get(key)
+	assert.False(t, ok)
+}
+
 func TestTieredDivergentValidatorPermutations(t *testing.T) {
 	stale := []byte("0123456789")
 	pinned := []byte("abcdefghij")
@@ -248,7 +485,7 @@ func TestTieredDivergentValidatorPermutations(t *testing.T) {
 			_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelDebug})
 			lower := perm.lower.new(t)
 			upper := perm.upper.new(t)
-			tiered := cache.MaybeNewTiered(ctx, []cache.Cache{lower, upper})
+			tiered := newTiered(ctx, lower, upper)
 			defer tiered.Close()
 
 			keyBoth := cache.NewKey("divergent-both")
@@ -350,7 +587,7 @@ func TestTieredDivergentValidatorProbeErrors(t *testing.T) {
 	lower, err := cache.NewMemory(ctx, cache.MemoryConfig{LimitMB: 1024, MaxTTL: time.Hour})
 	assert.NoError(t, err)
 	outage := errors.New("backend unavailable")
-	tiered := cache.MaybeNewTiered(ctx, []cache.Cache{lower, newFailingCache(outage)})
+	tiered := newTiered(ctx, lower, newFailingCache(outage))
 	defer tiered.Close()
 
 	key := cache.NewKey("divergent-probe-error")
@@ -395,7 +632,7 @@ func TestTieredDeletePermutations(t *testing.T) {
 			_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelDebug})
 			lower := perm.lower.new(t)
 			upper := perm.upper.new(t)
-			tiered := cache.MaybeNewTiered(ctx, []cache.Cache{lower, upper})
+			tiered := newTiered(ctx, lower, upper)
 			defer tiered.Close()
 
 			key := cache.NewKey("delete-test")
@@ -431,7 +668,7 @@ func TestTieredInvalidateSkipsAuthoritativeTier(t *testing.T) {
 			_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelDebug})
 			lower := perm.lower.new(t)
 			authoritative := perm.upper.new(t)
-			tiered := cache.MaybeNewTiered(ctx, []cache.Cache{lower, authoritative})
+			tiered := newTiered(ctx, lower, authoritative)
 			defer tiered.Close()
 
 			key := cache.NewKey("invalidate-test")
@@ -455,7 +692,7 @@ func TestSingleTierInvalidateIsNoop(t *testing.T) {
 	_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelDebug})
 	authoritative, err := cache.NewMemory(ctx, cache.MemoryConfig{LimitMB: 1024, MaxTTL: time.Hour})
 	assert.NoError(t, err)
-	tiered := cache.MaybeNewTiered(ctx, []cache.Cache{authoritative})
+	tiered := newTiered(ctx, authoritative)
 	defer tiered.Close()
 
 	key := cache.NewKey("single-tier-invalidate")
@@ -471,7 +708,7 @@ func TestSingleTierInvalidateIsNoop(t *testing.T) {
 
 func TestSingleTierDelegatesUnsupportedOperations(t *testing.T) {
 	_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelDebug})
-	tiered := cache.MaybeNewTiered(ctx, []cache.Cache{cache.NoOpCache()})
+	tiered := newTiered(ctx, cache.NoOpCache())
 	defer tiered.Close()
 
 	_, err := tiered.Stats(ctx)
@@ -500,7 +737,7 @@ func TestTieredCacheSoak(t *testing.T) {
 		EvictInterval: time.Second,
 	})
 	assert.NoError(t, err)
-	c := cache.MaybeNewTiered(ctx, []cache.Cache{memory, disk})
+	c := newTiered(ctx, memory, disk)
 	defer c.Close()
 
 	cachetest.Soak(t, c, cachetest.SoakConfig{

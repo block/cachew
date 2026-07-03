@@ -14,6 +14,7 @@ import (
 	"github.com/block/cachew/internal/cache"
 	"github.com/block/cachew/internal/cache/cachetest"
 	"github.com/block/cachew/internal/logging"
+	"github.com/block/cachew/internal/metadatadb"
 	"github.com/block/cachew/internal/strategy"
 )
 
@@ -50,7 +51,7 @@ func TestRemoteInvalidateSkipsRemoteAuthoritativeTier(t *testing.T) {
 	assert.NoError(t, err)
 	t.Cleanup(func() { authoritative.Close() })
 
-	tiered := cache.MaybeNewTiered(ctx, []cache.Cache{lower, authoritative})
+	tiered := cache.MaybeNewTiered(ctx, []cache.Cache{lower, authoritative}, metadatadb.New(ctx, metadatadb.NewMemoryBackend()))
 	mux := http.NewServeMux()
 	_, err = strategy.NewAPIV1(ctx, struct{}{}, tiered, mux)
 	assert.NoError(t, err)
