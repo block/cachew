@@ -2,6 +2,8 @@ package s3
 
 import (
 	"encoding/json"
+	"fmt"
+	"reflect"
 	"time"
 
 	"github.com/alecthomas/errors"
@@ -9,29 +11,34 @@ import (
 	"github.com/block/cachew/internal/metadatadb"
 )
 
-// wireOp is the JSON encoding of a metadatadb.Op, discriminated by Op. There
-// is no format version: evolution is handled by adding new discriminators.
-type wireOp struct {
-	Op     string `json:"op"`
-	Key    string `json:"key"`
-	MapKey any    `json:"mapKey,omitempty"`
-	Member any    `json:"member,omitempty"`
-	Value  any    `json:"value,omitempty"`
-	// IntValue carries IntSet/IntMapSet values: an int64 riding an
-	// any-typed field decodes as float64, losing precision above 2^53.
-	IntValue int64 `json:"intValue,omitempty"`
-	Delta    int64 `json:"delta,omitempty"`
-	Factor   int64 `json:"factor,omitempty"`
-	Divisor  int64 `json:"divisor,omitempty"`
-}
+// opTypes maps discriminator (the op's Go type name) to its concrete type.
+// There is no format version: evolution is handled by adding new ops here.
+//
+//nolint:gochecknoglobals
+var opTypes = func() map[string]reflect.Type {
+	types := make(map[string]reflect.Type)
+	for _, o := range []metadatadb.Op{
+		metadatadb.ScalarSet{}, metadatadb.ScalarDelete{},
+		metadatadb.IntSet{}, metadatadb.IntAdd{}, metadatadb.IntMul{}, metadatadb.IntDiv{},
+		metadatadb.SetAdd{}, metadatadb.SetRemove{},
+		metadatadb.IntMapSet{}, metadatadb.IntMapAdd{}, metadatadb.IntMapMul{},
+		metadatadb.IntMapDiv{}, metadatadb.IntMapDelete{},
+		metadatadb.MapSet{}, metadatadb.MapDelete{},
+		metadatadb.ListAppend{},
+	} {
+		t := reflect.TypeOf(o)
+		types[t.Name()] = t
+	}
+	return types
+}()
 
 // segment is a group-committed batch of ops; a clock probe has zero ops.
 type segment struct {
-	Ops []wireOp `json:"ops"`
+	Ops []json.RawMessage `json:"ops"`
 }
 
 func marshalSegment(ops []metadatadb.Op) ([]byte, error) {
-	seg := segment{Ops: make([]wireOp, 0, len(ops))}
+	seg := segment{Ops: make([]json.RawMessage, 0, len(ops))}
 	for _, o := range ops {
 		w, err := encodeOp(o)
 		if err != nil {
@@ -58,82 +65,47 @@ func unmarshalSegment(data []byte) ([]metadatadb.Op, error) {
 	return ops, nil
 }
 
-func encodeOp(o metadatadb.Op) (wireOp, error) {
-	switch o := o.(type) {
-	case metadatadb.ScalarSet:
-		return wireOp{Op: "ScalarSet", Key: o.Key, Value: o.Value}, nil
-	case metadatadb.ScalarDelete:
-		return wireOp{Op: "ScalarDelete", Key: o.Key}, nil
-	case metadatadb.IntSet:
-		return wireOp{Op: "IntSet", Key: o.Key, IntValue: o.Value}, nil
-	case metadatadb.IntAdd:
-		return wireOp{Op: "IntAdd", Key: o.Key, Delta: o.Delta}, nil
-	case metadatadb.IntMul:
-		return wireOp{Op: "IntMul", Key: o.Key, Factor: o.Factor}, nil
-	case metadatadb.IntDiv:
-		return wireOp{Op: "IntDiv", Key: o.Key, Divisor: o.Divisor}, nil
-	case metadatadb.SetAdd:
-		return wireOp{Op: "SetAdd", Key: o.Key, Member: o.Member}, nil
-	case metadatadb.SetRemove:
-		return wireOp{Op: "SetRemove", Key: o.Key, Member: o.Member}, nil
-	case metadatadb.IntMapSet:
-		return wireOp{Op: "IntMapSet", Key: o.Key, MapKey: o.MapKey, IntValue: o.Value}, nil
-	case metadatadb.IntMapAdd:
-		return wireOp{Op: "IntMapAdd", Key: o.Key, MapKey: o.MapKey, Delta: o.Delta}, nil
-	case metadatadb.IntMapMul:
-		return wireOp{Op: "IntMapMul", Key: o.Key, MapKey: o.MapKey, Factor: o.Factor}, nil
-	case metadatadb.IntMapDiv:
-		return wireOp{Op: "IntMapDiv", Key: o.Key, MapKey: o.MapKey, Divisor: o.Divisor}, nil
-	case metadatadb.IntMapDelete:
-		return wireOp{Op: "IntMapDelete", Key: o.Key, MapKey: o.MapKey}, nil
-	case metadatadb.MapSet:
-		return wireOp{Op: "MapSet", Key: o.Key, MapKey: o.MapKey, Value: o.Value}, nil
-	case metadatadb.MapDelete:
-		return wireOp{Op: "MapDelete", Key: o.Key, MapKey: o.MapKey}, nil
-	case metadatadb.ListAppend:
-		return wireOp{Op: "ListAppend", Key: o.Key, Value: o.Value}, nil
-	default:
-		return wireOp{}, errors.Errorf("unsupported op type %T", o)
+// encodeOp splices an "op" discriminator into the op's own JSON encoding
+// rather than round-tripping through a map, which would coerce int64 fields
+// to float64 and lose precision above 2^53.
+func encodeOp(o metadatadb.Op) (json.RawMessage, error) {
+	name := reflect.TypeOf(o).Name()
+	if _, ok := opTypes[name]; !ok {
+		return nil, errors.Errorf("unregistered op type %T", o)
 	}
+	data, err := json.Marshal(o)
+	if err != nil {
+		return nil, errors.Wrapf(err, "marshal %s", name)
+	}
+	if string(data) == "{}" {
+		return json.RawMessage(fmt.Sprintf(`{"op":%q}`, name)), nil
+	}
+	head := fmt.Sprintf(`{"op":%q,`, name)
+	return json.RawMessage(head + string(data[1:])), nil
 }
 
-func decodeOp(w wireOp) (metadatadb.Op, error) {
-	switch w.Op {
-	case "ScalarSet":
-		return metadatadb.ScalarSet{Key: w.Key, Value: w.Value}, nil
-	case "ScalarDelete":
-		return metadatadb.ScalarDelete{Key: w.Key}, nil
-	case "IntSet":
-		return metadatadb.IntSet{Key: w.Key, Value: w.IntValue}, nil
-	case "IntAdd":
-		return metadatadb.IntAdd{Key: w.Key, Delta: w.Delta}, nil
-	case "IntMul":
-		return metadatadb.IntMul{Key: w.Key, Factor: w.Factor}, nil
-	case "IntDiv":
-		return metadatadb.IntDiv{Key: w.Key, Divisor: w.Divisor}, nil
-	case "SetAdd":
-		return metadatadb.SetAdd{Key: w.Key, Member: w.Member}, nil
-	case "SetRemove":
-		return metadatadb.SetRemove{Key: w.Key, Member: w.Member}, nil
-	case "IntMapSet":
-		return metadatadb.IntMapSet{Key: w.Key, MapKey: w.MapKey, Value: w.IntValue}, nil
-	case "IntMapAdd":
-		return metadatadb.IntMapAdd{Key: w.Key, MapKey: w.MapKey, Delta: w.Delta}, nil
-	case "IntMapMul":
-		return metadatadb.IntMapMul{Key: w.Key, MapKey: w.MapKey, Factor: w.Factor}, nil
-	case "IntMapDiv":
-		return metadatadb.IntMapDiv{Key: w.Key, MapKey: w.MapKey, Divisor: w.Divisor}, nil
-	case "IntMapDelete":
-		return metadatadb.IntMapDelete{Key: w.Key, MapKey: w.MapKey}, nil
-	case "MapSet":
-		return metadatadb.MapSet{Key: w.Key, MapKey: w.MapKey, Value: w.Value}, nil
-	case "MapDelete":
-		return metadatadb.MapDelete{Key: w.Key, MapKey: w.MapKey}, nil
-	case "ListAppend":
-		return metadatadb.ListAppend{Key: w.Key, Value: w.Value}, nil
-	default:
-		return nil, errors.Errorf("unknown op discriminator %q", w.Op)
+// decodeOp is a two-pass unmarshal: the discriminator selects the concrete
+// type, then the same bytes decode into it (it ignores the "op" key).
+func decodeOp(data json.RawMessage) (metadatadb.Op, error) {
+	var head struct {
+		Op string `json:"op"`
 	}
+	if err := json.Unmarshal(data, &head); err != nil {
+		return nil, errors.Wrap(err, "unmarshal op discriminator")
+	}
+	typ, ok := opTypes[head.Op]
+	if !ok {
+		return nil, errors.Errorf("unknown op discriminator %q", head.Op)
+	}
+	v := reflect.New(typ)
+	if err := json.Unmarshal(data, v.Interface()); err != nil {
+		return nil, errors.Wrapf(err, "unmarshal %s", head.Op)
+	}
+	op, ok := v.Elem().Interface().(metadatadb.Op)
+	if !ok {
+		return nil, errors.Errorf("%s does not implement Op", head.Op)
+	}
+	return op, nil
 }
 
 // mark is a rollup's high-water (LastModified, key) position in canonical

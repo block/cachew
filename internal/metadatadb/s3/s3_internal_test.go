@@ -58,7 +58,7 @@ func TestWireRoundTrip(t *testing.T) {
 	ops := []metadatadb.Op{
 		metadatadb.ScalarSet{Key: "s", Value: "hello"},
 		metadatadb.ScalarDelete{Key: "s"},
-		metadatadb.IntSet{Key: "i", Value: 42},
+		metadatadb.IntSet{Key: "i", Value: 1 << 60}, // int64 fields must round-trip exactly
 		metadatadb.IntAdd{Key: "i", Delta: -3},
 		metadatadb.IntMul{Key: "i", Factor: 2},
 		metadatadb.IntDiv{Key: "i", Divisor: 4},

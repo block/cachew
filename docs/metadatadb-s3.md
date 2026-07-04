@@ -78,7 +78,7 @@ via LIST, whole seconds via HEAD).
 Sketch of the two bodies (illustrative, not exhaustive):
 
 ```
-segment-<uuidv7>.json:  {"ops": [{"op": "IntMapAdd", "key": ..., ...}, ...]}
+segment-<uuidv7>.json:  {"ops": [{"op": "IntMapAdd", "Key": ..., ...}, ...]}
                         {"ops": []}                          # clock probe
 rollup.json:            {"state": {...},
                          "mark": {"lm": "<LastModified exactly as listed>",
