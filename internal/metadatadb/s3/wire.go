@@ -17,18 +17,15 @@ type wireOp struct {
 	MapKey any    `json:"mapKey,omitempty"`
 	Member any    `json:"member,omitempty"`
 	Value  any    `json:"value,omitempty"`
-	// IntValue carries IntSet/IntMapSet values: riding the any-typed Value
-	// would decode them as float64 and silently lose precision above 2^53.
-	// MapKey/Member/Value still ride any — production keys are strings; a
-	// new op type with an int64 payload needs its own field like this one.
+	// IntValue carries IntSet/IntMapSet values: an int64 riding an
+	// any-typed field decodes as float64, losing precision above 2^53.
 	IntValue int64 `json:"intValue,omitempty"`
 	Delta    int64 `json:"delta,omitempty"`
 	Factor   int64 `json:"factor,omitempty"`
 	Divisor  int64 `json:"divisor,omitempty"`
 }
 
-// segment is the body of a segment object: a group-committed batch of ops.
-// A clock probe is a segment with zero ops.
+// segment is a group-committed batch of ops; a clock probe has zero ops.
 type segment struct {
 	Ops []wireOp `json:"ops"`
 }
@@ -140,9 +137,9 @@ func decodeOp(w wireOp) (metadatadb.Op, error) {
 }
 
 // mark is a rollup's high-water (LastModified, key) position in canonical
-// order. The zero mark covers nothing: every real stamp exceeds it. LM must
-// always be derived from LIST-returned values, never HEAD, so comparisons
-// against listing stamps are exact.
+// order; the zero mark covers nothing. LM must always derive from
+// LIST-returned values, never HEAD, so comparisons against listing stamps
+// are exact.
 type mark struct {
 	LM  time.Time `json:"lm"`
 	Key string    `json:"key"`
@@ -156,8 +153,7 @@ func (m mark) covers(lm time.Time, key string) bool {
 	return key <= m.Key
 }
 
-// rollupBody is the body of the rollup object: the replayed state of all
-// folded segments plus the mark they are covered by.
+// rollupBody is the replayed state of all folded segments plus their mark.
 type rollupBody struct {
 	State json.RawMessage `json:"state"`
 	Mark  mark            `json:"mark"`

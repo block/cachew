@@ -25,17 +25,12 @@ const (
 	rollupName     = "rollup.json"
 
 	defaultSyncInterval = 15 * time.Second
-	// minAgeThreshold is the floor for the compaction age threshold; the
-	// effective threshold is max(minAgeThreshold, 2 × sync-interval).
-	minAgeThreshold = 30 * time.Second
-	// segmentThreshold is the live-segment count that triggers compaction
-	// (or a clock probe when too few segments have aged).
+	// The effective age threshold is max(minAgeThreshold, 2 × sync-interval).
+	minAgeThreshold  = 30 * time.Second
 	segmentThreshold = 256
-	// sustainTicks is how many consecutive ticks a trigger must hold.
-	sustainTicks = 2
-	// putTimeout bounds a segment PUT including SDK-internal retries. It
-	// must stay under the age threshold: a retry landing after the segment
-	// was folded and deleted would re-create it and replay its ops twice.
+	sustainTicks     = 2
+	// putTimeout must stay under the age threshold: a PUT retried after its
+	// segment was folded and deleted would re-create it and replay it twice.
 	putTimeout       = 15 * time.Second
 	fetchConcurrency = 8
 	maxJitter        = 500 * time.Millisecond
@@ -73,8 +68,7 @@ type Backend struct {
 	jitter           func() time.Duration
 	initialTick      bool
 
-	// ctx carries the logger and is cancelled on Close, stopping all
-	// per-namespace goroutines and unblocking in-flight S3 calls.
+	// ctx carries the logger; cancelled on Close to stop all goroutines.
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
@@ -180,9 +174,6 @@ func (b *Backend) namespace(name string) *namespace {
 	return n
 }
 
-// namespace holds one namespace's local replica state: the served state map,
-// the committed segment cache, and the held rollup, plus the group-commit
-// writer and sync-tick goroutines.
 type namespace struct {
 	b    *Backend
 	name string
@@ -190,46 +181,39 @@ type namespace struct {
 	applyCh chan *applyReq
 	flushCh chan chan error
 
-	// stateMu guards state and cache. The writer's state-apply +
-	// cache-insert and the tick's input-snapshot / eviction / swap are
-	// critical sections on it; the tick's replay runs unlocked between
-	// snapshot and swap.
+	// stateMu guards state and cache; the tick's replay runs unlocked
+	// between its input-snapshot and swap critical sections.
 	stateMu sync.RWMutex
 	state   map[string]any
 	cache   map[string]*cacheEntry
 
-	// The fields below are owned exclusively by the runLoop goroutine.
+	// Owned exclusively by the runLoop goroutine.
 	rollup     *heldRollup
 	lastNewest time.Time
 	stall      int
 	sustain    int
 }
 
-// cacheEntry is a committed cache entry for one live segment. An entry is
-// unlisted (zero lm) from writer insert until the first LIST that includes it
-// supplies its canonical stamp; unlisted entries order after everything
-// listed, and among themselves by key, which matches write order under the
-// serialized writer.
+// cacheEntry is one live segment: unlisted (zero lm) from writer insert until
+// its first LIST supplies the canonical stamp.
 type cacheEntry struct {
 	ops    []metadatadb.Op
 	lm     time.Time
 	listed bool
-	// insertedAt is monotonic and only ever compared against LIST start
-	// times on this replica, so no clock trust is involved.
+	// insertedAt is monotonic, only ever compared to local LIST start times.
 	insertedAt time.Time
 }
 
-// heldRollup is the last rollup this replica fetched. State is kept raw and
-// unmarshalled fresh for each rebuild so replays never mutate shared state.
+// heldRollup keeps state raw so each rebuild unmarshals a fresh map.
 type heldRollup struct {
 	etag  string
 	mark  mark
 	state []byte
 }
 
-// rootNamespaceDir stands in for the empty root namespace in object keys:
-// MinIO rejects the "//" a raw empty component would produce, and cache
-// namespaces are validated to never start with ".", so it cannot collide.
+// rootNamespaceDir stands in for the empty root namespace: MinIO rejects the
+// "//" an empty component would produce, and cache namespaces never start
+// with ".", so it cannot collide.
 const rootNamespaceDir = ".root"
 
 func (n *namespace) dir() string {
@@ -253,6 +237,6 @@ func isNotFound(err error) bool           { return errStatus(err, 404) }
 func isNotModified(err error) bool        { return errStatus(err, 304) }
 func isPreconditionFailed(err error) bool { return errStatus(err, 412) }
 
-// isConflict matches the 409 ConditionalRequestConflict AWS returns for
-// racing conditional writes; like 412 it means we lost an election benignly.
+// isConflict matches AWS's 409 for racing conditional writes; like 412 it
+// means a benignly lost election.
 func isConflict(err error) bool { return errStatus(err, 409) }

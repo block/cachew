@@ -15,11 +15,10 @@ import (
 	"github.com/block/cachew/internal/metadatadb"
 )
 
-// ladder runs the compaction/probe bookkeeping after a successful background
-// tick, per the algorithm in docs/metadatadb-s3.md. Leaderless: any replica
-// may compact or probe; the conditional PUT of the rollup is both election
-// and commit. Ages are measured entirely in S3's time frame (newest listed
-// stamp minus segment stamp); the replica's clock is never consulted.
+// ladder runs the leaderless compaction/probe algorithm from
+// docs/metadatadb-s3.md. Ages are measured entirely in S3's time frame
+// (newest listed stamp minus segment stamp); the replica's clock is never
+// consulted.
 func (n *namespace) ladder(ctx context.Context, lst *listing) error {
 	if lst.newest.After(n.lastNewest) {
 		n.lastNewest = lst.newest
@@ -32,8 +31,7 @@ func (n *namespace) ladder(ctx context.Context, lst *listing) error {
 			continue
 		}
 		if n.rollup.mark.covers(lm, key) {
-			// Folded by a compaction whose compactor died before finishing
-			// its deletes.
+			// Folded by a compactor that died before finishing its deletes.
 			leftovers = append(leftovers, key)
 		} else {
 			candidates = append(candidates, key)
@@ -53,8 +51,7 @@ func (n *namespace) ladder(ctx context.Context, lst *listing) error {
 		n.sustain = 0
 		return n.compact(ctx, lst, candidates)
 	case len(lst.entries) >= n.b.segmentThreshold:
-		// Aging is stalled: enough live segments, too few aged. A clock
-		// probe advances the reference so the tail can age.
+		// Aging is stalled: enough live segments, too few aged.
 		n.sustain = 0
 		n.stall++
 		if n.stall < sustainTicks {
@@ -68,10 +65,8 @@ func (n *namespace) ladder(ctx context.Context, lst *listing) error {
 	}
 }
 
-// compact folds the candidates into a new rollup and commits it with a CAS
-// on the rollup's ETag — the election. A 412/409 means another replica won,
-// benignly. The winner deletes the folded segments; failures there are
-// ignored since any replica's leftover cleanup finishes the job.
+// compact folds the candidates into a new rollup, committed with a CAS on
+// the rollup's ETag — the election.
 func (n *namespace) compact(ctx context.Context, lst *listing, candidates []string) error {
 	select {
 	case <-time.After(n.b.jitter()):
@@ -102,8 +97,8 @@ func (n *namespace) compact(ctx context.Context, lst *listing, candidates []stri
 	for _, key := range candidates {
 		e, ok := n.cache[key]
 		if !ok {
-			// The tick fetched every listed segment above the mark, so this
-			// cannot happen; bail rather than fold an incomplete prefix.
+			// Cannot happen (the tick fetched everything above the mark);
+			// bail rather than fold an incomplete prefix.
 			n.stateMu.RUnlock()
 			return errors.Errorf("candidate %s missing from cache", key)
 		}
@@ -139,10 +134,8 @@ func (n *namespace) compact(ctx context.Context, lst *listing, candidates []stri
 	return nil
 }
 
-// probe PUTs an empty segment to advance the aging reference clock. It is a
-// raw PUT outside the group-commit writer, never applied locally or
-// cache-inserted; the next tick discovers it like any other segment. The
-// recheck LIST suppresses duplicates (rare, and harmless no-ops anyway).
+// probe PUTs an empty segment to advance the aging reference clock — a raw
+// PUT outside the group-commit writer, never applied locally.
 func (n *namespace) probe(ctx context.Context, lst *listing) error {
 	select {
 	case <-time.After(n.b.jitter()):
@@ -170,9 +163,8 @@ func (n *namespace) probe(ctx context.Context, lst *listing) error {
 	return errors.Wrap(err, "put probe")
 }
 
-// remove best-effort deletes segments via the multi-object delete API.
-// Failures are logged and ignored: leftover cleanup on any replica's future
-// tick finishes the job.
+// remove best-effort deletes segments; failures are ignored since leftover
+// cleanup on any replica's future tick finishes the job.
 func (n *namespace) remove(ctx context.Context, keys []string) {
 	objects := make(chan minio.ObjectInfo, len(keys))
 	for _, key := range keys {

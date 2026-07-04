@@ -79,7 +79,6 @@ func TestWireRoundTrip(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, len(ops), len(decoded))
 
-	// Replaying original and decoded ops must yield identical state.
 	want, got := map[string]any{}, map[string]any{}
 	for _, o := range ops {
 		metadatadb.ApplyOp(want, o)
@@ -130,12 +129,10 @@ func TestGroupCommitConcurrent(t *testing.T) {
 	assert.NoError(t, b.Query(ctx, "gc", metadatadb.IntGet{Key: "n"}, &v))
 	assert.Equal(t, int64(writers), v)
 
-	// Concurrent Applies must have coalesced into fewer segments.
 	lst, err := b.namespace("gc").list(b.ctx)
 	assert.NoError(t, err)
 	assert.True(t, len(lst.entries) < writers, "expected group commit to coalesce: %d segments for %d writers", len(lst.entries), writers)
 
-	// A second replica must converge to the same total from the journal.
 	b2 := newBackend(t, bucket)
 	assert.NoError(t, b2.Flush(ctx, "gc"))
 	assert.NoError(t, b2.Query(ctx, "gc", metadatadb.IntGet{Key: "n"}, &v))
@@ -159,7 +156,6 @@ func TestCompaction(t *testing.T) {
 	time.Sleep(1200 * time.Millisecond)
 	assert.NoError(t, b.Apply(ctx, "compact", metadatadb.IntAdd{Key: "n", Delta: 1}))
 
-	// Two sustained ticks trigger the election; the third proves stability.
 	for range 3 {
 		lst, err := n.tick(b.ctx)
 		assert.NoError(t, err)
@@ -171,12 +167,10 @@ func TestCompaction(t *testing.T) {
 	assert.NoError(t, b.Query(ctx, "compact", metadatadb.IntGet{Key: "n"}, &v))
 	assert.Equal(t, int64(4), v)
 
-	// The folded segments must be deleted; only the young write remains.
 	lst, err := n.list(b.ctx)
 	assert.NoError(t, err)
 	assert.Equal(t, 1, len(lst.entries))
 
-	// A cold replica converges from rollup + tail alone.
 	b2 := newBackend(t, bucket)
 	assert.NoError(t, b2.Flush(ctx, "compact"))
 	assert.NoError(t, b2.Query(ctx, "compact", metadatadb.IntGet{Key: "n"}, &v))
@@ -197,8 +191,7 @@ func TestClockProbe(t *testing.T) {
 		assert.NoError(t, b.Apply(ctx, "probe", metadatadb.IntAdd{Key: "n", Delta: 1}))
 	}
 
-	// Stall condition: live ≥ threshold, zero candidates. Two sustained
-	// ticks fire the probe.
+	// The stall condition must hold two consecutive ticks to fire the probe.
 	for range 2 {
 		lst, err := n.tick(b.ctx)
 		assert.NoError(t, err)
@@ -209,7 +202,6 @@ func TestClockProbe(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, 3, len(lst.entries), "expected a probe segment to have been written")
 
-	// The probe is a no-op in replay.
 	assert.NoError(t, b.Flush(ctx, "probe"))
 	var v int64
 	assert.NoError(t, b.Query(ctx, "probe", metadatadb.IntGet{Key: "n"}, &v))
@@ -240,7 +232,6 @@ func TestLegacySeed(t *testing.T) {
 	assert.True(t, result.OK)
 	assert.Equal(t, "alpha", result.Value)
 
-	// New writes replay on top of the seeded state.
 	assert.NoError(t, b.Apply(ctx, "legacy", metadatadb.IntAdd{Key: "counter", Delta: 1}))
 	assert.NoError(t, b.Flush(ctx, "legacy"))
 	assert.NoError(t, b.Query(ctx, "legacy", metadatadb.IntGet{Key: "counter"}, &v))
@@ -254,8 +245,7 @@ func TestEmptyRootNamespace(t *testing.T) {
 
 	assert.NoError(t, b.Apply(ctx, "", metadatadb.MapSet{Key: "cache-etags", MapKey: "obj", Value: `"etag"`}))
 
-	// The root namespace maps to the reserved .root directory (MinIO
-	// rejects the "//" an empty component would produce).
+	// The root namespace maps to the reserved .root directory.
 	client := s3clienttest.Client(t)
 	found := false
 	for obj := range client.ListObjects(ctx, bucket, minio.ListObjectsOptions{Prefix: ".metadata/.root/", Recursive: true}) {
@@ -290,8 +280,7 @@ func TestApplyAfterCloseDoesNotHang(t *testing.T) {
 	b := newBackend(t, bucket)
 	assert.NoError(t, b.Close(t.Context()))
 
-	// Callers pass context.Background() in production, so Apply must be
-	// unblocked by backend shutdown alone. Repeat to cover both select arms.
+	// Repeated to cover both select arms in apply's send.
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -323,7 +312,6 @@ func TestLegacyCorruptTreatedAsAbsent(t *testing.T) {
 	assert.NoError(t, b.Query(ctx, "corrupt", metadatadb.IntGet{Key: "counter"}, &v))
 	assert.Equal(t, int64(0), v)
 
-	// The namespace is not frozen: writes proceed on the empty seed.
 	assert.NoError(t, b.Apply(ctx, "corrupt", metadatadb.IntAdd{Key: "counter", Delta: 1}))
 	assert.NoError(t, b.Flush(ctx, "corrupt"))
 	assert.NoError(t, b.Query(ctx, "corrupt", metadatadb.IntGet{Key: "counter"}, &v))
@@ -370,8 +358,6 @@ func TestLeftoverCleanup(t *testing.T) {
 	assert.NoError(t, err)
 	assert.NoError(t, n.ladder(b.ctx, lst))
 
-	// The folded leftovers are deleted; only the young write remains, and
-	// state reflects rollup + tail without double-applying.
 	lst, err = n.list(b.ctx)
 	assert.NoError(t, err)
 	assert.Equal(t, 1, len(lst.entries))
@@ -389,8 +375,8 @@ func TestSeedRace(t *testing.T) {
 	assert.NoError(t, b1.Apply(ctx, "race", metadatadb.IntAdd{Key: "n", Delta: 1}))
 	assert.NoError(t, b2.Apply(ctx, "race", metadatadb.IntAdd{Key: "n", Delta: 1}))
 
-	// Both first ticks race to seed the rollup with If-None-Match:*; the
-	// loser must adopt the winner and still complete its tick.
+	// Both first ticks race the If-None-Match:* seed; the loser must adopt
+	// the winner and still complete its tick.
 	wg := sync.WaitGroup{}
 	for _, b := range []*Backend{b1, b2} {
 		wg.Go(func() { assert.NoError(t, b.Flush(ctx, "race")) })

@@ -32,11 +32,8 @@ func (n *namespace) apply(ctx context.Context, ops []metadatadb.Op) error {
 	case <-ctx.Done():
 		return errors.WithStack(ctx.Err())
 	case <-n.b.ctx.Done():
-		// Callers commonly pass context.Background() (see api.go), so the
-		// backend's own shutdown must unblock them. Prefer a reply that
-		// raced shutdown: the write may be durable and applied, and must
-		// not be misreported. A reply landing after this check still loses
-		// — an accepted ambiguity during Close.
+		// Callers pass context.Background() (api.go), so shutdown must
+		// unblock them — but prefer a raced reply: the write may be durable.
 		select {
 		case err := <-req.reply:
 			return errors.WithStack(err)
@@ -46,10 +43,8 @@ func (n *namespace) apply(ctx context.Context, ops []metadatadb.Op) error {
 	}
 }
 
-// writeLoop is the group-commit writer: at most one segment PUT in flight per
-// namespace. There is no time window — requests arriving while a PUT is in
-// flight queue on applyCh and are drained into the next batch when it
-// completes, so batch size scales with load while object count stays flat.
+// writeLoop is the group-commit writer: one PUT in flight; requests arriving
+// during a flight queue on applyCh and drain into the next batch.
 func (n *namespace) writeLoop() {
 	defer n.b.wg.Done()
 	for {
@@ -84,7 +79,7 @@ func (n *namespace) writeLoop() {
 	}
 }
 
-// commit PUTs one segment carrying the batch, then applies it locally so
+// commit PUTs the batch as one segment, then applies it locally so
 // read-your-own-writes holds when the callers unblock.
 func (n *namespace) commit(reqs []*applyReq) error {
 	var ops []metadatadb.Op
@@ -111,9 +106,8 @@ func (n *namespace) commit(reqs []*applyReq) error {
 
 	n.stateMu.Lock()
 	defer n.stateMu.Unlock()
-	// Key dedup against the committed cache only (staging is invisible
-	// here): if a tick listed and committed this segment first, the served
-	// state already contains its ops.
+	// Dedup against the committed cache only, never staging: committed
+	// means the served state already contains the ops.
 	if _, ok := n.cache[key]; ok {
 		return nil
 	}
@@ -124,10 +118,8 @@ func (n *namespace) commit(reqs []*applyReq) error {
 	return nil
 }
 
-// newSegmentKey returns a fresh segment object name. The UUIDv7 prefix makes
-// lexicographic key order match generation order within this process
-// (google/uuid guarantees strict per-process monotonicity), which is the
-// canonical-order tiebreak for same-granule LastModified ties.
+// newSegmentKey relies on google/uuid's strict per-process V7 monotonicity:
+// key order is the canonical-order tiebreak within a LastModified granule.
 func newSegmentKey() (string, error) {
 	id, err := uuid.NewV7()
 	if err != nil {
