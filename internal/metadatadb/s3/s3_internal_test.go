@@ -46,6 +46,7 @@ func TestS3Backend(t *testing.T) {
 }
 
 func TestS3BackendSoak(t *testing.T) {
+	metadatadbtest.SkipUnlessSoak(t)
 	bucket := s3clienttest.Start(t)
 	metadatadbtest.Soak(t, newBackend(t, bucket), metadatadbtest.SoakConfig{
 		Duration:    5 * time.Second,
@@ -55,6 +56,7 @@ func TestS3BackendSoak(t *testing.T) {
 }
 
 func TestS3BackendSoakReplicas(t *testing.T) {
+	metadatadbtest.SkipUnlessSoak(t)
 	bucket := s3clienttest.Start(t)
 	backends := make([]metadatadb.Backend, 3)
 	for i := range backends {

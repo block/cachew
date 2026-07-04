@@ -84,13 +84,20 @@ func (tr *tracker) appendList(key string) {
 	tr.listAppends[key]++
 }
 
+// SkipUnlessSoak skips the test unless SOAK_TEST is set. Call it before any
+// expensive setup; Soak and SoakReplicas also enforce it.
+func SkipUnlessSoak(t *testing.T) {
+	t.Helper()
+	if os.Getenv("SOAK_TEST") == "" {
+		t.Skip("Skipping soak test; set SOAK_TEST=1 to run")
+	}
+}
+
 // Soak runs a concurrent soak test against a backend, exercising all data
 // structure types with random operations and periodic flushes, then verifies
 // consistency by checking monotonic invariants and round-trip equality.
 func Soak(t *testing.T, backend metadatadb.Backend, config SoakConfig) SoakResult {
-	if os.Getenv("SOAK_TEST") == "" {
-		t.Skip("Skipping soak test; set SOAK_TEST=1 to run")
-	}
+	SkipUnlessSoak(t)
 	config.setDefaults()
 
 	ctx := logging.ContextWithLogger(context.Background(), slog.Default())
@@ -130,9 +137,7 @@ func Soak(t *testing.T, backend metadatadb.Backend, config SoakConfig) SoakResul
 // sharing the same underlying storage, then verifies the monotonic invariants
 // on every replica and that all replicas converge to identical state.
 func SoakReplicas(t *testing.T, backends []metadatadb.Backend, config SoakConfig) SoakResult {
-	if os.Getenv("SOAK_TEST") == "" {
-		t.Skip("Skipping soak test; set SOAK_TEST=1 to run")
-	}
+	SkipUnlessSoak(t)
 	config.setDefaults()
 
 	ctx := logging.ContextWithLogger(context.Background(), slog.Default())
