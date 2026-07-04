@@ -27,21 +27,38 @@ type listing struct {
 	start   time.Time
 }
 
+type flushReq struct {
+	ctx   context.Context //nolint:containedctx // carries the Flush deadline into the tick
+	reply chan error
+}
+
 func (n *namespace) flush(ctx context.Context) error {
-	reply := make(chan error, 1)
+	req := flushReq{ctx: ctx, reply: make(chan error, 1)}
 	select {
-	case n.flushCh <- reply:
+	case n.flushCh <- req:
 	case <-ctx.Done():
 		return errors.WithStack(ctx.Err())
 	case <-n.b.ctx.Done():
 		return errors.New("backend closed")
 	}
 	select {
-	case err := <-reply:
+	case err := <-req.reply:
 		return errors.WithStack(err)
 	case <-ctx.Done():
 		return errors.WithStack(ctx.Err())
 	}
+}
+
+// flushTick runs a tick under the Flush caller's context so an expired
+// deadline aborts it promptly instead of occupying the loop, while backend
+// Close still cancels it.
+func (n *namespace) flushTick(ctx context.Context) error {
+	tickCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	stop := context.AfterFunc(n.b.ctx, cancel)
+	defer stop()
+	_, err := n.tick(tickCtx)
+	return err
 }
 
 // maxConsecutiveFlushes bounds the Flush priority so sustained Flush traffic
@@ -78,9 +95,8 @@ func (n *namespace) runLoop() {
 		// A waiting Flush beats the ticker so it cannot be starved.
 		if flushes < maxConsecutiveFlushes {
 			select {
-			case reply := <-n.flushCh:
-				_, err := n.tick(n.b.ctx)
-				reply <- err
+			case req := <-n.flushCh:
+				req.reply <- n.flushTick(req.ctx)
 				flushes++
 				continue
 			default:
@@ -92,9 +108,8 @@ func (n *namespace) runLoop() {
 		case <-ticker.C:
 			flushes = 0
 			background()
-		case reply := <-n.flushCh:
-			_, err := n.tick(n.b.ctx)
-			reply <- err
+		case req := <-n.flushCh:
+			req.reply <- n.flushTick(req.ctx)
 			flushes++
 		case <-n.b.ctx.Done():
 			return
@@ -177,8 +192,7 @@ func (n *namespace) adoptRollup(etag string, data []byte) error {
 	}
 	// Validate the inner state now so replay can rely on it: a tampered
 	// rollup aborts the tick rather than silently serving empty state.
-	var state map[string]any
-	if err := json.Unmarshal(body.State, &state); err != nil {
+	if _, err := unmarshalState(body.State); err != nil {
 		return errors.Wrap(err, "unmarshal rollup state")
 	}
 	n.rollup = &heldRollup{etag: etag, mark: body.Mark, state: body.State}
@@ -235,8 +249,7 @@ func (n *namespace) readLegacy(ctx context.Context) ([]byte, error) {
 	}
 	// Must parse as namespace state: a valid JSON scalar or array would
 	// seed a rollup that every replay and compaction chokes on forever.
-	var state map[string]any
-	if len(data) == 0 || json.Unmarshal(data, &state) != nil {
+	if _, err := unmarshalState(data); len(data) == 0 || err != nil {
 		logging.FromContext(ctx).ErrorContext(ctx, "legacy metadata state is corrupt; treating as absent",
 			"namespace", n.name, "key", n.legacyKey(), "size", len(data))
 		return nil, nil
@@ -375,9 +388,9 @@ func (n *namespace) replay(input map[string]*cacheEntry) map[string]any {
 		return strings.Compare(a.key, b.key)
 	})
 
-	state := make(map[string]any)
 	// The state object was validated at adoption; never serve a torn state.
-	if err := json.Unmarshal(n.rollup.state, &state); err != nil {
+	state, err := unmarshalState(n.rollup.state)
+	if err != nil {
 		logging.FromContext(n.b.ctx).ErrorContext(n.b.ctx, "unmarshal held rollup state", "namespace", n.name, "error", err)
 		state = make(map[string]any)
 	}

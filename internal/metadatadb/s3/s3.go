@@ -163,7 +163,7 @@ func (b *Backend) namespace(name string) *namespace {
 		state:   make(map[string]any),
 		cache:   make(map[string]*cacheEntry),
 		applyCh: make(chan *applyReq, 64),
-		flushCh: make(chan chan error),
+		flushCh: make(chan flushReq),
 	}
 	b.ns[name] = n
 	if !b.closed {
@@ -179,7 +179,7 @@ type namespace struct {
 	name string
 
 	applyCh chan *applyReq
-	flushCh chan chan error
+	flushCh chan flushReq
 
 	// stateMu guards state and cache; the tick's replay runs unlocked
 	// between its input-snapshot and swap critical sections.

@@ -26,11 +26,12 @@ func (n *namespace) apply(ctx context.Context, ops []metadatadb.Op) error {
 	case <-n.b.ctx.Done():
 		return errors.New("backend closed")
 	}
+	// Once accepted, the write will be committed: returning the caller's
+	// cancellation here would misreport a write that still lands, and a
+	// retry would double-apply non-idempotent ops.
 	select {
 	case err := <-req.reply:
 		return errors.WithStack(err)
-	case <-ctx.Done():
-		return errors.WithStack(ctx.Err())
 	case <-n.b.ctx.Done():
 		// Callers pass context.Background() (api.go), so shutdown must
 		// unblock them — but prefer a raced reply: the write may be durable.

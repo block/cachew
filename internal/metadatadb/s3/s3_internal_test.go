@@ -99,6 +99,8 @@ func TestWireRoundTrip(t *testing.T) {
 		metadatadb.MapSet{Key: "m", MapKey: "k", Value: "v"},
 		metadatadb.MapDelete{Key: "m", MapKey: "k"},
 		metadatadb.ListAppend{Key: "l", Value: "entry"},
+		metadatadb.ScalarSet{Key: "big", Value: int64(1<<53 + 1)}, // any-typed values must round-trip exactly too
+		metadatadb.MapSet{Key: "bigm", MapKey: int64(1<<53 + 3), Value: int64(1<<53 + 5)},
 	}
 	data, err := marshalSegment(ops)
 	assert.NoError(t, err)
@@ -113,7 +115,13 @@ func TestWireRoundTrip(t *testing.T) {
 	for _, o := range decoded {
 		metadatadb.ApplyOp(got, o)
 	}
-	assert.Equal(t, want, got)
+	// Compare via JSON: identical encodings, differing Go types (int64 on
+	// the applied side, json.Number on the decoded side).
+	wantJSON, err := json.Marshal(want)
+	assert.NoError(t, err)
+	gotJSON, err := json.Marshal(got)
+	assert.NoError(t, err)
+	assert.Equal(t, string(wantJSON), string(gotJSON))
 }
 
 func TestUUIDv7Monotonic(t *testing.T) {
@@ -202,6 +210,39 @@ func TestCompaction(t *testing.T) {
 	assert.NoError(t, b2.Flush(ctx, "compact"))
 	assert.NoError(t, b2.Query(ctx, "compact", metadatadb.IntGet{Key: "n"}, &v))
 	assert.Equal(t, int64(4), v)
+}
+
+func TestLargeIntSurvivesRollup(t *testing.T) {
+	bucket := s3clienttest.Start(t)
+	b := newBackend(t, bucket)
+	b.initialTick = false // ticks are driven manually below
+	b.segmentThreshold = 2
+	b.ageThreshold = time.Second
+	b.jitter = func() time.Duration { return 0 }
+	ctx := t.Context()
+
+	const big = int64(1<<53 + 1) // not representable as float64
+	n := b.namespace("bigint")
+	assert.NoError(t, b.Apply(ctx, "bigint", metadatadb.IntSet{Key: "n", Value: big}))
+	assert.NoError(t, b.Apply(ctx, "bigint", metadatadb.IntMapSet{Key: "m", MapKey: "k", Value: big}))
+	time.Sleep(1200 * time.Millisecond)
+	assert.NoError(t, b.Apply(ctx, "bigint", metadatadb.IntAdd{Key: "n", Delta: 1}))
+
+	for range 3 {
+		lst, err := n.tick(b.ctx)
+		assert.NoError(t, err)
+		assert.NoError(t, n.ladder(b.ctx, lst))
+	}
+	assert.NotZero(t, n.rollup.mark.Key, "expected a compaction to have committed a rollup")
+
+	// A cold replica rebuilding from the rollup must see the exact values.
+	b2 := newBackend(t, bucket)
+	assert.NoError(t, b2.Flush(ctx, "bigint"))
+	var v int64
+	assert.NoError(t, b2.Query(ctx, "bigint", metadatadb.IntGet{Key: "n"}, &v))
+	assert.Equal(t, big+1, v)
+	assert.NoError(t, b2.Query(ctx, "bigint", metadatadb.IntMapGet{Key: "m", MapKey: "k"}, &v))
+	assert.Equal(t, big, v)
 }
 
 func TestClockProbe(t *testing.T) {

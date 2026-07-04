@@ -88,8 +88,8 @@ func (n *namespace) compact(ctx context.Context, lst *listing, candidates []stri
 		return strings.Compare(a, b)
 	})
 
-	state := make(map[string]any)
-	if err := json.Unmarshal(n.rollup.state, &state); err != nil {
+	state, err := unmarshalState(n.rollup.state)
+	if err != nil {
 		return errors.Wrap(err, "unmarshal rollup state")
 	}
 	newMark := n.rollup.mark

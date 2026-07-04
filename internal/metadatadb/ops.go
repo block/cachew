@@ -3,6 +3,7 @@ package metadatadb
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/alecthomas/errors"
 )
@@ -327,9 +328,12 @@ func decodeMapKeys(m map[string]any) map[string]any {
 	for k, v := range m {
 		// k is a JSON-encoded key (e.g. "\"hello\"" for string "hello",
 		// "42" for int 42). We need to decode it so that when json.Marshal
-		// re-encodes the result map, the keys come out correctly.
+		// re-encodes the result map, the keys come out correctly. UseNumber
+		// keeps large integer keys exact through fmt.Sprint.
+		dec := json.NewDecoder(strings.NewReader(k))
+		dec.UseNumber()
 		var decoded any
-		if err := json.Unmarshal([]byte(k), &decoded); err != nil {
+		if err := dec.Decode(&decoded); err != nil {
 			result[k] = v
 			continue
 		}
@@ -355,6 +359,12 @@ func toInt64(v any) int64 {
 		return n
 	case float64:
 		return int64(n)
+	case json.Number:
+		if i, err := n.Int64(); err == nil {
+			return i
+		}
+		f, _ := n.Float64() //nolint:errcheck // malformed numbers become 0
+		return int64(f)
 	default:
 		return 0
 	}

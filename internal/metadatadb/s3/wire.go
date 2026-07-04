@@ -1,6 +1,7 @@
 package s3
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"reflect"
@@ -10,6 +11,20 @@ import (
 
 	"github.com/block/cachew/internal/metadatadb"
 )
+
+// unmarshalNumeric decodes with UseNumber: a plain unmarshal coerces JSON
+// numbers in any-typed destinations to float64, corrupting int64 values
+// above 2^53.
+func unmarshalNumeric(data []byte, target any) error {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
+	return errors.WithStack(dec.Decode(target))
+}
+
+func unmarshalState(data []byte) (map[string]any, error) {
+	state := make(map[string]any)
+	return state, errors.Wrap(unmarshalNumeric(data, &state), "unmarshal state")
+}
 
 // There is no wire format version: evolution is handled by adding new op
 // types here, keyed by Go type name.
@@ -95,7 +110,7 @@ func decodeOp(data json.RawMessage) (metadatadb.Op, error) {
 		return nil, errors.Errorf("unknown op discriminator %q", head.Op)
 	}
 	v := reflect.New(typ)
-	if err := json.Unmarshal(data, v.Interface()); err != nil {
+	if err := unmarshalNumeric(data, v.Interface()); err != nil {
 		return nil, errors.Wrapf(err, "unmarshal %s", head.Op)
 	}
 	op, ok := v.Elem().Interface().(metadatadb.Op)
