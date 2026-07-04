@@ -7,10 +7,6 @@ import (
 	"github.com/alecthomas/errors"
 )
 
-// errInvalidToken is returned when an optimistic concurrency token does not
-// match the current version, indicating a concurrent write.
-var errInvalidToken = errors.New("invalid token")
-
 // Op is a write operation applied to the metadata store. Concrete types form a
 // closed set (sum type) — backends handle each variant via exhaustive type switch.
 //
@@ -237,6 +233,17 @@ func (ListEntries) readOp() {}
 type ListLen struct{ Key string }
 
 func (ListLen) readOp() {}
+
+// ApplyOp applies a single write Op to raw namespace state. It is exported
+// for Backend implementations that maintain state outside this package.
+func ApplyOp(state map[string]any, o Op) { applyOp(state, o) }
+
+// QueryStateInto executes a read query against raw namespace state and
+// unmarshals the result into target. It is exported for Backend
+// implementations that maintain state outside this package.
+func QueryStateInto(state map[string]any, q ReadOp, target any) error {
+	return errors.Wrap(jsonUnmarshalInto(queryState(state, q), target), "query state")
+}
 
 // applyOp applies a single write Op to the in-memory state via exhaustive type switch.
 func applyOp(state map[string]any, o Op) { //nolint:funlen

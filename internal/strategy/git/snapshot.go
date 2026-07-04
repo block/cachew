@@ -1009,8 +1009,7 @@ func (s *Strategy) generateAndUploadLFSSnapshot(ctx context.Context, repo *gitcl
 		// any other non-zero exit (invalid HEAD, repo corruption, command
 		// failure) is a real error that should propagate so we don't silently
 		// skip LFS snapshot generation for repos that actually use LFS.
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+		if exitErr, ok := errors.AsType[*exec.ExitError](err); ok && exitErr.ExitCode() == 1 {
 			s.metrics.recordLFSPhase(ctx, upstream, "discover", "skipped", time.Since(discoverStart))
 			logger.DebugContext(ctx, "No LFS filter in any .gitattributes, skipping LFS snapshot", "upstream", upstream)
 			return nil
