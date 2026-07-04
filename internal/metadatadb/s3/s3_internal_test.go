@@ -54,6 +54,31 @@ func TestS3BackendSoak(t *testing.T) {
 	})
 }
 
+func TestS3BackendSoakReplicas(t *testing.T) {
+	bucket := s3clienttest.Start(t)
+	backends := make([]metadatadb.Backend, 3)
+	for i := range backends {
+		_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelError})
+		b, err := New(ctx, s3client.ClientProvider(func() (*minio.Client, error) { return s3clienttest.Client(t), nil }), Config{
+			Bucket:       bucket,
+			SyncInterval: 500 * time.Millisecond, // real background ticks
+		})
+		assert.NoError(t, err)
+		t.Cleanup(func() { assert.NoError(t, b.Close(context.Background())) })
+		// Aggressive thresholds so compactions, elections, and probes fire
+		// repeatedly during the run.
+		b.ageThreshold = 2 * time.Second
+		b.segmentThreshold = 8
+		backends[i] = b
+	}
+
+	metadatadbtest.SoakReplicas(t, backends, metadatadbtest.SoakConfig{
+		Duration:    10 * time.Second,
+		Concurrency: 4,
+		NumKeys:     20,
+	})
+}
+
 func TestWireRoundTrip(t *testing.T) {
 	ops := []metadatadb.Op{
 		metadatadb.ScalarSet{Key: "s", Value: "hello"},
