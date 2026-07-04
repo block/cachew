@@ -11,8 +11,8 @@ import (
 	"github.com/block/cachew/internal/metadatadb"
 )
 
-// opTypes maps discriminator (the op's Go type name) to its concrete type.
-// There is no format version: evolution is handled by adding new ops here.
+// There is no wire format version: evolution is handled by adding new op
+// types here, keyed by Go type name.
 //
 //nolint:gochecknoglobals
 var opTypes = func() map[string]reflect.Type {
@@ -65,9 +65,8 @@ func unmarshalSegment(data []byte) ([]metadatadb.Op, error) {
 	return ops, nil
 }
 
-// encodeOp splices an "op" discriminator into the op's own JSON encoding
-// rather than round-tripping through a map, which would coerce int64 fields
-// to float64 and lose precision above 2^53.
+// encodeOp splices the discriminator in rather than round-tripping through a
+// map, which would coerce int64 fields to float64 above 2^53.
 func encodeOp(o metadatadb.Op) (json.RawMessage, error) {
 	name := reflect.TypeOf(o).Name()
 	if _, ok := opTypes[name]; !ok {
@@ -84,8 +83,6 @@ func encodeOp(o metadatadb.Op) (json.RawMessage, error) {
 	return json.RawMessage(head + string(data[1:])), nil
 }
 
-// decodeOp is a two-pass unmarshal: the discriminator selects the concrete
-// type, then the same bytes decode into it (it ignores the "op" key).
 func decodeOp(data json.RawMessage) (metadatadb.Op, error) {
 	var head struct {
 		Op string `json:"op"`
