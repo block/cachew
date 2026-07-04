@@ -23,7 +23,15 @@ func unmarshalNumeric(data []byte, target any) error {
 
 func unmarshalState(data []byte) (map[string]any, error) {
 	state := make(map[string]any)
-	return state, errors.Wrap(unmarshalNumeric(data, &state), "unmarshal state")
+	if err := unmarshalNumeric(data, &state); err != nil {
+		return nil, errors.Wrap(err, "unmarshal state")
+	}
+	// JSON null decodes by setting the map to nil without error; accepting
+	// it would panic later on the first write into the state.
+	if state == nil {
+		return nil, errors.New("state is null")
+	}
+	return state, nil
 }
 
 // There is no wire format version: evolution is handled by adding new op

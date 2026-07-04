@@ -366,24 +366,78 @@ func TestApplyAfterCloseDoesNotHang(t *testing.T) {
 func TestLegacyCorruptTreatedAsAbsent(t *testing.T) {
 	bucket := s3clienttest.Start(t)
 	client := s3clienttest.Client(t)
+	b := newBackend(t, bucket)
+
+	for _, tt := range []struct {
+		name string
+		body string
+	}{
+		{"Garbage", "{not json"},
+		{"Null", "null"},
+		{"Scalar", `42`},
+		{"Array", `[1, 2]`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := t.Context()
+			ns := "corrupt-" + strings.ToLower(tt.name)
+
+			_, err := client.PutObject(ctx, bucket, ".metadata/"+ns+".json",
+				strings.NewReader(tt.body), int64(len(tt.body)), minio.PutObjectOptions{})
+			assert.NoError(t, err)
+
+			assert.NoError(t, b.Flush(ctx, ns))
+
+			var v int64
+			assert.NoError(t, b.Query(ctx, ns, metadatadb.IntGet{Key: "counter"}, &v))
+			assert.Equal(t, int64(0), v)
+
+			assert.NoError(t, b.Apply(ctx, ns, metadatadb.IntAdd{Key: "counter", Delta: 1}))
+			assert.NoError(t, b.Flush(ctx, ns))
+			assert.NoError(t, b.Query(ctx, ns, metadatadb.IntGet{Key: "counter"}, &v))
+			assert.Equal(t, int64(1), v)
+		})
+	}
+}
+
+func TestStructKeysSurviveWire(t *testing.T) {
+	bucket := s3clienttest.Start(t)
+	b := newBackend(t, bucket)
 	ctx := t.Context()
 
-	garbage := []byte("{not json")
-	_, err := client.PutObject(ctx, bucket, ".metadata/corrupt.json",
-		bytes.NewReader(garbage), int64(len(garbage)), minio.PutObjectOptions{})
-	assert.NoError(t, err)
+	// Field order (Z before A) differs from sorted JSON key order, so this
+	// fails if local and replayed key encodings disagree.
+	type structKey struct {
+		Z string `json:"z"`
+		A string `json:"a"`
+	}
+	key := structKey{Z: "zed", A: "ay"}
+	assert.NoError(t, b.Apply(ctx, "sk", metadatadb.MapSet{Key: "m", MapKey: key, Value: "v"}))
 
-	b := newBackend(t, bucket)
-	assert.NoError(t, b.Flush(ctx, "corrupt"))
+	check := func(backend *Backend) {
+		t.Helper()
+		var result struct {
+			Value string
+			OK    bool
+		}
+		assert.NoError(t, backend.Query(ctx, "sk", metadatadb.MapGet{Key: "m", MapKey: key}, &result))
+		assert.True(t, result.OK)
+		assert.Equal(t, "v", result.Value)
+	}
+	check(b)
 
-	var v int64
-	assert.NoError(t, b.Query(ctx, "corrupt", metadatadb.IntGet{Key: "counter"}, &v))
-	assert.Equal(t, int64(0), v)
+	// A cold replica replays the key from the wire format.
+	b2 := newBackend(t, bucket)
+	assert.NoError(t, b2.Flush(ctx, "sk"))
+	check(b2)
 
-	assert.NoError(t, b.Apply(ctx, "corrupt", metadatadb.IntAdd{Key: "counter", Delta: 1}))
-	assert.NoError(t, b.Flush(ctx, "corrupt"))
-	assert.NoError(t, b.Query(ctx, "corrupt", metadatadb.IntGet{Key: "counter"}, &v))
-	assert.Equal(t, int64(1), v)
+	// A delete with the original struct key must remove the replayed entry.
+	assert.NoError(t, b2.Apply(ctx, "sk", metadatadb.MapDelete{Key: "m", MapKey: key}))
+	var result struct {
+		Value string
+		OK    bool
+	}
+	assert.NoError(t, b2.Query(ctx, "sk", metadatadb.MapGet{Key: "m", MapKey: key}, &result))
+	assert.False(t, result.OK)
 }
 
 func TestLeftoverCleanup(t *testing.T) {

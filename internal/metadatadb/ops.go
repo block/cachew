@@ -1,6 +1,7 @@
 package metadatadb
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -349,6 +350,20 @@ func marshalKey(v any) string {
 	data, err := json.Marshal(v)
 	if err != nil {
 		panic(fmt.Sprintf("metadatadb: marshal key %T: %v", v, err))
+	}
+	// Canonicalize composite keys: a struct marshals in field order, but the
+	// same key decoded from a backend's wire format is a map, which
+	// re-marshals with sorted keys — the two encodings must agree or
+	// replayed entries land under different state keys than local ones.
+	if len(data) > 0 && (data[0] == '{' || data[0] == '[') {
+		dec := json.NewDecoder(bytes.NewReader(data))
+		dec.UseNumber()
+		var decoded any
+		if err := dec.Decode(&decoded); err == nil {
+			if canon, err := json.Marshal(decoded); err == nil {
+				return string(canon)
+			}
+		}
 	}
 	return string(data)
 }
