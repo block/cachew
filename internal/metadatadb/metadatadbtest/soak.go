@@ -154,11 +154,9 @@ func SoakReplicas(t *testing.T, backends []metadatadb.Backend, config SoakConfig
 	var wg sync.WaitGroup
 	for replica, ns := range replicas {
 		for worker := range config.Concurrency {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
+			wg.Go(func() {
 				soakWorker(ctx, ns, &config, deadline, replica*config.Concurrency+worker, &result, tr)
-			}()
+			})
 		}
 	}
 	wg.Wait()
