@@ -39,7 +39,7 @@ func (m *MemoryBackend) Apply(_ context.Context, namespace string, ops ...Op) er
 	defer m.mu.Unlock()
 	ns := m.ns(namespace)
 	for _, o := range ops {
-		applyOp(ns, o)
+		ApplyOp(ns, o)
 	}
 	return nil
 }
