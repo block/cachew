@@ -2,7 +2,6 @@ package metadatadb
 
 import (
 	"context"
-	"encoding/json"
 	"sync"
 
 	"github.com/alecthomas/errors"
@@ -60,17 +59,4 @@ func (m *MemoryBackend) ns(namespace string) map[string]any {
 		m.state[namespace] = ns
 	}
 	return ns
-}
-
-// jsonUnmarshalInto marshals src to JSON then unmarshals into target,
-// bridging between the internal any-typed state and the caller's typed pointer.
-func jsonUnmarshalInto(src any, target any) error {
-	if src == nil {
-		return nil
-	}
-	data, err := json.Marshal(src)
-	if err != nil {
-		return errors.Wrap(err, "marshal")
-	}
-	return errors.Wrap(json.Unmarshal(data, target), "unmarshal")
 }

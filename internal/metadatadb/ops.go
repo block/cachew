@@ -237,10 +237,18 @@ type ListLen struct{ Key string }
 func (ListLen) readOp() {}
 
 // QueryStateInto executes a read query against raw namespace state and
-// unmarshals the result into target. It is exported for Backend
-// implementations that maintain state outside this package.
+// unmarshals the result into target, bridging the any-typed state and the
+// caller's typed pointer via a JSON round-trip.
 func QueryStateInto(state map[string]any, q ReadOp, target any) error {
-	return errors.Wrap(jsonUnmarshalInto(queryState(state, q), target), "query state")
+	result := queryState(state, q)
+	if result == nil {
+		return nil
+	}
+	data, err := json.Marshal(result)
+	if err != nil {
+		return errors.Wrap(err, "marshal result")
+	}
+	return errors.Wrap(json.Unmarshal(data, target), "unmarshal result")
 }
 
 // ApplyOp applies a single write Op to raw namespace state via exhaustive
