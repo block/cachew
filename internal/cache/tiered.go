@@ -25,6 +25,7 @@ type Tiered struct {
 	metadata  *metadatadb.Store
 	etags     *metadatadb.Map[Key, string]
 	namespace Namespace
+	healer    *tieredHealer
 }
 
 // MaybeNewTiered creates a [Tiered] cache from one or more caches.
@@ -41,7 +42,7 @@ func MaybeNewTiered(ctx context.Context, caches []Cache, metadata *metadatadb.St
 	if metadata == nil {
 		panic("Tiered cache requires a metadata store")
 	}
-	return Tiered{caches: caches, metadata: metadata, etags: tieredETags(metadata, "")}
+	return Tiered{caches: caches, metadata: metadata, etags: tieredETags(metadata, ""), healer: newTieredHealer(ctx)}
 }
 
 type authoritativeCache struct {
@@ -60,6 +61,11 @@ var _ Cache = (*Tiered)(nil)
 
 // Close all underlying caches.
 func (t Tiered) Close() error {
+	// Drain in-flight heals before closing the caches they operate on.
+	if t.healer != nil {
+		t.healer.cancel()
+		t.healer.wg.Wait()
+	}
 	wg := sync.WaitGroup{}
 	errs := make([]error, len(t.caches))
 	for i, cache := range t.caches {
@@ -276,10 +282,7 @@ func (t Tiered) Open(ctx context.Context, key Key, opts ...Option) (io.ReadClose
 		if fallback != nil {
 			discardTieredReader(ctx, key, fallback)
 		}
-		if i > 0 && !partial {
-			r = t.backfillReader(ctx, key, r, headers, t.caches[0])
-		}
-		return r, headers, nil
+		return t.convergeTier0(ctx, key, r, headers, c, i, partial), headers, nil
 	}
 	if len(probeErrs) > 0 {
 		if fallback != nil {
@@ -363,6 +366,126 @@ func backfillCreateOptions(headers http.Header) []Option {
 		return nil
 	}
 	return []Option{WithETag(rawETag)}
+}
+
+const tieredHealTimeout = 5 * time.Minute
+
+type healKey struct {
+	namespace Namespace
+	key       Key
+}
+
+const tieredHealMaxConcurrency = 8
+
+var errHealSuperseded = errors.New("heal superseded by concurrent write")
+
+type tieredHealer struct {
+	mu       sync.Mutex
+	inflight map[healKey]struct{}
+	sem      chan struct{}
+	ctx      context.Context
+	cancel   context.CancelFunc
+	wg       sync.WaitGroup
+}
+
+func newTieredHealer(ctx context.Context) *tieredHealer {
+	hctx, cancel := context.WithCancel(context.WithoutCancel(ctx)) //nolint:gosec // cancel is stored and called in Close
+	return &tieredHealer{inflight: map[healKey]struct{}{}, sem: make(chan struct{}, tieredHealMaxConcurrency), ctx: hctx, cancel: cancel}
+}
+
+func (h *tieredHealer) trigger(reqCtx context.Context, id healKey, heal func(context.Context)) {
+	h.mu.Lock()
+	if _, ok := h.inflight[id]; ok {
+		h.mu.Unlock()
+		return
+	}
+	// Opportunistically skip when saturated; a later divergent read re-triggers.
+	select {
+	case h.sem <- struct{}{}:
+	default:
+		h.mu.Unlock()
+		return
+	}
+	h.inflight[id] = struct{}{}
+	h.mu.Unlock()
+
+	ctx := logging.ContextWithLogger(h.ctx, logging.FromContext(reqCtx))
+	h.wg.Go(func() {
+		defer func() {
+			h.mu.Lock()
+			delete(h.inflight, id)
+			h.mu.Unlock()
+			<-h.sem
+		}()
+		heal(ctx)
+	})
+}
+
+func (t Tiered) convergeTier0(ctx context.Context, key Key, r io.ReadCloser, headers http.Header, source Cache, tier int, partial bool) io.ReadCloser {
+	switch {
+	case tier == 0:
+		return r
+	case !partial:
+		return t.backfillReader(ctx, key, r, headers, t.caches[0])
+	default:
+		// A ranged body can't backfill tier 0, so refresh it out of band;
+		// otherwise a divergent tier 0 never converges under ParallelGet.
+		t.healTier0(ctx, key, source, headers.Get(ETagKey))
+		return r
+	}
+}
+
+func (t Tiered) healTier0(reqCtx context.Context, key Key, source Cache, servedETag string) {
+	if t.healer == nil || servedETag == "" {
+		return
+	}
+	// Skip if tier 0 is legitimately newer than the served version, so a lagging
+	// deeper tier never overwrites it.
+	want, ok := t.etags.Get(key)
+	if !ok || want != servedETag {
+		return
+	}
+	t.healer.trigger(reqCtx, healKey{namespace: t.namespace, key: key}, func(ctx context.Context) {
+		t.backfillTier0FromSource(ctx, key, source, want)
+	})
+}
+
+func (t Tiered) backfillTier0FromSource(ctx context.Context, key Key, source Cache, wantETag string) {
+	logger := logging.FromContext(ctx)
+	ctx, cancel := context.WithTimeout(ctx, tieredHealTimeout)
+	defer cancel()
+
+	r, headers, err := source.Open(ctx, key, IfMatch(wantETag))
+	if err != nil {
+		logger.WarnContext(ctx, "Tiered: ranged heal source read failed", "key", key, "etag", wantETag, "error", err)
+		return
+	}
+	defer discardTieredReader(ctx, key, r)
+	if headers.Get(ETagKey) != wantETag {
+		return
+	}
+
+	w, err := t.caches[0].Create(ctx, key, headers, 0, backfillCreateOptions(headers)...) // 0 → cache's max TTL
+	if err != nil {
+		logger.WarnContext(ctx, "Tiered: ranged heal writer create failed", "key", key, "error", err)
+		return
+	}
+	if _, err := io.Copy(w, r); err != nil {
+		logger.WarnContext(ctx, "Tiered: ranged heal copy failed", "key", key, "error", errors.Join(err, w.Abort(err)))
+		return
+	}
+	// A concurrent Delete drops the etag entry; committing then would resurrect an
+	// object that invalidateStale can no longer clean up (it only fires on an
+	// etag mismatch, not a missing entry). Re-check narrows that window.
+	if got, ok := t.etags.Get(key); !ok || got != wantETag {
+		if err := w.Abort(errHealSuperseded); err != nil {
+			logger.WarnContext(ctx, "Tiered: ranged heal abort failed", "key", key, "error", err)
+		}
+		return
+	}
+	if err := w.Close(); err != nil {
+		logger.WarnContext(ctx, "Tiered: ranged heal commit failed", "key", key, "error", err)
+	}
 }
 
 // backfillReadCloser tees reads from src into dst asynchronously. Chunks are
@@ -543,7 +666,7 @@ func (t Tiered) Namespace(namespace Namespace) Cache {
 	for i, c := range t.caches {
 		namespaced[i] = c.Namespace(namespace)
 	}
-	return Tiered{caches: namespaced, metadata: t.metadata, etags: tieredETags(t.metadata, namespace), namespace: namespace}
+	return Tiered{caches: namespaced, metadata: t.metadata, etags: tieredETags(t.metadata, namespace), namespace: namespace, healer: t.healer}
 }
 
 // ListNamespaces returns unique namespaces from all underlying caches.
