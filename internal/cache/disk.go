@@ -2,6 +2,7 @@ package cache
 
 import (
 	"context"
+	"hash/fnv"
 	"io"
 	"io/fs"
 	"log/slog"
@@ -10,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -45,7 +47,10 @@ type Disk struct {
 	runEviction  chan struct{}
 	stop         context.CancelFunc
 	evictionDone chan struct{}
+	locks        *[diskLockStripes]sync.RWMutex
 }
+
+const diskLockStripes = 1024
 
 var _ Cache = (*Disk)(nil)
 
@@ -119,12 +124,20 @@ func NewDisk(ctx context.Context, config DiskConfig) (*Disk, error) {
 		runEviction:  make(chan struct{}),
 		stop:         stop,
 		evictionDone: make(chan struct{}),
+		locks:        &[diskLockStripes]sync.RWMutex{},
 	}
 	disk.size.Store(size)
 
 	go disk.evictionLoop(ctx)
 
 	return disk, nil
+}
+
+func (d *Disk) keyLock(namespace Namespace, key Key) *sync.RWMutex {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(namespace))
+	_, _ = h.Write(key[:])
+	return &d.locks[h.Sum32()&(diskLockStripes-1)]
 }
 
 func (d *Disk) String() string { return "disk:" + d.config.Root }
@@ -211,16 +224,17 @@ func (d *Disk) Delete(_ context.Context, key Key) error {
 		expired = true
 	}
 
+	lock := d.keyLock(d.namespace, key)
+	lock.Lock()
+	defer lock.Unlock()
+
 	info, err := os.Stat(fullPath)
 	if err != nil {
 		return errors.Errorf("failed to stat file: %w", err)
 	}
-
 	if err := os.Remove(fullPath); err != nil {
 		return errors.Errorf("failed to remove file: %w", err)
 	}
-
-	// Remove metadata
 	if err := d.db.delete(d.namespace, key); err != nil {
 		return errors.Errorf("failed to delete TTL metadata: %w", err)
 	}
@@ -271,28 +285,43 @@ func (d *Disk) Stat(ctx context.Context, key Key, opts ...Option) (http.Header, 
 	return headers, nil
 }
 
+func (d *Disk) openLocked(key Key, fullPath string, now time.Time) (f *os.File, headers http.Header, expired bool, err error) {
+	lock := d.keyLock(d.namespace, key)
+	lock.RLock()
+	defer lock.RUnlock()
+
+	f, err = os.Open(fullPath)
+	if err != nil {
+		return nil, nil, false, errors.Errorf("failed to open file: %w", err)
+	}
+	expiresAt, err := d.db.getTTL(d.namespace, key)
+	if err != nil {
+		return nil, nil, false, errors.Join(err, f.Close())
+	}
+	if now.After(expiresAt) {
+		return f, nil, true, nil
+	}
+	headers, err = d.db.getHeaders(d.namespace, key)
+	if err != nil {
+		return nil, nil, false, errors.Join(errors.Errorf("failed to get headers: %w", err), f.Close())
+	}
+	ttl := min(expiresAt.Sub(now), d.config.MaxTTL)
+	if err := d.db.setTTL(d.namespace, key, now.Add(ttl)); err != nil {
+		return nil, nil, false, errors.Join(errors.Errorf("failed to update expiration time: %w", err), f.Close())
+	}
+	return f, headers, false, nil
+}
+
 func (d *Disk) Open(ctx context.Context, key Key, opts ...Option) (io.ReadCloser, http.Header, error) {
 	path := d.keyToPath(d.namespace, key)
 	fullPath := filepath.Join(d.config.Root, path)
 
-	f, err := os.Open(fullPath)
+	f, headers, expired, err := d.openLocked(key, fullPath, time.Now())
 	if err != nil {
-		return nil, nil, errors.Errorf("failed to open file: %w", err)
+		return nil, nil, err
 	}
-
-	expiresAt, err := d.db.getTTL(d.namespace, key)
-	if err != nil {
-		return nil, nil, errors.Join(err, f.Close())
-	}
-
-	now := time.Now()
-	if now.After(expiresAt) {
+	if expired {
 		return nil, nil, errors.Join(fs.ErrNotExist, f.Close(), d.Delete(ctx, key))
-	}
-
-	headers, err := d.db.getHeaders(d.namespace, key)
-	if err != nil {
-		return nil, nil, errors.Join(errors.Errorf("failed to get headers: %w", err), f.Close())
 	}
 
 	finfo, err := f.Stat()
@@ -300,14 +329,6 @@ func (d *Disk) Open(ctx context.Context, key Key, opts ...Option) (io.ReadCloser
 		return nil, nil, errors.Join(errors.Errorf("failed to stat file for size: %w", err), f.Close())
 	}
 	headers.Set("Content-Length", strconv.FormatInt(finfo.Size(), 10))
-
-	// Reset expiration time to implement LRU
-	ttl := min(expiresAt.Sub(now), d.config.MaxTTL)
-	newExpiresAt := now.Add(ttl)
-
-	if err := d.db.setTTL(d.namespace, key, newExpiresAt); err != nil {
-		return nil, nil, errors.Join(errors.Errorf("failed to update expiration time: %w", err), f.Close())
-	}
 
 	if h, condErr := conditionalShortCircuit(headers, opts); condErr != nil {
 		return nil, h, errors.Join(condErr, f.Close())
@@ -505,17 +526,8 @@ func (w *diskWriter) Close() error {
 		return errors.Errorf("failed to create directory: %w", err)
 	}
 
-	// Check if we're overwriting an existing file and subtract its size
-	if info, err := os.Stat(w.path); err == nil {
-		w.disk.size.Add(-info.Size())
-	}
-
-	if err := os.Rename(w.tempPath, w.path); err != nil {
-		return errors.Errorf("failed to rename temp file: %w", err)
-	}
-
-	if err := w.disk.db.set(w.key, w.namespace, w.expiresAt, w.headers); err != nil {
-		return errors.Join(errors.Errorf("failed to set metadata: %w", err), os.Remove(w.path))
+	if err := w.commitLocked(); err != nil {
+		return err
 	}
 
 	w.disk.size.Add(w.size)
@@ -525,6 +537,23 @@ func (w *diskWriter) Close() error {
 	default:
 	}
 
+	return nil
+}
+
+func (w *diskWriter) commitLocked() error {
+	lock := w.disk.keyLock(w.namespace, w.key)
+	lock.Lock()
+	defer lock.Unlock()
+
+	if info, err := os.Stat(w.path); err == nil {
+		w.disk.size.Add(-info.Size())
+	}
+	if err := os.Rename(w.tempPath, w.path); err != nil {
+		return errors.Errorf("failed to rename temp file: %w", err)
+	}
+	if err := w.disk.db.set(w.key, w.namespace, w.expiresAt, w.headers); err != nil {
+		return errors.Join(errors.Errorf("failed to set metadata: %w", err), os.Remove(w.path))
+	}
 	return nil
 }
 
