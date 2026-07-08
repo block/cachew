@@ -2,6 +2,15 @@
 
 Status: draft, under iteration.
 
+> [!IMPORTANT]
+> **Rollout requirement:** do not run the old (whole-object) and new (journal)
+> backends against the same bucket beyond a brief rolling-deploy overlap. The
+> legacy state object is read exactly once at seeding, so writes an old replica
+> makes after a new replica seeds the rollup are silently dropped. This is
+> tolerable only because the data is advisory (etags self-heal against the
+> authoritative tier; clone counts are approximate) — keep the overlap short.
+> See [Migration (backfill)](#migration-backfill).
+
 ## Problem
 
 The current S3 metadata backend stores each namespace as a single JSON object
