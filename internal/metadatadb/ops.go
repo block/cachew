@@ -1,15 +1,13 @@
 package metadatadb
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/alecthomas/errors"
 )
-
-// errInvalidToken is returned when an optimistic concurrency token does not
-// match the current version, indicating a concurrent write.
-var errInvalidToken = errors.New("invalid token")
 
 // Op is a write operation applied to the metadata store. Concrete types form a
 // closed set (sum type) — backends handle each variant via exhaustive type switch.
@@ -238,8 +236,24 @@ type ListLen struct{ Key string }
 
 func (ListLen) readOp() {}
 
-// applyOp applies a single write Op to the in-memory state via exhaustive type switch.
-func applyOp(state map[string]any, o Op) { //nolint:funlen
+// QueryStateInto executes a read query against raw namespace state and
+// unmarshals the result into target, bridging the any-typed state and the
+// caller's typed pointer via a JSON round-trip.
+func QueryStateInto(state map[string]any, q ReadOp, target any) error {
+	result := queryState(state, q)
+	if result == nil {
+		return nil
+	}
+	data, err := json.Marshal(result)
+	if err != nil {
+		return errors.Wrap(err, "marshal result")
+	}
+	return errors.Wrap(json.Unmarshal(data, target), "unmarshal result")
+}
+
+// ApplyOp applies a single write Op to raw namespace state via exhaustive
+// type switch.
+func ApplyOp(state map[string]any, o Op) { //nolint:funlen
 	switch o := o.(type) {
 	case ScalarSet:
 		state[o.Key] = o.Value
@@ -320,9 +334,12 @@ func decodeMapKeys(m map[string]any) map[string]any {
 	for k, v := range m {
 		// k is a JSON-encoded key (e.g. "\"hello\"" for string "hello",
 		// "42" for int 42). We need to decode it so that when json.Marshal
-		// re-encodes the result map, the keys come out correctly.
+		// re-encodes the result map, the keys come out correctly. UseNumber
+		// keeps large integer keys exact through fmt.Sprint.
+		dec := json.NewDecoder(strings.NewReader(k))
+		dec.UseNumber()
 		var decoded any
-		if err := json.Unmarshal([]byte(k), &decoded); err != nil {
+		if err := dec.Decode(&decoded); err != nil {
 			result[k] = v
 			continue
 		}
@@ -339,6 +356,20 @@ func marshalKey(v any) string {
 	if err != nil {
 		panic(fmt.Sprintf("metadatadb: marshal key %T: %v", v, err))
 	}
+	// Canonicalize composite keys: a struct marshals in field order, but the
+	// same key decoded from a backend's wire format is a map, which
+	// re-marshals with sorted keys — the two encodings must agree or
+	// replayed entries land under different state keys than local ones.
+	if len(data) > 0 && (data[0] == '{' || data[0] == '[') {
+		dec := json.NewDecoder(bytes.NewReader(data))
+		dec.UseNumber()
+		var decoded any
+		if err := dec.Decode(&decoded); err == nil {
+			if canon, err := json.Marshal(decoded); err == nil {
+				return string(canon)
+			}
+		}
+	}
 	return string(data)
 }
 
@@ -348,6 +379,12 @@ func toInt64(v any) int64 {
 		return n
 	case float64:
 		return int64(n)
+	case json.Number:
+		if i, err := n.Int64(); err == nil {
+			return i
+		}
+		f, _ := n.Float64() //nolint:errcheck // malformed numbers become 0
+		return int64(f)
 	default:
 		return 0
 	}

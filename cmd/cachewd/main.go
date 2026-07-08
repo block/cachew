@@ -30,6 +30,7 @@ import (
 	"github.com/block/cachew/internal/jobscheduler"
 	"github.com/block/cachew/internal/logging"
 	"github.com/block/cachew/internal/metadatadb"
+	metadatas3 "github.com/block/cachew/internal/metadatadb/s3"
 	"github.com/block/cachew/internal/metrics"
 	"github.com/block/cachew/internal/opa"
 	"github.com/block/cachew/internal/reaper"
@@ -260,7 +261,7 @@ func newRegistries(
 
 	mr := metadatadb.NewRegistry()
 	metadatadb.RegisterMemory(mr)
-	metadatadb.RegisterS3(mr, s3ClientProvider)
+	metadatas3.Register(mr, s3ClientProvider)
 
 	sr := strategy.NewRegistry()
 	strategy.RegisterAPIV1(sr)

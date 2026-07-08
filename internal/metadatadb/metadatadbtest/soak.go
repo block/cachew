@@ -84,13 +84,20 @@ func (tr *tracker) appendList(key string) {
 	tr.listAppends[key]++
 }
 
+// SkipUnlessSoak skips the test unless SOAK_TEST is set. Call it before any
+// expensive setup; Soak and SoakReplicas also enforce it.
+func SkipUnlessSoak(t *testing.T) {
+	t.Helper()
+	if os.Getenv("SOAK_TEST") == "" {
+		t.Skip("Skipping soak test; set SOAK_TEST=1 to run")
+	}
+}
+
 // Soak runs a concurrent soak test against a backend, exercising all data
 // structure types with random operations and periodic flushes, then verifies
 // consistency by checking monotonic invariants and round-trip equality.
 func Soak(t *testing.T, backend metadatadb.Backend, config SoakConfig) SoakResult {
-	if os.Getenv("SOAK_TEST") == "" {
-		t.Skip("Skipping soak test; set SOAK_TEST=1 to run")
-	}
+	SkipUnlessSoak(t)
 	config.setDefaults()
 
 	ctx := logging.ContextWithLogger(context.Background(), slog.Default())
@@ -124,6 +131,88 @@ func Soak(t *testing.T, backend metadatadb.Backend, config SoakConfig) SoakResul
 	logSoakResult(t, &result)
 
 	return result
+}
+
+// SoakReplicas runs the soak workload concurrently across multiple backends
+// sharing the same underlying storage, then verifies the monotonic invariants
+// on every replica and that all replicas converge to identical state.
+func SoakReplicas(t *testing.T, backends []metadatadb.Backend, config SoakConfig) SoakResult {
+	SkipUnlessSoak(t)
+	config.setDefaults()
+
+	ctx := logging.ContextWithLogger(context.Background(), slog.Default())
+	ctx, cancel := context.WithTimeout(ctx, config.Duration+time.Minute)
+	defer cancel()
+
+	replicas := make([]*metadatadb.Namespace, len(backends))
+	for i, backend := range backends {
+		store := metadatadb.New(ctx, backend)
+		t.Cleanup(func() { assert.NoError(t, store.Close(ctx)) })
+		replicas[i] = store.Namespace("soak-replicas")
+	}
+
+	tr := newTracker()
+	var result SoakResult
+	startTime := time.Now()
+	deadline := startTime.Add(config.Duration)
+
+	var wg sync.WaitGroup
+	for replica, ns := range replicas {
+		for worker := range config.Concurrency {
+			wg.Go(func() {
+				soakWorker(ctx, ns, &config, deadline, replica*config.Concurrency+worker, &result, tr)
+			})
+		}
+	}
+	wg.Wait()
+	result.Duration = time.Since(startTime)
+
+	// Writes are synchronous, so everything is durable once the workers
+	// stop; each replica's flush then observes every write.
+	for _, ns := range replicas {
+		assert.NoError(t, ns.Flush(ctx))
+	}
+	for _, ns := range replicas {
+		verifyMonotonicInvariants(t, ns, tr)
+	}
+	verifyReplicasConverge(t, replicas, config.NumKeys)
+	logSoakResult(t, &result)
+	return result
+}
+
+func verifyReplicasConverge(t *testing.T, replicas []*metadatadb.Namespace, numKeys int) {
+	t.Helper()
+	base := replicas[0]
+	for i, ns := range replicas[1:] {
+		for k := range numKeys {
+			key := fmt.Sprintf("key-%d", k)
+
+			baseScalar, baseOK := metadatadb.NewScalar[string](base, "sc-"+key).Get()
+			scalar, ok := metadatadb.NewScalar[string](ns, "sc-"+key).Get()
+			assert.Equal(t, baseOK, ok, "replica %d scalar sc-%s presence", i+1, key)
+			assert.Equal(t, baseScalar, scalar, "replica %d scalar sc-%s", i+1, key)
+
+			assert.Equal(t,
+				metadatadb.NewInt(base, "int-"+key).Get(),
+				metadatadb.NewInt(ns, "int-"+key).Get(), "replica %d int-%s", i+1, key)
+			assert.Equal(t,
+				metadatadb.NewSet[string](base, "set-"+key).Members(),
+				metadatadb.NewSet[string](ns, "set-"+key).Members(), "replica %d set-%s", i+1, key)
+			assert.Equal(t,
+				metadatadb.NewMap[string, string](base, "map-"+key).Entries(),
+				metadatadb.NewMap[string, string](ns, "map-"+key).Entries(), "replica %d map-%s", i+1, key)
+			assert.Equal(t,
+				metadatadb.NewInt(base, "mono-int-"+key).Get(),
+				metadatadb.NewInt(ns, "mono-int-"+key).Get(), "replica %d mono-int-%s", i+1, key)
+			assert.Equal(t,
+				metadatadb.NewSet[string](base, "mono-set-"+key).Members(),
+				metadatadb.NewSet[string](ns, "mono-set-"+key).Members(), "replica %d mono-set-%s", i+1, key)
+			// Element order must match too: canonical replay order is total.
+			assert.Equal(t,
+				metadatadb.NewList[string](base, "mono-list-"+key).Entries(),
+				metadatadb.NewList[string](ns, "mono-list-"+key).Entries(), "replica %d mono-list-%s", i+1, key)
+		}
+	}
 }
 
 func soakWorker(
