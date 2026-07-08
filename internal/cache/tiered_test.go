@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -631,6 +633,203 @@ func TestTieredDivergentValidatorPermutations(t *testing.T) {
 				assert.Equal(t, pinned, readAllAndClose(t, r2))
 			})
 		})
+	}
+}
+
+func eventually(t *testing.T, fn func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if fn() {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("condition not met before deadline")
+}
+
+func tierHolds(ctx context.Context, t *testing.T, c cache.Cache, key cache.Key, wantBody []byte, wantETag string) bool {
+	t.Helper()
+	r, headers, err := c.Open(ctx, key)
+	if err != nil {
+		return false
+	}
+	got := readAllAndClose(t, r)
+	return string(got) == string(wantBody) && headers.Get(cache.ETagKey) == wantETag
+}
+
+func TestTieredRangedReadHealsDivergentTier0(t *testing.T) {
+	pinned := []byte("abcdefghij")
+	stale := []byte("0123456789")
+
+	for _, validator := range []struct {
+		name string
+		opts []cache.Option
+	}{
+		{"IfRange", []cache.Option{cache.Range(2, 6), cache.IfRange(`"pinned-etag"`)}},
+		{"IfMatch", []cache.Option{cache.Range(2, 6), cache.IfMatch(`"pinned-etag"`)}},
+	} {
+		t.Run(validator.name, func(t *testing.T) {
+			_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelDebug})
+			store := newMetadataStore(ctx)
+			lower, err := cache.NewMemory(ctx, cache.MemoryConfig{LimitMB: 1024, MaxTTL: time.Hour})
+			assert.NoError(t, err)
+			upper, err := cache.NewMemory(ctx, cache.MemoryConfig{LimitMB: 1024, MaxTTL: time.Hour})
+			assert.NoError(t, err)
+			tiered := cache.MaybeNewTiered(ctx, []cache.Cache{lower, upper}, store)
+			defer tiered.Close()
+
+			key := cache.NewKey("heal-ranged")
+			seedTier(ctx, t, tiered, key, stale, "stale-etag")
+			seedTier(ctx, t, tiered, key, pinned, "pinned-etag")
+			seedTier(ctx, t, lower, key, stale, "stale-etag")
+
+			r, headers, err := tiered.Open(ctx, key, validator.opts...)
+			assert.NoError(t, err)
+			assert.Equal(t, []byte("cdef"), readAllAndClose(t, r))
+			assert.Equal(t, `"pinned-etag"`, headers.Get(cache.ETagKey))
+
+			eventually(t, func() bool { return tierHolds(ctx, t, lower, key, pinned, `"pinned-etag"`) })
+
+			assert.NoError(t, upper.Delete(ctx, key))
+			r, headers, err = tiered.Open(ctx, key)
+			assert.NoError(t, err)
+			assert.Equal(t, pinned, readAllAndClose(t, r))
+			assert.Equal(t, `"pinned-etag"`, headers.Get(cache.ETagKey))
+		})
+	}
+}
+
+func TestTieredRangedReadKeepsNewerTier0(t *testing.T) {
+	newer := []byte("abcdefghij")
+	lagging := []byte("0123456789")
+
+	_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelDebug})
+	store := newMetadataStore(ctx)
+	lower, err := cache.NewMemory(ctx, cache.MemoryConfig{LimitMB: 1024, MaxTTL: time.Hour})
+	assert.NoError(t, err)
+	upper, err := cache.NewMemory(ctx, cache.MemoryConfig{LimitMB: 1024, MaxTTL: time.Hour})
+	assert.NoError(t, err)
+	tiered := cache.MaybeNewTiered(ctx, []cache.Cache{lower, upper}, store)
+	defer tiered.Close()
+
+	key := cache.NewKey("heal-newer-tier0")
+	seedTier(ctx, t, lower, key, newer, "newer-etag")
+	seedTier(ctx, t, upper, key, lagging, "lagging-etag")
+	assert.NoError(t, tieredETags(store, "").Set(key, `"newer-etag"`))
+
+	r, headers, err := tiered.Open(ctx, key, cache.Range(2, 6), cache.IfRange(`"lagging-etag"`))
+	assert.NoError(t, err)
+	assert.Equal(t, []byte("2345"), readAllAndClose(t, r))
+	assert.Equal(t, `"lagging-etag"`, headers.Get(cache.ETagKey))
+
+	time.Sleep(100 * time.Millisecond)
+	assert.True(t, tierHolds(ctx, t, lower, key, newer, `"newer-etag"`))
+}
+
+type gatedCache struct {
+	cache.Cache
+	opens   atomic.Int32
+	gate    chan struct{}
+	reached chan struct{}
+	once    sync.Once
+}
+
+func (c *gatedCache) Open(ctx context.Context, key cache.Key, opts ...cache.Option) (io.ReadCloser, http.Header, error) {
+	r, h, err := c.Cache.Open(ctx, key, opts...)
+	if err == nil && c.opens.Add(1) == 2 {
+		return &gatedReader{ReadCloser: r, gate: c.gate, reached: c.reached, once: &c.once}, h, nil
+	}
+	return r, h, err
+}
+
+type gatedReader struct {
+	io.ReadCloser
+	gate    chan struct{}
+	reached chan struct{}
+	once    *sync.Once
+}
+
+func (g *gatedReader) Read(p []byte) (int, error) {
+	g.once.Do(func() {
+		close(g.reached)
+		<-g.gate
+	})
+	return g.ReadCloser.Read(p) //nolint:wrapcheck
+}
+
+type recordingCache struct {
+	cache.Cache
+	armed     atomic.Bool
+	committed chan struct{}
+	aborted   chan struct{}
+}
+
+func (c *recordingCache) Create(ctx context.Context, key cache.Key, headers http.Header, ttl time.Duration, opts ...cache.Option) (cache.Writer, error) {
+	w, err := c.Cache.Create(ctx, key, headers, ttl, opts...)
+	if err == nil && c.armed.Load() {
+		return &recordingWriter{Writer: w, committed: c.committed, aborted: c.aborted}, nil
+	}
+	return w, err
+}
+
+type recordingWriter struct {
+	cache.Writer
+	committed chan struct{}
+	aborted   chan struct{}
+	once      sync.Once
+}
+
+func (w *recordingWriter) Close() error {
+	w.once.Do(func() { close(w.committed) })
+	return w.Writer.Close() //nolint:wrapcheck
+}
+
+func (w *recordingWriter) Abort(err error) error {
+	w.once.Do(func() { close(w.aborted) })
+	return w.Writer.Abort(err) //nolint:wrapcheck
+}
+
+func TestTieredRangedReadHealAbortsAfterConcurrentDelete(t *testing.T) {
+	pinned := []byte("abcdefghij")
+	stale := []byte("0123456789")
+
+	_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelDebug})
+	store := newMetadataStore(ctx)
+	lowerMem, err := cache.NewMemory(ctx, cache.MemoryConfig{LimitMB: 1024, MaxTTL: time.Hour})
+	assert.NoError(t, err)
+	lower := &recordingCache{Cache: lowerMem, committed: make(chan struct{}), aborted: make(chan struct{})}
+	upperMem, err := cache.NewMemory(ctx, cache.MemoryConfig{LimitMB: 1024, MaxTTL: time.Hour})
+	assert.NoError(t, err)
+	upper := &gatedCache{Cache: upperMem, gate: make(chan struct{}), reached: make(chan struct{})}
+	tiered := cache.MaybeNewTiered(ctx, []cache.Cache{lower, upper}, store)
+	defer tiered.Close()
+
+	key := cache.NewKey("heal-delete-race")
+	seedTier(ctx, t, tiered, key, stale, "stale-etag")
+	seedTier(ctx, t, tiered, key, pinned, "pinned-etag")
+	seedTier(ctx, t, lowerMem, key, stale, "stale-etag")
+	lower.armed.Store(true)
+
+	r, _, err := tiered.Open(ctx, key, cache.Range(2, 6), cache.IfRange(`"pinned-etag"`))
+	assert.NoError(t, err)
+	assert.Equal(t, []byte("cdef"), readAllAndClose(t, r))
+
+	select {
+	case <-upper.reached:
+	case <-time.After(2 * time.Second):
+		close(upper.gate)
+		t.Fatal("heal did not open source")
+	}
+	assert.NoError(t, tieredETags(store, "").Delete(key))
+	close(upper.gate)
+
+	select {
+	case <-lower.aborted:
+	case <-lower.committed:
+		t.Fatal("heal committed after the etag entry was removed (resurrection)")
+	case <-time.After(2 * time.Second):
+		t.Fatal("heal did not finish")
 	}
 }
 
