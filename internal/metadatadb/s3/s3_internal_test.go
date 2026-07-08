@@ -306,6 +306,13 @@ func TestLegacySeed(t *testing.T) {
 	assert.Equal(t, int64(43), v)
 }
 
+func TestFlushNSSkipsInitialTick(t *testing.T) {
+	bucket := s3clienttest.Start(t)
+	b := newBackend(t, bucket)
+	assert.False(t, b.namespaceForFlush("flush-first").runInitialTick)
+	assert.True(t, b.namespace("apply-first").runInitialTick)
+}
+
 func TestEmptyRootNamespace(t *testing.T) {
 	bucket := s3clienttest.Start(t)
 	b := newBackend(t, bucket)

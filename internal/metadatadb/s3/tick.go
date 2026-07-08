@@ -53,6 +53,10 @@ func (n *namespace) flush(ctx context.Context) error {
 // deadline aborts it promptly instead of occupying the loop, while backend
 // Close still cancels it.
 func (n *namespace) flushTick(ctx context.Context) error {
+	// Carry the backend logger so the tick logs like a background tick even
+	// when the Flush caller's context has none, while keeping the caller's
+	// deadline for cancellation.
+	ctx = logging.ContextWithLogger(ctx, logging.FromContext(n.b.ctx))
 	tickCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	stop := context.AfterFunc(n.b.ctx, cancel)
@@ -83,8 +87,11 @@ func (n *namespace) runLoop() {
 	}
 
 	// Immediate first tick so a restarted replica converges without waiting
-	// a full interval.
-	if n.b.initialTick {
+	// a full interval. A Flush-created namespace skips this: its own tick is
+	// the initial convergence and runs under the caller's deadline, so this
+	// background tick under n.b.ctx cannot wedge the loop past an abandoned
+	// Flush.
+	if n.runInitialTick {
 		background()
 	}
 

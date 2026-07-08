@@ -134,7 +134,7 @@ func (b *Backend) Query(_ context.Context, namespace string, q metadatadb.ReadOp
 // Flush runs a sync tick now and returns its error. Its LIST starts after
 // this call, so every write durable before the call is observed.
 func (b *Backend) Flush(ctx context.Context, namespace string) error {
-	return b.namespace(namespace).flush(ctx)
+	return b.namespaceForFlush(namespace).flush(ctx)
 }
 
 // Close stops all per-namespace goroutines. It is idempotent.
@@ -152,18 +152,31 @@ func (b *Backend) Close(_ context.Context) error {
 }
 
 func (b *Backend) namespace(name string) *namespace {
+	return b.getNamespace(name, true)
+}
+
+// namespaceForFlush creates the namespace without the unconditional startup
+// tick: when a Flush is the first operation, its own tick is the initial
+// convergence and runs under the caller's deadline, so a separate background
+// tick under n.b.ctx cannot wedge the loop past an abandoned Flush.
+func (b *Backend) namespaceForFlush(name string) *namespace {
+	return b.getNamespace(name, false)
+}
+
+func (b *Backend) getNamespace(name string, runInitialTick bool) *namespace {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if n, ok := b.ns[name]; ok {
 		return n
 	}
 	n := &namespace{
-		b:       b,
-		name:    name,
-		state:   make(map[string]any),
-		cache:   make(map[string]*cacheEntry),
-		applyCh: make(chan *applyReq, 64),
-		flushCh: make(chan flushReq),
+		b:              b,
+		name:           name,
+		state:          make(map[string]any),
+		cache:          make(map[string]*cacheEntry),
+		applyCh:        make(chan *applyReq, 64),
+		flushCh:        make(chan flushReq),
+		runInitialTick: b.initialTick && runInitialTick,
 	}
 	b.ns[name] = n
 	if !b.closed {
@@ -180,6 +193,10 @@ type namespace struct {
 
 	applyCh chan *applyReq
 	flushCh chan flushReq
+
+	// runInitialTick runs one background tick at loop start; cleared when the
+	// namespace is created by Flush so its own tick is the initial convergence.
+	runInitialTick bool
 
 	// stateMu guards state and cache; the tick's replay runs unlocked
 	// between its input-snapshot and swap critical sections.
