@@ -46,8 +46,13 @@ func (m *MemoryBackend) Apply(_ context.Context, namespace string, ops ...Op) er
 
 func (m *MemoryBackend) Query(_ context.Context, namespace string, q ReadOp, target any) error {
 	m.mu.RLock()
-	defer m.mu.RUnlock()
-	result := queryState(m.ns(namespace), q)
+	// Do not lazy-create the namespace under a read lock — that races with
+	// concurrent Apply on a different namespace. queryState handles a nil
+	// map by returning zero values, which is the right answer for a
+	// namespace that has never been written.
+	ns := m.state[namespace]
+	result := queryState(ns, q)
+	m.mu.RUnlock()
 	return errors.Wrap(jsonUnmarshalInto(result, target), "memory query")
 }
 
