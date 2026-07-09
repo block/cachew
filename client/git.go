@@ -201,12 +201,36 @@ type GitSnapshotMetadata struct {
 // returns the snapshot's freshen metadata, read from the discovery response.
 // Returns os.ErrNotExist when the server has no snapshot available.
 func (c *Client) DownloadGitSnapshot(ctx context.Context, repoURL string, dst io.WriterAt, chunkSize int64, concurrency int) (GitSnapshotMetadata, error) {
+	return c.downloadGitSnapshot(repoURL, func(reader *gitArtifactRangeReader) error {
+		return errors.WithStack(ParallelGet(ctx, reader, NewKey(repoURL), dst, chunkSize, concurrency))
+	})
+}
+
+// DownloadGitSnapshotStream fetches the working-tree snapshot for repoURL and
+// writes it to w as a sequential byte stream, fetching up to concurrency
+// chunkSize-byte ranges concurrently and reordering them through a spill file
+// in spillDir (see [ParallelGetStream]). When concurrency is 1 the single
+// response is streamed directly to w with no spill file; a server without
+// range support falls back to a single full download, which still round-trips
+// through the spill file. It returns the snapshot's freshen metadata, read
+// from the discovery response. Returns os.ErrNotExist when the server has no
+// snapshot available.
+func (c *Client) DownloadGitSnapshotStream(ctx context.Context, repoURL string, w io.Writer, chunkSize int64, concurrency int, spillDir string) (GitSnapshotMetadata, error) {
+	return c.downloadGitSnapshot(repoURL, func(reader *gitArtifactRangeReader) error {
+		return errors.WithStack(ParallelGetStream(ctx, reader, NewKey(repoURL), w, chunkSize, concurrency, spillDir))
+	})
+}
+
+// downloadGitSnapshot resolves repoURL's snapshot endpoint, runs fetch against
+// a metadata-recording RangeReader for it, and returns the recorded freshen
+// metadata.
+func (c *Client) downloadGitSnapshot(repoURL string, fetch func(*gitArtifactRangeReader) error) (GitSnapshotMetadata, error) {
 	endpoint, err := gitEndpointURL(c.baseURL, repoURL, "snapshot.tar.zst")
 	if err != nil {
 		return GitSnapshotMetadata{}, err
 	}
 	reader := &gitArtifactRangeReader{client: c, endpoint: endpoint}
-	if err := ParallelGet(ctx, reader, NewKey(repoURL), dst, chunkSize, concurrency); err != nil {
+	if err := fetch(reader); err != nil {
 		return GitSnapshotMetadata{}, errors.Wrap(err, "download snapshot")
 	}
 	return reader.metadata(), nil

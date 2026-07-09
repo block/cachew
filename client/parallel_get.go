@@ -91,6 +91,39 @@ func ParallelGet(ctx context.Context, c RangeReader, key Key, dst io.WriterAt, c
 	return errors.Wrap(eg.Wait(), "parallel get")
 }
 
+// ParallelGetStream downloads an object from any Range-capable RangeReader
+// into w as a sequential byte stream, while still fetching chunkSize-byte
+// chunks with up to concurrency concurrent requests. Out-of-order chunks are
+// reordered through an unlinked spill file created in spillDir rather than
+// held in RAM; consumed regions of the spill file are hole-punched where the
+// platform supports it, so its disk footprint tracks the gap between download
+// and consumption. A concurrency of 1 streams the single response directly to
+// w and touches no disk. Revision-safety semantics match [ParallelGet]: a
+// partially written w must be discarded by the caller on failure.
+func ParallelGetStream(ctx context.Context, c RangeReader, key Key, w io.Writer, chunkSize int64, concurrency int, spillDir string) error {
+	// chunkSize is irrelevant to the single-request path, so it is validated
+	// by ParallelGet only when actually chunking.
+	if concurrency <= 1 {
+		rc, _, err := c.Open(ctx, key)
+		if err != nil {
+			return errors.Wrap(err, "parallel get: full read")
+		}
+		_, copyErr := io.Copy(w, rc)
+		return errors.Wrap(errors.Join(copyErr, rc.Close()), "parallel get")
+	}
+
+	sb, err := newSpillBuffer(spillDir)
+	if err != nil {
+		return errors.Wrap(err, "parallel get")
+	}
+	eg, egCtx := errgroup.WithContext(ctx)
+	eg.Go(func() error {
+		return sb.closeWrite(ParallelGet(egCtx, c, key, sb, chunkSize, concurrency))
+	})
+	eg.Go(func() error { return sb.streamTo(egCtx, w) })
+	return errors.Join(eg.Wait(), sb.Close())
+}
+
 func fullRead(ctx context.Context, c RangeReader, key Key, dst io.WriterAt) error {
 	rc, _, err := c.Open(ctx, key)
 	if err != nil {

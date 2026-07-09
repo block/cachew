@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/alecthomas/errors"
@@ -15,6 +16,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/block/cachew/client"
 	"github.com/block/cachew/internal/snapshot"
@@ -116,99 +118,77 @@ func (c *GitRestoreCmd) Run(ctx context.Context, api *client.Client) error {
 	return nil
 }
 
-// fetchAndExtractSnapshot downloads the snapshot and extracts it into the target
-// directory, returning its freshen metadata (commit and bundle URL). With a
-// download concurrency above 1 it downloads in parallel into a temp file, since
-// ParallelGet needs a WriterAt; otherwise it streams the single response
-// directly into extraction.
+// fetchAndExtractSnapshot streams the snapshot download straight into
+// extraction, overlapping the two, and returns its freshen metadata (commit
+// and bundle URL). Concurrent range requests are reordered through a spill
+// file rather than staging a full temp copy of the snapshot (see
+// [client.ParallelGetStream]). Because extraction overlaps the download, a
+// failed restore may leave the target directory partially extracted; callers
+// must treat it as disposable on error, as with the streaming restores that
+// preceded parallel downloads.
 func (c *GitRestoreCmd) fetchAndExtractSnapshot(ctx context.Context, api *client.Client) (commit, bundleURL string, err error) {
-	if c.DownloadConcurrency > 1 {
-		return c.parallelFetchAndExtract(ctx, api)
+	// Stage the spill file on the same filesystem as the restore target so a
+	// small or separate /tmp can't fail a restore the target directory has
+	// room for. The parent of c.Directory shares its filesystem and is created
+	// by extraction anyway.
+	spillDir := filepath.Dir(c.Directory)
+	if err := os.MkdirAll(spillDir, 0o750); err != nil {
+		return "", "", errors.Wrap(err, "create snapshot spill dir")
 	}
-	return c.streamFetchAndExtract(ctx, api)
-}
 
-// streamFetchAndExtract downloads the snapshot in a single request and pipes the
-// response body straight into extraction, overlapping download and extraction.
-func (c *GitRestoreCmd) streamFetchAndExtract(ctx context.Context, api *client.Client) (string, string, error) {
-	var snap *client.GitSnapshot
-	if err := inSpan(ctx, "cachew.download_snapshot",
-		[]attribute.KeyValue{attribute.String("cachew.repo_url", c.RepoURL)},
-		func(ctx context.Context) error {
-			downloadStart := time.Now()
-			s, err := api.OpenGitSnapshot(ctx, c.RepoURL)
-			if err != nil {
-				return err //nolint:wrapcheck // wrapped by caller
-			}
-			snap = s
-			trace.SpanFromContext(ctx).SetAttributes(
-				attribute.String("cachew.snapshot_commit", s.Commit),
-				attribute.String("cachew.bundle_url", s.BundleURL),
-				attribute.Float64("cachew.elapsed_seconds", time.Since(downloadStart).Seconds()),
-			)
-			return nil
-		}); err != nil {
-		return "", "", err
-	}
-	defer snap.Close()
-
-	if err := c.extract(ctx, snap.Body); err != nil {
-		return "", "", err
-	}
-	return snap.Commit, snap.BundleURL, nil
-}
-
-// parallelFetchAndExtract downloads the snapshot into a temp file using bounded
-// concurrent range requests, then extracts from the file. ParallelGet writes via
-// WriteAt so it cannot stream into extraction; the temp file is removed on
-// return.
-func (c *GitRestoreCmd) parallelFetchAndExtract(ctx context.Context, api *client.Client) (string, string, error) {
-	// Stage the temp snapshot on the same filesystem as the restore target so a
-	// small or separate /tmp can't fail a restore the target directory has room
-	// for. The parent of c.Directory shares its filesystem and is created by
-	// extraction anyway.
-	tmpDir := filepath.Dir(c.Directory)
-	if err := os.MkdirAll(tmpDir, 0o750); err != nil {
-		return "", "", errors.Wrap(err, "create snapshot temp dir")
-	}
-	tmp, err := os.CreateTemp(tmpDir, ".cachew-snapshot-*.tar.zst")
-	if err != nil {
-		return "", "", errors.Wrap(err, "create snapshot temp file")
-	}
-	defer func() {
-		_ = tmp.Close()
-		_ = os.Remove(tmp.Name()) //nolint:gosec // name is from os.CreateTemp, not external input
-	}()
-
+	pr, pw := io.Pipe()
 	var meta client.GitSnapshotMetadata
-	if err := inSpan(ctx, "cachew.download_snapshot",
-		[]attribute.KeyValue{
-			attribute.String("cachew.repo_url", c.RepoURL),
-			attribute.Int("cachew.download_concurrency", c.DownloadConcurrency),
-			attribute.Int("cachew.download_chunk_size_mb", c.DownloadChunkSizeMB),
-		},
-		func(ctx context.Context) error {
-			downloadStart := time.Now()
-			m, err := api.DownloadGitSnapshot(ctx, c.RepoURL, tmp, int64(c.DownloadChunkSizeMB)<<20, c.DownloadConcurrency)
-			if err != nil {
-				return err //nolint:wrapcheck // wrapped by caller
-			}
-			meta = m
-			trace.SpanFromContext(ctx).SetAttributes(
-				attribute.String("cachew.snapshot_commit", m.Commit),
-				attribute.String("cachew.bundle_url", m.BundleURL),
-				attribute.Float64("cachew.elapsed_seconds", time.Since(downloadStart).Seconds()),
-			)
-			return nil
-		}); err != nil {
-		return "", "", err
+	// Whichever side of the pipe fails first is the root cause: its failure is
+	// recorded before it triggers the teardown (pipe close, group cancel) that
+	// makes the other side fail with an echo such as a closed pipe, a cancelled
+	// request, or a killed tar process.
+	var rootCause error
+	var rootOnce sync.Once
+	record := func(err error) {
+		if err != nil {
+			rootOnce.Do(func() { rootCause = err })
+		}
 	}
-
-	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
-		return "", "", errors.Wrap(err, "rewind snapshot temp file")
-	}
-	if err := c.extract(ctx, tmp); err != nil {
-		return "", "", err
+	eg, egCtx := errgroup.WithContext(ctx)
+	eg.Go(func() error {
+		downloadErr := inSpan(egCtx, "cachew.download_snapshot",
+			[]attribute.KeyValue{
+				attribute.String("cachew.repo_url", c.RepoURL),
+				attribute.Int("cachew.download_concurrency", c.DownloadConcurrency),
+				attribute.Int("cachew.download_chunk_size_mb", c.DownloadChunkSizeMB),
+			},
+			func(ctx context.Context) error {
+				downloadStart := time.Now()
+				m, err := api.DownloadGitSnapshotStream(ctx, c.RepoURL, pw,
+					int64(c.DownloadChunkSizeMB)<<20, c.DownloadConcurrency, spillDir)
+				if err != nil {
+					return err //nolint:wrapcheck // wrapped by caller
+				}
+				meta = m
+				trace.SpanFromContext(ctx).SetAttributes(
+					attribute.String("cachew.snapshot_commit", m.Commit),
+					attribute.String("cachew.bundle_url", m.BundleURL),
+					attribute.Float64("cachew.elapsed_seconds", time.Since(downloadStart).Seconds()),
+				)
+				return nil
+			})
+		record(downloadErr)
+		pw.CloseWithError(downloadErr)
+		return downloadErr
+	})
+	eg.Go(func() error {
+		extractErr := c.extract(egCtx, pr)
+		record(extractErr)
+		_ = pr.Close()
+		return extractErr
+	})
+	if eg.Wait() != nil {
+		// External cancellation fails both sides with unhelpful echoes, so
+		// report it as itself for errors.Is(context.Canceled) callers.
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return "", "", errors.WithStack(ctxErr)
+		}
+		return "", "", rootCause
 	}
 	return meta.Commit, meta.BundleURL, nil
 }

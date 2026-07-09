@@ -1,6 +1,7 @@
 package cache_test
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"log/slog"
@@ -65,6 +66,11 @@ func TestParallelGet(t *testing.T) {
 			err := cache.ParallelGet(ctx, c, key, &dst, tt.chunkSize, tt.concurrency)
 			assert.NoError(t, err)
 			assert.Equal(t, content, dst.buf)
+
+			var stream bytes.Buffer
+			err = cache.ParallelGetStream(ctx, c, key, &stream, tt.chunkSize, tt.concurrency, t.TempDir())
+			assert.NoError(t, err)
+			assert.Equal(t, content, stream.Bytes())
 		})
 	}
 }
@@ -86,6 +92,10 @@ func TestParallelGetEmptyObject(t *testing.T) {
 		var dst bufferAt
 		assert.NoError(t, cache.ParallelGet(ctx, c, key, &dst, 100, concurrency))
 		assert.Equal(t, 0, len(dst.buf))
+
+		var stream bytes.Buffer
+		assert.NoError(t, cache.ParallelGetStream(ctx, c, key, &stream, 100, concurrency, t.TempDir()))
+		assert.Equal(t, 0, stream.Len())
 	}
 }
 
@@ -97,5 +107,8 @@ func TestParallelGetNotFound(t *testing.T) {
 
 	var dst bufferAt
 	err = cache.ParallelGet(ctx, c, cache.NewKey("missing"), &dst, 100, 4)
+	assert.IsError(t, err, os.ErrNotExist)
+
+	err = cache.ParallelGetStream(ctx, c, cache.NewKey("missing"), &bytes.Buffer{}, 100, 4, t.TempDir())
 	assert.IsError(t, err, os.ErrNotExist)
 }

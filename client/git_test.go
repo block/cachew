@@ -175,14 +175,11 @@ func TestOpenGitBundleNotFound(t *testing.T) {
 	assert.True(t, errors.Is(err, os.ErrNotExist))
 }
 
-func TestDownloadGitSnapshotParallel(t *testing.T) {
-	body := make([]byte, 1000)
-	for i := range body {
-		body[i] = byte(i % 251)
-	}
-	const etag = `"snap-v1"`
-
-	var requests atomic.Int64
+// newSnapshotRangeServer serves body as a ranged snapshot endpoint, counting
+// requests. ServeContent honours Range/If-Range against the ETag, so it
+// returns 206 + Content-Range for the chunked requests ParallelGet makes.
+func newSnapshotRangeServer(t *testing.T, body []byte, etag string, requests *atomic.Int64) *httptest.Server {
+	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, "/git/github.com/org/repo/snapshot.tar.zst", r.URL.Path)
 		requests.Add(1)
@@ -190,11 +187,20 @@ func TestDownloadGitSnapshotParallel(t *testing.T) {
 		w.Header().Set("ETag", etag)
 		w.Header().Set(client.SnapshotCommitHeader, "deadbeef")
 		w.Header().Set(client.BundleURLHeader, "/git/github.com/org/repo/snapshot.bundle?base=deadbeef")
-		// ServeContent honours Range/If-Range against the ETag set above, so it
-		// returns 206 + Content-Range for the chunked requests ParallelGet makes.
 		http.ServeContent(w, r, "snapshot.tar.zst", time.Time{}, bytes.NewReader(body))
 	}))
-	defer srv.Close()
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func TestDownloadGitSnapshotParallel(t *testing.T) {
+	body := make([]byte, 1000)
+	for i := range body {
+		body[i] = byte(i % 251)
+	}
+
+	var requests atomic.Int64
+	srv := newSnapshotRangeServer(t, body, `"snap-v1"`, &requests)
 
 	api := client.NewWithHTTPClient(srv.URL, srv.Client())
 	var dst bufferAt
@@ -206,6 +212,75 @@ func TestDownloadGitSnapshotParallel(t *testing.T) {
 	assert.Equal(t, "deadbeef", meta.Commit)
 	assert.Equal(t, "/git/github.com/org/repo/snapshot.bundle?base=deadbeef", meta.BundleURL)
 	assert.True(t, requests.Load() > 1, "expected multiple range requests, got %d", requests.Load())
+}
+
+func TestDownloadGitSnapshotStreamParallel(t *testing.T) {
+	body := make([]byte, 1000)
+	for i := range body {
+		body[i] = byte(i % 251)
+	}
+
+	var requests atomic.Int64
+	srv := newSnapshotRangeServer(t, body, `"snap-v1"`, &requests)
+
+	api := client.NewWithHTTPClient(srv.URL, srv.Client())
+	var out bytes.Buffer
+	meta, err := api.DownloadGitSnapshotStream(context.Background(), "https://github.com/org/repo", &out, 128, 4, t.TempDir())
+	assert.NoError(t, err)
+	assert.Equal(t, body, out.Bytes())
+	assert.Equal(t, "deadbeef", meta.Commit)
+	assert.Equal(t, "/git/github.com/org/repo/snapshot.bundle?base=deadbeef", meta.BundleURL)
+	assert.True(t, requests.Load() > 1, "expected multiple range requests, got %d", requests.Load())
+}
+
+func TestDownloadGitSnapshotStreamSingleRequest(t *testing.T) {
+	body := make([]byte, 1000)
+	for i := range body {
+		body[i] = byte(i % 251)
+	}
+
+	var requests atomic.Int64
+	srv := newSnapshotRangeServer(t, body, `"snap-v1"`, &requests)
+
+	api := client.NewWithHTTPClient(srv.URL, srv.Client())
+	var out bytes.Buffer
+	meta, err := api.DownloadGitSnapshotStream(context.Background(), "https://github.com/org/repo", &out, 128, 1, t.TempDir())
+	assert.NoError(t, err)
+	assert.Equal(t, body, out.Bytes())
+	assert.Equal(t, "deadbeef", meta.Commit)
+	assert.Equal(t, int64(1), requests.Load())
+}
+
+func TestDownloadGitSnapshotStreamFallsBackWithoutRange(t *testing.T) {
+	body := []byte("full body, server ignores ranges")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		// No ETag and no range handling: always answer the full object with 200,
+		// mimicking an older server. ParallelGetStream must fall back to a
+		// single read through the spill file.
+		w.Header().Set("Content-Type", "application/zstd")
+		w.Header().Set(client.SnapshotCommitHeader, "cafe")
+		_, _ = w.Write(body) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	api := client.NewWithHTTPClient(srv.URL, srv.Client())
+	var out bytes.Buffer
+	meta, err := api.DownloadGitSnapshotStream(context.Background(), "https://github.com/org/repo", &out, 8, 4, t.TempDir())
+	assert.NoError(t, err)
+	assert.Equal(t, body, out.Bytes())
+	assert.Equal(t, "cafe", meta.Commit)
+}
+
+func TestDownloadGitSnapshotStreamNotFound(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	api := client.NewWithHTTPClient(srv.URL, srv.Client())
+	var out bytes.Buffer
+	_, err := api.DownloadGitSnapshotStream(context.Background(), "https://github.com/org/repo", &out, 8, 4, t.TempDir())
+	assert.True(t, errors.Is(err, os.ErrNotExist))
 }
 
 func TestDownloadGitSnapshotFallsBackWithoutRange(t *testing.T) {

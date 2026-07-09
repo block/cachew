@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/alecthomas/assert/v2"
+	"github.com/alecthomas/errors"
 
 	"github.com/block/cachew/client"
 )
@@ -247,6 +248,62 @@ func TestParallelGetNoETagSizeChangedBetweenRequests(t *testing.T) {
 	err := client.ParallelGet(context.Background(), c, client.NewKey("k"), &dst, 100, 4)
 	assert.NoError(t, err)
 	assert.Equal(t, c.rewritten, dst.buf)
+}
+
+func TestParallelGetStream(t *testing.T) {
+	data := make([]byte, 1000)
+	for i := range data {
+		data[i] = byte(i % 251)
+	}
+
+	tests := []struct {
+		name        string
+		reader      client.RangeReader
+		concurrency int
+		want        []byte
+		wantErrIs   error
+		wantErrText string
+	}{
+		{name: "MultiChunk", reader: &recordingReader{data: data, etag: `"v1"`}, concurrency: 4, want: data},
+		{name: "SingleWorker", reader: &recordingReader{data: data, etag: `"v1"`}, concurrency: 1, want: data},
+		{name: "NoETagFallback", reader: &noETagReader{data: data}, concurrency: 4, want: data},
+		{name: "Empty", reader: &recordingReader{etag: `"v1"`}, concurrency: 4},
+		{name: "ETagMismatch", reader: &rangeFlipReader{data: data, firstETag: `"v1"`, restETag: `"v2"`},
+			concurrency: 4, wantErrText: "object changed during read"},
+		{name: "PreconditionFailed", reader: &ifMatchFlipReader{data: data, firstETag: `"v1"`, restETag: `"v2"`},
+			concurrency: 4, wantErrIs: client.ErrPreconditionFailed},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var out bytes.Buffer
+			err := client.ParallelGetStream(context.Background(), tt.reader, client.NewKey("k"), &out, 100, tt.concurrency, t.TempDir())
+			switch {
+			case tt.wantErrIs != nil:
+				assert.IsError(t, err, tt.wantErrIs)
+			case tt.wantErrText != "":
+				assert.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantErrText)
+			default:
+				assert.NoError(t, err)
+				assert.Equal(t, tt.want, out.Bytes())
+			}
+		})
+	}
+}
+
+type failingWriter struct{ err error }
+
+func (f *failingWriter) Write([]byte) (int, error) { return 0, f.err }
+
+func TestParallelGetStreamWriterError(t *testing.T) {
+	data := make([]byte, 1000)
+	for i := range data {
+		data[i] = byte(i % 251)
+	}
+	c := &recordingReader{data: data, etag: `"v1"`}
+	sinkErr := errors.New("sink failed")
+	err := client.ParallelGetStream(context.Background(), c, client.NewKey("k"), &failingWriter{err: sinkErr}, 100, 4, t.TempDir())
+	assert.IsError(t, err, sinkErr)
 }
 
 func TestParallelGetClient(t *testing.T) {

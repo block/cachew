@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/alecthomas/assert/v2"
+	"github.com/alecthomas/errors"
 
 	"github.com/block/cachew/client"
 )
@@ -168,13 +170,78 @@ func TestGitRestoreSnapshotParallel(t *testing.T) {
 	content, err = os.ReadFile(filepath.Join(dstDir, "subdir", "nested.txt"))
 	assert.NoError(t, err)
 	assert.Equal(t, "nested content", string(content))
+}
 
-	// The temp snapshot is staged on the target filesystem and cleaned up.
-	entries, err := os.ReadDir(filepath.Dir(dstDir))
+func TestGitRestoreMidDownloadFailureSurfacesDownloadError(t *testing.T) {
+	srcDir := t.TempDir()
+	big := make([]byte, 8<<20)
+	_, err := rand.Read(big)
 	assert.NoError(t, err)
-	for _, e := range entries {
-		assert.False(t, strings.HasPrefix(e.Name(), ".cachew-snapshot-"), "temp snapshot left behind: %s", e.Name())
+	initGitRepo(t, srcDir, map[string]string{"big.bin": string(big)})
+	snapshotData := createTarZst(t, srcDir)
+	assert.True(t, len(snapshotData) > 3<<20, "snapshot too small to span multiple chunks: %d", len(snapshotData))
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/snapshot.tar.zst") {
+			http.NotFound(w, r)
+			return
+		}
+		if rng := r.Header.Get("Range"); rng != "" && !strings.HasPrefix(rng, "bytes=0-") {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/zstd")
+		w.Header().Set("ETag", `"snap-v1"`)
+		http.ServeContent(w, r, "snapshot.tar.zst", time.Time{}, bytes.NewReader(snapshotData))
+	}))
+	defer srv.Close()
+
+	dstDir := filepath.Join(t.TempDir(), "restored")
+	cmd := &GitRestoreCmd{
+		RepoURL:             "https://github.com/test/repo",
+		Directory:           dstDir,
+		DownloadConcurrency: 4,
+		DownloadChunkSizeMB: 1,
 	}
+	api := client.NewWithHTTPClient(srv.URL, srv.Client())
+	err = cmd.Run(context.Background(), api)
+	assert.Error(t, err)
+	var statusErr *client.HTTPStatusError
+	assert.True(t, errors.As(err, &statusErr), "expected HTTP status error, got: %v", err)
+	assert.Equal(t, http.StatusInternalServerError, statusErr.StatusCode)
+	assert.NotContains(t, err.Error(), "zstd failed")
+}
+
+func TestGitRestoreCorruptSnapshotSurfacesExtractionError(t *testing.T) {
+	garbage := make([]byte, 8<<20)
+	for i := range garbage {
+		garbage[i] = byte(i % 251)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/snapshot.tar.zst") {
+			w.Header().Set("Content-Type", "application/zstd")
+			w.Header().Set("ETag", `"snap-v1"`)
+			http.ServeContent(w, r, "snapshot.tar.zst", time.Time{}, bytes.NewReader(garbage))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	dstDir := filepath.Join(t.TempDir(), "restored")
+	cmd := &GitRestoreCmd{
+		RepoURL:             "https://github.com/test/repo",
+		Directory:           dstDir,
+		DownloadConcurrency: 4,
+		DownloadChunkSizeMB: 1,
+	}
+	api := client.NewWithHTTPClient(srv.URL, srv.Client())
+	err := cmd.Run(context.Background(), api)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "zstd failed")
+	assert.NotContains(t, err.Error(), "closed pipe")
+	assert.NotContains(t, err.Error(), "context canceled")
 }
 
 func TestGitRestoreWithBundle(t *testing.T) {
