@@ -177,6 +177,49 @@ func TestGitRestoreSnapshotParallel(t *testing.T) {
 	}
 }
 
+func TestGitRestoreIntoExistingDirectory(t *testing.T) {
+	srcDir := t.TempDir()
+	initGitRepo(t, srcDir, map[string]string{"hello.txt": "hello world"})
+	snapshotData := createTarZst(t, srcDir)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/snapshot.tar.zst") {
+			w.Header().Set("Content-Type", "application/zstd")
+			w.Write(snapshotData) //nolint:errcheck
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	dstDir := filepath.Join(t.TempDir(), "restored")
+	assert.NoError(t, os.MkdirAll(dstDir, 0o750))
+	assert.NoError(t, os.WriteFile(filepath.Join(dstDir, "existing.txt"), []byte("keep me"), 0o600))
+
+	cmd := &GitRestoreCmd{
+		RepoURL:   "https://github.com/test/repo",
+		Directory: dstDir,
+	}
+	api := client.NewWithHTTPClient(srv.URL, srv.Client())
+	assert.NoError(t, cmd.Run(context.Background(), api))
+
+	content, err := os.ReadFile(filepath.Join(dstDir, "hello.txt"))
+	assert.NoError(t, err)
+	assert.Equal(t, "hello world", string(content))
+	content, err = os.ReadFile(filepath.Join(dstDir, "existing.txt"))
+	assert.NoError(t, err)
+	assert.Equal(t, "keep me", string(content))
+}
+
+func TestGitRestoreExtractStagesTrailingSlashTarget(t *testing.T) {
+	dstDir := filepath.Join(t.TempDir(), "restored")
+	cmd := &GitRestoreCmd{Directory: dstDir + string(filepath.Separator)}
+	err := cmd.extract(context.Background(), strings.NewReader("not a zstd stream"))
+	assert.Error(t, err)
+	_, err = os.Stat(dstDir)
+	assert.True(t, os.IsNotExist(err), "failed restore must not create the target directory")
+}
+
 func TestGitRestoreWithBundle(t *testing.T) {
 	srcDir := t.TempDir()
 	initGitRepo(t, srcDir, map[string]string{"file.txt": "v1"})

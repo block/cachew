@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -184,42 +185,88 @@ func (c *Client) openGitArtifact(ctx context.Context, repoURL, suffix string) (*
 	}, nil
 }
 
-// GitSnapshotMetadata carries the freshen metadata returned alongside a
-// parallel snapshot download. Commit is the mirror's HEAD SHA at snapshot time
-// (empty for cold serves); BundleURL, when non-empty, points at a delta bundle
-// that brings the snapshot up to the mirror's current HEAD.
-type GitSnapshotMetadata struct {
-	Commit    string
-	BundleURL string
-}
-
-// DownloadGitSnapshot fetches the working-tree snapshot for repoURL into dst,
-// using up to concurrency concurrent range requests of chunkSize bytes each.
-// When concurrency is 1, or the server does not support ranges, it transparently
-// falls back to a single full download. dst is written at non-overlapping
-// offsets via WriteAt (e.g. an *os.File) and the caller owns its lifecycle. It
-// returns the snapshot's freshen metadata, read from the discovery response.
-// Returns os.ErrNotExist when the server has no snapshot available.
-func (c *Client) DownloadGitSnapshot(ctx context.Context, repoURL string, dst io.WriterAt, chunkSize int64, concurrency int) (GitSnapshotMetadata, error) {
+// OpenGitSnapshotParallel downloads the working-tree snapshot for repoURL with
+// up to concurrency concurrent range requests of chunkSize bytes each. It
+// returns as soon as the freshen metadata (Commit, BundleURL) is available,
+// with the download continuing in the background as the caller reads Body, so
+// extraction overlaps the transfer.
+//
+// The caller must Close the returned GitSnapshot, which cancels any in-flight
+// download. A concurrency of 1 streams a single plain request with no
+// buffering; a server without range support falls back to a single full
+// download. Returns os.ErrNotExist when the server has no snapshot.
+func (c *Client) OpenGitSnapshotParallel(ctx context.Context, repoURL string, chunkSize int64, concurrency int) (*GitSnapshot, error) {
+	if concurrency <= 1 {
+		return c.OpenGitSnapshot(ctx, repoURL)
+	}
+	if err := validateParallelParams(chunkSize, concurrency); err != nil {
+		return nil, err
+	}
 	endpoint, err := gitEndpointURL(c.baseURL, repoURL, "snapshot.tar.zst")
 	if err != nil {
-		return GitSnapshotMetadata{}, err
+		return nil, err
 	}
-	reader := &gitArtifactRangeReader{client: c, endpoint: endpoint}
-	if err := ParallelGet(ctx, reader, NewKey(repoURL), dst, chunkSize, concurrency); err != nil {
-		return GitSnapshotMetadata{}, errors.Wrap(err, "download snapshot")
+	reader := &gitArtifactRangeReader{client: c, endpoint: endpoint, discovered: make(chan struct{})}
+
+	ctx, cancel := context.WithCancel(ctx)
+
+	buf := newStreamBuffer(chunkSize, concurrency)
+	done := make(chan error, 1)
+	go func() {
+		err := ParallelGet(ctx, reader, NewKey(repoURL), buf, chunkSize, concurrency)
+		buf.closeWrite(err)
+		done <- errors.Wrap(err, "download snapshot")
+	}()
+
+	// A small object can finish before discovered is observed, leaving both
+	// channels ready and select picking at random; treat done as "no snapshot"
+	// only when discovery never happened, otherwise let Body drain the buffered
+	// bytes or surface the download error.
+	select {
+	case <-reader.discovered:
+	case err := <-done:
+		if !reader.didDiscover() {
+			cancel()
+			_ = buf.Close() //nolint:errcheck
+			if err == nil {
+				return nil, errors.WithStack(os.ErrNotExist)
+			}
+			return nil, err
+		}
 	}
-	return reader.metadata(), nil
+	headers := reader.discoveryHeaders()
+	return &GitSnapshot{
+		Body:      &cancelReadCloser{ReadCloser: buf, cancel: cancel},
+		Headers:   headers,
+		Commit:    headers.Get(SnapshotCommitHeader),
+		BundleURL: headers.Get(BundleURLHeader),
+	}, nil
+}
+
+// cancelReadCloser cancels the supplied context when Closed, in addition to
+// closing the wrapped reader, so closing a streaming download stops its
+// background goroutine promptly.
+type cancelReadCloser struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+}
+
+func (c *cancelReadCloser) Close() error {
+	c.cancel()
+	return errors.WithStack(c.ReadCloser.Close())
 }
 
 // gitArtifactRangeReader adapts a git artifact endpoint to the RangeReader
-// interface so ParallelGet can fetch it with concurrent range requests. The
-// object's identity is the endpoint URL, so the Key argument is ignored. It
-// records the first response's headers, which carry the snapshot's freshen
-// metadata (delivered on the discovery chunk) that ParallelGet does not surface.
+// interface. The object's identity is the endpoint URL, so the Key argument is
+// ignored. ParallelGet reports the accepted discovery response's headers via
+// observeDiscovery, which carry the snapshot's freshen metadata it does not
+// surface itself.
 type gitArtifactRangeReader struct {
 	client   *Client
 	endpoint string
+
+	// discovered is closed once the discovery response's headers are recorded.
+	discovered chan struct{}
 
 	mu        sync.Mutex
 	discovery http.Header
@@ -238,14 +285,12 @@ func (g *gitArtifactRangeReader) Open(ctx context.Context, _ Key, opts ...Reques
 	}
 	switch resp.StatusCode {
 	case http.StatusOK, http.StatusPartialContent:
-		g.recordDiscovery(resp.Header)
 		return resp.Body, resp.Header, nil
 	case http.StatusNotFound:
 		_, _ = io.Copy(io.Discard, resp.Body) //nolint:errcheck,gosec
 		return nil, nil, errors.Join(os.ErrNotExist, resp.Body.Close())
 	case http.StatusRequestedRangeNotSatisfiable:
 		_, _ = io.Copy(io.Discard, resp.Body) //nolint:errcheck,gosec
-		g.recordDiscovery(resp.Header)
 		return nil, resp.Header, errors.Join(ErrRangeNotSatisfiable, resp.Body.Close())
 	default:
 		_, _ = io.Copy(io.Discard, resp.Body) //nolint:errcheck,gosec
@@ -253,23 +298,39 @@ func (g *gitArtifactRangeReader) Open(ctx context.Context, _ Key, opts ...Reques
 	}
 }
 
-// recordDiscovery stores the first response's headers so the freshen metadata
-// they carry survives after the bodies are consumed.
-func (g *gitArtifactRangeReader) recordDiscovery(h http.Header) {
+// didDiscover reports whether the first response's headers have been recorded.
+func (g *gitArtifactRangeReader) didDiscover() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.discovery != nil
+}
+
+// observeDiscovery stores the accepted discovery response's headers so the
+// freshen metadata they carry survives after the bodies are consumed. Only the
+// first observation is kept: a later etag-less fallback read must not clobber
+// the headers a caller may already hold.
+func (g *gitArtifactRangeReader) observeDiscovery(h http.Header) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if g.discovery == nil {
 		g.discovery = h.Clone()
+		close(g.discovered)
 	}
 }
 
-func (g *gitArtifactRangeReader) metadata() GitSnapshotMetadata {
+// discoveryHeaders returns the first response's headers with transport-layer
+// headers stripped. The discovery response is a 206 for only the first chunk,
+// so Content-Range/Content-Length are rewritten to describe the full
+// reassembled object streamed on GitSnapshot.Body.
+func (g *gitArtifactRangeReader) discoveryHeaders() http.Header {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	return GitSnapshotMetadata{
-		Commit:    g.discovery.Get(SnapshotCommitHeader),
-		BundleURL: g.discovery.Get(BundleURLHeader),
+	headers := filterHeaders(g.discovery, transportHeaders...)
+	if total, ok := parseContentRangeTotal(headers.Get("Content-Range")); ok {
+		headers.Del("Content-Range")
+		headers.Set("Content-Length", strconv.FormatInt(total, 10))
 	}
+	return headers
 }
 
 // gitEndpointURL builds a /git/{host}/{repoPath}/{suffix} URL from a cachew
