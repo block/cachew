@@ -33,7 +33,7 @@ var bucketNameRe = regexp.MustCompile(`[^a-z0-9-]`)
 // Any stale objects left over from a previous (possibly crashed) run
 // are removed up front, and t.Cleanup removes objects when the test
 // finishes normally.
-func Start(t *testing.T) string {
+func Start(t testing.TB) string {
 	t.Helper()
 
 	t.Setenv("AWS_ACCESS_KEY_ID", Username)
@@ -67,7 +67,7 @@ const modulePrefix = "github.com/block/cachew/"
 // incorporates the calling package path and the test name. This
 // ensures uniqueness across packages even though t.Name() alone does
 // not include the package.
-func bucketName(t *testing.T) string {
+func bucketName(t testing.TB) string {
 	t.Helper()
 
 	// Walk up the call stack past this package to find the caller's function.
@@ -95,7 +95,7 @@ func bucketName(t *testing.T) string {
 }
 
 // CleanBucket removes all objects from the given bucket.
-func CleanBucket(t *testing.T, bucket string) {
+func CleanBucket(t testing.TB, bucket string) {
 	t.Helper()
 	client := Client(t)
 	for obj := range client.ListObjects(t.Context(), bucket, minio.ListObjectsOptions{Recursive: true}) {
@@ -109,7 +109,7 @@ func CleanBucket(t *testing.T, bucket string) {
 }
 
 // Client returns a minio client connected to the test server.
-func Client(t *testing.T) *minio.Client {
+func Client(t testing.TB) *minio.Client {
 	t.Helper()
 	client, err := minio.New(Addr, &minio.Options{
 		Creds:  credentials.NewStaticV4(Username, Password, ""),
@@ -119,7 +119,7 @@ func Client(t *testing.T) *minio.Client {
 	return client
 }
 
-func startContainer(t *testing.T) {
+func startContainer(t testing.TB) {
 	t.Helper()
 	cmd := exec.CommandContext(t.Context(), "docker", "run", "-d",
 		"--name", containerName,
@@ -141,14 +141,14 @@ func startContainer(t *testing.T) {
 	}
 }
 
-func isHealthy(t *testing.T) bool {
+func isHealthy(t testing.TB) bool {
 	t.Helper()
 	client := Client(t)
 	_, err := client.ListBuckets(t.Context())
 	return err == nil
 }
 
-func waitForReady(t *testing.T) {
+func waitForReady(t testing.TB) {
 	t.Helper()
 	client := Client(t)
 	timeout := time.After(30 * time.Second)
