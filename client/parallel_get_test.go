@@ -11,30 +11,38 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/alecthomas/assert/v2"
+	"github.com/alecthomas/errors"
 
 	"github.com/block/cachew/client"
 )
 
+// Compile-time assertion that the concrete Client satisfies the narrow
+// interface ParallelGet drives.
 var _ client.RangeReader = (*client.Client)(nil)
 
-type bufferAt struct {
-	mu  sync.Mutex
-	buf []byte
-}
-
-func (b *bufferAt) WriteAt(p []byte, off int64) (int, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if end := int(off) + len(p); end > len(b.buf) {
-		b.buf = append(b.buf, make([]byte, end-len(b.buf))...)
+func patternBytes(n int) []byte {
+	data := make([]byte, n)
+	for i := range data {
+		data[i] = byte(i % 251)
 	}
-	copy(b.buf[off:], p)
-	return len(p), nil
+	return data
 }
 
+// collect runs ParallelGet into an in-memory WriterAt and returns the
+// reassembled bytes.
+func collect(c client.RangeReader, key client.Key, chunkSize int64, concurrency int) ([]byte, error) {
+	dst := &bufferAt{}
+	err := client.ParallelGet(context.Background(), c, key, dst, chunkSize, concurrency)
+	return dst.buf, err
+}
+
+// rangeFlipReader serves correct byte ranges but reports a different ETag for
+// any chunk past the first, simulating an object rewritten mid-download.
 type rangeFlipReader struct {
 	data      []byte
 	firstETag string
@@ -64,12 +72,14 @@ func (f *rangeFlipReader) Open(_ context.Context, _ client.Key, opts ...client.R
 
 func TestParallelGetETagMismatch(t *testing.T) {
 	c := &rangeFlipReader{data: make([]byte, 1000), firstETag: `"v1"`, restETag: `"v2"`}
-	var dst bufferAt
-	err := client.ParallelGet(context.Background(), c, client.NewKey("k"), &dst, 100, 4)
+	_, err := collect(c, client.NewKey("k"), 100, 4)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "object changed during read")
 }
 
+// ifMatchFlipReader honours If-Match against firstETag on the discovery request
+// but reports restETag (and a 412) for any pinned chunk, modelling a server that
+// enforces If-Match on an object rewritten mid-download.
 type ifMatchFlipReader struct {
 	data      []byte
 	firstETag string
@@ -102,12 +112,14 @@ func (f *ifMatchFlipReader) Open(_ context.Context, _ client.Key, opts ...client
 
 func TestParallelGetPreconditionFailedOnRewrite(t *testing.T) {
 	c := &ifMatchFlipReader{data: make([]byte, 1000), firstETag: `"v1"`, restETag: `"v2"`}
-	var dst bufferAt
-	err := client.ParallelGet(context.Background(), c, client.NewKey("k"), &dst, 100, 4)
+	dst := &bufferAt{}
+	err := client.ParallelGet(context.Background(), c, client.NewKey("k"), dst, 100, 4)
 	assert.IsError(t, err, client.ErrPreconditionFailed)
 	assert.Contains(t, err.Error(), "object changed during read")
 }
 
+// noETagReader serves byte ranges but never sets an ETag, modelling a legacy
+// entry or a RangeReader implementation that omits it.
 type noETagReader struct {
 	data []byte
 }
@@ -128,26 +140,24 @@ func (n *noETagReader) Open(_ context.Context, _ client.Key, opts ...client.Requ
 }
 
 func TestParallelGetNoETagMultiChunk(t *testing.T) {
-	data := make([]byte, 1000)
-	for i := range data {
-		data[i] = byte(i % 251)
-	}
+	data := patternBytes(1000)
 	c := &noETagReader{data: data}
-	var dst bufferAt
-	err := client.ParallelGet(context.Background(), c, client.NewKey("k"), &dst, 100, 4)
+	got, err := collect(c, client.NewKey("k"), 100, 4)
 	assert.NoError(t, err)
-	assert.Equal(t, data, dst.buf)
+	assert.Equal(t, data, got)
 }
 
 func TestParallelGetNoETagSingleChunk(t *testing.T) {
 	data := []byte("0123456789")
 	c := &noETagReader{data: data}
-	var dst bufferAt
-	err := client.ParallelGet(context.Background(), c, client.NewKey("k"), &dst, 100, 4)
+	got, err := collect(c, client.NewKey("k"), 100, 4)
 	assert.NoError(t, err)
-	assert.Equal(t, data, dst.buf)
+	assert.Equal(t, data, got)
 }
 
+// changingSizeReader serves a multi-chunk body with no ETag on the ranged
+// discovery request, then a differently sized body on the subsequent full
+// (non-range) read, modelling an object rewritten between the two requests.
 type changingSizeReader struct {
 	discovery []byte
 	rewritten []byte
@@ -173,11 +183,21 @@ func (c *changingSizeReader) Open(_ context.Context, _ client.Key, opts ...clien
 	return io.NopCloser(bytes.NewReader(c.discovery[start : start+length])), headers, nil
 }
 
+func TestParallelGetNoETagSizeChangedBetweenRequests(t *testing.T) {
+	c := &changingSizeReader{discovery: make([]byte, 1000), rewritten: []byte("changed")}
+	got, err := collect(c, client.NewKey("k"), 100, 4)
+	assert.NoError(t, err)
+	assert.Equal(t, c.rewritten, got)
+}
+
 type openRecord struct {
 	Range   string
 	IfMatch string
 }
 
+// recordingReader serves byte ranges and records the Range and If-Match options
+// of every Open call (both "" for a full, non-ranged read), so tests can assert
+// how the object was fetched and how chunks were pinned.
 type recordingReader struct {
 	data []byte
 	etag string
@@ -209,27 +229,28 @@ func (r *recordingReader) Open(_ context.Context, _ client.Key, opts ...client.R
 	return io.NopCloser(bytes.NewReader(r.data[start : start+length])), headers, nil
 }
 
-func TestParallelGetSingleWorkerFullRead(t *testing.T) {
-	data := make([]byte, 1000)
-	for i := range data {
-		data[i] = byte(i % 251)
-	}
+func TestParallelGetReassembly(t *testing.T) {
+	data := patternBytes(10_000)
 	c := &recordingReader{data: data, etag: `"v1"`}
-	var dst bufferAt
-	err := client.ParallelGet(context.Background(), c, client.NewKey("k"), &dst, 100, 1)
+	got, err := collect(c, client.NewKey("k"), 1000, 4)
 	assert.NoError(t, err)
-	assert.Equal(t, data, dst.buf)
+	assert.Equal(t, data, got)
+}
+
+func TestParallelGetSingleWorkerFullRead(t *testing.T) {
+	data := patternBytes(1000)
+	c := &recordingReader{data: data, etag: `"v1"`}
+	got, err := collect(c, client.NewKey("k"), 100, 1)
+	assert.NoError(t, err)
+	assert.Equal(t, data, got)
 	assert.Equal(t, []openRecord{{}}, c.opens)
 }
 
 func TestParallelGetPinsChunksWithIfMatch(t *testing.T) {
-	data := make([]byte, 1000)
-	for i := range data {
-		data[i] = byte(i % 251)
-	}
+	data := patternBytes(1000)
 	c := &recordingReader{data: data, etag: `"v1"`}
-	var dst bufferAt
-	err := client.ParallelGet(context.Background(), c, client.NewKey("k"), &dst, 100, 4)
+	dst := &bufferAt{}
+	err := client.ParallelGet(context.Background(), c, client.NewKey("k"), dst, 100, 4)
 	assert.NoError(t, err)
 	assert.Equal(t, data, dst.buf)
 
@@ -241,19 +262,189 @@ func TestParallelGetPinsChunksWithIfMatch(t *testing.T) {
 	assert.Equal(t, expected, c.opens)
 }
 
-func TestParallelGetNoETagSizeChangedBetweenRequests(t *testing.T) {
-	c := &changingSizeReader{discovery: make([]byte, 1000), rewritten: []byte("changed")}
-	var dst bufferAt
-	err := client.ParallelGet(context.Background(), c, client.NewKey("k"), &dst, 100, 4)
+func TestParallelGetEmptyObject(t *testing.T) {
+	c := &recordingReader{data: nil, etag: `"v1"`}
+	got, err := collect(c, client.NewKey("k"), 100, 4)
 	assert.NoError(t, err)
-	assert.Equal(t, c.rewritten, dst.buf)
+	assert.Equal(t, 0, len(got))
+}
+
+func TestParallelGetServerIgnoresRange(t *testing.T) {
+	data := patternBytes(1000)
+	c := &ignoreRangeReader{data: data}
+	got, err := collect(c, client.NewKey("k"), 100, 4)
+	assert.NoError(t, err)
+	assert.Equal(t, data, got)
+}
+
+func TestParallelGetOutOfOrderCompletion(t *testing.T) {
+	data := patternBytes(10_000)
+	c := &reorderReader{data: data, etag: `"v1"`, chunkSize: 1000}
+	got, err := collect(c, client.NewKey("k"), 1000, 4)
+	assert.NoError(t, err)
+	assert.Equal(t, data, got)
+}
+
+func TestParallelGetPropagatesOpenError(t *testing.T) {
+	c := &failingChunkReader{data: patternBytes(10_000), etag: `"v1"`, failAtStart: 5000}
+	_, err := collect(c, client.NewKey("k"), 1000, 4)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "boom")
+}
+
+func TestParallelGetRejectsOverlongChunk(t *testing.T) {
+	c := &fullBodyOnChunkReader{data: patternBytes(10_000), etag: `"v1"`}
+	_, err := collect(c, client.NewKey("k"), 1000, 4)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "more than the expected 1000 bytes")
+}
+
+func TestParallelGetRejectsMidflightRangeIgnore(t *testing.T) {
+	c := &midflightRangeIgnoreReader{data: patternBytes(10_000), etag: `"v1"`}
+	_, err := collect(c, client.NewKey("k"), 1000, 4)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "server ignored range")
+}
+
+// bufferAt is an in-memory io.WriterAt that extends like a file, zero-filling
+// gaps, so tests can assert reassembly without touching disk.
+type bufferAt struct {
+	mu  sync.Mutex
+	buf []byte
+}
+
+func (b *bufferAt) WriteAt(p []byte, off int64) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if end := int(off) + len(p); end > len(b.buf) {
+		b.buf = append(b.buf, make([]byte, end-len(b.buf))...)
+	}
+	copy(b.buf[off:], p)
+	return len(p), nil
+}
+
+// fullBodyOnChunkReader honours the discovery range (start 0) with a proper 206
+// but ignores the range on any later chunk, returning the entire object with the
+// same ETag — modelling a backend that degrades to full responses mid-download.
+type fullBodyOnChunkReader struct {
+	data []byte
+	etag string
+}
+
+func (r *fullBodyOnChunkReader) Open(_ context.Context, _ client.Key, opts ...client.RequestOption) (io.ReadCloser, http.Header, error) {
+	size := int64(len(r.data))
+	start, length, outcome := client.NewRequestOptions(opts...).ResolveRange(size, r.etag)
+	headers := http.Header{}
+	headers.Set(client.ETagKey, r.etag)
+	if outcome == client.RangePartial && start == 0 {
+		headers.Set("Content-Length", strconv.FormatInt(length, 10))
+		headers.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, start+length-1, size))
+		return io.NopCloser(bytes.NewReader(r.data[start : start+length])), headers, nil
+	}
+	if outcome == client.RangePartial {
+		headers.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, start+length-1, size))
+	}
+	headers.Set("Content-Length", strconv.FormatInt(size, 10))
+	return io.NopCloser(bytes.NewReader(r.data)), headers, nil
+}
+
+// midflightRangeIgnoreReader ranges the discovery chunk but answers subsequent
+// chunk requests with the full body and no Content-Range, modelling a replica
+// that stops honouring ranges mid-download.
+type midflightRangeIgnoreReader struct {
+	data []byte
+	etag string
+}
+
+func (r *midflightRangeIgnoreReader) Open(_ context.Context, _ client.Key, opts ...client.RequestOption) (io.ReadCloser, http.Header, error) {
+	size := int64(len(r.data))
+	start, length, outcome := client.NewRequestOptions(opts...).ResolveRange(size, r.etag)
+	headers := http.Header{}
+	headers.Set(client.ETagKey, r.etag)
+	if outcome == client.RangePartial && start == 0 {
+		headers.Set("Content-Length", strconv.FormatInt(length, 10))
+		headers.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, start+length-1, size))
+		return io.NopCloser(bytes.NewReader(r.data[start : start+length])), headers, nil
+	}
+	headers.Set("Content-Length", strconv.FormatInt(size, 10))
+	return io.NopCloser(bytes.NewReader(r.data)), headers, nil
+}
+
+// ignoreRangeReader returns the whole object with no Content-Range regardless of
+// the requested range, modelling a backend that doesn't honour ranges.
+type ignoreRangeReader struct{ data []byte }
+
+func (r *ignoreRangeReader) Open(_ context.Context, _ client.Key, _ ...client.RequestOption) (io.ReadCloser, http.Header, error) {
+	headers := http.Header{}
+	headers.Set("Content-Length", strconv.Itoa(len(r.data)))
+	return io.NopCloser(bytes.NewReader(r.data)), headers, nil
+}
+
+// reorderReader serves correct byte ranges but delays earlier offsets longer
+// than later ones, so within the in-flight window chunks complete out of order
+// and the writer must buffer and reorder them.
+type reorderReader struct {
+	data      []byte
+	etag      string
+	chunkSize int64
+}
+
+func (r *reorderReader) Open(_ context.Context, _ client.Key, opts ...client.RequestOption) (io.ReadCloser, http.Header, error) {
+	size := int64(len(r.data))
+	o := client.NewRequestOptions(opts...)
+	start, length, outcome := o.ResolveRange(size, r.etag)
+	headers := http.Header{}
+	if outcome == client.RangeNotSatisfiable {
+		headers.Set("Content-Range", fmt.Sprintf("bytes */%d", size))
+		return nil, headers, client.ErrRangeNotSatisfiable
+	}
+	// Earlier chunks within a window sleep longer, so higher offsets finish
+	// first and the writer is forced to reorder.
+	if outcome == client.RangePartial {
+		chunks := (size - start) / r.chunkSize
+		time.Sleep(time.Duration(chunks) * time.Millisecond)
+	}
+	headers.Set(client.ETagKey, r.etag)
+	headers.Set("Content-Length", strconv.FormatInt(length, 10))
+	if outcome == client.RangePartial {
+		headers.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, start+length-1, size))
+	}
+	return io.NopCloser(bytes.NewReader(r.data[start : start+length])), headers, nil
+}
+
+// failingChunkReader serves ranges normally but errors when the requested range
+// starts at failAtStart, modelling a mid-download fetch failure.
+type failingChunkReader struct {
+	data        []byte
+	etag        string
+	failAtStart int64
+
+	opens atomic.Int64
+}
+
+func (r *failingChunkReader) Open(_ context.Context, _ client.Key, opts ...client.RequestOption) (io.ReadCloser, http.Header, error) {
+	r.opens.Add(1)
+	size := int64(len(r.data))
+	o := client.NewRequestOptions(opts...)
+	start, length, outcome := o.ResolveRange(size, r.etag)
+	if outcome == client.RangePartial && start == r.failAtStart {
+		return nil, nil, errors.New("boom")
+	}
+	headers := http.Header{}
+	if outcome == client.RangeNotSatisfiable {
+		headers.Set("Content-Range", fmt.Sprintf("bytes */%d", size))
+		return nil, headers, client.ErrRangeNotSatisfiable
+	}
+	headers.Set(client.ETagKey, r.etag)
+	headers.Set("Content-Length", strconv.FormatInt(length, 10))
+	if outcome == client.RangePartial {
+		headers.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, start+length-1, size))
+	}
+	return io.NopCloser(bytes.NewReader(r.data[start : start+length])), headers, nil
 }
 
 func TestParallelGetClient(t *testing.T) {
-	content := make([]byte, 1000)
-	for i := range content {
-		content[i] = byte(i % 251)
-	}
+	content := patternBytes(1000)
 	etag := fakeETag(content)
 
 	mux := http.NewServeMux()
@@ -291,8 +482,8 @@ func TestParallelGetClient(t *testing.T) {
 
 	c := client.New(srv.URL, nil).Namespace("test")
 	defer c.Close()
-	var dst bufferAt
-	err := client.ParallelGet(context.Background(), c, client.NewKey("parallel-client"), &dst, 100, 4)
+	dst := &bufferAt{}
+	err := client.ParallelGet(context.Background(), c, client.NewKey("parallel-client"), dst, 100, 4)
 	assert.NoError(t, err)
 	assert.Equal(t, content, dst.buf)
 }

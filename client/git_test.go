@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -148,7 +149,6 @@ func TestOpenGitBundle(t *testing.T) {
 
 	api := client.NewWithHTTPClient(srv.URL, srv.Client())
 
-	// Root-relative URL (as returned in X-Cachew-Bundle-Url).
 	body, err := api.OpenGitBundle(context.Background(),
 		"/git/github.com/org/repo/snapshot.bundle?base=abc")
 	assert.NoError(t, err)
@@ -157,7 +157,6 @@ func TestOpenGitBundle(t *testing.T) {
 	assert.NoError(t, body.Close())
 	assert.Equal(t, "bundle-bytes", string(data))
 
-	// Absolute URL.
 	body, err = api.OpenGitBundle(context.Background(),
 		srv.URL+"/git/github.com/org/repo/snapshot.bundle?base=abc")
 	assert.NoError(t, err)
@@ -175,7 +174,7 @@ func TestOpenGitBundleNotFound(t *testing.T) {
 	assert.True(t, errors.Is(err, os.ErrNotExist))
 }
 
-func TestDownloadGitSnapshotParallel(t *testing.T) {
+func TestOpenGitSnapshotParallel(t *testing.T) {
 	body := make([]byte, 1000)
 	for i := range body {
 		body[i] = byte(i % 251)
@@ -190,29 +189,53 @@ func TestDownloadGitSnapshotParallel(t *testing.T) {
 		w.Header().Set("ETag", etag)
 		w.Header().Set(client.SnapshotCommitHeader, "deadbeef")
 		w.Header().Set(client.BundleURLHeader, "/git/github.com/org/repo/snapshot.bundle?base=deadbeef")
-		// ServeContent honours Range/If-Range against the ETag set above, so it
-		// returns 206 + Content-Range for the chunked requests ParallelGet makes.
 		http.ServeContent(w, r, "snapshot.tar.zst", time.Time{}, bytes.NewReader(body))
 	}))
 	defer srv.Close()
 
 	api := client.NewWithHTTPClient(srv.URL, srv.Client())
-	var dst bufferAt
-	// A 128-byte chunk over a 1000-byte body forces multiple chunks, exercising
-	// concurrent range reassembly.
-	meta, err := api.DownloadGitSnapshot(context.Background(), "https://github.com/org/repo", &dst, 128, 4)
+	snap, err := api.OpenGitSnapshotParallel(context.Background(), "https://github.com/org/repo", 128, 4)
 	assert.NoError(t, err)
-	assert.Equal(t, body, dst.buf)
-	assert.Equal(t, "deadbeef", meta.Commit)
-	assert.Equal(t, "/git/github.com/org/repo/snapshot.bundle?base=deadbeef", meta.BundleURL)
+	defer snap.Close()
+
+	assert.Equal(t, "deadbeef", snap.Commit)
+	assert.Equal(t, "/git/github.com/org/repo/snapshot.bundle?base=deadbeef", snap.BundleURL)
+
+	assert.Equal(t, "", snap.Headers.Get("Content-Range"))
+	assert.Equal(t, strconv.Itoa(len(body)), snap.Headers.Get("Content-Length"))
+
+	got, err := io.ReadAll(snap.Body)
+	assert.NoError(t, err)
+	assert.Equal(t, body, got)
 	assert.True(t, requests.Load() > 1, "expected multiple range requests, got %d", requests.Load())
 }
 
-func TestDownloadGitSnapshotFallsBackWithoutRange(t *testing.T) {
+func TestOpenGitSnapshotParallelSmallObject(t *testing.T) {
+	body := []byte("a tiny snapshot that fits in the first chunk")
+	const etag = `"snap-small"`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/zstd")
+		w.Header().Set("ETag", etag)
+		w.Header().Set(client.SnapshotCommitHeader, "beef")
+		http.ServeContent(w, r, "snapshot.tar.zst", time.Time{}, bytes.NewReader(body))
+	}))
+	defer srv.Close()
+
+	api := client.NewWithHTTPClient(srv.URL, srv.Client())
+	for range 200 {
+		snap, err := api.OpenGitSnapshotParallel(context.Background(), "https://github.com/org/repo", 4096, 4)
+		assert.NoError(t, err)
+		assert.Equal(t, "beef", snap.Commit)
+		got, err := io.ReadAll(snap.Body)
+		assert.NoError(t, err)
+		assert.Equal(t, body, got)
+		assert.NoError(t, snap.Close())
+	}
+}
+
+func TestOpenGitSnapshotParallelFallsBackWithoutRange(t *testing.T) {
 	body := []byte("full body, server ignores ranges")
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		// No ETag and no range handling: always answer the full object with 200,
-		// mimicking an older server. ParallelGet must fall back to a single read.
 		w.Header().Set("Content-Type", "application/zstd")
 		w.Header().Set(client.SnapshotCommitHeader, "cafe")
 		_, _ = w.Write(body) //nolint:errcheck
@@ -220,21 +243,47 @@ func TestDownloadGitSnapshotFallsBackWithoutRange(t *testing.T) {
 	defer srv.Close()
 
 	api := client.NewWithHTTPClient(srv.URL, srv.Client())
-	var dst bufferAt
-	meta, err := api.DownloadGitSnapshot(context.Background(), "https://github.com/org/repo", &dst, 8, 4)
+	snap, err := api.OpenGitSnapshotParallel(context.Background(), "https://github.com/org/repo", 8, 4)
 	assert.NoError(t, err)
-	assert.Equal(t, body, dst.buf)
-	assert.Equal(t, "cafe", meta.Commit)
+	defer snap.Close()
+
+	assert.Equal(t, "cafe", snap.Commit)
+	got, err := io.ReadAll(snap.Body)
+	assert.NoError(t, err)
+	assert.Equal(t, body, got)
 }
 
-func TestDownloadGitSnapshotNotFound(t *testing.T) {
+func TestOpenGitSnapshotParallelNotFound(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 	}))
 	defer srv.Close()
 
 	api := client.NewWithHTTPClient(srv.URL, srv.Client())
-	var dst bufferAt
-	_, err := api.DownloadGitSnapshot(context.Background(), "https://github.com/org/repo", &dst, 8, 4)
+	_, err := api.OpenGitSnapshotParallel(context.Background(), "https://github.com/org/repo", 8, 4)
 	assert.True(t, errors.Is(err, os.ErrNotExist))
+}
+
+func TestOpenGitSnapshotParallelCloseStopsDownload(t *testing.T) {
+	body := make([]byte, 1<<20)
+	for i := range body {
+		body[i] = byte(i % 251)
+	}
+	const etag = `"snap-v1"`
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/zstd")
+		w.Header().Set("ETag", etag)
+		http.ServeContent(w, r, "snapshot.tar.zst", time.Time{}, bytes.NewReader(body))
+	}))
+	defer srv.Close()
+
+	api := client.NewWithHTTPClient(srv.URL, srv.Client())
+	snap, err := api.OpenGitSnapshotParallel(context.Background(), "https://github.com/org/repo", 4096, 4)
+	assert.NoError(t, err)
+
+	buf := make([]byte, 16)
+	_, err = io.ReadFull(snap.Body, buf)
+	assert.NoError(t, err)
+	assert.NoError(t, snap.Close())
 }
