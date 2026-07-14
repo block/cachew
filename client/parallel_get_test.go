@@ -246,6 +246,29 @@ func TestParallelGetSingleWorkerFullRead(t *testing.T) {
 	assert.Equal(t, []openRecord{{}}, c.opens)
 }
 
+func TestParallelGetReaderReassembly(t *testing.T) {
+	data := patternBytes(10_000)
+	c := &recordingReader{data: data, etag: `"v1"`}
+	r, err := client.ParallelGetReader(context.Background(), c, client.NewKey("k"), 1000, 4)
+	assert.NoError(t, err)
+	got, err := io.ReadAll(r)
+	assert.NoError(t, err)
+	assert.NoError(t, r.Close())
+	assert.Equal(t, data, got)
+}
+
+func TestParallelGetReaderZeroConcurrencySingleStream(t *testing.T) {
+	data := patternBytes(1000)
+	c := &recordingReader{data: data, etag: `"v1"`}
+	r, err := client.ParallelGetReader(context.Background(), c, client.NewKey("k"), 100, 0)
+	assert.NoError(t, err)
+	got, err := io.ReadAll(r)
+	assert.NoError(t, err)
+	assert.NoError(t, r.Close())
+	assert.Equal(t, data, got)
+	assert.Equal(t, []openRecord{{}}, c.opens)
+}
+
 func TestParallelGetPinsChunksWithIfMatch(t *testing.T) {
 	data := patternBytes(1000)
 	c := &recordingReader{data: data, etag: `"v1"`}

@@ -271,7 +271,7 @@ func (s *S3) Open(ctx context.Context, key Key, opts ...Option) (io.ReadCloser, 
 		return nil, headers, rangeErr
 	}
 	if partial {
-		reader, err := s.rangeGetReader(ctx, s.config.Bucket, objectName, start, length, objInfo.ETag)
+		reader, err := s.rangedGetReader(ctx, s.config.Bucket, objectName, start, length, objInfo.ETag)
 		if err != nil {
 			return nil, nil, err
 		}
