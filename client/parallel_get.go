@@ -132,6 +132,25 @@ func ParallelGet(ctx context.Context, c RangeReader, key Key, dst io.WriterAt, c
 	return errors.Wrap(eg.Wait(), "parallel get")
 }
 
+// ParallelGetReader returns a reader over an object downloaded by ParallelGet,
+// reassembling concurrent chunk writes into a sequential stream with bounded
+// buffering (2*concurrency chunk-sized pages). Download errors surface on
+// Read; Close cancels any in-flight requests.
+func ParallelGetReader(ctx context.Context, c RangeReader, key Key, chunkSize int64, concurrency int) (io.ReadCloser, error) {
+	concurrency = max(concurrency, 1) // ParallelGet treats <= 1 as a single-stream read.
+	if err := validateParallelParams(chunkSize, concurrency); err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	buf := newStreamBuffer(chunkSize, concurrency)
+	go func() {
+		err := ParallelGet(ctx, c, key, buf, chunkSize, concurrency)
+		cancel()
+		buf.closeWrite(err)
+	}()
+	return &cancelReadCloser{ReadCloser: buf, cancel: cancel}, nil
+}
+
 // discoverFirstChunk opens chunk zero with a ranged request, revealing the
 // total size and the ETag that pin the remaining chunks. A response that
 // ignores the range is accepted as the single-stream fallback rather than

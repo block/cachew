@@ -2,51 +2,66 @@ package cache
 
 import (
 	"context"
+	"fmt"
 	"io"
+	"net/http"
 
 	"github.com/alecthomas/errors"
 	"github.com/minio/minio-go/v7"
-	"golang.org/x/sync/errgroup"
+
+	"github.com/block/cachew/client"
 )
 
-// parallelGetReader returns an io.ReadCloser that downloads the S3 object
-// using parallel range-GET requests and reassembles chunks in order.
-// For objects smaller than one chunk, it falls back to a single GetObject.
-// The etag pins all chunk requests to one object revision, preventing
-// corruption if the key is overwritten during a large read.
-func (s *S3) parallelGetReader(ctx context.Context, bucket, objectName string, size int64, etag string) (io.ReadCloser, error) {
-	chunkSize := int64(s.config.DownloadPartSizeMB) << 20 // #nosec G115 -- DownloadPartSizeMB is a small operator-supplied tuning value.
-	if size <= chunkSize {
-		// Small object: single stream.
-		obj, err := s.client.GetObject(ctx, bucket, objectName, minio.GetObjectOptions{})
-		if err != nil {
-			return nil, errors.Errorf("failed to get object: %w", err)
-		}
-		return &s3Reader{obj: obj}, nil
-	}
+// minRangePartSize is the smallest per-request part worth fetching in
+// parallel for ranged reads; below this, per-request overhead outweighs the
+// bandwidth gained from additional streams.
+const minRangePartSize int64 = 4 << 20
 
-	// Large object: parallel range requests reassembled in order via io.Pipe.
-	// Use a cancellable context so workers stop promptly if the consumer
-	// disconnects or a write error occurs.
-	dlCtx, cancel := context.WithCancel(ctx)
-	pr, pw := io.Pipe()
-	go func() {
-		err := s.parallelGet(dlCtx, bucket, objectName, size, etag, pw)
-		cancel()
-		pw.CloseWithError(err)
-	}()
-	return &cancelReadCloser{ReadCloser: pr, cancel: cancel}, nil
+// parallelGetReader returns a reader for a whole S3 object, fetched with
+// parallel range-GET requests via [client.ParallelGetReader]. Objects that
+// fit in one chunk use a single GetObject.
+func (s *S3) parallelGetReader(ctx context.Context, bucket, objectName string, size int64, etag string) (io.ReadCloser, error) {
+	chunkSize := int64(s.config.DownloadPartSizeMB) << 20                                      // #nosec G115 -- DownloadPartSizeMB is a small operator-supplied tuning value.
+	if concurrency := int(s.config.DownloadConcurrency); size > chunkSize && concurrency > 1 { // #nosec G115 -- DownloadConcurrency is a small operator-supplied tuning value.
+		window := &s3ObjectWindow{s3: s, bucket: bucket, objectName: objectName, start: 0, length: size, etag: etag}
+		return client.ParallelGetReader(ctx, window, Key{}, chunkSize, concurrency) //nolint:wrapcheck
+	}
+	obj, err := s.client.GetObject(ctx, bucket, objectName, minio.GetObjectOptions{})
+	if err != nil {
+		return nil, errors.Errorf("failed to get object: %w", err)
+	}
+	return &s3Reader{obj: obj}, nil
+}
+
+// rangedGetReader serves [start, start+length) of an S3 object. Large ranges
+// are split into parallel sub-range requests because a single S3 stream is
+// limited to a fraction of the available bandwidth; small ranges use a single
+// request. Sub-range parts scale down below the configured part size (to a
+// floor of minRangePartSize) so that ranges smaller than one configured part
+// still fan out across multiple streams.
+func (s *S3) rangedGetReader(ctx context.Context, bucket, objectName string, start, length int64, etag string) (io.ReadCloser, error) {
+	concurrency := int64(s.config.DownloadConcurrency) // #nosec G115 -- DownloadConcurrency is a small operator-supplied tuning value.
+	if length < 2*minRangePartSize || concurrency <= 1 {
+		return s.rangeGetReader(ctx, bucket, objectName, start, length, etag)
+	}
+	chunkSize := (length + concurrency - 1) / concurrency
+	chunkSize = min(max(chunkSize, minRangePartSize), int64(s.config.DownloadPartSizeMB)<<20) // #nosec G115 -- DownloadPartSizeMB is a small operator-supplied tuning value.
+	window := &s3ObjectWindow{s3: s, bucket: bucket, objectName: objectName, start: start, length: length, etag: etag}
+	return client.ParallelGetReader(ctx, window, Key{}, chunkSize, int(concurrency)) //nolint:wrapcheck
 }
 
 // rangeGetReader returns an io.ReadCloser for a single byte range of an S3
-// object, pinned to etag so the read sees a consistent object revision.
+// object, pinned to etag (when non-empty) so the read sees a consistent
+// object revision.
 func (s *S3) rangeGetReader(ctx context.Context, bucket, objectName string, start, length int64, etag string) (io.ReadCloser, error) {
 	opts := minio.GetObjectOptions{}
 	if err := opts.SetRange(start, start+length-1); err != nil {
 		return nil, errors.Errorf("set range %d-%d: %w", start, start+length-1, err)
 	}
-	if err := opts.SetMatchETag(etag); err != nil {
-		return nil, errors.Errorf("set etag %s: %w", etag, err)
+	if etag != "" {
+		if err := opts.SetMatchETag(etag); err != nil {
+			return nil, errors.Errorf("set etag %s: %w", etag, err)
+		}
 	}
 	obj, err := s.client.GetObject(ctx, bucket, objectName, opts)
 	if err != nil {
@@ -55,99 +70,41 @@ func (s *S3) rangeGetReader(ctx context.Context, bucket, objectName string, star
 	return &s3Reader{obj: obj}, nil
 }
 
-// cancelReadCloser wraps an io.ReadCloser and cancels a context on Close,
-// ensuring background goroutines are cleaned up when the consumer is done.
-type cancelReadCloser struct {
-	io.ReadCloser
-	cancel context.CancelFunc
+// s3ObjectWindow adapts a byte window of a pinned S3 object revision to
+// [client.RangeReader], letting ParallelGet drive parallel S3 downloads.
+// Range offsets are relative to the window, and every request carries an
+// If-Match for the pinned etag regardless of the supplied options, so
+// discovery and sub-range requests can never splice revisions. Response
+// headers are synthesized from the pinned values: minio enforces the real
+// preconditions (SetRange, SetMatchETag) at the protocol level, surfacing
+// violations as read errors. The window's identity is bound in the struct, so
+// the Key argument is ignored.
+type s3ObjectWindow struct {
+	s3         *S3
+	bucket     string
+	objectName string
+	start      int64 // window offset within the object
+	length     int64 // window size in bytes
+	etag       string
 }
 
-func (c *cancelReadCloser) Close() error {
-	c.cancel()
-	return errors.Wrap(c.ReadCloser.Close(), "close parallel get reader")
-}
-
-// parallelGet downloads an S3 object in parallel chunks and writes them in
-// order to w. Each worker downloads its chunk into memory so the TCP
-// connection stays active at full speed. Peak memory: numWorkers × chunkSize.
-// All chunk requests are pinned to the given etag to ensure consistency.
-// An errgroup cancels all workers on the first error from any goroutine.
-func (s *S3) parallelGet(ctx context.Context, bucket, objectName string, size int64, etag string, w io.Writer) error {
-	chunkSize := int64(s.config.DownloadPartSizeMB) << 20 // #nosec G115 -- DownloadPartSizeMB is a small operator-supplied tuning value.
-	numChunks := int((size + chunkSize - 1) / chunkSize)
-	numWorkers := min(int(s.config.DownloadConcurrency), numChunks) // #nosec G115 -- DownloadConcurrency is a small operator-supplied tuning value.
-
-	// One buffered channel per chunk so workers never block after sending.
-	results := make([]chan []byte, numChunks)
-	for i := range results {
-		results[i] = make(chan []byte, 1)
+func (w *s3ObjectWindow) Open(ctx context.Context, _ Key, opts ...Option) (io.ReadCloser, http.Header, error) {
+	start, length, outcome := NewRequestOptions(opts...).ResolveRange(w.length, w.etag)
+	headers := http.Header{}
+	if w.etag != "" {
+		headers.Set(ETagKey, w.etag)
 	}
-
-	// Work queue of chunk indices.
-	work := make(chan int, numChunks)
-	for i := range numChunks {
-		work <- i
+	switch outcome {
+	case RangeNotSatisfiable:
+		headers.Set("Content-Range", fmt.Sprintf("bytes */%d", w.length))
+		return nil, headers, errors.WithStack(ErrRangeNotSatisfiable)
+	case RangePartial:
+		headers.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, start+length-1, w.length))
+	case RangeFull:
 	}
-	close(work)
-
-	eg, egCtx := errgroup.WithContext(ctx)
-
-	// Download workers: fetch chunks concurrently and send data on success,
-	// or return an error which cancels all other workers via egCtx.
-	for range numWorkers {
-		eg.Go(func() error {
-			for seq := range work {
-				if egCtx.Err() != nil {
-					return egCtx.Err()
-				}
-
-				start := int64(seq) * chunkSize
-				end := min(start+chunkSize-1, size-1)
-
-				opts := minio.GetObjectOptions{}
-				if err := opts.SetRange(start, end); err != nil {
-					return errors.Errorf("set range %d-%d: %w", start, end, err)
-				}
-				// Pin to the object revision from the initial stat to prevent
-				// reading a mix of old and new data if the key is overwritten.
-				if err := opts.SetMatchETag(etag); err != nil {
-					return errors.Errorf("set etag %s: %w", etag, err)
-				}
-
-				obj, err := s.client.GetObject(egCtx, bucket, objectName, opts)
-				if err != nil {
-					return errors.Errorf("get range %d-%d: %w", start, end, err)
-				}
-
-				// Drain the body immediately so the TCP connection stays at
-				// full speed. All workers do this concurrently, saturating
-				// the available S3 bandwidth.
-				data, readErr := io.ReadAll(obj)
-				obj.Close() //nolint:errcheck,gosec
-				if readErr != nil {
-					return errors.Wrap(readErr, "read chunk")
-				}
-				results[seq] <- data
-			}
-			return nil
-		})
+	rc, err := w.s3.rangeGetReader(ctx, w.bucket, w.objectName, w.start+start, length, w.etag)
+	if err != nil {
+		return nil, nil, err
 	}
-
-	// Write chunks in order. Runs in the errgroup so that a write error
-	// cancels egCtx, which stops download workers promptly.
-	eg.Go(func() error {
-		for _, ch := range results {
-			select {
-			case data := <-ch:
-				if _, err := w.Write(data); err != nil {
-					return errors.Wrap(err, "write chunk")
-				}
-			case <-egCtx.Done():
-				return egCtx.Err()
-			}
-		}
-		return nil
-	})
-
-	return errors.Wrap(eg.Wait(), "parallel get")
+	return rc, headers, nil
 }
