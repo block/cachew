@@ -2,9 +2,7 @@ package cache
 
 import (
 	"context"
-	"fmt"
 	"io"
-	"net/http"
 
 	"github.com/alecthomas/errors"
 	"github.com/minio/minio-go/v7"
@@ -23,7 +21,7 @@ const minRangePartSize int64 = 4 << 20
 func (s *S3) parallelGetReader(ctx context.Context, bucket, objectName string, size int64, etag string) (io.ReadCloser, error) {
 	chunkSize := int64(s.config.DownloadPartSizeMB) << 20                                      // #nosec G115 -- DownloadPartSizeMB is a small operator-supplied tuning value.
 	if concurrency := int(s.config.DownloadConcurrency); size > chunkSize && concurrency > 1 { // #nosec G115 -- DownloadConcurrency is a small operator-supplied tuning value.
-		window := &s3ObjectWindow{s3: s, bucket: bucket, objectName: objectName, start: 0, length: size, etag: etag}
+		window := s.objectWindow(bucket, objectName, 0, size, etag)
 		return client.ParallelGetReader(ctx, window, Key{}, chunkSize, concurrency) //nolint:wrapcheck
 	}
 	obj, err := s.client.GetObject(ctx, bucket, objectName, minio.GetObjectOptions{})
@@ -46,8 +44,22 @@ func (s *S3) rangedGetReader(ctx context.Context, bucket, objectName string, sta
 	}
 	chunkSize := (length + concurrency - 1) / concurrency
 	chunkSize = min(max(chunkSize, minRangePartSize), int64(s.config.DownloadPartSizeMB)<<20) // #nosec G115 -- DownloadPartSizeMB is a small operator-supplied tuning value.
-	window := &s3ObjectWindow{s3: s, bucket: bucket, objectName: objectName, start: start, length: length, etag: etag}
+	window := s.objectWindow(bucket, objectName, start, length, etag)
 	return client.ParallelGetReader(ctx, window, Key{}, chunkSize, int(concurrency)) //nolint:wrapcheck
+}
+
+// objectWindow returns a window over [start, start+length) of the pinned S3
+// object revision, served by direct sub-range GETs so chunk requests bypass
+// S3.Open's per-call stat and range policy.
+func (s *S3) objectWindow(bucket, objectName string, start, length int64, etag string) *objectWindow {
+	return &objectWindow{
+		openRange: func(ctx context.Context, start, length int64) (io.ReadCloser, error) {
+			return s.rangeGetReader(ctx, bucket, objectName, start, length, etag)
+		},
+		start:  start,
+		length: length,
+		etag:   etag,
+	}
 }
 
 // rangeGetReader returns an io.ReadCloser for a single byte range of an S3
@@ -68,43 +80,4 @@ func (s *S3) rangeGetReader(ctx context.Context, bucket, objectName string, star
 		return nil, errors.Errorf("failed to get object range: %w", err)
 	}
 	return &s3Reader{obj: obj}, nil
-}
-
-// s3ObjectWindow adapts a byte window of a pinned S3 object revision to
-// [client.RangeReader], letting ParallelGet drive parallel S3 downloads.
-// Range offsets are relative to the window, and every request carries an
-// If-Match for the pinned etag regardless of the supplied options, so
-// discovery and sub-range requests can never splice revisions. Response
-// headers are synthesized from the pinned values: minio enforces the real
-// preconditions (SetRange, SetMatchETag) at the protocol level, surfacing
-// violations as read errors. The window's identity is bound in the struct, so
-// the Key argument is ignored.
-type s3ObjectWindow struct {
-	s3         *S3
-	bucket     string
-	objectName string
-	start      int64 // window offset within the object
-	length     int64 // window size in bytes
-	etag       string
-}
-
-func (w *s3ObjectWindow) Open(ctx context.Context, _ Key, opts ...Option) (io.ReadCloser, http.Header, error) {
-	start, length, outcome := NewRequestOptions(opts...).ResolveRange(w.length, w.etag)
-	headers := http.Header{}
-	if w.etag != "" {
-		headers.Set(ETagKey, w.etag)
-	}
-	switch outcome {
-	case RangeNotSatisfiable:
-		headers.Set("Content-Range", fmt.Sprintf("bytes */%d", w.length))
-		return nil, headers, errors.WithStack(ErrRangeNotSatisfiable)
-	case RangePartial:
-		headers.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, start+length-1, w.length))
-	case RangeFull:
-	}
-	rc, err := w.s3.rangeGetReader(ctx, w.bucket, w.objectName, w.start+start, length, w.etag)
-	if err != nil {
-		return nil, nil, err
-	}
-	return rc, headers, nil
 }
