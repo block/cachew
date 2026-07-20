@@ -1,6 +1,7 @@
 package cache_test
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -698,6 +699,75 @@ func TestTieredRangedReadHealsDivergentTier0(t *testing.T) {
 			assert.Equal(t, `"pinned-etag"`, headers.Get(cache.ETagKey))
 		})
 	}
+}
+
+type countingCache struct {
+	cache.Cache
+	rangedOpens atomic.Int32
+}
+
+func (c *countingCache) Open(ctx context.Context, key cache.Key, opts ...cache.Option) (io.ReadCloser, http.Header, error) {
+	if cache.NewRequestOptions(opts...).Range != "" {
+		c.rangedOpens.Add(1)
+	}
+	return c.Cache.Open(ctx, key, opts...) //nolint:wrapcheck
+}
+
+func TestTieredHealFansOutLargeObjects(t *testing.T) {
+	pinned := bytes.Repeat([]byte("abcdefgh"), 9<<20/8)
+	stale := []byte("0123456789")
+
+	_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelDebug})
+	store := newMetadataStore(ctx)
+	lower, err := cache.NewMemory(ctx, cache.MemoryConfig{LimitMB: 1024, MaxTTL: time.Hour})
+	assert.NoError(t, err)
+	upperMem, err := cache.NewMemory(ctx, cache.MemoryConfig{LimitMB: 1024, MaxTTL: time.Hour})
+	assert.NoError(t, err)
+	upper := &countingCache{Cache: upperMem}
+	tiered := cache.MaybeNewTiered(ctx, []cache.Cache{lower, upper}, store)
+	defer tiered.Close()
+
+	key := cache.NewKey("heal-fan-out")
+	seedTier(ctx, t, tiered, key, stale, "stale-etag")
+	seedTier(ctx, t, tiered, key, pinned, "pinned-etag")
+	seedTier(ctx, t, lower, key, stale, "stale-etag")
+
+	r, _, err := tiered.Open(ctx, key, cache.Range(2, 6), cache.IfRange(`"pinned-etag"`))
+	assert.NoError(t, err)
+	assert.Equal(t, pinned[2:6], readAllAndClose(t, r))
+
+	eventually(t, func() bool { return tierHolds(ctx, t, lower, key, pinned, `"pinned-etag"`) })
+	assert.True(t, upper.rangedOpens.Load() >= 3, "expected fan-out, got %d ranged opens", upper.rangedOpens.Load())
+}
+
+func TestTieredHealProbesPastStaleSourceTier(t *testing.T) {
+	pinned := []byte("abcdefghij")
+	stale := []byte("0123456789")
+
+	_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelDebug})
+	store := newMetadataStore(ctx)
+	lower, err := cache.NewMemory(ctx, cache.MemoryConfig{LimitMB: 1024, MaxTTL: time.Hour})
+	assert.NoError(t, err)
+	sourceFront, err := cache.NewMemory(ctx, cache.MemoryConfig{LimitMB: 1024, MaxTTL: time.Hour})
+	assert.NoError(t, err)
+	sourceBack, err := cache.NewMemory(ctx, cache.MemoryConfig{LimitMB: 1024, MaxTTL: time.Hour})
+	assert.NoError(t, err)
+	source := cache.MaybeNewTiered(ctx, []cache.Cache{sourceFront, sourceBack}, newMetadataStore(ctx))
+	defer source.Close()
+	tiered := cache.MaybeNewTiered(ctx, []cache.Cache{lower, source}, store)
+	defer tiered.Close()
+
+	key := cache.NewKey("heal-stale-source-tier")
+	seedTier(ctx, t, sourceFront, key, stale, "stale-etag")
+	seedTier(ctx, t, sourceBack, key, pinned, "pinned-etag")
+	seedTier(ctx, t, lower, key, stale, "stale-etag")
+	assert.NoError(t, tieredETags(store, "").Set(key, `"pinned-etag"`))
+
+	r, _, err := tiered.Open(ctx, key, cache.Range(2, 6), cache.IfRange(`"pinned-etag"`))
+	assert.NoError(t, err)
+	assert.Equal(t, pinned[2:6], readAllAndClose(t, r))
+
+	eventually(t, func() bool { return tierHolds(ctx, t, lower, key, pinned, `"pinned-etag"`) })
 }
 
 func TestTieredRangedReadKeepsNewerTier0(t *testing.T) {

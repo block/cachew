@@ -12,6 +12,7 @@ import (
 
 	"github.com/alecthomas/errors"
 
+	"github.com/block/cachew/client"
 	"github.com/block/cachew/internal/logging"
 	"github.com/block/cachew/internal/metadatadb"
 )
@@ -450,20 +451,54 @@ func (t Tiered) healTier0(reqCtx context.Context, key Key, source Cache, servedE
 	})
 }
 
+// Heal chunks stay below the S3 tier's internal large-range fan-out threshold
+// (2*minRangePartSize) so each chunk maps to a single upstream request rather
+// than fanning out twice.
+const (
+	tieredHealChunkSize   = minRangePartSize
+	tieredHealConcurrency = 8
+)
+
+// healSource pins every heal read to the revision being backfilled, so
+// discovery and chunk requests fail with ErrPreconditionFailed instead of
+// splicing in a concurrent rewrite.
+type healSource struct {
+	c    Cache
+	etag string
+}
+
+func (s healSource) Open(ctx context.Context, key Key, opts ...Option) (io.ReadCloser, http.Header, error) {
+	r, h, err := s.c.Open(ctx, key, append(opts, IfMatch(s.etag))...)
+	return r, h, errors.WithStack(err)
+}
+
+// backfillTier0FromSource re-fetches the whole object from source and writes
+// it to tier 0. Heals pull from a deeper (often network) tier where a single
+// stream is bandwidth-limited, so the read fans out into parallel chunk
+// requests; discovery degrades to a single stream when the source lacks Range
+// or ETag support.
 func (t Tiered) backfillTier0FromSource(ctx context.Context, key Key, source Cache, wantETag string) {
 	logger := logging.FromContext(ctx)
 	ctx, cancel := context.WithTimeout(ctx, tieredHealTimeout)
 	defer cancel()
 
-	r, headers, err := source.Open(ctx, key, IfMatch(wantETag))
+	// If-Match lets a tiered source probe past stale front tiers for the wanted
+	// revision; a precondition failure means no tier holds it anymore.
+	headers, err := source.Stat(ctx, key, IfMatch(wantETag))
+	if errors.Is(err, ErrPreconditionFailed) {
+		return
+	}
+	if err != nil {
+		logger.WarnContext(ctx, "Tiered: ranged heal source stat failed", "key", key, "etag", wantETag, "error", err)
+		return
+	}
+
+	r, err := client.ParallelGetReader(ctx, healSource{c: source, etag: wantETag}, key, tieredHealChunkSize, tieredHealConcurrency)
 	if err != nil {
 		logger.WarnContext(ctx, "Tiered: ranged heal source read failed", "key", key, "etag", wantETag, "error", err)
 		return
 	}
 	defer discardTieredReader(ctx, key, r)
-	if headers.Get(ETagKey) != wantETag {
-		return
-	}
 
 	w, err := t.caches[0].Create(ctx, key, headers, 0, backfillCreateOptions(headers)...) // 0 → cache's max TTL
 	if err != nil {
