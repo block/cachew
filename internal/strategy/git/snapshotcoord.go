@@ -23,10 +23,12 @@ const (
 )
 
 // snapshotGenRecord is the shared per-artifact generation state. StartedAt is
-// the most recent claim; CompletedAt is the most recent successful generation.
+// the most recent claim; CompletedAt is the most recent successful generation;
+// Commit is the mirror HEAD that generation captured.
 type snapshotGenRecord struct {
 	StartedAt   time.Time `json:"started_at"`
 	CompletedAt time.Time `json:"completed_at,omitzero"`
+	Commit      string    `json:"commit,omitempty"`
 }
 
 // SnapshotCoordinator shares per-artifact generation state across replicas so
@@ -98,16 +100,45 @@ func (c *SnapshotCoordinator) Claim(job, upstreamURL string, interval time.Durat
 	return true, nil
 }
 
-// Complete records a successful generation so other replicas skip the
-// artifact until it goes stale again.
-func (c *SnapshotCoordinator) Complete(job, upstreamURL string) error {
+// Complete records a successful generation and the commit it captured so
+// other replicas skip the artifact until it goes stale again.
+func (c *SnapshotCoordinator) Complete(job, upstreamURL, commit string) error {
 	if c == nil {
 		return nil
 	}
 	key := snapshotGenKey(job, upstreamURL)
 	rec, _ := c.gens.Get(key)
 	rec.CompletedAt = c.now()
+	rec.Commit = commit
 	return errors.Wrap(c.gens.Set(key, rec), "record snapshot completion")
+}
+
+// Release clears an in-progress claim after a decision not to generate, so
+// peers aren't suppressed until the claim TTL expires.
+func (c *SnapshotCoordinator) Release(job, upstreamURL string) error {
+	if c == nil {
+		return nil
+	}
+	key := snapshotGenKey(job, upstreamURL)
+	rec, ok := c.gens.Get(key)
+	if !ok || !rec.CompletedAt.Before(rec.StartedAt) {
+		return nil
+	}
+	rec.StartedAt = rec.CompletedAt
+	return errors.Wrap(c.gens.Set(key, rec), "release snapshot claim")
+}
+
+// Unchanged reports whether the last completed generation captured the same
+// commit and is recent enough (within maxAge) that its cache entry cannot
+// have expired. Callers skipping on this must not call Complete, so
+// CompletedAt keeps tracking the last actual upload and maxAge bounds both
+// cache-entry age and drift of non-HEAD refs captured in the artifact.
+func (c *SnapshotCoordinator) Unchanged(job, upstreamURL, commit string, maxAge time.Duration) bool {
+	if c == nil || commit == "" || maxAge <= 0 {
+		return false
+	}
+	rec, ok := c.gens.Get(snapshotGenKey(job, upstreamURL))
+	return ok && rec.Commit == commit && !rec.CompletedAt.IsZero() && c.now().Sub(rec.CompletedAt) < maxAge
 }
 
 func snapshotGenKey(job, upstreamURL string) string {

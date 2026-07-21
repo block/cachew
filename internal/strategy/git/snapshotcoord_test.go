@@ -30,9 +30,46 @@ func TestSnapshotCoordinatorNilSafe(t *testing.T) {
 	claimed, err := c.Claim("snapshot", "https://github.com/foo/bar", time.Hour)
 	assert.NoError(t, err)
 	assert.True(t, claimed)
-	assert.NoError(t, c.Complete("snapshot", "https://github.com/foo/bar"))
+	assert.NoError(t, c.Complete("snapshot", "https://github.com/foo/bar", "abc123"))
+	assert.NoError(t, c.Release("snapshot", "https://github.com/foo/bar"))
+	assert.False(t, c.Unchanged("snapshot", "https://github.com/foo/bar", "abc123", time.Hour))
 	assert.NoError(t, c.Prime(context.Background()))
 	assert.Zero(t, NewSnapshotCoordinator(nil))
+}
+
+func TestSnapshotCoordinatorUnchanged(t *testing.T) {
+	clock := time.Date(2026, 5, 5, 12, 0, 0, 0, time.UTC)
+	coords := newTestSnapshotCoordinators(t, func() time.Time { return clock }, 2)
+	const upstream = "https://github.com/foo/bar"
+	const maxAge = 24 * time.Hour
+
+	// No completion recorded yet.
+	assert.False(t, coords[0].Unchanged("snapshot", upstream, "abc123", maxAge))
+
+	assert.NoError(t, coords[0].Complete("snapshot", upstream, "abc123"))
+
+	// Peers share the record: same commit within maxAge skips, everything
+	// else regenerates.
+	clock = clock.Add(12 * time.Hour)
+	assert.True(t, coords[1].Unchanged("snapshot", upstream, "abc123", maxAge))
+	assert.False(t, coords[1].Unchanged("snapshot", upstream, "def456", maxAge))
+	assert.False(t, coords[1].Unchanged("snapshot", upstream, "", maxAge))
+	assert.False(t, coords[1].Unchanged("snapshot", upstream, "abc123", 0))
+	assert.False(t, coords[1].Unchanged("lfs-snapshot", upstream, "abc123", maxAge))
+
+	clock = clock.Add(12 * time.Hour)
+	assert.False(t, coords[1].Unchanged("snapshot", upstream, "abc123", maxAge))
+}
+
+func TestSnapshotCoordinatorClaimWithoutCompleteIsNotUnchanged(t *testing.T) {
+	clock := time.Date(2026, 5, 5, 12, 0, 0, 0, time.UTC)
+	coords := newTestSnapshotCoordinators(t, func() time.Time { return clock }, 1)
+	const upstream = "https://github.com/foo/bar"
+
+	claimed, err := coords[0].Claim("snapshot", upstream, time.Hour)
+	assert.NoError(t, err)
+	assert.True(t, claimed)
+	assert.False(t, coords[0].Unchanged("snapshot", upstream, "abc123", 24*time.Hour))
 }
 
 func TestSnapshotCoordinatorFreshArtifactSkips(t *testing.T) {
@@ -44,7 +81,7 @@ func TestSnapshotCoordinatorFreshArtifactSkips(t *testing.T) {
 	assert.NoError(t, err)
 	assert.True(t, claimed)
 	clock = clock.Add(2 * time.Minute)
-	assert.NoError(t, coords[0].Complete("snapshot", upstream))
+	assert.NoError(t, coords[0].Complete("snapshot", upstream, "abc123"))
 
 	clock = clock.Add(10 * time.Minute)
 	claimed, err = coords[1].Claim("snapshot", upstream, time.Hour)
@@ -65,7 +102,7 @@ func TestSnapshotCoordinatorFreshUntilFullInterval(t *testing.T) {
 	claimed, err := coords[0].Claim("snapshot", upstream, time.Hour)
 	assert.NoError(t, err)
 	assert.True(t, claimed)
-	assert.NoError(t, coords[0].Complete("snapshot", upstream))
+	assert.NoError(t, coords[0].Complete("snapshot", upstream, "abc123"))
 
 	// A completion just shy of the full interval still suppresses peers.
 	clock = clock.Add(time.Hour - time.Minute)
@@ -87,7 +124,7 @@ func TestSnapshotCoordinatorShortIntervalStillSuppresses(t *testing.T) {
 	claimed, err := coords[0].Claim("snapshot", upstream, 5*time.Minute)
 	assert.NoError(t, err)
 	assert.True(t, claimed)
-	assert.NoError(t, coords[0].Complete("snapshot", upstream))
+	assert.NoError(t, coords[0].Complete("snapshot", upstream, "abc123"))
 
 	clock = clock.Add(2 * time.Minute)
 	claimed, err = coords[1].Claim("snapshot", upstream, 5*time.Minute)
@@ -116,6 +153,32 @@ func TestSnapshotCoordinatorInProgressClaimSuppressesPeers(t *testing.T) {
 	assert.True(t, claimed)
 }
 
+func TestSnapshotCoordinatorReleaseClearsClaim(t *testing.T) {
+	clock := time.Date(2026, 5, 5, 12, 0, 0, 0, time.UTC)
+	coords := newTestSnapshotCoordinators(t, func() time.Time { return clock }, 2)
+	const upstream = "https://github.com/foo/bar"
+
+	claimed, err := coords[0].Claim("snapshot", upstream, time.Hour)
+	assert.NoError(t, err)
+	assert.True(t, claimed)
+	assert.NoError(t, coords[0].Release("snapshot", upstream))
+
+	// A released claim no longer suppresses peers, even within the claim TTL.
+	clock = clock.Add(time.Minute)
+	claimed, err = coords[1].Claim("snapshot", upstream, time.Hour)
+	assert.NoError(t, err)
+	assert.True(t, claimed)
+
+	// Release without an in-progress claim is a no-op: a fresh completion
+	// keeps suppressing peers.
+	assert.NoError(t, coords[1].Complete("snapshot", upstream, "abc123"))
+	assert.NoError(t, coords[1].Release("snapshot", upstream))
+	clock = clock.Add(time.Minute)
+	claimed, err = coords[0].Claim("snapshot", upstream, time.Hour)
+	assert.NoError(t, err)
+	assert.False(t, claimed)
+}
+
 func TestSnapshotCoordinatorFailedGenerationDoesNotMarkFresh(t *testing.T) {
 	clock := time.Date(2026, 5, 5, 12, 0, 0, 0, time.UTC)
 	coords := newTestSnapshotCoordinators(t, func() time.Time { return clock }, 2)
@@ -140,7 +203,7 @@ func TestSnapshotCoordinatorKeysAreIndependent(t *testing.T) {
 	claimed, err := c.Claim("snapshot", "https://github.com/foo/bar", time.Hour)
 	assert.NoError(t, err)
 	assert.True(t, claimed)
-	assert.NoError(t, c.Complete("snapshot", "https://github.com/foo/bar"))
+	assert.NoError(t, c.Complete("snapshot", "https://github.com/foo/bar", "abc123"))
 
 	for _, job := range []string{"lfs-snapshot", "mirror-snapshot"} {
 		claimed, err = c.Claim(job, "https://github.com/foo/bar", time.Hour)

@@ -110,7 +110,7 @@ func (s *Strategy) withSnapshotClone(ctx context.Context, repo *gitclone.Reposit
 	return fn(workDir)
 }
 
-func (s *Strategy) generateAndUploadSnapshot(ctx context.Context, repo *gitclone.Repository) (returnErr error) {
+func (s *Strategy) generateAndUploadSnapshot(ctx context.Context, repo *gitclone.Repository) (commit string, returnErr error) {
 	upstream := repo.UpstreamURL()
 	ctx, span := tracer.Start(ctx, "git.snapshot.generate",
 		trace.WithAttributes(
@@ -136,6 +136,11 @@ func (s *Strategy) generateAndUploadSnapshot(ctx context.Context, repo *gitclone
 	defer mu.Unlock()
 
 	cacheKey := snapshotCacheKey(upstream)
+	if head := s.getMirrorHead(ctx, repo); s.snapshotUnchanged(ctx, snapshotJobBase, cacheKey, upstream, head) {
+		s.metrics.recordOperation(ctx, "snapshot", "unchanged", time.Since(start))
+		logger.InfoContext(ctx, "Snapshot unchanged, skipping generation", "upstream", upstream, "commit", head)
+		return "", nil
+	}
 	if err := s.withSnapshotClone(ctx, repo, "base", func(workDir string) error {
 		// Capture the snapshot's HEAD so we can later build a delta bundle between
 		// the cached snapshot and the current mirror state.
@@ -143,17 +148,18 @@ func (s *Strategy) generateAndUploadSnapshot(ctx context.Context, repo *gitclone
 		if err != nil {
 			return errors.Wrap(err, "rev-parse HEAD for snapshot")
 		}
+		commit = headSHA
 		extraHeaders := http.Header{}
 		extraHeaders.Set("X-Cachew-Snapshot-Commit", headSHA)
 
 		return snapshot.Create(ctx, s.cache, cacheKey, workDir, 0, nil, s.config.ZstdThreads, extraHeaders)
 	}); err != nil {
-		return errors.Wrap(err, "create snapshot")
+		return "", errors.Wrap(err, "create snapshot")
 	}
 
 	s.metrics.recordOperation(ctx, "snapshot", "success", time.Since(start))
 	logger.InfoContext(ctx, "Snapshot generation completed", "upstream", upstream)
-	return nil
+	return commit, nil
 }
 
 // generateAndUploadMirrorSnapshot creates a snapshot of the bare mirror
@@ -161,7 +167,7 @@ func (s *Strategy) generateAndUploadSnapshot(ctx context.Context, repo *gitclone
 // restored directly as a mirror without any conversion. This is used for
 // pod-to-pod bootstrap: a new cachew pod restores the mirror snapshot and
 // is immediately ready to serve, with background fetch handling freshening.
-func (s *Strategy) generateAndUploadMirrorSnapshot(ctx context.Context, repo *gitclone.Repository) (returnErr error) {
+func (s *Strategy) generateAndUploadMirrorSnapshot(ctx context.Context, repo *gitclone.Repository) (commit string, returnErr error) {
 	upstream := repo.UpstreamURL()
 	ctx, span := tracer.Start(ctx, "git.snapshot.generate_mirror",
 		trace.WithAttributes(
@@ -186,6 +192,16 @@ func (s *Strategy) generateAndUploadMirrorSnapshot(ctx context.Context, repo *gi
 	defer mu.Unlock()
 
 	cacheKey := mirrorSnapshotCacheKey(upstream)
+
+	// HEAD is a proxy for the whole mirror: branch refs can move while HEAD is
+	// stable, so a skipped mirror snapshot may miss ref updates for up to
+	// snapshot-max-age. Restored pods immediately fetch to freshen, which
+	// covers that drift.
+	head := s.getMirrorHead(ctx, repo)
+	if s.snapshotUnchanged(ctx, snapshotJobMirror, cacheKey, upstream, head) {
+		logger.InfoContext(ctx, "Mirror snapshot unchanged, skipping generation", "upstream", upstream, "commit", head)
+		return "", nil
+	}
 	excludePatterns := []string{"*.lock"}
 
 	// Hold the fetch semaphore while tar-ing the bare mirror directory.
@@ -196,11 +212,32 @@ func (s *Strategy) generateAndUploadMirrorSnapshot(ctx context.Context, repo *gi
 			return snapshot.Create(ctx, s.cache, cacheKey, repo.Path(), 0, excludePatterns, s.config.ZstdThreads)
 		})
 	}); err != nil {
-		return errors.Wrap(err, "create mirror snapshot")
+		return "", errors.Wrap(err, "create mirror snapshot")
 	}
 
 	logger.InfoContext(ctx, "Mirror snapshot generation completed", "upstream", upstream)
-	return nil
+	return head, nil
+}
+
+// Coordinated snapshot job names, shared between scheduling and the
+// per-generator unchanged-skip checks.
+const (
+	snapshotJobBase   = "snapshot"
+	snapshotJobLFS    = "lfs-snapshot"
+	snapshotJobMirror = "mirror-snapshot"
+)
+
+// snapshotUnchanged reports whether generation can be skipped: the last
+// completed generation captured the same commit recently enough that its
+// cache entry cannot have expired, and the entry still exists. The existence
+// check keeps a lost entry (crash, manual delete) from going unrepaired until
+// the record ages out, and makes miss-driven backfills regenerate immediately.
+func (s *Strategy) snapshotUnchanged(ctx context.Context, job string, key cache.Key, upstream, head string) bool {
+	if !s.snapshotCoord.Unchanged(job, upstream, head, s.config.SnapshotMaxAge) {
+		return false
+	}
+	_, err := s.cache.Stat(ctx, key)
+	return err == nil
 }
 
 // snapshotStartupSpread staggers each replica's first coordinated snapshot
@@ -211,7 +248,7 @@ const snapshotStartupSpread = 5 * time.Minute
 
 func (s *Strategy) scheduleSnapshotJobs(repo *gitclone.Repository) {
 	upstream := repo.UpstreamURL()
-	submit := func(job string, interval time.Duration, generate func(ctx context.Context) error) {
+	submit := func(job string, interval time.Duration, generate func(ctx context.Context) (string, error)) {
 		run := s.coordinatedSnapshotJob(job, repo, interval, generate)
 		delay, interval := s.snapshotSchedule(interval)
 		if delay == 0 {
@@ -224,20 +261,20 @@ func (s *Strategy) scheduleSnapshotJobs(repo *gitclone.Repository) {
 			s.scheduler.SubmitPeriodicJob(upstream, job+"-periodic", interval, run)
 		})
 	}
-	submit("snapshot", s.config.SnapshotInterval, func(ctx context.Context) error {
+	submit(snapshotJobBase, s.config.SnapshotInterval, func(ctx context.Context) (string, error) {
 		if err := s.doFetch(ctx, repo); err != nil {
 			logging.FromContext(ctx).WarnContext(ctx, "Pre-snapshot fetch failed", "upstream", upstream, "error", err)
 		}
 		return s.generateAndUploadSnapshot(ctx, repo)
 	})
-	submit("lfs-snapshot", s.config.SnapshotInterval, func(ctx context.Context) error {
+	submit(snapshotJobLFS, s.config.SnapshotInterval, func(ctx context.Context) (string, error) {
 		return s.generateAndUploadLFSSnapshot(ctx, repo)
 	})
 	mirrorInterval := s.config.MirrorSnapshotInterval
 	if mirrorInterval == 0 {
 		mirrorInterval = s.config.SnapshotInterval
 	}
-	submit("mirror-snapshot", mirrorInterval, func(ctx context.Context) error {
+	submit(snapshotJobMirror, mirrorInterval, func(ctx context.Context) (string, error) {
 		return s.generateAndUploadMirrorSnapshot(ctx, repo)
 	})
 }
@@ -259,8 +296,11 @@ func (s *Strategy) snapshotSchedule(interval time.Duration) (delay, jittered tim
 // coordinatedSnapshotJob wraps a snapshot generation job with cross-replica
 // coordination: the job is skipped when another replica generated the
 // artifact recently or is generating it now. Coordination failures fail open
-// so a broken metadata store never stops snapshot generation.
-func (s *Strategy) coordinatedSnapshotJob(job string, repo *gitclone.Repository, interval time.Duration, generate func(ctx context.Context) error) func(ctx context.Context) error {
+// so a broken metadata store never stops snapshot generation. generate
+// returns the commit it captured; empty means nothing was uploaded (skipped
+// as unchanged, or nothing to snapshot), which must not count as a completion
+// or the unchanged-skip's max-age bound would drift from the last upload.
+func (s *Strategy) coordinatedSnapshotJob(job string, repo *gitclone.Repository, interval time.Duration, generate func(ctx context.Context) (string, error)) func(ctx context.Context) error {
 	upstream := repo.UpstreamURL()
 	return func(ctx context.Context) error {
 		logger := logging.FromContext(ctx)
@@ -271,10 +311,21 @@ func (s *Strategy) coordinatedSnapshotJob(job string, repo *gitclone.Repository,
 			logger.DebugContext(ctx, "Skipping snapshot generation, fresh or in progress on another replica", "job", job, "upstream", upstream)
 			return nil
 		}
-		if err := generate(ctx); err != nil {
+		commit, err := generate(ctx)
+		if err != nil {
 			return err
 		}
-		if err := s.snapshotCoord.Complete(job, upstream); err != nil {
+		if commit == "" {
+			// Nothing was uploaded, so release the claim rather than record a
+			// completion: CompletedAt must keep tracking the last actual
+			// upload, and a lingering claim would suppress peers for the full
+			// claim TTL.
+			if err := s.snapshotCoord.Release(job, upstream); err != nil {
+				logger.WarnContext(ctx, "Failed to release snapshot claim", "job", job, "upstream", upstream, "error", err)
+			}
+			return nil
+		}
+		if err := s.snapshotCoord.Complete(job, upstream, commit); err != nil {
 			logger.WarnContext(ctx, "Failed to record snapshot completion", "job", job, "upstream", upstream, "error", err)
 		}
 		return nil
@@ -946,7 +997,7 @@ func (s *Strategy) writeSnapshotSpool(w http.ResponseWriter, r *http.Request, re
 		}
 		mu.Unlock()
 		bgCtx := context.WithoutCancel(ctx)
-		if err := s.generateAndUploadSnapshot(bgCtx, repo); err != nil {
+		if _, err := s.generateAndUploadSnapshot(bgCtx, repo); err != nil {
 			logger.ErrorContext(bgCtx, "Background cache upload failed", "upstream", upstreamURL, "error", err)
 		}
 	}()
@@ -1051,7 +1102,7 @@ func snapshotSpoolDirForURL(mirrorRoot, upstreamURL string) (string, error) {
 //
 // The archive stores paths relative to .git/ (e.g. ./lfs/objects/xx/yy/sha256) so that
 // the client can extract it directly into the repo's .git/ directory.
-func (s *Strategy) generateAndUploadLFSSnapshot(ctx context.Context, repo *gitclone.Repository) (returnErr error) {
+func (s *Strategy) generateAndUploadLFSSnapshot(ctx context.Context, repo *gitclone.Repository) (commit string, returnErr error) {
 	upstream := repo.UpstreamURL()
 	ctx, span := tracer.Start(ctx, "git.snapshot.generate_lfs",
 		trace.WithAttributes(
@@ -1069,6 +1120,15 @@ func (s *Strategy) generateAndUploadLFSSnapshot(ctx context.Context, repo *gitcl
 
 	logger := logging.FromContext(ctx)
 
+	// LFS objects are derived from HEAD, so an unchanged HEAD means the
+	// snapshot content is unchanged. Repos without an LFS entry never pass
+	// the existence check and simply re-run the cheap discovery grep below.
+	head := s.getMirrorHead(ctx, repo)
+	if s.snapshotUnchanged(ctx, snapshotJobLFS, lfsSnapshotCacheKey(upstream), upstream, head) {
+		logger.InfoContext(ctx, "LFS snapshot unchanged, skipping generation", "upstream", upstream, "commit", head)
+		return "", nil
+	}
+
 	// Check if any .gitattributes file at HEAD declares filter=lfs. This searches
 	// the root and all nested .gitattributes, avoiding false negatives for repos
 	// that only configure LFS in subdirectories.
@@ -1083,10 +1143,10 @@ func (s *Strategy) generateAndUploadLFSSnapshot(ctx context.Context, repo *gitcl
 		if exitErr, ok := errors.AsType[*exec.ExitError](err); ok && exitErr.ExitCode() == 1 {
 			s.metrics.recordLFSPhase(ctx, upstream, "discover", "skipped", time.Since(discoverStart))
 			logger.DebugContext(ctx, "No LFS filter in any .gitattributes, skipping LFS snapshot", "upstream", upstream)
-			return nil
+			return head, nil
 		}
 		s.metrics.recordLFSPhase(ctx, upstream, "discover", "error", time.Since(discoverStart))
-		return errors.Wrap(err, "git grep for LFS filter")
+		return "", errors.Wrap(err, "git grep for LFS filter")
 	}
 	s.metrics.recordLFSPhase(ctx, upstream, "discover", "success", time.Since(discoverStart))
 
@@ -1166,12 +1226,12 @@ func (s *Strategy) generateAndUploadLFSSnapshot(ctx context.Context, repo *gitcl
 			s.metrics.recordLFSPhase(ctx, upstream, "clone", "error", time.Since(cloneStart))
 		}
 		s.metrics.recordOperation(ctx, "lfs-snapshot", "error", time.Since(start))
-		return errors.Wrap(err, "create LFS snapshot")
+		return "", errors.Wrap(err, "create LFS snapshot")
 	}
 
 	s.metrics.recordOperation(ctx, "lfs-snapshot", "success", time.Since(start))
 	logger.InfoContext(ctx, "LFS snapshot generation completed", "upstream", upstream)
-	return nil
+	return head, nil
 }
 
 // dirSizeBytes returns the total size in bytes of regular files under root.

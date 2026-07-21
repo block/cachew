@@ -20,6 +20,7 @@ import (
 	"github.com/block/cachew/internal/gitclone"
 	"github.com/block/cachew/internal/githubapp"
 	"github.com/block/cachew/internal/logging"
+	"github.com/block/cachew/internal/metadatadb"
 	"github.com/block/cachew/internal/snapshot"
 	"github.com/block/cachew/internal/strategy/git"
 )
@@ -174,6 +175,85 @@ func createTestMirrorRepoWithFiles(t *testing.T, mirrorPath string, files map[st
 		output, err := cmd.CombinedOutput()
 		assert.NoError(t, err, string(output))
 	}
+}
+
+// addCommitToMirror pushes a new empty commit to the bare mirror so its HEAD
+// moves.
+func addCommitToMirror(t *testing.T, mirrorPath string) {
+	t.Helper()
+	tmpWork := t.TempDir()
+	for _, args := range [][]string{
+		{"clone", mirrorPath, tmpWork},
+		{"-C", tmpWork, "config", "user.email", "test@test.com"},
+		{"-C", tmpWork, "config", "user.name", "Test"},
+		{"-C", tmpWork, "commit", "--allow-empty", "-m", "update"},
+		{"-C", tmpWork, "push", "origin", "HEAD"},
+	} {
+		cmd := exec.Command("git", args...)
+		output, err := cmd.CombinedOutput()
+		assert.NoError(t, err, string(output))
+	}
+}
+
+// TestSnapshotUnchangedSkipsRegeneration proves the unchanged-skip end to
+// end: with shared coordination state, regenerating while HEAD is unchanged
+// leaves the cached snapshot (and its ETag) untouched, while a lost cache
+// entry or a moved HEAD triggers a real regeneration.
+func TestSnapshotUnchangedSkipsRegeneration(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not found in PATH")
+	}
+
+	_, ctx := logging.Configure(context.Background(), logging.Config{})
+	tmpDir := t.TempDir()
+	mirrorRoot := filepath.Join(tmpDir, "mirrors")
+	upstreamURL := "https://github.com/org/repo"
+	mirrorPath := filepath.Join(mirrorRoot, "github.com", "org", "repo")
+	createTestMirrorRepo(t, mirrorPath)
+
+	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: time.Hour})
+	assert.NoError(t, err)
+	mux := newTestMux()
+
+	cm := gitclone.NewManagerProvider(ctx, gitclone.Config{MirrorRoot: mirrorRoot}, nil)
+	s, err := git.New(ctx, git.Config{SnapshotMaxAge: time.Hour}, newTestScheduler(ctx, t), memCache, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
+	assert.NoError(t, err)
+	s.SetMetadataStore(metadatadb.New(ctx, metadatadb.NewMemoryBackend()))
+
+	manager, err := cm()
+	assert.NoError(t, err)
+	repo, err := manager.GetOrCreate(ctx, upstreamURL)
+	assert.NoError(t, err)
+	waitForReady(t, s)
+
+	// Interval 0 lets every run claim; freshness is enforced by max-age.
+	const interval = time.Duration(0)
+	cacheKey := cache.NewKey(upstreamURL + ".snapshot")
+	etagAt := func() string {
+		headers, err := memCache.Stat(ctx, cacheKey)
+		assert.NoError(t, err)
+		etag := headers.Get(cache.ETagKey)
+		assert.NotZero(t, etag)
+		return etag
+	}
+
+	assert.NoError(t, s.RunCoordinatedSnapshot(ctx, repo, interval))
+	etag1 := etagAt()
+
+	// Unchanged HEAD: the upload is skipped and the ETag stays stable.
+	assert.NoError(t, s.RunCoordinatedSnapshot(ctx, repo, interval))
+	assert.Equal(t, etag1, etagAt())
+
+	// A lost cache entry regenerates despite matching coordination metadata.
+	assert.NoError(t, memCache.Delete(ctx, cacheKey))
+	assert.NoError(t, s.RunCoordinatedSnapshot(ctx, repo, interval))
+	etag2 := etagAt()
+	assert.NotEqual(t, etag1, etag2)
+
+	// A moved HEAD regenerates.
+	addCommitToMirror(t, mirrorPath)
+	assert.NoError(t, s.RunCoordinatedSnapshot(ctx, repo, interval))
+	assert.NotEqual(t, etag2, etagAt())
 }
 
 func TestSnapshotGenerationViaLocalClone(t *testing.T) {
