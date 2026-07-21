@@ -51,11 +51,17 @@ type S3Config struct {
 }
 
 type S3 struct {
-	logger    *slog.Logger
-	config    S3Config
-	namespace Namespace
-	client    *minio.Client
+	logger         *slog.Logger
+	config         S3Config
+	namespace      Namespace
+	client         *minio.Client
+	companionGrace time.Duration
 }
+
+// s3CompanionGrace generously bounds the gap between a data object landing
+// and its companion write (one small PUT, normally milliseconds) so that
+// only provably orphaned objects are served without a matching companion.
+const s3CompanionGrace = 15 * time.Minute
 
 var _ Cache = (*S3)(nil)
 
@@ -140,9 +146,10 @@ func NewS3(ctx context.Context, config S3Config, clientProvider s3client.ClientP
 	}
 
 	return &S3{
-		logger: logging.FromContext(ctx),
-		config: config,
-		client: client,
+		logger:         logging.FromContext(ctx),
+		config:         config,
+		client:         client,
+		companionGrace: s3CompanionGrace,
 	}, nil
 }
 
@@ -193,12 +200,24 @@ func (s *S3) statAndHeaders(ctx context.Context, key Key) (minio.ObjectInfo, htt
 		return minio.ObjectInfo{}, nil, s3Meta{}, err
 	}
 
-	// Reject metadata that describes a different data object than the one
-	// stored (e.g. interleaved concurrent writes to the same key, or a data
-	// object whose companion has not been written yet). Treating this as a
-	// miss lets the caller fall back to upstream; the next write reconciles.
+	// A companion describing a different data object than the one stored is
+	// either a commit still in flight (the data object lands first, its
+	// companion follows within the same Close) or a companion lost to a crash
+	// or clobbered by an interleaved writer. Young objects stay misses so an
+	// unfinished commit is never readable, per the Create contract. Past the
+	// grace window no commit can still be in flight, and the data object is
+	// self-describing (immutable headers travel in its user metadata) and
+	// complete (uploads are atomic and checksummed), so serve it with its own
+	// expiry rather than hiding a valid object until the next regeneration.
+	// The next expiry refresh or write reconciles the companion. Objects from
+	// older formats that carried the ETag only in the companion stay misses:
+	// serving them without a validator would break conditional requests and
+	// ranged-download consistency checks.
 	if objInfo.UserMetadata[s3TagMetadataKey] != meta.Tag {
-		return minio.ObjectInfo{}, nil, s3Meta{}, os.ErrNotExist
+		if time.Since(objInfo.LastModified) < s.companionGrace || headers.Get(ETagKey) == "" {
+			return minio.ObjectInfo{}, nil, s3Meta{}, os.ErrNotExist
+		}
+		meta = s3Meta{ExpiresAt: objInfo.Expires, Tag: objInfo.UserMetadata[s3TagMetadataKey]}
 	}
 
 	maps.Copy(headers, meta.Headers)
@@ -490,11 +509,45 @@ func (w *s3Writer) Close() error {
 		return err
 	}
 
-	// Skip companion metadata if the context was cancelled via Abort.
-	if w.ctx.Err() == nil {
-		metaHeaders := make(http.Header)
-		metaHeaders.Set(ETagKey, w.headers.Get(ETagKey))
-		return w.s3.writeMeta(w.ctx, w.namespace, w.key, s3Meta{Headers: metaHeaders, ExpiresAt: w.expiresAt, Tag: w.tag})
+	// The data object landed but the write is not committed until the
+	// companion is written. If the write was aborted or the companion write
+	// fails, delete the data object so the uncommitted write cannot age into
+	// the stale-companion fallback and become readable. Cleanup failures
+	// propagate to the caller: a tagged object left behind would become
+	// readable once it ages past the grace window.
+	if w.ctx.Err() != nil {
+		return w.removeUncommitted()
+	}
+	metaHeaders := make(http.Header)
+	metaHeaders.Set(ETagKey, w.headers.Get(ETagKey))
+	if err := w.s3.writeMeta(w.ctx, w.namespace, w.key, s3Meta{Headers: metaHeaders, ExpiresAt: w.expiresAt, Tag: w.tag}); err != nil {
+		return errors.Join(err, w.removeUncommitted())
+	}
+	return nil
+}
+
+// removeUncommitted deletes the data object after its upload succeeded but
+// the write failed to commit. The delete only proceeds while the stored
+// object still carries this writer's tag, so an interleaved writer's
+// committed object is preserved; the residual stat-to-delete race just costs
+// that writer a miss. Failure leaves an orphan equivalent to a crash between
+// the two puts.
+func (w *s3Writer) removeUncommitted() error {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(w.ctx), 30*time.Second)
+	defer cancel()
+	objectName := w.s3.keyToPath(w.namespace, w.key)
+	objInfo, err := w.s3.client.StatObject(ctx, w.s3.config.Bucket, objectName, minio.StatObjectOptions{})
+	if err != nil {
+		if minio.ToErrorResponse(err).Code == s3ErrNoSuchKey {
+			return nil
+		}
+		return errors.Errorf("failed to stat uncommitted S3 data object %s: %w", objectName, err)
+	}
+	if objInfo.UserMetadata[s3TagMetadataKey] != w.tag {
+		return nil
+	}
+	if err := w.s3.client.RemoveObject(ctx, w.s3.config.Bucket, objectName, minio.RemoveObjectOptions{}); err != nil {
+		return errors.Errorf("failed to remove uncommitted S3 data object %s: %w", objectName, err)
 	}
 	return nil
 }
