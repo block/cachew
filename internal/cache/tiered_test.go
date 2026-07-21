@@ -1,6 +1,7 @@
 package cache_test
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -242,6 +243,92 @@ func TestTieredBackfillPermutations(t *testing.T) {
 			assert.Equal(t, etag, lowerHeaders.Get(cache.ETagKey))
 		})
 	}
+}
+
+func TestTieredBackfillDiscardsIncompleteStreams(t *testing.T) {
+	errMidStream := errors.New("mid-stream failure")
+	newTieredWithFailingUpper := func(t *testing.T, key cache.Key, content []byte, failAfter int) (tiered, lower cache.Cache) {
+		t.Helper()
+		_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelDebug})
+		lower, err := cache.NewMemory(ctx, cache.MemoryConfig{LimitMB: 1024, MaxTTL: time.Hour})
+		assert.NoError(t, err)
+		upper, err := cache.NewMemory(ctx, cache.MemoryConfig{LimitMB: 1024, MaxTTL: time.Hour})
+		assert.NoError(t, err)
+		seedTier(ctx, t, upper, key, content, "backfill-etag")
+		tiered = newTiered(ctx, lower, midStreamFailingCache{Cache: upper, failAfter: failAfter, err: errMidStream})
+		t.Cleanup(func() { _ = tiered.Close() })
+		return tiered, lower
+	}
+
+	key := cache.NewKey("backfill-truncated")
+	content := bytes.Repeat([]byte("0123456789abcdef"), 64)
+
+	t.Run("MidStreamReadError", func(t *testing.T) {
+		_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelDebug})
+		tiered, lower := newTieredWithFailingUpper(t, key, content, len(content)/2)
+
+		r, _, err := tiered.Open(ctx, key)
+		assert.NoError(t, err)
+		_, err = io.ReadAll(r)
+		assert.IsError(t, err, errMidStream)
+		assert.NoError(t, r.Close())
+
+		_, _, err = lower.Open(ctx, key)
+		assert.IsError(t, err, os.ErrNotExist)
+	})
+
+	t.Run("CloseBeforeEOF", func(t *testing.T) {
+		_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelDebug})
+		tiered, lower := newTieredWithFailingUpper(t, key, content, len(content))
+
+		r, _, err := tiered.Open(ctx, key)
+		assert.NoError(t, err)
+		buf := make([]byte, len(content)/2)
+		_, err = io.ReadFull(r, buf)
+		assert.NoError(t, err)
+		assert.NoError(t, r.Close())
+
+		_, _, err = lower.Open(ctx, key)
+		assert.IsError(t, err, os.ErrNotExist)
+	})
+}
+
+// midStreamFailingCache serves failAfter bytes of each opened object and then
+// fails the read with err, simulating an upstream stream dying mid-transfer.
+type midStreamFailingCache struct {
+	cache.Cache
+	failAfter int
+	err       error
+}
+
+func (c midStreamFailingCache) Open(ctx context.Context, key cache.Key, opts ...cache.Option) (io.ReadCloser, http.Header, error) {
+	r, h, err := c.Cache.Open(ctx, key, opts...)
+	if err != nil {
+		return nil, nil, err //nolint:wrapcheck
+	}
+	return &midStreamFailingReader{r: r, remaining: c.failAfter, err: c.err}, h, nil
+}
+
+type midStreamFailingReader struct {
+	r         io.ReadCloser
+	remaining int
+	err       error
+}
+
+func (r *midStreamFailingReader) Read(p []byte) (int, error) {
+	if r.remaining <= 0 {
+		return 0, r.err
+	}
+	if len(p) > r.remaining {
+		p = p[:r.remaining]
+	}
+	n, err := r.r.Read(p)
+	r.remaining -= n
+	return n, err //nolint:wrapcheck
+}
+
+func (r *midStreamFailingReader) Close() error {
+	return r.r.Close() //nolint:wrapcheck
 }
 
 func TestTieredCreateUsesSameETagInEveryTier(t *testing.T) {
