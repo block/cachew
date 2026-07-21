@@ -23,10 +23,14 @@ const (
 )
 
 // snapshotGenRecord is the shared per-artifact generation state. StartedAt is
-// the most recent claim; CompletedAt is the most recent successful generation.
+// the most recent claim; CompletedAt is the most recent successful generation;
+// CheckedAt is the most recent claim that ended in a skip (nothing uploaded);
+// Commit is the mirror HEAD that generation captured.
 type snapshotGenRecord struct {
 	StartedAt   time.Time `json:"started_at"`
 	CompletedAt time.Time `json:"completed_at,omitzero"`
+	CheckedAt   time.Time `json:"checked_at,omitzero"`
+	Commit      string    `json:"commit,omitempty"`
 }
 
 // SnapshotCoordinator shares per-artifact generation state across replicas so
@@ -69,8 +73,8 @@ func (c *SnapshotCoordinator) Prime(ctx context.Context) error {
 
 // Claim reports whether this replica should generate the artifact now, and
 // records the claim when it should. It declines when another replica
-// completed a generation within the interval, or holds an unexpired
-// in-progress claim.
+// completed a generation or checked-and-skipped within the interval, or
+// holds an unexpired in-progress claim.
 func (c *SnapshotCoordinator) Claim(job, upstreamURL string, interval time.Duration) (bool, error) {
 	if c == nil {
 		return true, nil
@@ -86,6 +90,13 @@ func (c *SnapshotCoordinator) Claim(job, upstreamURL string, interval time.Durat
 		if !rec.CompletedAt.IsZero() && now.Sub(rec.CompletedAt) < interval {
 			return false, nil
 		}
+		// A checked-and-skipped decision is as fresh as a completion for
+		// claiming purposes: without it, once the last upload ages past the
+		// interval every replica would re-fetch an unchanged repo each
+		// interval instead of one.
+		if !rec.CheckedAt.IsZero() && now.Sub(rec.CheckedAt) < interval {
+			return false, nil
+		}
 		inProgress := rec.CompletedAt.Before(rec.StartedAt)
 		if inProgress && now.Sub(rec.StartedAt) < snapshotClaimTTL {
 			return false, nil
@@ -98,16 +109,48 @@ func (c *SnapshotCoordinator) Claim(job, upstreamURL string, interval time.Durat
 	return true, nil
 }
 
-// Complete records a successful generation so other replicas skip the
-// artifact until it goes stale again.
-func (c *SnapshotCoordinator) Complete(job, upstreamURL string) error {
+// Complete records a successful generation and the commit it captured so
+// other replicas skip the artifact until it goes stale again.
+func (c *SnapshotCoordinator) Complete(job, upstreamURL, commit string) error {
 	if c == nil {
 		return nil
 	}
 	key := snapshotGenKey(job, upstreamURL)
 	rec, _ := c.gens.Get(key)
 	rec.CompletedAt = c.now()
+	rec.Commit = commit
 	return errors.Wrap(c.gens.Set(key, rec), "record snapshot completion")
+}
+
+// Skip records a claim that ended without an upload (unchanged artifact or
+// nothing to snapshot). It clears the in-progress claim and stamps CheckedAt
+// so peers stay suppressed for the freshness interval rather than the claim
+// TTL, without counting as a completion: CompletedAt must keep tracking the
+// last actual upload so Unchanged's maxAge bound holds.
+func (c *SnapshotCoordinator) Skip(job, upstreamURL string) error {
+	if c == nil {
+		return nil
+	}
+	key := snapshotGenKey(job, upstreamURL)
+	rec, _ := c.gens.Get(key)
+	rec.CheckedAt = c.now()
+	if rec.CompletedAt.Before(rec.StartedAt) {
+		rec.StartedAt = rec.CompletedAt
+	}
+	return errors.Wrap(c.gens.Set(key, rec), "record snapshot skip")
+}
+
+// Unchanged reports whether the last completed generation captured the same
+// commit and is recent enough (within maxAge) that its cache entry cannot
+// have expired. Callers skipping on this must not call Complete, so
+// CompletedAt keeps tracking the last actual upload and maxAge bounds both
+// cache-entry age and drift of non-HEAD refs captured in the artifact.
+func (c *SnapshotCoordinator) Unchanged(job, upstreamURL, commit string, maxAge time.Duration) bool {
+	if c == nil || commit == "" || maxAge <= 0 {
+		return false
+	}
+	rec, ok := c.gens.Get(snapshotGenKey(job, upstreamURL))
+	return ok && rec.Commit == commit && !rec.CompletedAt.IsZero() && c.now().Sub(rec.CompletedAt) < maxAge
 }
 
 func snapshotGenKey(job, upstreamURL string) string {
