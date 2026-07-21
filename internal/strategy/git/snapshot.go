@@ -58,14 +58,34 @@ func lfsSnapshotCacheKey(upstreamURL string) cache.Key {
 }
 
 // cloneForSnapshot clones the mirror into destDir under repo's read lock,
-// then fixes the remote URL to point through cachew (or upstream).
-func (s *Strategy) cloneForSnapshot(ctx context.Context, repo *gitclone.Repository, destDir string) error {
+// then fixes the remote URL to point through cachew (or upstream). A non-empty
+// filter produces a partial clone (e.g. blob:none) that carries full history
+// metadata but only the blobs needed for the HEAD checkout.
+func (s *Strategy) cloneForSnapshot(ctx context.Context, repo *gitclone.Repository, destDir, filter string) error {
 	if err := repo.WithReadLock(func() error {
+		args := []string{"clone"}
+		if filter != "" {
+			// Local (hardlink) clones copy the entire object store and silently
+			// ignore --filter; --no-local forces the transport path so the filter
+			// applies and objects unreachable from cloned refs (e.g. refs/pull
+			// history in the mirror) are left behind.
+			args = append(args, "--no-local", "--filter="+filter)
+		}
+		args = append(args, repo.Path(), destDir)
 		// #nosec G204 - repo.Path() and destDir are controlled by us
-		cmd := exec.CommandContext(ctx, "git", "clone", repo.Path(), destDir)
+		cmd := exec.CommandContext(ctx, "git", args...)
 		cmd.Env = append(os.Environ(), "GIT_LFS_SKIP_SMUDGE=1")
 		if output, err := cmd.CombinedOutput(); err != nil {
 			return errors.Wrapf(err, "git clone for snapshot: %s", string(output))
+		}
+
+		if filter != "" {
+			// git silently falls back to a full clone when the source repo does
+			// not advertise the filter capability; fail loudly rather than cache
+			// a full-size artifact for a repo configured to be filtered.
+			if err := verifyPartialClone(ctx, destDir); err != nil {
+				return errors.WithStack(err)
+			}
 		}
 
 		// git clone from a local path sets remote.origin.url to that path; restore
@@ -83,7 +103,30 @@ func (s *Strategy) cloneForSnapshot(ctx context.Context, repo *gitclone.Reposito
 	return nil
 }
 
-func (s *Strategy) withSnapshotClone(ctx context.Context, repo *gitclone.Repository, suffix string, fn func(workDir string) error) error {
+// snapshotFilterFor reports the partial-clone filter configured for the repo,
+// or empty when the snapshot should be a full clone.
+func (s *Strategy) snapshotFilterFor(upstreamURL string) string {
+	if len(s.config.SnapshotFilters) == 0 {
+		return ""
+	}
+	repoPath, err := gitclone.RepoPathFromURL(upstreamURL)
+	if err != nil {
+		return ""
+	}
+	return s.config.SnapshotFilters[repoPath]
+}
+
+// verifyPartialClone reports an error when repoDir is not a partial clone.
+func verifyPartialClone(ctx context.Context, repoDir string) error {
+	cmd := exec.CommandContext(ctx, "git", "-C", repoDir, "config", "--get", "remote.origin.promisor") // #nosec G204
+	output, err := cmd.Output()
+	if err != nil || strings.TrimSpace(string(output)) != "true" {
+		return errors.New("snapshot filter was ignored by the mirror (uploadpack.allowFilter unset?)")
+	}
+	return nil
+}
+
+func (s *Strategy) withSnapshotClone(ctx context.Context, repo *gitclone.Repository, suffix, filter string, fn func(workDir string) error) error {
 	logger := logging.FromContext(ctx)
 	mirrorRoot := s.cloneManager.Config().MirrorRoot
 	workDir, err := snapshotDirForURL(mirrorRoot, repo.UpstreamURL())
@@ -100,7 +143,7 @@ func (s *Strategy) withSnapshotClone(ctx context.Context, repo *gitclone.Reposit
 		return errors.Wrap(err, "create snapshot work dir parent")
 	}
 
-	if err := s.cloneForSnapshot(ctx, repo, workDir); err != nil {
+	if err := s.cloneForSnapshot(ctx, repo, workDir, filter); err != nil {
 		_ = os.RemoveAll(workDir)
 		return err
 	}
@@ -134,7 +177,11 @@ func (s *Strategy) generateAndUploadSnapshot(ctx context.Context, repo *gitclone
 	logger := logging.FromContext(ctx)
 	start := time.Now()
 
-	logger.InfoContext(ctx, "Snapshot generation started", "upstream", upstream)
+	filter := s.snapshotFilterFor(upstream)
+	if filter != "" {
+		span.SetAttributes(attribute.String("cachew.snapshot.filter", filter))
+	}
+	logger.InfoContext(ctx, "Snapshot generation started", "upstream", upstream, "filter", filter)
 
 	mu := s.snapshotMutexFor(upstream)
 	mu.Lock()
@@ -146,7 +193,7 @@ func (s *Strategy) generateAndUploadSnapshot(ctx context.Context, repo *gitclone
 		logger.InfoContext(ctx, "Snapshot unchanged, skipping generation", "upstream", upstream, "commit", head)
 		return "", nil
 	}
-	if err := s.withSnapshotClone(ctx, repo, "base", func(workDir string) error {
+	if err := s.withSnapshotClone(ctx, repo, "base", filter, func(workDir string) error {
 		// Capture the snapshot's HEAD so we can later build a delta bundle between
 		// the cached snapshot and the current mirror state.
 		headSHA, err := revParse(ctx, workDir, "HEAD")
@@ -958,7 +1005,7 @@ func (s *Strategy) streamSnapshotDirect(w http.ResponseWriter, r *http.Request, 
 	defer func() { _ = os.RemoveAll(snapshotDir) }()
 
 	repoDir := filepath.Join(snapshotDir, "repo")
-	if err := s.cloneForSnapshot(ctx, repo, repoDir); err != nil {
+	if err := s.cloneForSnapshot(ctx, repo, repoDir, s.snapshotFilterFor(repo.UpstreamURL())); err != nil {
 		return errors.Wrap(err, "clone for snapshot streaming")
 	}
 
@@ -999,7 +1046,7 @@ func (s *Strategy) prepareSnapshotSpool(ctx context.Context, repo *gitclone.Repo
 	}
 
 	repoDir = filepath.Join(snapshotDir, "repo")
-	if err := s.cloneForSnapshot(ctx, repo, repoDir); err != nil {
+	if err := s.cloneForSnapshot(ctx, repo, repoDir, s.snapshotFilterFor(upstreamURL)); err != nil {
 		spool.MarkError(err)
 		s.snapshotSpools.Delete(upstreamURL)
 		_ = os.RemoveAll(snapshotDir)
@@ -1217,7 +1264,10 @@ func (s *Strategy) generateAndUploadLFSSnapshot(ctx context.Context, repo *gitcl
 	excludePatterns := []string{"*.lock"}
 	cloneStart := time.Now()
 	cloneRecorded := false
-	if err := s.withSnapshotClone(ctx, repo, "lfs", func(workDir string) error {
+	// The LFS clone stays unfiltered: after the remote is reset to upstream, a
+	// partial clone's lazy fetches would hit GitHub directly without the
+	// credential injection that repo.GitCommand provides.
+	if err := s.withSnapshotClone(ctx, repo, "lfs", "", func(workDir string) error {
 		s.metrics.recordLFSPhase(ctx, upstream, "clone", "success", time.Since(cloneStart))
 		cloneRecorded = true
 

@@ -318,6 +318,92 @@ func TestSnapshotGenerationViaLocalClone(t *testing.T) {
 	assert.True(t, os.IsNotExist(err))
 }
 
+func TestSnapshotGenerationWithFilter(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not found in PATH")
+	}
+
+	_, ctx := logging.Configure(context.Background(), logging.Config{})
+	tmpDir := t.TempDir()
+	mirrorRoot := filepath.Join(tmpDir, "mirrors")
+	upstreamURL := "https://github.com/org/repo"
+
+	mirrorPath := filepath.Join(mirrorRoot, "github.com", "org", "repo")
+	historicalBlob := createTestMirrorRepoWithHistory(t, mirrorPath)
+
+	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: time.Hour})
+	assert.NoError(t, err)
+	mux := newTestMux()
+
+	cm := gitclone.NewManagerProvider(ctx, gitclone.Config{MirrorRoot: mirrorRoot}, nil)
+	s, err := git.New(ctx, git.Config{SnapshotFilters: map[string]string{"github.com/org/repo": "blob:none"}}, newTestScheduler(ctx, t), memCache, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
+	assert.NoError(t, err)
+
+	manager, err := cm()
+	assert.NoError(t, err)
+	repo, err := manager.GetOrCreate(ctx, upstreamURL)
+	assert.NoError(t, err)
+	assert.Equal(t, gitclone.StateReady, repo.State())
+
+	waitForReady(t, s)
+	err = s.GenerateAndUploadSnapshot(ctx, repo)
+	assert.NoError(t, err)
+
+	cacheKey := cache.NewKey(upstreamURL + ".snapshot")
+	restoreDir := filepath.Join(tmpDir, "restored")
+	err = snapshot.Restore(ctx, memCache, cacheKey, restoreDir, 0)
+	assert.NoError(t, err)
+
+	data, err := os.ReadFile(filepath.Join(restoreDir, "data.txt"))
+	assert.NoError(t, err)
+	assert.Equal(t, "current\n", string(data))
+
+	cmd := exec.Command("git", "-C", restoreDir, "config", "--get", "remote.origin.partialclonefilter")
+	output, err := cmd.CombinedOutput()
+	assert.NoError(t, err, string(output))
+	assert.Equal(t, "blob:none\n", string(output))
+
+	cmd = exec.Command("git", "-C", restoreDir, "cat-file", "--batch-all-objects", "--batch-check=%(objectname)")
+	output, err = cmd.CombinedOutput()
+	assert.NoError(t, err, string(output))
+	assert.False(t, strings.Contains(string(output), historicalBlob))
+
+	cmd = exec.Command("git", "-C", restoreDir, "remote", "get-url", "origin")
+	output, err = cmd.CombinedOutput()
+	assert.NoError(t, err, string(output))
+	assert.Equal(t, upstreamURL+"\n", string(output))
+}
+
+// createTestMirrorRepoWithHistory creates a mirror whose history contains a
+// superseded version of data.txt, returning that historical blob's SHA.
+func createTestMirrorRepoWithHistory(t *testing.T, mirrorPath string) string {
+	t.Helper()
+	tmpWork := t.TempDir()
+
+	run := func(args ...string) string {
+		cmd := exec.Command("git", args...)
+		output, err := cmd.CombinedOutput()
+		assert.NoError(t, err, string(output))
+		return strings.TrimSpace(string(output))
+	}
+
+	run("init", tmpWork)
+	run("-C", tmpWork, "config", "user.email", "test@test.com")
+	run("-C", tmpWork, "config", "user.name", "Test")
+	assert.NoError(t, os.WriteFile(filepath.Join(tmpWork, "data.txt"), []byte("historical\n"), 0o644))
+	run("-C", tmpWork, "add", ".")
+	run("-C", tmpWork, "commit", "-m", "one")
+	historicalBlob := run("-C", tmpWork, "rev-parse", "HEAD:data.txt")
+	assert.NoError(t, os.WriteFile(filepath.Join(tmpWork, "data.txt"), []byte("current\n"), 0o644))
+	run("-C", tmpWork, "commit", "-am", "two")
+	run("clone", "--mirror", tmpWork, mirrorPath)
+	// configureMirror sets this on managed mirrors; a premade test mirror lacks
+	// it, and without it git silently ignores --filter.
+	run("-C", mirrorPath, "config", "uploadpack.allowfilter", "true")
+	run("-C", mirrorPath, "cat-file", "-e", historicalBlob)
+	return historicalBlob
+}
+
 func TestSnapshotGenerationIncludesTrackedLockFiles(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not found in PATH")
