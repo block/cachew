@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net/http"
 	"os"
 	"os/exec"
@@ -202,23 +203,93 @@ func (s *Strategy) generateAndUploadMirrorSnapshot(ctx context.Context, repo *gi
 	return nil
 }
 
+// snapshotStartupSpread staggers each replica's first coordinated snapshot
+// run after registration. Periodic jobs run immediately when this pod has no
+// recorded last run, so on a deploy every replica would otherwise decide
+// within the same metadata sync window, before peers' claims propagate.
+const snapshotStartupSpread = 5 * time.Minute
+
 func (s *Strategy) scheduleSnapshotJobs(repo *gitclone.Repository) {
-	s.scheduler.SubmitPeriodicJob(repo.UpstreamURL(), "snapshot-periodic", s.config.SnapshotInterval, func(ctx context.Context) error {
+	upstream := repo.UpstreamURL()
+	submit := func(job string, interval time.Duration, generate func(ctx context.Context) error) {
+		run := s.coordinatedSnapshotJob(job, repo, interval, generate)
+		delay, interval := s.snapshotSchedule(interval)
+		if delay == 0 {
+			s.scheduler.SubmitPeriodicJob(upstream, job+"-periodic", interval, run)
+			return
+		}
+		// SubmitPeriodicJob is a no-op once the scheduler is draining or torn
+		// down, so a timer that fires during shutdown is harmless.
+		time.AfterFunc(delay, func() {
+			s.scheduler.SubmitPeriodicJob(upstream, job+"-periodic", interval, run)
+		})
+	}
+	submit("snapshot", s.config.SnapshotInterval, func(ctx context.Context) error {
 		if err := s.doFetch(ctx, repo); err != nil {
-			logging.FromContext(ctx).WarnContext(ctx, "Pre-snapshot fetch failed", "upstream", repo.UpstreamURL(), "error", err)
+			logging.FromContext(ctx).WarnContext(ctx, "Pre-snapshot fetch failed", "upstream", upstream, "error", err)
 		}
 		return s.generateAndUploadSnapshot(ctx, repo)
 	})
-	s.scheduler.SubmitPeriodicJob(repo.UpstreamURL(), "lfs-snapshot-periodic", s.config.SnapshotInterval, func(ctx context.Context) error {
+	submit("lfs-snapshot", s.config.SnapshotInterval, func(ctx context.Context) error {
 		return s.generateAndUploadLFSSnapshot(ctx, repo)
 	})
 	mirrorInterval := s.config.MirrorSnapshotInterval
 	if mirrorInterval == 0 {
 		mirrorInterval = s.config.SnapshotInterval
 	}
-	s.scheduler.SubmitPeriodicJob(repo.UpstreamURL(), "mirror-snapshot-periodic", mirrorInterval, func(ctx context.Context) error {
+	submit("mirror-snapshot", mirrorInterval, func(ctx context.Context) error {
 		return s.generateAndUploadMirrorSnapshot(ctx, repo)
 	})
+}
+
+func startupSpreadDelay() time.Duration {
+	return rand.N(snapshotStartupSpread) //nolint:gosec // scheduling jitter needs no cryptographic randomness
+}
+
+// Spread and jitter only help when replicas coordinate through shared
+// metadata; without a coordinator, preserve immediate registration at the
+// exact configured interval.
+func (s *Strategy) snapshotSchedule(interval time.Duration) (delay, jittered time.Duration) {
+	if s.snapshotCoord == nil {
+		return 0, interval
+	}
+	return startupSpreadDelay(), jitterInterval(interval)
+}
+
+// coordinatedSnapshotJob wraps a snapshot generation job with cross-replica
+// coordination: the job is skipped when another replica generated the
+// artifact recently or is generating it now. Coordination failures fail open
+// so a broken metadata store never stops snapshot generation.
+func (s *Strategy) coordinatedSnapshotJob(job string, repo *gitclone.Repository, interval time.Duration, generate func(ctx context.Context) error) func(ctx context.Context) error {
+	upstream := repo.UpstreamURL()
+	return func(ctx context.Context) error {
+		logger := logging.FromContext(ctx)
+		claimed, err := s.snapshotCoord.Claim(job, upstream, interval)
+		if err != nil {
+			logger.WarnContext(ctx, "Snapshot coordination claim failed, generating anyway", "job", job, "upstream", upstream, "error", err)
+		} else if !claimed {
+			logger.DebugContext(ctx, "Skipping snapshot generation, fresh or in progress on another replica", "job", job, "upstream", upstream)
+			return nil
+		}
+		if err := generate(ctx); err != nil {
+			return err
+		}
+		if err := s.snapshotCoord.Complete(job, upstream); err != nil {
+			logger.WarnContext(ctx, "Failed to record snapshot completion", "job", job, "upstream", upstream, "error", err)
+		}
+		return nil
+	}
+}
+
+// jitterInterval spreads replicas' periodic snapshot schedules apart so that
+// coordination claims (synced asynchronously between replicas) propagate
+// before a peer decides whether to generate. Without it, replicas deployed
+// together tick in lockstep and race inside the sync window.
+func jitterInterval(interval time.Duration) time.Duration {
+	if interval <= 0 {
+		return interval
+	}
+	return interval + rand.N(interval/8) //nolint:gosec // scheduling jitter needs no cryptographic randomness
 }
 
 func (s *Strategy) snapshotMutexFor(upstreamURL string) *sync.Mutex {

@@ -55,6 +55,9 @@ func newTestScheduler(ctx context.Context, t *testing.T) jobscheduler.Provider {
 // warm-up goroutine started in git.New.
 func waitForReady(t *testing.T, s *git.Strategy) {
 	t.Helper()
+	// Simulate config.Load's wiring step, which releases the warm-up
+	// goroutine. Idempotent, so repeated calls are safe.
+	s.SetMetadataStore(nil)
 	deadline := time.Now().Add(5 * time.Second)
 	for !s.Ready() && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
@@ -224,10 +227,7 @@ func TestNewIsReadyAfterWarm(t *testing.T) {
 	s, err := git.New(ctx, git.Config{}, newTestScheduler(ctx, t), nil, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
 	assert.NoError(t, err)
 
-	deadline := time.Now().Add(5 * time.Second)
-	for !s.Ready() && time.Now().Before(deadline) {
-		time.Sleep(10 * time.Millisecond)
-	}
+	waitForReady(t, s)
 	assert.True(t, s.Ready(), "strategy should be ready after warm-up completes")
 }
 
