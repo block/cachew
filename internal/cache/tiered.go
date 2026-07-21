@@ -208,6 +208,33 @@ func (t Tiered) Stat(ctx context.Context, key Key, opts ...Option) (http.Header,
 	return nil, errors.Join(errs...)
 }
 
+// AuthoritativeStater reports object existence in authoritative shared
+// storage, bypassing local tiers whose copies can outlive a lost shared
+// object.
+type AuthoritativeStater interface {
+	AuthoritativeStat(ctx context.Context, key Key, opts ...Option) (http.Header, error)
+}
+
+var _ AuthoritativeStater = (*Tiered)(nil)
+
+// AuthoritativeStat stats the final tier, which is authoritative by
+// construction.
+func (t Tiered) AuthoritativeStat(ctx context.Context, key Key, opts ...Option) (http.Header, error) {
+	headers, err := t.caches[len(t.caches)-1].Stat(ctx, key, opts...)
+	return headers, errors.WithStack(err)
+}
+
+// StatAuthoritative stats the authoritative tier when the cache is tiered,
+// and falls back to a plain Stat for single-tier caches.
+func StatAuthoritative(ctx context.Context, c Cache, key Key, opts ...Option) (http.Header, error) {
+	if as, ok := c.(AuthoritativeStater); ok {
+		headers, err := as.AuthoritativeStat(ctx, key, opts...)
+		return headers, errors.WithStack(err)
+	}
+	headers, err := c.Stat(ctx, key, opts...)
+	return headers, errors.WithStack(err)
+}
+
 // Open returns a reader from the first cache that succeeds.
 // When a higher tier hits but lower tiers missed, the returned reader
 // transparently backfills the lowest tier as the caller reads, so that

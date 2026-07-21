@@ -364,6 +364,37 @@ func TestTieredRequiresMetadataStore(t *testing.T) {
 	})
 }
 
+func TestStatAuthoritativeBypassesLocalTiers(t *testing.T) {
+	_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelDebug})
+	local, err := cache.NewMemory(ctx, cache.MemoryConfig{LimitMB: 1024, MaxTTL: time.Hour})
+	assert.NoError(t, err)
+	shared, err := cache.NewMemory(ctx, cache.MemoryConfig{LimitMB: 1024, MaxTTL: time.Hour})
+	assert.NoError(t, err)
+	tiered := newTiered(ctx, local, shared)
+
+	key := cache.NewKey("stat-authoritative")
+	w, err := tiered.Create(ctx, key, nil, time.Minute)
+	assert.NoError(t, err)
+	_, err = w.Write([]byte("content"))
+	assert.NoError(t, err)
+	assert.NoError(t, w.Close())
+
+	_, err = cache.StatAuthoritative(ctx, tiered, key)
+	assert.NoError(t, err)
+
+	// A lost shared object must be reported missing even while a local tier
+	// still holds a copy.
+	assert.NoError(t, shared.Delete(ctx, key))
+	_, err = tiered.Stat(ctx, key)
+	assert.NoError(t, err)
+	_, err = cache.StatAuthoritative(ctx, tiered, key)
+	assert.IsError(t, err, os.ErrNotExist)
+
+	// Single-tier caches fall back to a plain Stat.
+	_, err = cache.StatAuthoritative(ctx, local, key)
+	assert.NoError(t, err)
+}
+
 func TestTieredCreateDoesNotPublishMetadataETagForNewKey(t *testing.T) {
 	_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelDebug})
 	store := newMetadataStore(ctx)
