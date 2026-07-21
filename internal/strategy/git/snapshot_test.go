@@ -374,6 +374,51 @@ func TestSnapshotGenerationWithFilter(t *testing.T) {
 	assert.Equal(t, upstreamURL+"\n", string(output))
 }
 
+func TestSnapshotGenerationWithFilterFailsWhenMirrorIgnoresFilter(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not found in PATH")
+	}
+
+	_, ctx := logging.Configure(context.Background(), logging.Config{})
+	tmpDir := t.TempDir()
+	mirrorRoot := filepath.Join(tmpDir, "mirrors")
+	upstreamURL := "https://github.com/org/repo"
+
+	mirrorPath := filepath.Join(mirrorRoot, "github.com", "org", "repo")
+	createTestMirrorRepoWithHistory(t, mirrorPath)
+
+	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: time.Hour})
+	assert.NoError(t, err)
+	mux := newTestMux()
+
+	cm := gitclone.NewManagerProvider(ctx, gitclone.Config{MirrorRoot: mirrorRoot}, nil)
+	s, err := git.New(ctx, git.Config{SnapshotFilters: map[string]string{"github.com/org/repo": "blob:none"}}, newTestScheduler(ctx, t), memCache, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
+	assert.NoError(t, err)
+
+	manager, err := cm()
+	assert.NoError(t, err)
+	repo, err := manager.GetOrCreate(ctx, upstreamURL)
+	assert.NoError(t, err)
+	assert.Equal(t, gitclone.StateReady, repo.State())
+
+	waitForReady(t, s)
+
+	// A mirror missing uploadpack.allowFilter makes git silently fall back to
+	// a full clone; generation must fail rather than cache the full artifact.
+	// Unset only after waitForReady: startup warming reruns configureMirror,
+	// which would re-enable the capability.
+	cmd := exec.Command("git", "-C", mirrorPath, "config", "--unset", "uploadpack.allowfilter")
+	output, err := cmd.CombinedOutput()
+	assert.NoError(t, err, string(output))
+
+	err = s.GenerateAndUploadSnapshot(ctx, repo)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "ignored by the mirror")
+
+	_, err = memCache.Stat(ctx, cache.NewKey(upstreamURL+".snapshot"))
+	assert.IsError(t, err, os.ErrNotExist)
+}
+
 // createTestMirrorRepoWithHistory creates a mirror whose history contains a
 // superseded version of data.txt, returning that historical blob's SHA.
 func createTestMirrorRepoWithHistory(t *testing.T, mirrorPath string) string {

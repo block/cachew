@@ -74,18 +74,22 @@ func (s *Strategy) cloneForSnapshot(ctx context.Context, repo *gitclone.Reposito
 		args = append(args, repo.Path(), destDir)
 		// #nosec G204 - repo.Path() and destDir are controlled by us
 		cmd := exec.CommandContext(ctx, "git", args...)
-		cmd.Env = append(os.Environ(), "GIT_LFS_SKIP_SMUDGE=1")
-		if output, err := cmd.CombinedOutput(); err != nil {
+		// LC_ALL=C pins git's messages to English so the filter fallback
+		// warning below is detectable regardless of the host locale.
+		cmd.Env = append(os.Environ(), "GIT_LFS_SKIP_SMUDGE=1", "LC_ALL=C")
+		output, err := cmd.CombinedOutput()
+		if err != nil {
 			return errors.Wrapf(err, "git clone for snapshot: %s", string(output))
 		}
 
-		if filter != "" {
-			// git silently falls back to a full clone when the source repo does
-			// not advertise the filter capability; fail loudly rather than cache
-			// a full-size artifact for a repo configured to be filtered.
-			if err := verifyPartialClone(ctx, destDir); err != nil {
-				return errors.WithStack(err)
-			}
+		// When the source repo does not advertise the filter capability, git
+		// falls back to a full clone with only a warning — while still writing
+		// remote.origin.promisor and partialclonefilter as if the filter had
+		// applied, so the clone's config cannot be trusted as proof. The
+		// warning is the reliable signal; detect it and fail loudly rather
+		// than cache a full-size artifact for a repo configured to be filtered.
+		if filter != "" && strings.Contains(string(output), "filtering not recognized by server") {
+			return errors.Errorf("snapshot filter %q was ignored by the mirror (uploadpack.allowFilter unset?)", filter)
 		}
 
 		// git clone from a local path sets remote.origin.url to that path; restore
@@ -93,7 +97,7 @@ func (s *Strategy) cloneForSnapshot(ctx context.Context, repo *gitclone.Reposito
 		// embedding the cachew URL here would couple snapshots to a specific instance.
 		// #nosec G204 - upstreamURL is derived from controlled inputs
 		cmd = exec.CommandContext(ctx, "git", "-C", destDir, "remote", "set-url", "origin", repo.UpstreamURL())
-		if output, err := cmd.CombinedOutput(); err != nil {
+		if output, err = cmd.CombinedOutput(); err != nil {
 			return errors.Wrapf(err, "fix snapshot remote URL: %s", string(output))
 		}
 		return nil
@@ -114,16 +118,6 @@ func (s *Strategy) snapshotFilterFor(upstreamURL string) string {
 		return ""
 	}
 	return s.config.SnapshotFilters[repoPath]
-}
-
-// verifyPartialClone reports an error when repoDir is not a partial clone.
-func verifyPartialClone(ctx context.Context, repoDir string) error {
-	cmd := exec.CommandContext(ctx, "git", "-C", repoDir, "config", "--get", "remote.origin.promisor") // #nosec G204
-	output, err := cmd.Output()
-	if err != nil || strings.TrimSpace(string(output)) != "true" {
-		return errors.New("snapshot filter was ignored by the mirror (uploadpack.allowFilter unset?)")
-	}
-	return nil
 }
 
 func (s *Strategy) withSnapshotClone(ctx context.Context, repo *gitclone.Repository, suffix, filter string, fn func(workDir string) error) error {
