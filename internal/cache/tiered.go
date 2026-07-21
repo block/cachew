@@ -490,10 +490,10 @@ func (t Tiered) backfillTier0FromSource(ctx context.Context, key Key, source Cac
 
 // backfillReadCloser tees reads from src into dst asynchronously. Chunks are
 // sent to a background goroutine via a buffered channel so the Read path is
-// never blocked by disk I/O (up to ~32 MB of buffer). If the full stream is
-// consumed and Close completes without error, dst is closed normally
-// (committing the cached entry). On any write failure the backfill is
-// abandoned but reads continue unaffected.
+// never blocked by disk I/O (up to ~32 MB of buffer). Only a stream consumed
+// through to io.EOF commits the dst entry; a mid-stream read error or a Close
+// before EOF cancels the write context so the partial entry is discarded. On
+// any write failure the backfill is abandoned but reads continue unaffected.
 type backfillReadCloser struct {
 	src     io.ReadCloser
 	ch      chan []byte
@@ -501,6 +501,7 @@ type backfillReadCloser struct {
 	cancel  context.CancelFunc
 	done    chan error
 	closed  bool
+	eof     bool
 	closeMu sync.Mutex
 }
 
@@ -565,6 +566,15 @@ func (b *backfillReadCloser) Read(p []byte) (int, error) {
 		b.closeMu.Unlock()
 	}
 	if err != nil {
+		if errors.Is(err, io.EOF) {
+			b.closeMu.Lock()
+			b.eof = true
+			b.closeMu.Unlock()
+		} else {
+			// Mid-stream failure: cancel so the writer discards the partial
+			// entry instead of committing a truncated object.
+			b.cancel()
+		}
 		b.closeChan()
 	}
 	return n, err //nolint:wrapcheck // must return unwrapped io.EOF per io.Reader contract
@@ -572,6 +582,14 @@ func (b *backfillReadCloser) Read(p []byte) (int, error) {
 
 func (b *backfillReadCloser) Close() error {
 	srcErr := b.src.Close()
+	b.closeMu.Lock()
+	complete := b.eof
+	b.closeMu.Unlock()
+	if !complete {
+		// Closed before EOF: the stream was abandoned or failed, so the
+		// partial entry must be discarded, not committed.
+		b.cancel()
+	}
 	b.closeChan()
 	// Wait for the background writer to finish.
 	bgErr := <-b.done
