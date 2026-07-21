@@ -68,6 +68,9 @@ type Strategy struct {
 	deferredRestoreOnce sync.Map // keyed by upstream URL, ensures at most one deferred restore per repo
 	metrics             *gitMetrics
 	repoCounts          *RepoCounts
+	snapshotCoord       *SnapshotCoordinator
+	metadataWired       chan struct{} // closed by SetMetadataStore; gates warm-up
+	wiredOnce           sync.Once
 	ready               atomic.Bool
 }
 
@@ -129,21 +132,44 @@ func New(
 	m := newGitMetrics()
 
 	s := &Strategy{
-		config:       config,
-		cache:        cache,
-		cloneManager: cloneManager,
-		httpClient:   http.DefaultClient,
-		ctx:          ctx,
-		scheduler:    scheduler.WithQueuePrefix("git"),
-		spools:       make(map[string]*RepoSpools),
-		tokenManager: tokenManager,
-		metrics:      m,
+		config:        config,
+		cache:         cache,
+		cloneManager:  cloneManager,
+		httpClient:    http.DefaultClient,
+		ctx:           ctx,
+		scheduler:     scheduler.WithQueuePrefix("git"),
+		spools:        make(map[string]*RepoSpools),
+		tokenManager:  tokenManager,
+		metrics:       m,
+		metadataWired: make(chan struct{}),
 	}
 	// Run startup fetches in the background so the HTTP listener (and
 	// /_liveness) come up immediately. /_readiness gates on Ready() so the
 	// Service load balancer holds traffic until warming completes.
 	go func() {
 		warmCtx := context.WithoutCancel(ctx)
+		// Coordination only matters when warm-up will schedule snapshot
+		// jobs; with snapshots disabled, warm immediately.
+		if s.config.SnapshotInterval > 0 {
+			// Wait for SetMetadataStore so warm-up never schedules snapshot
+			// jobs before cross-replica coordination is installed.
+			// config.Load wires every MetadataConsumer immediately after
+			// construction.
+			select {
+			case <-s.metadataWired:
+			case <-ctx.Done():
+				return
+			}
+			// Sync shared coordination state before scheduling so the first
+			// claim decisions don't run against an empty local view. Bounded
+			// and fail-open (coordination is advisory) so a slow metadata
+			// backend can't wedge readiness.
+			primeCtx, cancel := context.WithTimeout(warmCtx, time.Minute)
+			if err := s.snapshotCoord.Prime(primeCtx); err != nil {
+				logger.WarnContext(warmCtx, "Failed to prime snapshot coordination state", "error", err)
+			}
+			cancel()
+		}
 		if err := s.warmExistingRepos(warmCtx); err != nil {
 			logger.WarnContext(warmCtx, "Failed to warm existing repos", "error", err)
 		}
@@ -197,12 +223,17 @@ func (s *Strategy) Ready() bool {
 	return s.ready.Load()
 }
 
-// SetMetadataStore enables the per-repo clone histogram and schedules its
-// daily reaper. Called by config.Load after the metadata backend is built.
+// SetMetadataStore enables the per-repo clone histogram (and schedules its
+// daily reaper) and cross-replica snapshot generation coordination. Called by
+// config.Load after the metadata backend is built. It also releases the
+// warm-up goroutine, which waits for wiring so warmed repos are scheduled
+// with coordination in place.
 func (s *Strategy) SetMetadataStore(store *metadatadb.Store) {
+	defer s.wiredOnce.Do(func() { close(s.metadataWired) })
 	if store == nil {
 		return
 	}
+	s.snapshotCoord = NewSnapshotCoordinator(store.Namespace("git"))
 	s.repoCounts = NewRepoCounts(store.Namespace("git"))
 	logging.FromContext(s.ctx).InfoContext(s.ctx, "Per-repo clone histogram enabled",
 		"retention_days", s.repoCounts.retentionDays)
