@@ -1,4 +1,4 @@
-set positional-arguments := true
+set positional-arguments
 set shell := ["bash", "-c"]
 
 # Import modules
