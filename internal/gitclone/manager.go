@@ -569,7 +569,7 @@ func (r *Repository) Fetch(ctx context.Context) error {
 // for catch-up fetches after snapshot restore where the delta may be large and
 // the default Config.FetchTimeout is too short.
 func (r *Repository) FetchWithTimeout(ctx context.Context, timeout time.Duration) error {
-	return r.fetchInternal(ctx, timeout, true)
+	return r.fetchInternal(ctx, timeout, true, true)
 }
 
 // FetchLenient fetches from upstream with the given timeout but without the
@@ -578,10 +578,19 @@ func (r *Repository) FetchWithTimeout(ctx context.Context, timeout time.Duration
 // stall at near-zero transfer rate for minutes — the same situation that
 // executeClone handles by omitting lowSpeedLimit.
 func (r *Repository) FetchLenient(ctx context.Context, timeout time.Duration) error {
-	return r.fetchInternal(ctx, timeout, false)
+	return r.fetchInternal(ctx, timeout, false, true)
 }
 
-func (r *Repository) fetchInternal(ctx context.Context, timeout time.Duration, enforceSpeedLimit bool) error {
+// FetchVerified fetches from upstream, waiting for the fetch semaphore if
+// another operation holds it. Unlike Fetch, it never coalesces with a
+// concurrent semaphore holder — the holder may not be fetching at all (e.g.
+// WithFetchExclusion) or its fetch may have failed — so a nil return
+// guarantees this call ran a successful git fetch.
+func (r *Repository) FetchVerified(ctx context.Context) error {
+	return r.fetchInternal(ctx, r.config.FetchTimeout, true, false)
+}
+
+func (r *Repository) fetchInternal(ctx context.Context, timeout time.Duration, enforceSpeedLimit, coalesce bool) error {
 	select {
 	case <-r.fetchSem:
 		defer func() {
@@ -590,12 +599,24 @@ func (r *Repository) fetchInternal(ctx context.Context, timeout time.Duration, e
 	case <-ctx.Done():
 		return errors.Wrap(ctx.Err(), "context cancelled before acquiring fetch semaphore")
 	default:
+		// The semaphore is held. Coalescing callers treat the holder's work as
+		// their fetch; verified callers wait their turn and fetch themselves.
+		if coalesce {
+			select {
+			case <-r.fetchSem:
+				r.fetchSem <- struct{}{}
+				return nil
+			case <-ctx.Done():
+				return errors.Wrap(ctx.Err(), "context cancelled while waiting for fetch")
+			}
+		}
 		select {
 		case <-r.fetchSem:
-			r.fetchSem <- struct{}{}
-			return nil
+			defer func() {
+				r.fetchSem <- struct{}{}
+			}()
 		case <-ctx.Done():
-			return errors.Wrap(ctx.Err(), "context cancelled while waiting for fetch")
+			return errors.Wrap(ctx.Err(), "context cancelled before acquiring fetch semaphore")
 		}
 	}
 

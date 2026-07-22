@@ -125,9 +125,15 @@ func (c *Client) OpenGitLFSSnapshot(ctx context.Context, repoURL string) (*GitSn
 	return c.openGitArtifact(ctx, repoURL, "lfs-snapshot.tar.zst")
 }
 
+// ErrUpToDate is returned by OpenGitBundle when the server reports the
+// snapshot already matches upstream HEAD, so there is nothing to fetch and no
+// freshen is needed.
+var ErrUpToDate = errors.New("snapshot already up to date")
+
 // OpenGitBundle fetches the bundle pointed at by a BundleURL returned in a
 // previous GitSnapshot response. The caller is responsible for writing the
-// body to a file and applying it via `git pull`/`git fetch`.
+// body to a file and applying it via `git pull`/`git fetch`. Returns
+// ErrUpToDate when the snapshot already matches upstream HEAD.
 func (c *Client) OpenGitBundle(ctx context.Context, bundleURL string) (io.ReadCloser, error) {
 	resolved, err := resolveBundleURL(c.baseURL, bundleURL)
 	if err != nil {
@@ -142,6 +148,10 @@ func (c *Client) OpenGitBundle(ctx context.Context, bundleURL string) (io.ReadCl
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return nil, errors.Wrap(err, "execute bundle request")
+	}
+	if resp.StatusCode == http.StatusNoContent {
+		_, _ = io.Copy(io.Discard, resp.Body) //nolint:errcheck,gosec
+		return nil, errors.Join(ErrUpToDate, resp.Body.Close())
 	}
 	if resp.StatusCode == http.StatusNotFound {
 		_, _ = io.Copy(io.Discard, resp.Body) //nolint:errcheck,gosec

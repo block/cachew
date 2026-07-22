@@ -42,7 +42,7 @@ func newGitMetrics() *gitMetrics {
 		snapshotServeTotal:     metrics.NewMetric[metric.Int64Counter](meter, "cachew.git.snapshot_serves_total", "{serves}", "Snapshot serve events by source (cache, spool, cold_cache, generated) and repository"),
 		snapshotServeSize:      metrics.NewHistogram(meter, "cachew.git.snapshot_serve_bytes", "By", "Size of served snapshots in bytes", metrics.ByteBuckets()),
 		snapshotServeDuration:  metrics.NewHistogram(meter, "cachew.git.snapshot_serve_duration_seconds", "s", "Wall-clock duration of snapshot serves, from handler entry to last byte sent", metrics.LatencyBuckets()),
-		bundleServeTotal:       metrics.NewMetric[metric.Int64Counter](meter, "cachew.git.bundle_serves_total", "{serves}", "Bundle serve events by source (cache, generated, miss) and repository"),
+		bundleServeTotal:       metrics.NewMetric[metric.Int64Counter](meter, "cachew.git.bundle_serves_total", "{serves}", "Bundle serve events by source (cache, generated, up_to_date, miss_bad_base, miss) and repository"),
 		bundleServeSize:        metrics.NewHistogram(meter, "cachew.git.bundle_serve_bytes", "By", "Size of served bundles in bytes", metrics.ByteBuckets()),
 		bundleServeDuration:    metrics.NewHistogram(meter, "cachew.git.bundle_serve_duration_seconds", "s", "Wall-clock duration of bundle serves, including any on-demand generation", metrics.LatencyBuckets()),
 		ensureRefsTotal:        metrics.NewMetric[metric.Int64Counter](meter, "cachew.git.ensure_refs_total", "{requests}", "EnsureRefs requests by fetched and status"),
@@ -101,7 +101,10 @@ func (m *gitMetrics) recordSnapshotServe(ctx context.Context, source, repo strin
 
 // recordBundleServe records a bundle serve event. Source is one of:
 // "cache" (served from object cache), "generated" (created on demand from the
-// local mirror), or "miss" (no bundle could be produced).
+// local mirror), "up_to_date" (base already matches upstream HEAD, nothing to
+// bundle), "miss_bad_base" (base unknown even after freshening the mirror),
+// "miss_stale" (mirror freshen failed, so up-to-date could not be verified), or
+// "miss" (no bundle could be produced for any other reason).
 func (m *gitMetrics) recordBundleServe(ctx context.Context, source, repo string, sizeBytes int64, duration time.Duration) {
 	attrs := metric.WithAttributes(
 		attribute.String("source", source),

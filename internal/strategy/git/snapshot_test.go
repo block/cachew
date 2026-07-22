@@ -1112,3 +1112,167 @@ func TestSnapshotGetHonorsRange(t *testing.T) {
 	rangeWithStaleIfMatch := getCond("bytes="+beyond, map[string]string{"If-Match": `"stale-etag"`})
 	assert.Equal(t, http.StatusPreconditionFailed, rangeWithStaleIfMatch.Code)
 }
+
+// createUpstreamAndMirror creates a working upstream repo with one commit and
+// a mirror clone of it, returning the upstream work dir so tests can add
+// commits upstream after the mirror is created.
+func createUpstreamAndMirror(t *testing.T, mirrorPath string) string {
+	t.Helper()
+	upstream := t.TempDir()
+	for _, args := range [][]string{
+		{"init", upstream},
+		{"-C", upstream, "config", "user.email", "test@test.com"},
+		{"-C", upstream, "config", "user.name", "Test"},
+		{"-C", upstream, "commit", "--allow-empty", "-m", "initial"},
+		{"clone", "--mirror", upstream, mirrorPath},
+	} {
+		cmd := exec.Command("git", args...)
+		output, err := cmd.CombinedOutput()
+		assert.NoError(t, err, string(output))
+	}
+	return upstream
+}
+
+func commitUpstream(t *testing.T, upstream, msg string) string {
+	t.Helper()
+	cmd := exec.Command("git", "-C", upstream, "commit", "--allow-empty", "-m", msg)
+	output, err := cmd.CombinedOutput()
+	assert.NoError(t, err, string(output))
+	out, err := exec.Command("git", "-C", upstream, "rev-parse", "HEAD").Output()
+	assert.NoError(t, err)
+	return strings.TrimSpace(string(out))
+}
+
+func newBundleTestStrategy(ctx context.Context, t *testing.T, mirrorRoot string, refCheckInterval time.Duration) *testMux {
+	t.Helper()
+	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: time.Hour})
+	assert.NoError(t, err)
+	mux := newTestMux()
+	cm := gitclone.NewManagerProvider(ctx, gitclone.Config{MirrorRoot: mirrorRoot, RefCheckInterval: refCheckInterval}, nil)
+	s, err := git.New(ctx, git.Config{}, newTestScheduler(ctx, t), memCache, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
+	assert.NoError(t, err)
+	waitForReady(t, s)
+	return mux
+}
+
+func requestBundle(ctx context.Context, mux *testMux, base string) *httptest.ResponseRecorder {
+	handler := mux.handlers["GET /git/{host}/{path...}"]
+	req := httptest.NewRequest(http.MethodGet, "/git/github.com/org/repo/snapshot.bundle?base="+base, nil)
+	req = req.WithContext(ctx)
+	req.SetPathValue("host", "github.com")
+	req.SetPathValue("path", "org/repo/snapshot.bundle")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	return w
+}
+
+func TestBundleRequestUpToDateReturnsNoContent(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not found in PATH")
+	}
+
+	_, ctx := logging.Configure(context.Background(), logging.Config{})
+	mirrorRoot := filepath.Join(t.TempDir(), "mirrors")
+	mirrorPath := filepath.Join(mirrorRoot, "github.com", "org", "repo")
+	createUpstreamAndMirror(t, mirrorPath)
+	mux := newBundleTestStrategy(ctx, t, mirrorRoot, time.Millisecond)
+
+	head, err := exec.Command("git", "-C", mirrorPath, "rev-parse", "HEAD").Output()
+	assert.NoError(t, err)
+
+	w := requestBundle(ctx, mux, strings.TrimSpace(string(head)))
+	assert.Equal(t, http.StatusNoContent, w.Code)
+	assert.Equal(t, 0, w.Body.Len())
+}
+
+func TestBundleRequestFreshensStaleMirror(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not found in PATH")
+	}
+
+	_, ctx := logging.Configure(context.Background(), logging.Config{})
+	mirrorRoot := filepath.Join(t.TempDir(), "mirrors")
+	mirrorPath := filepath.Join(mirrorRoot, "github.com", "org", "repo")
+	upstream := createUpstreamAndMirror(t, mirrorPath)
+	mux := newBundleTestStrategy(ctx, t, mirrorRoot, time.Millisecond)
+
+	// Commit upstream after startup so the mirror is genuinely stale and
+	// serving a bundle for base requires the handler's freshen fetch.
+	base := commitUpstream(t, upstream, "second")
+	commitUpstream(t, upstream, "third")
+	time.Sleep(5 * time.Millisecond)
+
+	w := requestBundle(ctx, mux, base)
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "application/x-git-bundle", w.Header().Get("Content-Type"))
+	assert.True(t, strings.HasPrefix(w.Body.String(), "# v2 git bundle"))
+}
+
+func TestBundleRequestUpToDateFetchesDespiteRecentRefCheck(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not found in PATH")
+	}
+
+	_, ctx := logging.Configure(context.Background(), logging.Config{})
+	mirrorRoot := filepath.Join(t.TempDir(), "mirrors")
+	mirrorPath := filepath.Join(mirrorRoot, "github.com", "org", "repo")
+	upstream := createUpstreamAndMirror(t, mirrorPath)
+	// A long RefCheckInterval so the startup fetch would suppress a
+	// rate-limited freshen for the rest of the test.
+	mux := newBundleTestStrategy(ctx, t, mirrorRoot, time.Hour)
+
+	head, err := exec.Command("git", "-C", mirrorPath, "rev-parse", "HEAD").Output()
+	assert.NoError(t, err)
+	base := strings.TrimSpace(string(head))
+
+	// Upstream advances after startup: the mirror's HEAD still equals base,
+	// but reporting up-to-date from the stale mirror would make the client
+	// skip its fallback freshen. The handler must fetch for real and serve a
+	// bundle instead.
+	commitUpstream(t, upstream, "second")
+
+	w := requestBundle(ctx, mux, base)
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.True(t, strings.HasPrefix(w.Body.String(), "# v2 git bundle"))
+}
+
+func TestBundleRequestFreshenFailureIsNotUpToDate(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not found in PATH")
+	}
+
+	_, ctx := logging.Configure(context.Background(), logging.Config{})
+	mirrorRoot := filepath.Join(t.TempDir(), "mirrors")
+	mirrorPath := filepath.Join(mirrorRoot, "github.com", "org", "repo")
+	upstream := createUpstreamAndMirror(t, mirrorPath)
+	mux := newBundleTestStrategy(ctx, t, mirrorRoot, time.Millisecond)
+
+	head, err := exec.Command("git", "-C", mirrorPath, "rev-parse", "HEAD").Output()
+	assert.NoError(t, err)
+
+	// With the upstream gone the freshen fetch fails, so the handler cannot
+	// verify that base is still upstream HEAD and must not report up-to-date.
+	assert.NoError(t, os.RemoveAll(upstream))
+	time.Sleep(5 * time.Millisecond)
+
+	w := requestBundle(ctx, mux, strings.TrimSpace(string(head)))
+	assert.Equal(t, http.StatusNotFound, w.Code)
+}
+
+func TestBundleRequestUnknownBase(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not found in PATH")
+	}
+
+	_, ctx := logging.Configure(context.Background(), logging.Config{})
+	mirrorRoot := filepath.Join(t.TempDir(), "mirrors")
+	mirrorPath := filepath.Join(mirrorRoot, "github.com", "org", "repo")
+	createUpstreamAndMirror(t, mirrorPath)
+	mux := newBundleTestStrategy(ctx, t, mirrorRoot, time.Millisecond)
+
+	unknown := requestBundle(ctx, mux, strings.Repeat("d", 40))
+	assert.Equal(t, http.StatusNotFound, unknown.Code)
+
+	invalid := requestBundle(ctx, mux, "not-a-sha")
+	assert.Equal(t, http.StatusBadRequest, invalid.Code)
+}

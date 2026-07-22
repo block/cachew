@@ -755,7 +755,27 @@ func (s *Strategy) submitFetch(repo *gitclone.Repository) {
 	})
 }
 
-func (s *Strategy) doFetch(ctx context.Context, repo *gitclone.Repository) (returnErr error) {
+// freshenMirror synchronously fetches the mirror unless it already fetched
+// within the ref-check interval, bounding upstream load when fallback bundle
+// requests repeat against the same repository.
+func (s *Strategy) freshenMirror(ctx context.Context, repo *gitclone.Repository) error {
+	if !repo.NeedsFetch(s.cloneManager.Config().RefCheckInterval) {
+		return nil
+	}
+	return errors.WithStack(s.doFetch(ctx, repo))
+}
+
+func (s *Strategy) doFetch(ctx context.Context, repo *gitclone.Repository) error {
+	return s.fetchMirror(ctx, repo, repo.Fetch)
+}
+
+// doFetchVerified is doFetch minus fetch coalescing: nil guarantees this call
+// ran a successful git fetch, so the caller can assert upstream state.
+func (s *Strategy) doFetchVerified(ctx context.Context, repo *gitclone.Repository) error {
+	return s.fetchMirror(ctx, repo, repo.FetchVerified)
+}
+
+func (s *Strategy) fetchMirror(ctx context.Context, repo *gitclone.Repository, fetch func(context.Context) error) (returnErr error) {
 	ctx, span := tracer.Start(ctx, "git.fetch",
 		trace.WithAttributes(
 			attribute.String("cachew.operation", "fetch"),
@@ -774,7 +794,7 @@ func (s *Strategy) doFetch(ctx context.Context, repo *gitclone.Repository) (retu
 	logger.InfoContext(ctx, "Fetching updates", "upstream", repo.UpstreamURL(), "path", repo.Path())
 
 	start := time.Now()
-	if err := repo.Fetch(ctx); err != nil {
+	if err := fetch(ctx); err != nil {
 		s.metrics.recordOperation(ctx, "fetch", "error", time.Since(start))
 		return errors.Errorf("fetch failed: %w", err)
 	}
