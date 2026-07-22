@@ -119,25 +119,38 @@ func Client(t *testing.T) *minio.Client {
 	return client
 }
 
+// startContainer starts the shared MinIO container, tolerating races with
+// other test processes doing the same: a "name already in use" failure means
+// another process is creating the container, but "docker start" on it can
+// still fail with "No such container" until that creation finishes
+// registering, so keep retrying until the container is up or the deadline
+// passes.
 func startContainer(t *testing.T) {
 	t.Helper()
-	cmd := exec.CommandContext(t.Context(), "docker", "run", "-d",
-		"--name", containerName,
-		"-p", Port+":9000",
-		"-e", "MINIO_ROOT_USER="+Username,
-		"-e", "MINIO_ROOT_PASSWORD="+Password,
-		"minio/minio", "server", "/data",
-	)
-	output, err := cmd.CombinedOutput()
-	if err == nil {
-		return
-	}
-	if !strings.Contains(string(output), "already in use") {
-		t.Fatalf("failed to start minio container: %v\n%s", err, output)
-	}
-	// Container exists but may be stopped — try restarting it.
-	if restartOut, restartErr := exec.CommandContext(t.Context(), "docker", "start", containerName).CombinedOutput(); restartErr != nil {
-		t.Fatalf("failed to restart existing minio container: %v\n%s", restartErr, restartOut)
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		cmd := exec.CommandContext(t.Context(), "docker", "run", "-d",
+			"--name", containerName,
+			"-p", Port+":9000",
+			"-e", "MINIO_ROOT_USER="+Username,
+			"-e", "MINIO_ROOT_PASSWORD="+Password,
+			"minio/minio", "server", "/data",
+		)
+		output, err := cmd.CombinedOutput()
+		if err == nil {
+			return
+		}
+		if !strings.Contains(string(output), "already in use") {
+			t.Fatalf("failed to start minio container: %v\n%s", err, output)
+		}
+		// Container exists but may be stopped — try restarting it.
+		if _, restartErr := exec.CommandContext(t.Context(), "docker", "start", containerName).CombinedOutput(); restartErr == nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for minio container: %v\n%s", err, output)
+		}
+		time.Sleep(200 * time.Millisecond)
 	}
 }
 
