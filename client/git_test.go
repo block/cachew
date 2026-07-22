@@ -163,6 +163,17 @@ func TestOpenGitBundle(t *testing.T) {
 	assert.NoError(t, body.Close())
 }
 
+func TestOpenGitBundleUpToDate(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	api := client.NewWithHTTPClient(srv.URL, srv.Client())
+	_, err := api.OpenGitBundle(context.Background(), "/git/x/y/snapshot.bundle?base=abc")
+	assert.True(t, errors.Is(err, client.ErrUpToDate))
+}
+
 func TestOpenGitBundleNotFound(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)

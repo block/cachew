@@ -295,6 +295,64 @@ func TestRepository_NeedsFetch(t *testing.T) {
 	assert.False(t, repo.NeedsFetch(15*time.Minute))
 }
 
+func TestRepository_FetchVerifiedDoesNotCoalesce(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+	upstreamPath := createBareRepo(t, tmpDir)
+
+	clonePath := filepath.Join(tmpDir, "clone")
+	repo := &Repository{
+		state:       StateEmpty,
+		config:      testRepoConfig(),
+		path:        clonePath,
+		upstreamURL: upstreamPath,
+		fetchSem:    make(chan struct{}, 1),
+	}
+	repo.fetchSem <- struct{}{}
+	assert.NoError(t, repo.Clone(ctx))
+
+	// Advance upstream so the mirror is behind.
+	workPath := filepath.Join(tmpDir, "work")
+	assert.NoError(t, os.WriteFile(filepath.Join(workPath, "f.txt"), []byte("y"), 0o644))
+	for _, args := range [][]string{
+		{"git", "-C", workPath, "commit", "-am", "update"},
+		{"git", "-C", workPath, "push", upstreamPath, "HEAD"},
+	} {
+		assert.NoError(t, exec.Command(args[0], args[1:]...).Run())
+	}
+	newSHAOut, err := exec.Command("git", "-C", workPath, "rev-parse", "HEAD").Output()
+	assert.NoError(t, err)
+	newSHA := strings.TrimSpace(string(newSHAOut))
+
+	holdSem := func(t *testing.T, fetch func() error) error {
+		t.Helper()
+		release := make(chan struct{})
+		holderDone := make(chan error, 1)
+		go func() {
+			holderDone <- repo.WithFetchExclusion(ctx, func() error {
+				<-release
+				return nil
+			})
+		}()
+		time.Sleep(20 * time.Millisecond)
+		fetchDone := make(chan error, 1)
+		go func() { fetchDone <- fetch() }()
+		time.Sleep(50 * time.Millisecond)
+		close(release)
+		assert.NoError(t, <-holderDone)
+		return <-fetchDone
+	}
+
+	// Fetch coalesces with the semaphore holder even though the holder was
+	// not fetching, so the mirror stays behind.
+	assert.NoError(t, holdSem(t, func() error { return repo.Fetch(ctx) }))
+	assert.False(t, repo.HasCommit(ctx, newSHA))
+
+	// FetchVerified waits for the holder and then runs its own fetch.
+	assert.NoError(t, holdSem(t, func() error { return repo.FetchVerified(ctx) }))
+	assert.True(t, repo.HasCommit(ctx, newSHA))
+}
+
 func TestParseGitRefs(t *testing.T) {
 	output := []byte(`
 abc123 refs/heads/main

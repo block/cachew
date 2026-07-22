@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"syscall"
@@ -47,6 +48,10 @@ func mirrorSnapshotCacheKey(upstreamURL string) cache.Key {
 func bundleCacheKey(upstreamURL, baseCommit string) cache.Key {
 	return cache.NewKey(upstreamURL + ".bundle." + baseCommit)
 }
+
+// commitSHARe matches a full SHA-1 or SHA-256 commit hash. Bundle bases are
+// validated against it so untrusted query values are never passed to git.
+var commitSHARe = regexp.MustCompile(`^[0-9a-f]{40}([0-9a-f]{24})?$`)
 
 func lfsSnapshotCacheKey(upstreamURL string) cache.Key {
 	return cache.NewKey(upstreamURL + ".lfs-snapshot")
@@ -550,8 +555,8 @@ func (s *Strategy) handleBundleRequest(w http.ResponseWriter, r *http.Request, h
 	logger := logging.FromContext(ctx)
 
 	base := r.URL.Query().Get("base")
-	if base == "" {
-		http.Error(w, "missing base query parameter", http.StatusBadRequest)
+	if !commitSHARe.MatchString(base) {
+		http.Error(w, "base query parameter must be a full commit SHA", http.StatusBadRequest)
 		span.SetAttributes(attribute.String("cachew.source", "bad_request"))
 		return
 	}
@@ -603,6 +608,49 @@ func (s *Strategy) handleBundleRequest(w http.ResponseWriter, r *http.Request, h
 		http.Error(w, "Repository unavailable", http.StatusServiceUnavailable)
 		span.RecordError(cloneErr)
 		span.SetStatus(codes.Error, cloneErr.Error())
+		return
+	}
+
+	// Mirrors are per-pod but the cache (and thus the advertised bundle URL)
+	// is shared, so this pod's mirror can lag the pod that advertised the
+	// bundle: base may be missing here, or HEAD may still equal base. Freshen
+	// once and re-evaluate instead of failing the request, which would force
+	// the client into a needless full freshen.
+	head := s.getMirrorHead(ctx, repo)
+	var freshenErr error
+	switch {
+	case head == base:
+		// An up-to-date verdict tells clients to skip their fallback freshen
+		// entirely, so it must be backed by a fetch this call actually ran —
+		// not the rate-limited skip or a coalesced concurrent holder.
+		freshenErr = s.doFetchVerified(ctx, repo)
+	case !repo.HasCommit(ctx, base):
+		// Rate-limited so client-supplied bogus bases cannot hammer upstream;
+		// a 404 here only sends the client to its safe fallback freshen.
+		freshenErr = s.freshenMirror(ctx, repo)
+	}
+	if freshenErr != nil {
+		logger.WarnContext(ctx, "Failed to freshen mirror for bundle", "upstream", upstreamURL, "error", freshenErr)
+		span.RecordError(freshenErr)
+	}
+	head = s.getMirrorHead(ctx, repo)
+	hasBase := repo.HasCommit(ctx, base)
+	switch {
+	case freshenErr != nil && (head == base || !hasBase):
+		// The mirror could not be verified against upstream, so make the
+		// client fall back rather than trust a possibly stale verdict.
+		source = "miss_stale"
+		http.Error(w, "Bundle not available", http.StatusNotFound)
+		return
+	case !hasBase:
+		// Unknown even after freshening: bogus or force-pushed away.
+		source = "miss_bad_base"
+		logger.WarnContext(ctx, "Bundle base not in mirror after freshen", "upstream", upstreamURL, "base", base)
+		http.Error(w, "Bundle not available", http.StatusNotFound)
+		return
+	case head == base:
+		source = "up_to_date"
+		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 
