@@ -387,6 +387,69 @@ func TestArchiveExtract(t *testing.T) {
 	assert.False(t, slices.Contains(names, "y.log"))
 }
 
+func TestExtractOverReadOnlyTree(t *testing.T) {
+	src := t.TempDir()
+	assert.NoError(t, os.MkdirAll(filepath.Join(src, "pkg", "conf"), 0o755))
+	assert.NoError(t, os.WriteFile(filepath.Join(src, "pkg", "conf", "cacerts"), []byte("v2"), 0o444))
+	assert.NoError(t, os.Chmod(filepath.Join(src, "pkg", "conf"), 0o555))
+	assert.NoError(t, os.Chmod(filepath.Join(src, "pkg"), 0o555))
+	t.Cleanup(func() { makeWritable(t, src) })
+
+	var buf bytes.Buffer
+	assert.NoError(t, client.Archive(t.Context(), &buf, src, []string{"pkg"}, nil, 0))
+
+	dst := t.TempDir()
+	assert.NoError(t, os.MkdirAll(filepath.Join(dst, "pkg", "conf"), 0o755))
+	assert.NoError(t, os.WriteFile(filepath.Join(dst, "pkg", "conf", "cacerts"), []byte("v1"), 0o444))
+	assert.NoError(t, os.Chmod(filepath.Join(dst, "pkg", "conf"), 0o555))
+	assert.NoError(t, os.Chmod(filepath.Join(dst, "pkg"), 0o555))
+	t.Cleanup(func() { makeWritable(t, dst) })
+
+	assert.NoError(t, client.Extract(t.Context(), &buf, dst, 0))
+
+	got, err := os.ReadFile(filepath.Join(dst, "pkg", "conf", "cacerts"))
+	assert.NoError(t, err)
+	assert.Equal(t, "v2", string(got))
+
+	assertReadOnlyDir(t, filepath.Join(dst, "pkg"))
+	assertReadOnlyDir(t, filepath.Join(dst, "pkg", "conf"))
+}
+
+func TestExtractFailureRestoresDirModes(t *testing.T) {
+	dst := t.TempDir()
+	assert.NoError(t, os.MkdirAll(filepath.Join(dst, "pkg", "conf"), 0o755))
+	assert.NoError(t, os.WriteFile(filepath.Join(dst, "pkg", "conf", "cacerts"), []byte("v1"), 0o444))
+	assert.NoError(t, os.Chmod(filepath.Join(dst, "pkg", "conf"), 0o555))
+	assert.NoError(t, os.Chmod(filepath.Join(dst, "pkg"), 0o555|os.ModeSetgid))
+	t.Cleanup(func() { makeWritable(t, dst) })
+
+	err := client.Extract(t.Context(), bytes.NewReader([]byte("not a zstd stream")), dst, 0)
+	assert.Error(t, err)
+
+	info, err := os.Stat(filepath.Join(dst, "pkg"))
+	assert.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o555)|os.ModeSetgid, info.Mode()&(os.ModePerm|os.ModeSetgid))
+	assertReadOnlyDir(t, filepath.Join(dst, "pkg", "conf"))
+}
+
+func assertReadOnlyDir(t *testing.T, path string) {
+	t.Helper()
+	info, err := os.Stat(path)
+	assert.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o555), info.Mode().Perm())
+}
+
+// makeWritable re-adds owner-write under root so t.TempDir cleanup can remove it.
+func makeWritable(t *testing.T, root string) {
+	t.Helper()
+	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err == nil && d.IsDir() {
+			_ = os.Chmod(path, 0o755)
+		}
+		return nil
+	})
+}
+
 func TestOpenIfNoneMatch(t *testing.T) {
 	srv := newFakeServer(nil)
 	defer srv.Close()

@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -52,13 +53,30 @@ func Archive(ctx context.Context, w io.Writer, baseDir string, includePaths []st
 // Extract decompresses a zstd+tar stream from r into directory, preserving
 // file permissions, ownership, and symlinks. threads controls zstd
 // parallelism; 0 uses all CPU cores.
-func Extract(ctx context.Context, r io.Reader, directory string, threads int) error {
+//
+// Existing read-only directories are made owner-writable so tar can replace
+// their contents. tar re-applies archived modes, and a failed extract
+// restores the originals; read-only directories absent from the archive are
+// left owner-writable.
+func Extract(ctx context.Context, r io.Reader, directory string, threads int) (rerr error) {
 	if threads <= 0 {
 		threads = runtime.GOMAXPROCS(0)
 	}
 
 	if err := os.MkdirAll(directory, 0o750); err != nil {
 		return errors.Wrap(err, "failed to create target directory")
+	}
+
+	// Relax read-only dirs (e.g. Hermit package trees) so tar can overwrite
+	// their contents, restoring the original modes if anything fails.
+	relaxed, err := makeTreeWritable(directory)
+	defer func() {
+		if rerr != nil {
+			restoreDirModes(relaxed)
+		}
+	}()
+	if err != nil {
+		return errors.Wrap(err, "failed to make target directory writable")
 	}
 
 	zstdCmd := exec.CommandContext(ctx, "zstd", "-dc", fmt.Sprintf("-T%d", threads)) //nolint:gosec
@@ -101,6 +119,49 @@ func Extract(ctx context.Context, r io.Reader, directory string, threads int) er
 		errs = append(errs, errors.Errorf("tar failed: %w: %s", tarErr, tarStderr.String()))
 	}
 	return errors.Join(errs...)
+}
+
+// dirMode is a directory path and its pre-relaxation mode.
+type dirMode struct {
+	path string
+	mode fs.FileMode
+}
+
+// makeTreeWritable adds owner-write to root and every directory beneath it,
+// returning the changed directories with their original modes. tar overwrites
+// a file by unlinking it, which requires a writable parent directory.
+func makeTreeWritable(root string) ([]dirMode, error) {
+	var changed []dirMode
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
+		switch {
+		case walkErr != nil:
+			return walkErr
+		case !d.IsDir():
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return errors.Wrapf(err, "failed to stat %s", path)
+		}
+		// Keep setuid/setgid/sticky so relaxing and restoring don't strip them.
+		mode := info.Mode() & (fs.ModePerm | fs.ModeSetuid | fs.ModeSetgid | fs.ModeSticky)
+		if mode&0o200 == 0 {
+			if err := os.Chmod(path, mode|0o200); err != nil {
+				return errors.Wrapf(err, "failed to make %s writable", path)
+			}
+			changed = append(changed, dirMode{path: path, mode: mode})
+		}
+		return nil
+	})
+	return changed, errors.Wrap(err, "failed to walk target directory")
+}
+
+// restoreDirModes best-effort restores modes relaxed by makeTreeWritable;
+// failures are ignored so the extraction error stays the one reported.
+func restoreDirModes(dirs []dirMode) {
+	for _, d := range dirs {
+		os.Chmod(d.path, d.mode) //nolint:errcheck,gosec
+	}
 }
 
 // runTarZstdPipeline runs tar piped through pzstd, writing compressed output
