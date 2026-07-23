@@ -26,8 +26,11 @@ cachew git restore https://github.com/org/repo ./repo
 
 ```hcl
 git {
-  snapshot-interval = "1h"
-  repack-interval   = "1h"
+  snapshot-interval   = "1h"
+  repack-interval      = "1h"
+  # Full repack is expensive (re-deltas every object) and only needs to run
+  # occasionally; the frequent geometric repack absorbs day-to-day churn.
+  full-repack-interval = "168h"
 }
 ```
 
@@ -279,8 +282,9 @@ github-app {
 git-clone {}
 
 git {
-  snapshot-interval = "1h"
-  repack-interval   = "1h"
+  snapshot-interval   = "1h"
+  repack-interval      = "1h"
+  full-repack-interval = "168h"
 }
 
 github-releases {
