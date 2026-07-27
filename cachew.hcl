@@ -64,6 +64,8 @@ strategy gomod {
 
 strategy hermit { }
 
+strategy android-sdk { }
+
 strategy proxy { }
 
 cache disk {
