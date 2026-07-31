@@ -183,7 +183,7 @@ func (s *Strategy) generateAndUploadSnapshot(ctx context.Context, repo *gitclone
 
 	cacheKey := snapshotCacheKey(upstream)
 	if head := s.getMirrorHead(ctx, repo); s.snapshotUnchanged(ctx, snapshotJobBase, cacheKey, upstream, head) {
-		s.metrics.recordOperation(ctx, "snapshot", "unchanged", time.Since(start))
+		s.metrics.recordOperation(ctx, "snapshot", "unchanged", "background", time.Since(start))
 		logger.InfoContext(ctx, "Snapshot unchanged, skipping generation", "upstream", upstream, "commit", head)
 		return "", nil
 	}
@@ -203,7 +203,7 @@ func (s *Strategy) generateAndUploadSnapshot(ctx context.Context, repo *gitclone
 		return "", errors.Wrap(err, "create snapshot")
 	}
 
-	s.metrics.recordOperation(ctx, "snapshot", "success", time.Since(start))
+	s.metrics.recordOperation(ctx, "snapshot", "success", "background", time.Since(start))
 	logger.InfoContext(ctx, "Snapshot generation completed", "upstream", upstream)
 	return commit, nil
 }
@@ -664,7 +664,7 @@ func (s *Strategy) handleBundleRequest(w http.ResponseWriter, r *http.Request, h
 		// An up-to-date verdict tells clients to skip their fallback freshen
 		// entirely, so it must be backed by a fetch this call actually ran —
 		// not the rate-limited skip or a coalesced concurrent holder.
-		freshenErr = s.doFetchVerified(ctx, repo)
+		freshenErr = s.doFetchVerified(ctx, repo, "background")
 	case !repo.HasCommit(ctx, base):
 		// Rate-limited so client-supplied bogus bases cannot hammer upstream;
 		// a 404 here only sends the client to its safe fallback freshen.
@@ -1334,11 +1334,11 @@ func (s *Strategy) generateAndUploadLFSSnapshot(ctx context.Context, repo *gitcl
 		if !cloneRecorded {
 			s.metrics.recordLFSPhase(ctx, upstream, "clone", "error", time.Since(cloneStart))
 		}
-		s.metrics.recordOperation(ctx, "lfs-snapshot", "error", time.Since(start))
+		s.metrics.recordOperation(ctx, "lfs-snapshot", "error", "background", time.Since(start))
 		return "", errors.Wrap(err, "create LFS snapshot")
 	}
 
-	s.metrics.recordOperation(ctx, "lfs-snapshot", "success", time.Since(start))
+	s.metrics.recordOperation(ctx, "lfs-snapshot", "success", "background", time.Since(start))
 	logger.InfoContext(ctx, "LFS snapshot generation completed", "upstream", upstream)
 	return commit, nil
 }

@@ -675,12 +675,12 @@ func (s *Strategy) startClone(ctx context.Context, repo *gitclone.Repository) (r
 	}
 
 	if err != nil {
-		s.metrics.recordOperation(ctx, "clone", "error", time.Since(cloneStart))
+		s.metrics.recordOperation(ctx, "clone", "error", "background", time.Since(cloneStart))
 		repo.ResetToEmpty()
 		return errors.Wrapf(err, "clone %s", upstream)
 	}
 
-	s.metrics.recordOperation(ctx, "clone", "success", time.Since(cloneStart))
+	s.metrics.recordOperation(ctx, "clone", "success", "background", time.Since(cloneStart))
 	logger.InfoContext(ctx, "Clone completed", "upstream", upstream, "path", repo.Path())
 
 	if s.config.SnapshotInterval > 0 {
@@ -770,20 +770,21 @@ func (s *Strategy) freshenMirror(ctx context.Context, repo *gitclone.Repository)
 }
 
 func (s *Strategy) doFetch(ctx context.Context, repo *gitclone.Repository) error {
-	return s.fetchMirror(ctx, repo, repo.Fetch)
+	return s.fetchMirror(ctx, repo, repo.Fetch, "background")
 }
 
 // doFetchVerified is doFetch minus fetch coalescing: nil guarantees this call
 // ran a successful git fetch, so the caller can assert upstream state.
-func (s *Strategy) doFetchVerified(ctx context.Context, repo *gitclone.Repository) error {
-	return s.fetchMirror(ctx, repo, repo.FetchVerified)
+func (s *Strategy) doFetchVerified(ctx context.Context, repo *gitclone.Repository, trigger string) error {
+	return s.fetchMirror(ctx, repo, repo.FetchVerified, trigger)
 }
 
-func (s *Strategy) fetchMirror(ctx context.Context, repo *gitclone.Repository, fetch func(context.Context) error) (returnErr error) {
+func (s *Strategy) fetchMirror(ctx context.Context, repo *gitclone.Repository, fetch func(context.Context) error, trigger string) (returnErr error) {
 	ctx, span := tracer.Start(ctx, "git.fetch",
 		trace.WithAttributes(
 			attribute.String("cachew.operation", "fetch"),
 			attribute.String("cachew.upstream", repo.UpstreamURL()),
+			attribute.String("cachew.trigger", trigger),
 		),
 	)
 	defer func() {
@@ -799,10 +800,10 @@ func (s *Strategy) fetchMirror(ctx context.Context, repo *gitclone.Repository, f
 
 	start := time.Now()
 	if err := fetch(ctx); err != nil {
-		s.metrics.recordOperation(ctx, "fetch", "error", time.Since(start))
+		s.metrics.recordOperation(ctx, "fetch", "error", trigger, time.Since(start))
 		return errors.Errorf("fetch failed: %w", err)
 	}
-	s.metrics.recordOperation(ctx, "fetch", "success", time.Since(start))
+	s.metrics.recordOperation(ctx, "fetch", "success", trigger, time.Since(start))
 	logger.InfoContext(ctx, "Fetch completed", "upstream", repo.UpstreamURL(), "duration", time.Since(start))
 	return nil
 }
