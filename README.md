@@ -6,10 +6,11 @@ Cachew (pronounced "cashew") is a tiered, protocol-aware, caching HTTP proxy for
 
 ### Git
 
-Caches Git repositories with two complementary techniques:
+Caches Git repositories with three complementary techniques:
 
 1. **Snapshots** — periodic `.tar.zst` archives that restore 4–5x faster than `git clone`.
 2. **Pack caching** — passthrough caching of packs from `git-upload-pack` for incremental pulls.
+3. **Incremental pull-through**: when the mirror lacks a wanted object, fetches only the missing delta from upstream and serves the pack locally instead of forwarding the whole request. On by default; set `incremental-pullthrough = false` to disable.
 
 Redirect Git traffic through cachew:
 
@@ -26,8 +27,10 @@ cachew git restore https://github.com/org/repo ./repo
 
 ```hcl
 git {
-  snapshot-interval = "1h"
-  repack-interval   = "1h"
+  snapshot-interval         = "1h"
+  repack-interval           = "1h"
+  incremental-pullthrough   = true    # default; false disables incremental pull-through
+  incremental-fetch-timeout = "2m"    # default
 }
 ```
 
