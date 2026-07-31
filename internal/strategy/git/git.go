@@ -407,8 +407,7 @@ func (s *Strategy) handleGitRequest(w http.ResponseWriter, r *http.Request, host
 func (s *Strategy) serveReadyRepo(w http.ResponseWriter, r *http.Request, repo *gitclone.Repository, host, pathValue string, isInfoRefs bool) error {
 	ctx := r.Context()
 
-	stale, _ := s.checkRefsStale(ctx, repo) //nolint:errcheck // best-effort; treat as non-stale on failure
-	if isInfoRefs && stale {
+	if isInfoRefs && s.checkRefsStale(ctx, repo) {
 		// Mirror is behind upstream. Forward to upstream so the client gets
 		// fresh refs immediately, and kick off a background fetch so the
 		// mirror catches up for subsequent requests.
@@ -747,9 +746,12 @@ func (s *Strategy) tryRestoreSnapshot(ctx context.Context, repo *gitclone.Reposi
 	return nil
 }
 
-// submitFetch schedules a fetch unconditionally. Use this when ls-remote has
-// already confirmed the mirror is behind upstream.
+// submitFetch schedules a background fetch when the mirror may be behind
+// upstream and the fetch cooldown has elapsed.
 func (s *Strategy) submitFetch(repo *gitclone.Repository) {
+	if !repo.NeedsFetch(s.cloneManager.Config().RefCheckInterval) {
+		return
+	}
 	// Use a separate queue from snapshot/repack so fetches are not serialized
 	// behind long-running jobs on the same upstream URL queue.
 	s.scheduler.Submit(repo.UpstreamURL()+"/fetch", "fetch", func(ctx context.Context) error {

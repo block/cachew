@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -87,10 +88,16 @@ type Repository struct {
 	path               string
 	upstreamURL        string
 	lastFetch          time.Time
+	lastFetchAttempt   time.Time // set when a git fetch starts, including failures; gates NeedsFetch
 	lastRefCheck       time.Time
 	refCheckValid      bool
+	refCheckStale      bool
+	refCheckErr        error
+	refCheckErrAt      time.Time // set when a ref check fails; gates the failure backoff
+	refCheckInFlight   chan struct{}
 	fetchSem           chan struct{}
 	credentialProvider CredentialProvider
+	lsRemoteRuns       atomic.Int64
 }
 
 type Manager struct {
@@ -340,7 +347,11 @@ func (r *Repository) LastFetch() time.Time {
 func (r *Repository) NeedsFetch(fetchInterval time.Duration) bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	return time.Since(r.lastFetch) >= fetchInterval
+	last := r.lastFetch
+	if r.lastFetchAttempt.After(last) {
+		last = r.lastFetchAttempt
+	}
+	return time.Since(last) >= fetchInterval
 }
 
 func (r *Repository) WithReadLock(fn func() error) error {
@@ -364,6 +375,7 @@ func (r *Repository) ResetToEmpty() {
 	defer r.mu.Unlock()
 	r.state = StateEmpty
 	r.lastFetch = time.Time{}
+	r.lastFetchAttempt = time.Time{}
 }
 
 // TryStartCloning atomically transitions the repository from StateEmpty to
@@ -671,6 +683,13 @@ func (r *Repository) fetchInternal(ctx context.Context, timeout time.Duration, e
 
 // executeFetch runs git fetch against upstream. The caller must hold fetchSem.
 func (r *Repository) executeFetch(ctx context.Context, enforceSpeedLimit bool) error {
+	// Record the attempt before the network call so a failure or timeout still
+	// trips NeedsFetch's cooldown and serial requests do not each pay a full
+	// IncrementalFetchTimeout / FetchTimeout during an upstream outage.
+	r.mu.Lock()
+	r.lastFetchAttempt = time.Now()
+	r.mu.Unlock()
+
 	config := DefaultGitTuningConfig()
 
 	args := []string{
@@ -703,6 +722,10 @@ func (r *Repository) executeFetch(ctx context.Context, enforceSpeedLimit bool) e
 
 	r.mu.Lock()
 	r.lastFetch = time.Now()
+	// Drop any cached ref-staleness verdict so the next check reopens instead of
+	// serving a stale "behind" result for the rest of the interval. This also
+	// clears a cached failure, since upstream is now known reachable.
+	r.invalidateRefCheckLocked()
 	r.mu.Unlock()
 	return nil
 }
@@ -711,30 +734,124 @@ func (r *Repository) executeFetch(ctx context.Context, enforceSpeedLimit bool) e
 // If refs are stale it returns NeedsFetch=true so the caller can schedule a
 // background fetch via the job scheduler, rather than fetching synchronously
 // on the request path (which would acquire a write lock and block all serving).
+//
+// Concurrent callers share one check: the first runs the ls-remote while later
+// callers wait on refCheckInFlight and reuse its outcome. Without this, a burst
+// of requests landing in the same window would each issue their own ls-remote
+// against upstream.
 func (r *Repository) EnsureRefsUpToDate(ctx context.Context) (needsFetch bool, err error) {
 	r.mu.Lock()
 	if r.refCheckValid && time.Since(r.lastRefCheck) < r.config.RefCheckInterval {
+		stale, checkErr := r.refCheckStale, r.refCheckErr
 		r.mu.Unlock()
-		return false, nil
+		return stale, checkErr
 	}
+	// A failed check is cached for a short backoff window so that during an
+	// upstream outage serial requests do not each run their own ls-remote and wait
+	// out LsRemoteTimeout. The window is a fraction of RefCheckInterval so
+	// recovery is still noticed promptly, and it is keyed off the failure
+	// timestamp rather than refCheckValid so a check in flight is never mistaken
+	// for a completed one.
+	if r.refCheckErr != nil && time.Since(r.refCheckErrAt) < r.refCheckFailureBackoff() {
+		checkErr := r.refCheckErr
+		r.mu.Unlock()
+		return false, checkErr
+	}
+	if r.refCheckInFlight != nil {
+		ch := r.refCheckInFlight
+		r.mu.Unlock()
+		select {
+		case <-ch:
+		case <-ctx.Done():
+			return false, errors.Wrap(ctx.Err(), "context cancelled waiting for in-flight ref check")
+		}
+		r.mu.Lock()
+		stale, checkErr := r.refCheckStale, r.refCheckErr
+		r.mu.Unlock()
+		return stale, checkErr
+	}
+	// Record the check time to rate-limit re-entry after a successful check, but
+	// do NOT set refCheckValid=true until the ls-remote succeeds. Otherwise
+	// concurrent callers read a cached "refs up to date" result while the check
+	// is still in flight and skip a fetch they needed.
 	r.lastRefCheck = time.Now()
-	r.refCheckValid = true
+	r.refCheckInFlight = make(chan struct{})
+	inFlight := r.refCheckInFlight
 	r.mu.Unlock()
+
+	defer func() {
+		r.mu.Lock()
+		close(inFlight)
+		r.refCheckInFlight = nil
+		r.mu.Unlock()
+	}()
+
+	// Detach from the caller's context so a disconnecting client cannot fail every
+	// waiter with a cancellation error. runRefCheck applies LsRemoteTimeout
+	// internally.
+	return r.runRefCheck(context.WithoutCancel(ctx))
+}
+
+// refCheckFailureBackoff is how long a failed ref check is cached before another
+// caller may retry it. It is a fraction of RefCheckInterval: long enough to
+// collapse a burst of serial requests during an upstream outage, short enough
+// that recovery is picked up quickly.
+func (r *Repository) refCheckFailureBackoff() time.Duration {
+	return r.config.RefCheckInterval / 4
+}
+
+// invalidateRefCheckLocked drops any cached ref-check verdict, including a
+// cached failure, so the next check reopens. The caller must hold r.mu.
+func (r *Repository) invalidateRefCheckLocked() {
+	r.refCheckValid = false
+	r.refCheckErr = nil
+	r.refCheckErrAt = time.Time{}
+}
+
+// runRefCheck performs the ls-remote comparison for the caller that started the
+// check and records the outcome for callers waiting on it.
+func (r *Repository) runRefCheck(ctx context.Context) (bool, error) {
+	// Bound the whole check, not just the ls-remote: GetLocalRefs holds the
+	// repository read lock across a for-each-ref subprocess, so a hang there
+	// would otherwise wedge the refCheckInFlight singleflight slot forever.
+	ctx, cancel := context.WithTimeout(ctx, r.config.LsRemoteTimeout)
+	defer cancel()
+
+	r.mu.RLock()
+	lastFetchBefore := r.lastFetch
+	r.mu.RUnlock()
+
+	record := func(valid, stale bool, err error) {
+		r.mu.Lock()
+		// A fetch that landed while this check was in flight already invalidated
+		// the cache; do not overwrite that with a pre-fetch verdict.
+		if r.lastFetch.After(lastFetchBefore) {
+			r.mu.Unlock()
+			return
+		}
+		r.refCheckValid = valid
+		r.refCheckStale = stale
+		r.refCheckErr = err
+		if err != nil {
+			r.refCheckErrAt = time.Now()
+		} else {
+			r.refCheckErrAt = time.Time{}
+		}
+		r.mu.Unlock()
+	}
 
 	localRefs, err := r.GetLocalRefs(ctx)
 	if err != nil {
-		return false, errors.Wrap(err, "get local refs")
+		err = errors.Wrap(err, "get local refs")
+		record(false, false, err)
+		return false, err
 	}
 
-	lsCtx, cancel := context.WithTimeout(ctx, r.config.LsRemoteTimeout)
-	defer cancel()
-
-	upstreamRefs, err := r.GetUpstreamRefs(lsCtx)
+	upstreamRefs, err := r.GetUpstreamRefs(ctx)
 	if err != nil {
-		r.mu.Lock()
-		r.refCheckValid = false
-		r.mu.Unlock()
-		return false, errors.Wrap(err, "get upstream refs")
+		err = errors.Wrap(err, "get upstream refs")
+		record(false, false, err)
+		return false, err
 	}
 
 	for ref, upstreamSHA := range upstreamRefs {
@@ -746,13 +863,17 @@ func (r *Repository) EnsureRefsUpToDate(ctx context.Context) (needsFetch bool, e
 		}
 		localSHA, exists := localRefs[ref]
 		if !exists || localSHA != upstreamSHA {
-			r.mu.Lock()
-			r.refCheckValid = false
-			r.mu.Unlock()
+			// Cache the stale verdict under RefCheckInterval so a behind
+			// mirror does not re-issue ls-remote on every serial request;
+			// a successful fetch clears the cache so the next check reopens.
+			record(true, true, nil)
 			return true, nil
 		}
 	}
 
+	// The check succeeded and refs match. Cache the result so subsequent calls
+	// within the interval skip the ls-remote round trip.
+	record(true, false, nil)
 	return false, nil
 }
 
@@ -791,7 +912,7 @@ func (r *Repository) EnsureRefs(
 	// Invalidate the cached ref-check so the normal transparent path also
 	// re-evaluates after our forced fetch.
 	r.mu.Lock()
-	r.refCheckValid = false
+	r.invalidateRefCheckLocked()
 	r.mu.Unlock()
 
 	localRefs, err = r.GetLocalRefs(ctx)
@@ -868,6 +989,7 @@ func (r *Repository) GetLocalRefs(ctx context.Context) (map[string]string, error
 }
 
 func (r *Repository) GetUpstreamRefs(ctx context.Context) (map[string]string, error) {
+	r.lsRemoteRuns.Add(1)
 	// #nosec G204 - r.upstreamURL is controlled by us
 	cmd, err := r.GitCommand(ctx, "ls-remote", r.upstreamURL)
 	if err != nil {

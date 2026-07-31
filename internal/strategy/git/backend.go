@@ -171,7 +171,7 @@ func (s *Strategy) serveFromBackend(w http.ResponseWriter, r *http.Request, repo
 	if stderrBuf.Len() > 0 {
 		stderr := stderrBuf.String()
 		logger.ErrorContext(r.Context(), "git http-backend error", "stderr", stderr, "path", backendPath)
-		if !bw.committed && strings.Contains(stderr, "not our ref") {
+		if !bw.committed && (strings.Contains(stderr, "not our ref") || strings.Contains(stderr, "unknown ref")) {
 			return true
 		}
 	}
@@ -183,10 +183,17 @@ func (s *Strategy) serveFromBackend(w http.ResponseWriter, r *http.Request, repo
 // checkRefsStale checks whether the local mirror's refs are behind upstream.
 // Returns true if a fetch is needed. The caller decides whether to fetch
 // synchronously or fall back to upstream.
-func (s *Strategy) checkRefsStale(ctx context.Context, repo *gitclone.Repository) (bool, error) {
+//
+// A failed check reports "not stale" so a flaky ls-remote cannot take the mirror
+// out of service. The failure is logged at debug level only: this runs on every
+// info/refs request, so an unreachable upstream would otherwise emit a warning
+// per request.
+func (s *Strategy) checkRefsStale(ctx context.Context, repo *gitclone.Repository) bool {
 	needsFetch, err := repo.EnsureRefsUpToDate(ctx)
 	if err != nil {
-		return false, errors.Wrap(err, "check upstream refs")
+		logging.FromContext(ctx).DebugContext(ctx, "Ref staleness check failed, treating mirror as fresh",
+			"upstream", repo.UpstreamURL(), "error", errors.Wrap(err, "check upstream refs"))
+		return false
 	}
-	return needsFetch, nil
+	return needsFetch
 }

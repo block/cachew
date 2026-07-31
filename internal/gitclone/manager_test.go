@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/alecthomas/assert/v2"
+	"github.com/alecthomas/errors"
 
 	"github.com/block/cachew/internal/logging"
 )
@@ -293,6 +294,19 @@ func TestRepository_NeedsFetch(t *testing.T) {
 	repo.mu.Unlock()
 
 	assert.False(t, repo.NeedsFetch(15*time.Minute))
+
+	// A recent failed attempt must also suppress NeedsFetch, even when the
+	// last successful fetch is older than the interval.
+	repo.mu.Lock()
+	repo.lastFetch = time.Now().Add(-time.Hour)
+	repo.lastFetchAttempt = time.Now()
+	repo.mu.Unlock()
+	assert.False(t, repo.NeedsFetch(15*time.Minute))
+
+	repo.mu.Lock()
+	repo.lastFetchAttempt = time.Now().Add(-20 * time.Minute)
+	repo.mu.Unlock()
+	assert.True(t, repo.NeedsFetch(15*time.Minute))
 }
 
 func TestRepository_FetchVerifiedDoesNotCoalesce(t *testing.T) {
@@ -398,6 +412,265 @@ func TestRepository_FetchCoalescingReportsWhetherItFetched(t *testing.T) {
 	fetched, err := repo.FetchCoalescing(ctx)
 	assert.NoError(t, err)
 	assert.True(t, fetched)
+}
+
+// testRefCheckConfig returns a Config with a long RefCheckInterval so tests
+// control precisely when the cached ref check expires.
+func testRefCheckConfig() Config {
+	cfg := testRepoConfig()
+	cfg.RefCheckInterval = time.Minute
+	return cfg
+}
+
+// newClonedTestRepo creates an upstream and a mirror clone of it, returning
+// the ready Repository and the upstream path for advancing refs.
+func newClonedTestRepo(t *testing.T, cfg Config) (*Repository, string) {
+	t.Helper()
+	tmpDir := t.TempDir()
+	upstreamPath := createBareRepo(t, tmpDir)
+	clonePath := filepath.Join(tmpDir, "clone")
+	repo := &Repository{
+		state:       StateEmpty,
+		config:      cfg,
+		path:        clonePath,
+		upstreamURL: upstreamPath,
+		fetchSem:    make(chan struct{}, 1),
+	}
+	repo.fetchSem <- struct{}{}
+	assert.NoError(t, repo.Clone(context.Background()))
+	return repo, upstreamPath
+}
+
+// advanceBareUpstream adds a commit to the work repo that barePath was cloned
+// from and pushes it, moving the upstream ref ahead of any mirror.
+func advanceBareUpstream(t *testing.T, barePath string) {
+	t.Helper()
+	workPath := filepath.Join(filepath.Dir(barePath), "work")
+	assert.NoError(t, os.WriteFile(filepath.Join(workPath, "f.txt"), []byte("advanced"), 0o600))
+	// #nosec G204 - workPath is derived from barePath, a t.TempDir() path created by this test
+	branchOut, err := exec.Command("git", "-C", workPath, "rev-parse", "--abbrev-ref", "HEAD").Output()
+	assert.NoError(t, err)
+	branch := strings.TrimSpace(string(branchOut))
+	for _, args := range [][]string{
+		{"git", "-C", workPath, "add", "."},
+		{"git", "-C", workPath, "commit", "-m", "advance"},
+		{"git", "-C", workPath, "push", barePath, "HEAD:" + branch},
+	} {
+		out, err := exec.Command(args[0], args[1:]...).CombinedOutput()
+		assert.NoError(t, err, string(out))
+	}
+}
+
+func TestRepository_EnsureRefsUpToDate_CachesSuccessfulCheck(t *testing.T) {
+	repo, _ := newClonedTestRepo(t, testRefCheckConfig())
+	ctx := context.Background()
+
+	needsFetch, err := repo.EnsureRefsUpToDate(ctx)
+	assert.NoError(t, err)
+	assert.False(t, needsFetch)
+	runs := repo.lsRemoteRuns.Load()
+	assert.Equal(t, int64(1), runs)
+
+	needsFetch, err = repo.EnsureRefsUpToDate(ctx)
+	assert.NoError(t, err)
+	assert.False(t, needsFetch)
+	assert.Equal(t, runs, repo.lsRemoteRuns.Load(), "second check within RefCheckInterval must reuse the cached result")
+}
+
+func TestRepository_EnsureRefsUpToDate_CachesFailureForBackoff(t *testing.T) {
+	repo, _ := newClonedTestRepo(t, testRefCheckConfig())
+	ctx := context.Background()
+
+	// Unreachable upstream: ls-remote fails fast with connection-refused.
+	repo.upstreamURL = "https://127.0.0.1:1/nonexistent/repo"
+
+	_, err := repo.EnsureRefsUpToDate(ctx)
+	assert.Error(t, err)
+	runs := repo.lsRemoteRuns.Load()
+
+	// During an upstream outage the cached failure is replayed, so serial requests
+	// do not each run their own ls-remote and wait out LsRemoteTimeout.
+	_, err = repo.EnsureRefsUpToDate(ctx)
+	assert.Error(t, err)
+	assert.Equal(t, runs, repo.lsRemoteRuns.Load(), "failed check must be cached for the backoff window")
+
+	// A successful fetch proves upstream is reachable again, so it must drop the
+	// cached failure rather than leaving callers to wait out the backoff. (The
+	// fetch uses the clone's origin remote, which still points at the real
+	// upstream, so it succeeds while ls-remote keeps failing.)
+	assert.NoError(t, repo.Fetch(ctx))
+	_, err = repo.EnsureRefsUpToDate(ctx)
+	assert.Error(t, err)
+	assert.Equal(t, runs+1, repo.lsRemoteRuns.Load(), "fetch must invalidate the cached failure")
+	runs = repo.lsRemoteRuns.Load()
+
+	// The failure is cached only for a fraction of RefCheckInterval, so recovery
+	// is picked up long before a successful verdict would expire.
+	repo.mu.Lock()
+	repo.refCheckErrAt = time.Now().Add(-2 * repo.refCheckFailureBackoff())
+	repo.mu.Unlock()
+
+	_, err = repo.EnsureRefsUpToDate(ctx)
+	assert.Error(t, err)
+	assert.Equal(t, runs+1, repo.lsRemoteRuns.Load(), "check must reopen once the failure backoff expires")
+}
+
+func TestRepository_EnsureRefsUpToDate_CachesStaleVerdict(t *testing.T) {
+	repo, upstreamPath := newClonedTestRepo(t, testRefCheckConfig())
+	ctx := context.Background()
+
+	needsFetch, err := repo.EnsureRefsUpToDate(ctx)
+	assert.NoError(t, err)
+	assert.False(t, needsFetch)
+
+	// Expire the fresh cache entry and advance upstream so the next check
+	// observes staleness.
+	repo.mu.Lock()
+	repo.lastRefCheck = time.Now().Add(-2 * time.Minute)
+	repo.mu.Unlock()
+	advanceBareUpstream(t, upstreamPath)
+
+	needsFetch, err = repo.EnsureRefsUpToDate(ctx)
+	assert.NoError(t, err)
+	assert.True(t, needsFetch, "mirror should be detected stale after upstream advanced")
+	runs := repo.lsRemoteRuns.Load()
+
+	// A stale verdict is cached under RefCheckInterval so serial requests
+	// against a behind mirror do not each re-issue ls-remote.
+	needsFetch, err = repo.EnsureRefsUpToDate(ctx)
+	assert.NoError(t, err)
+	assert.True(t, needsFetch)
+	assert.Equal(t, runs, repo.lsRemoteRuns.Load(), "stale results must be cached within RefCheckInterval")
+}
+
+func TestRepository_EnsureRefsUpToDate_FetchInvalidatesStaleCache(t *testing.T) {
+	repo, upstreamPath := newClonedTestRepo(t, testRefCheckConfig())
+	ctx := context.Background()
+
+	// Clear any cached verdict and advance upstream so the check reports stale.
+	repo.mu.Lock()
+	repo.lastRefCheck = time.Now().Add(-2 * time.Minute)
+	repo.refCheckValid = false
+	repo.mu.Unlock()
+	advanceBareUpstream(t, upstreamPath)
+
+	needsFetch, err := repo.EnsureRefsUpToDate(ctx)
+	assert.NoError(t, err)
+	assert.True(t, needsFetch)
+
+	// A successful fetch must clear the cached stale verdict so the next
+	// check reopens rather than serving "behind" for the rest of the interval.
+	assert.NoError(t, repo.Fetch(ctx))
+	assert.False(t, repo.refCheckValid, "fetch must invalidate the cached ref check")
+
+	needsFetch, err = repo.EnsureRefsUpToDate(ctx)
+	assert.NoError(t, err)
+	assert.False(t, needsFetch, "after fetch the mirror should match upstream")
+}
+
+func TestRepository_EnsureRefsUpToDate_LeaderCancelDoesNotPoisonWaiter(t *testing.T) {
+	repo, _ := newClonedTestRepo(t, testRefCheckConfig())
+
+	leaderCtx, cancel := context.WithCancel(context.Background())
+	cancel() // already cancelled; without WithoutCancel the leader would fail
+
+	type result struct {
+		stale bool
+		err   error
+	}
+	leaderDone := make(chan result, 1)
+	waiterDone := make(chan result, 1)
+
+	go func() {
+		stale, err := repo.EnsureRefsUpToDate(leaderCtx)
+		leaderDone <- result{stale, err}
+	}()
+	time.Sleep(5 * time.Millisecond)
+	go func() {
+		stale, err := repo.EnsureRefsUpToDate(context.Background())
+		waiterDone <- result{stale, err}
+	}()
+
+	leader := <-leaderDone
+	waiter := <-waiterDone
+	assert.NoError(t, leader.err, "cancelled leader must still complete the check")
+	assert.NoError(t, waiter.err, "waiter must not inherit the leader's cancellation")
+	assert.Equal(t, leader.stale, waiter.stale)
+}
+
+func TestRepository_EnsureRefsUpToDate_SingleflightWaiter(t *testing.T) {
+	repo := &Repository{
+		config:           testRepoConfig(),
+		fetchSem:         make(chan struct{}, 1),
+		refCheckInFlight: make(chan struct{}),
+		refCheckStale:    true,
+	}
+	repo.fetchSem <- struct{}{}
+
+	type result struct {
+		stale bool
+		err   error
+	}
+	done := make(chan result, 1)
+	go func() {
+		stale, err := repo.EnsureRefsUpToDate(context.Background())
+		done <- result{stale, err}
+	}()
+
+	// The waiter must block until the simulated in-flight check completes.
+	select {
+	case <-done:
+		t.Fatal("waiter returned before the in-flight check completed")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(repo.refCheckInFlight)
+	res := <-done
+	assert.NoError(t, res.err)
+	assert.True(t, res.stale)
+	assert.Equal(t, int64(0), repo.lsRemoteRuns.Load(), "waiter must reuse the in-flight check, not issue its own ls-remote")
+}
+
+func TestRepository_EnsureRefsUpToDate_SingleflightWaiterError(t *testing.T) {
+	repo := &Repository{
+		config:           testRepoConfig(),
+		fetchSem:         make(chan struct{}, 1),
+		refCheckInFlight: make(chan struct{}),
+		refCheckErr:      errors.New("ls-remote exploded"),
+	}
+	repo.fetchSem <- struct{}{}
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := repo.EnsureRefsUpToDate(context.Background())
+		done <- err
+	}()
+	time.Sleep(20 * time.Millisecond)
+	close(repo.refCheckInFlight)
+	err := <-done
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "ls-remote exploded")
+}
+
+func TestRepository_EnsureRefsUpToDate_SingleflightWaiterCancel(t *testing.T) {
+	repo := &Repository{
+		config:           testRepoConfig(),
+		fetchSem:         make(chan struct{}, 1),
+		refCheckInFlight: make(chan struct{}),
+	}
+	repo.fetchSem <- struct{}{}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := repo.EnsureRefsUpToDate(ctx)
+		done <- err
+	}()
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+	err := <-done
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "context cancelled")
 }
 
 func TestParseGitRefs(t *testing.T) {
