@@ -34,3 +34,6 @@ func (s *Strategy) RunCoordinatedSnapshot(ctx context.Context, repo *gitclone.Re
 func (s *Strategy) CacheBundle(ctx context.Context, key cache.Key, r io.Reader) error {
 	return s.cacheBundle(ctx, key, r)
 }
+
+// UploadPackParseLimit exports uploadPackParseLimit for testing.
+const UploadPackParseLimit = uploadPackParseLimit
