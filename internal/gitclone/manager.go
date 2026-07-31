@@ -569,7 +569,19 @@ func (r *Repository) Fetch(ctx context.Context) error {
 // for catch-up fetches after snapshot restore where the delta may be large and
 // the default Config.FetchTimeout is too short.
 func (r *Repository) FetchWithTimeout(ctx context.Context, timeout time.Duration) error {
-	return r.fetchInternal(ctx, timeout, true, true)
+	_, err := r.fetchInternal(ctx, timeout, true, true)
+	return err
+}
+
+// FetchCoalescing fetches from upstream, coalescing with a concurrent semaphore
+// holder rather than issuing a redundant network call. The attempted flag
+// reports whether this call ran a git fetch itself (true, whether or not it
+// succeeded) or piggy-backed on another holder's work (false), so a caller can
+// tell a failed fetch from a coalesce wait that timed out without ever
+// contacting upstream. Callers that need a guaranteed fetch should fall back to
+// FetchVerified only when attempted is false.
+func (r *Repository) FetchCoalescing(ctx context.Context) (attempted bool, err error) {
+	return r.fetchInternal(ctx, r.config.FetchTimeout, true, true)
 }
 
 // FetchLenient fetches from upstream with the given timeout but without the
@@ -578,7 +590,8 @@ func (r *Repository) FetchWithTimeout(ctx context.Context, timeout time.Duration
 // stall at near-zero transfer rate for minutes — the same situation that
 // executeClone handles by omitting lowSpeedLimit.
 func (r *Repository) FetchLenient(ctx context.Context, timeout time.Duration) error {
-	return r.fetchInternal(ctx, timeout, false, true)
+	_, err := r.fetchInternal(ctx, timeout, false, true)
+	return err
 }
 
 // FetchVerified fetches from upstream, waiting for the fetch semaphore if
@@ -587,17 +600,47 @@ func (r *Repository) FetchLenient(ctx context.Context, timeout time.Duration) er
 // WithFetchExclusion) or its fetch may have failed — so a nil return
 // guarantees this call ran a successful git fetch.
 func (r *Repository) FetchVerified(ctx context.Context) error {
-	return r.fetchInternal(ctx, r.config.FetchTimeout, true, false)
+	_, err := r.fetchInternal(ctx, r.config.FetchTimeout, true, false)
+	return err
 }
 
-func (r *Repository) fetchInternal(ctx context.Context, timeout time.Duration, enforceSpeedLimit, coalesce bool) error {
+// FetchVerifiedIfAbsent waits for the fetch semaphore and runs a git fetch only
+// when oids are still missing. If a concurrent fetch already brought the objects
+// in while this call waited, or the wait itself was cut short, it returns
+// attempted=false without hitting upstream.
+func (r *Repository) FetchVerifiedIfAbsent(ctx context.Context, oids []string) (attempted bool, err error) {
+	select {
+	case <-r.fetchSem:
+		defer func() { r.fetchSem <- struct{}{} }()
+	case <-ctx.Done():
+		return false, errors.Wrap(ctx.Err(), "context cancelled before acquiring fetch semaphore")
+	}
+
+	missing, err := r.MissingObjects(ctx, oids)
+	if err != nil {
+		return false, err
+	}
+	if len(missing) == 0 {
+		return false, nil
+	}
+
+	fetchCtx, cancel := context.WithTimeout(ctx, r.config.FetchTimeout)
+	defer cancel()
+	return true, r.executeFetch(fetchCtx, true)
+}
+
+// fetchInternal returns attempted=true when this call ran the git fetch itself,
+// whether or not the fetch succeeded, and attempted=false when it never reached
+// upstream: a coalescing caller piggy-backed on another semaphore holder, or the
+// context ended while waiting for the semaphore.
+func (r *Repository) fetchInternal(ctx context.Context, timeout time.Duration, enforceSpeedLimit, coalesce bool) (attempted bool, err error) {
 	select {
 	case <-r.fetchSem:
 		defer func() {
 			r.fetchSem <- struct{}{}
 		}()
 	case <-ctx.Done():
-		return errors.Wrap(ctx.Err(), "context cancelled before acquiring fetch semaphore")
+		return false, errors.Wrap(ctx.Err(), "context cancelled before acquiring fetch semaphore")
 	default:
 		// The semaphore is held. Coalescing callers treat the holder's work as
 		// their fetch; verified callers wait their turn and fetch themselves.
@@ -605,9 +648,9 @@ func (r *Repository) fetchInternal(ctx context.Context, timeout time.Duration, e
 			select {
 			case <-r.fetchSem:
 				r.fetchSem <- struct{}{}
-				return nil
+				return false, nil
 			case <-ctx.Done():
-				return errors.Wrap(ctx.Err(), "context cancelled while waiting for fetch")
+				return false, errors.Wrap(ctx.Err(), "context cancelled while waiting for fetch")
 			}
 		}
 		select {
@@ -616,13 +659,18 @@ func (r *Repository) fetchInternal(ctx context.Context, timeout time.Duration, e
 				r.fetchSem <- struct{}{}
 			}()
 		case <-ctx.Done():
-			return errors.Wrap(ctx.Err(), "context cancelled before acquiring fetch semaphore")
+			return false, errors.Wrap(ctx.Err(), "context cancelled before acquiring fetch semaphore")
 		}
 	}
 
 	fetchCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
+	return true, r.executeFetch(fetchCtx, enforceSpeedLimit)
+}
+
+// executeFetch runs git fetch against upstream. The caller must hold fetchSem.
+func (r *Repository) executeFetch(ctx context.Context, enforceSpeedLimit bool) error {
 	config := DefaultGitTuningConfig()
 
 	args := []string{
@@ -637,7 +685,7 @@ func (r *Repository) fetchInternal(ctx context.Context, timeout time.Duration, e
 	}
 	args = append(args, "fetch", "--prune", "--prune-tags")
 
-	cmd, err := r.GitCommand(fetchCtx, args...)
+	cmd, err := r.GitCommand(ctx, args...)
 	if err != nil {
 		return errors.Wrap(err, "create git command")
 	}

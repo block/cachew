@@ -353,6 +353,53 @@ func TestRepository_FetchVerifiedDoesNotCoalesce(t *testing.T) {
 	assert.True(t, repo.HasCommit(ctx, newSHA))
 }
 
+func TestRepository_FetchCoalescingReportsWhetherItFetched(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+	upstreamPath := createBareRepo(t, tmpDir)
+
+	clonePath := filepath.Join(tmpDir, "clone")
+	repo := &Repository{
+		state:       StateEmpty,
+		config:      testRepoConfig(),
+		path:        clonePath,
+		upstreamURL: upstreamPath,
+		fetchSem:    make(chan struct{}, 1),
+	}
+	repo.fetchSem <- struct{}{}
+	assert.NoError(t, repo.Clone(ctx))
+
+	// Coalescing onto a non-fetch semaphore holder reports fetched=false.
+	release := make(chan struct{})
+	acquired := make(chan struct{})
+	holderDone := make(chan error, 1)
+	go func() {
+		holderDone <- repo.WithFetchExclusion(ctx, func() error {
+			close(acquired)
+			<-release
+			return nil
+		})
+	}()
+	<-acquired
+	fetchedDone := make(chan bool, 1)
+	errDone := make(chan error, 1)
+	go func() {
+		fetched, err := repo.FetchCoalescing(ctx)
+		fetchedDone <- fetched
+		errDone <- err
+	}()
+	time.Sleep(50 * time.Millisecond)
+	close(release)
+	assert.NoError(t, <-holderDone)
+	assert.NoError(t, <-errDone)
+	assert.False(t, <-fetchedDone)
+
+	// With the semaphore free, it runs the fetch itself and reports fetched=true.
+	fetched, err := repo.FetchCoalescing(ctx)
+	assert.NoError(t, err)
+	assert.True(t, fetched)
+}
+
 func TestParseGitRefs(t *testing.T) {
 	output := []byte(`
 abc123 refs/heads/main
@@ -684,6 +731,78 @@ func TestRepository_EnsureRefs(t *testing.T) {
 	assert.False(t, fetched)
 	assert.Equal(t, 0, len(missing))
 	assert.Equal(t, newSHA, resolved[head])
+}
+
+func TestRepository_FetchVerifiedIfAbsentPeerDelivered(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+	upstreamPath := createBareRepo(t, tmpDir)
+
+	clonePath := filepath.Join(tmpDir, "clone")
+	repo := &Repository{
+		state:       StateEmpty,
+		config:      testRepoConfig(),
+		path:        clonePath,
+		upstreamURL: upstreamPath,
+		fetchSem:    make(chan struct{}, 1),
+	}
+	repo.fetchSem <- struct{}{}
+	assert.NoError(t, repo.Clone(ctx))
+
+	workPath := filepath.Join(tmpDir, "work")
+	assert.NoError(t, os.WriteFile(filepath.Join(workPath, "f.txt"), []byte("peer"), 0o600))
+	// #nosec G204 - workPath is a t.TempDir() path created by this test
+	branchOut, err := exec.Command("git", "-C", workPath, "rev-parse", "--abbrev-ref", "HEAD").Output()
+	assert.NoError(t, err)
+	branch := strings.TrimSpace(string(branchOut))
+	for _, args := range [][]string{
+		{"git", "-C", workPath, "add", "."},
+		{"git", "-C", workPath, "commit", "-m", "peer"},
+		{"git", "-C", workPath, "push", upstreamPath, "HEAD:" + branch},
+	} {
+		out, err := exec.Command(args[0], args[1:]...).CombinedOutput()
+		assert.NoError(t, err, string(out))
+	}
+	// #nosec G204 - workPath is a t.TempDir() path created by this test
+	newSHAOut, err := exec.Command("git", "-C", workPath, "rev-parse", "HEAD").Output()
+	assert.NoError(t, err)
+	newSHA := strings.TrimSpace(string(newSHAOut))
+
+	before := repo.LastFetch()
+	release := make(chan struct{})
+	acquired := make(chan struct{})
+	holderDone := make(chan error, 1)
+	go func() {
+		holderDone <- repo.WithFetchExclusion(ctx, func() error {
+			close(acquired)
+			// #nosec G204 - clonePath is a t.TempDir() path created by this test
+			out, fetchErr := exec.Command("git", "-C", clonePath, "fetch", "--prune", "--prune-tags").CombinedOutput()
+			if fetchErr != nil {
+				return fetchErr
+			}
+			_ = out
+			<-release
+			return nil
+		})
+	}()
+	<-acquired
+
+	type result struct {
+		fetched bool
+		err     error
+	}
+	done := make(chan result, 1)
+	go func() {
+		fetched, err := repo.FetchVerifiedIfAbsent(ctx, []string{newSHA})
+		done <- result{fetched, err}
+	}()
+	close(release)
+	assert.NoError(t, <-holderDone)
+	res := <-done
+	assert.NoError(t, res.err)
+	assert.False(t, res.fetched, "peer fetch should satisfy wants without this call fetching")
+	assert.Equal(t, before, repo.LastFetch(), "LastFetch must not advance when no fetch ran in this call")
+	assert.True(t, repo.HasCommit(ctx, newSHA))
 }
 
 // TestMirrorConfigAllowsUnreachableSHA verifies that the mirror config lets
