@@ -9,19 +9,24 @@ import (
 	"strings"
 
 	"github.com/alecthomas/errors"
+
+	"github.com/block/cachew/gitcredential"
 )
 
 // GitCommand returns a git subprocess configured with repository-scoped
 // authentication and any per-URL git config overrides disabled.
 func (r *Repository) GitCommand(ctx context.Context, args ...string) (*exec.Cmd, error) {
 	repoURL := r.upstreamURL
-	var token string
-	if r.credentialProvider != nil && strings.Contains(repoURL, "github.com") {
-		var err error
-		token, err = r.credentialProvider.GetTokenForURL(ctx, repoURL)
-		// If error getting token, fall back to original URL (system credentials)
+	var authorization string
+	var credentialScope string
+	if r.credentialProvider != nil {
+		credential, matched, err := r.credentialProvider.Credential(ctx, repoURL)
 		if err != nil {
-			token = ""
+			return nil, errors.Wrap(err, "get git credential")
+		}
+		if matched {
+			authorization = credential.Authorization
+			credentialScope = credential.URLScope
 		}
 	}
 
@@ -35,13 +40,18 @@ func (r *Repository) GitCommand(ctx context.Context, args ...string) (*exec.Cmd,
 		allArgs = append(allArgs, configArgs...)
 	}
 
-	// Add credential helper configuration if we have a token
-	// This ensures git uses the GitHub App token for authentication
-	// for all operations (clone, fetch, remote update, etc.)
-	if token != "" {
-		escapedToken := strings.ReplaceAll(token, "'", "'\\''")
-		credHelper := "!f() { test \"$1\" = get && echo username=x-access-token && printf 'password=%s\\n' '" + escapedToken + "'; }; f"
-		allArgs = append(allArgs, "-c", "credential.helper="+credHelper)
+	if authorization != "" {
+		if strings.TrimSpace(authorization) != authorization || strings.ContainsAny(authorization, "\r\n\x00") {
+			return nil, errors.New("credential provider returned an invalid authorization value")
+		}
+		expectedScope, err := gitcredential.NormalizeRepositoryURLScope(repoURL)
+		if err != nil {
+			return nil, errors.Wrap(err, "normalize credential URL scope")
+		}
+		if credentialScope != expectedScope {
+			return nil, errors.New("credential provider returned an invalid URL scope")
+		}
+		allArgs = append(allArgs, "-c", "http."+credentialScope+".extraHeader=Authorization: "+authorization)
 	}
 
 	allArgs = append(allArgs, args...)

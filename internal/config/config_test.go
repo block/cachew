@@ -189,14 +189,18 @@ func TestInjectEnvarsExpandsPlaceholders(t *testing.T) {
 		Policy string `hcl:"policy"`
 	}
 	type Config struct {
-		Bind      string `hcl:"bind"`
-		OPAConfig OPA    `hcl:"opa,block"`
+		Bind      string            `hcl:"bind"`
+		Remotes   []string          `hcl:"remotes"`
+		Headers   map[string]string `hcl:"headers"`
+		OPAConfig OPA               `hcl:"opa,block"`
 	}
 	schema, err := hcl.Schema(new(Config))
 	assert.NoError(t, err)
 
 	const input = `
 bind = "${CACHEW_BIND}"
+remotes = ["${CACHEW_REMOTE_ONE}", "${CACHEW_REMOTE_TWO}"]
+headers = { "Authorization": "Bearer ${CACHEW_TOKEN}" }
 
 opa {
   policy = <<EOF
@@ -209,6 +213,9 @@ opa {
 
 	InjectEnvars(schema, ast, "CACHEW", map[string]string{
 		"CACHEW_BIND":             "0.0.0.0:9090",
+		"CACHEW_REMOTE_ONE":       "https://git.example.com/one",
+		"CACHEW_REMOTE_TWO":       "https://git.example.com/two",
+		"CACHEW_TOKEN":            "test-token",
 		"CACHEW_WARMER_PRINCIPAL": "spiffe://example/ns/warm/sa/x",
 	})
 
@@ -218,6 +225,8 @@ opa {
 
 	// Both *hcl.String and *hcl.Heredoc attribute values are expanded.
 	assert.Contains(t, out, `bind = "0.0.0.0:9090"`)
+	assert.Contains(t, out, `remotes = ["https://git.example.com/one", "https://git.example.com/two"]`)
+	assert.Contains(t, out, `"Authorization": "Bearer test-token"`)
 	assert.Contains(t, out, `caller_principal == "spiffe://example/ns/warm/sa/x"`)
 	// No literal placeholder remains anywhere in the rendered AST.
 	assert.Equal(t, false, strings.Contains(out, "${CACHEW_"))

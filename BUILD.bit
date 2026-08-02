@@ -5,7 +5,7 @@ param version = exec('git describe --tags --always --dirty 2>/dev/null || echo "
 param registry : string #= "127.0.0.1:5000"
 let git_commit = exec('git rev-parse HEAD')
 let arch = ["amd64", "arm64"]
-let command = ["cachew", "cachewd"]
+let command = ["cachew", "cachewd", "cachew-azure-git-credential"]
 
 # Format all Go files.
 pre fmt = go.fmt {}
@@ -19,6 +19,11 @@ cachew = go.exe {
 cachewd = go.exe {
   package = "./cmd/cachewd"
   output = "dist/cachewd"
+}
+
+cachew-azure-git-credential = go.exe {
+  package = "./cmd/cachew-azure-git-credential"
+  output = "dist/cachew-azure-git-credential"
 }
 
 # Tests
@@ -44,7 +49,7 @@ image = docker.image {
   tag = "cachew:latest"
   context = "."
   dockerfile = "docker/Dockerfile"
-  depends_on = [cross[arm64, cachew], cross[arm64, cachewd]]
+  depends_on = [cross[arm64, cachew], cross[arm64, cachewd], cross[arm64, cachew-azure-git-credential]]
 }
 
 # Build production image.
@@ -70,4 +75,4 @@ target docker = [container]
 target push = [multi-arch-image]
 
 # Build default targets
-target default = [cachew, cachewd, test, lint]
+target default = [cachew, cachewd, cachew-azure-git-credential, test, lint]

@@ -11,6 +11,7 @@ TAG := `git rev-parse --short HEAD 2>/dev/null || echo "dev"`
 VERSION := `git describe --tags --always --dirty 2>/dev/null || echo "dev"`
 GIT_COMMIT := `git rev-parse HEAD 2>/dev/null || echo "unknown"`
 DOCKERFILE := ROOT + "/docker/Dockerfile"
+TEST_DOCKERFILE := ROOT + "/docker/Dockerfile.test"
 RELEASE := ROOT + "/dist"
 DEFAULT_TAGS := "-t cachew:" + TAG
 
@@ -25,6 +26,15 @@ build:
         -t cachew:local \
         {{ ROOT }}
     @echo "✓ Built cachew:local"
+
+# Build an image with the deterministic external Git credential test provider
+build-test: build
+    @echo "Building Git credential provider test image..."
+    @docker build -f {{ TEST_DOCKERFILE }} \
+        --build-arg BASE_IMAGE=cachew:local \
+        -t cachew:credential-test \
+        {{ ROOT }}
+    @echo "✓ Built cachew:credential-test"
 
 # Build multi-arch Docker image (builds for amd64 + arm64, stays in cache)
 build-multi *extra_args=(DEFAULT_TAGS):
@@ -51,5 +61,6 @@ run log_level="info": build
 clean:
     @echo "Cleaning Docker images..."
     @docker rmi cachew:local 2>/dev/null || true
+    @docker rmi cachew:credential-test 2>/dev/null || true
     @docker rmi cachew:{{ TAG }} 2>/dev/null || true
     @echo "✓ Cleaned"

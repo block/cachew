@@ -230,8 +230,8 @@ func Load(
 	return h, readiers, nil
 }
 
-// expandVars expands environment variable references in HCL `*hcl.String`
-// and `*hcl.Heredoc` attribute values in-place. It is a low-level helper;
+// expandVars expands environment variable references in HCL string values,
+// including strings nested in lists and maps, in-place. It is a low-level helper;
 // most callers should go through `InjectEnvars`, which performs both
 // schema-driven attribute injection for absent attributes AND placeholder
 // expansion in attribute values that the operator wrote with `${VAR}`.
@@ -245,15 +245,31 @@ func expandVars(ast *hcl.AST, vars map[string]string) {
 	_ = hcl.Visit(ast, func(node hcl.Node, next func() error) error { //nolint:errcheck
 		attr, ok := node.(*hcl.Attribute)
 		if ok {
-			switch attr := attr.Value.(type) {
-			case *hcl.String:
-				attr.Str = os.Expand(attr.Str, func(s string) string { return vars[s] })
-			case *hcl.Heredoc:
-				attr.Doc = os.Expand(attr.Doc, func(s string) string { return vars[s] })
-			}
+			expandValue(attr.Value, vars)
 		}
 		return next()
 	})
+}
+
+func expandValue(value hcl.Value, vars map[string]string) {
+	expand := func(s string) string {
+		return os.Expand(s, func(key string) string { return vars[key] })
+	}
+	switch value := value.(type) {
+	case *hcl.String:
+		value.Str = expand(value.Str)
+	case *hcl.Heredoc:
+		value.Doc = expand(value.Doc)
+	case *hcl.List:
+		for _, item := range value.List {
+			expandValue(item, vars)
+		}
+	case *hcl.Map:
+		for _, entry := range value.Entries {
+			expandValue(entry.Key, vars)
+			expandValue(entry.Value, vars)
+		}
+	}
 }
 
 // InjectEnvars resolves environment variables against the config AST in two

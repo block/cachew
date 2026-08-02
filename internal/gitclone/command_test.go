@@ -6,6 +6,9 @@ import (
 	"testing"
 
 	"github.com/alecthomas/assert/v2"
+	"github.com/alecthomas/errors"
+
+	"github.com/block/cachew/gitcredential"
 )
 
 func TestGetInsteadOfDisableArgsForURL(t *testing.T) {
@@ -79,12 +82,47 @@ func TestGitCommandWithEmptyURL(t *testing.T) {
 }
 
 type mockCredentialProvider struct {
-	token string
-	err   error
+	authorization string
+	scope         string
+	matched       bool
+	err           error
 }
 
-func (m *mockCredentialProvider) GetTokenForURL(_ context.Context, _ string) (string, error) {
-	return m.token, m.err
+func (m *mockCredentialProvider) Credential(_ context.Context, repositoryURL string) (gitcredential.Credential, bool, error) {
+	scope := m.scope
+	if scope == "" {
+		scope = repositoryURL
+	}
+	return gitcredential.Credential{Authorization: m.authorization, URLScope: scope}, m.matched, m.err
+}
+
+func TestGitCommandProviderFailure(t *testing.T) {
+	repo := &Repository{
+		upstreamURL: "https://example.com/user/repo",
+		credentialProvider: &mockCredentialProvider{
+			matched: true,
+			err:     errors.New("provider failed"),
+		},
+	}
+	cmd, err := repo.GitCommand(t.Context(), "version")
+	assert.Error(t, err)
+	assert.Zero(t, cmd)
+}
+
+func TestGitCommandRejectsInvalidCredential(t *testing.T) {
+	tests := []mockCredentialProvider{
+		{authorization: "Bearer token\nInjected: value", matched: true},
+		{authorization: "Bearer token", scope: "https://example.com", matched: true},
+	}
+	for _, provider := range tests {
+		repo := &Repository{
+			upstreamURL:        "https://example.com/user/repo",
+			credentialProvider: &provider,
+		}
+		cmd, err := repo.GitCommand(t.Context(), "version")
+		assert.Error(t, err)
+		assert.Zero(t, cmd)
+	}
 }
 
 func TestGitCommandWithCredentialProvider(t *testing.T) {
@@ -92,26 +130,17 @@ func TestGitCommandWithCredentialProvider(t *testing.T) {
 
 	tests := []struct {
 		name          string
-		token         string
-		expectHelper  bool
-		expectedToken string
+		authorization string
+		expectHeader  bool
 	}{
 		{
-			name:          "WithValidToken",
-			token:         "ghp_test123456",
-			expectHelper:  true,
-			expectedToken: "ghp_test123456",
+			name:          "WithValidAuthorization",
+			authorization: "Bearer test123456",
+			expectHeader:  true,
 		},
 		{
-			name:          "WithTokenContainingSingleQuote",
-			token:         "token'with'quotes",
-			expectHelper:  true,
-			expectedToken: "token'with'quotes",
-		},
-		{
-			name:         "WithEmptyToken",
-			token:        "",
-			expectHelper: false,
+			name:         "WithEmptyAuthorization",
+			expectHeader: false,
 		},
 	}
 
@@ -120,7 +149,8 @@ func TestGitCommandWithCredentialProvider(t *testing.T) {
 			repo := &Repository{
 				upstreamURL: "https://github.com/user/repo",
 				credentialProvider: &mockCredentialProvider{
-					token: tt.token,
+					authorization: tt.authorization,
+					matched:       true,
 				},
 			}
 
@@ -128,19 +158,15 @@ func TestGitCommandWithCredentialProvider(t *testing.T) {
 			assert.NoError(t, err)
 			assert.NotZero(t, cmd)
 
-			if tt.expectHelper {
-				found := false
-				for i, arg := range cmd.Args {
-					if arg == "-c" && i+1 < len(cmd.Args) {
-						if strings.Contains(cmd.Args[i+1], "credential.helper=") {
-							found = true
-							assert.True(t, strings.Contains(cmd.Args[i+1], "username=x-access-token"))
-							break
-						}
-					}
+			found := false
+			for i, arg := range cmd.Args {
+				if arg == "-c" && i+1 < len(cmd.Args) && strings.Contains(cmd.Args[i+1], ".extraHeader=Authorization: ") {
+					found = true
+					assert.True(t, strings.Contains(cmd.Args[i+1], tt.authorization))
+					break
 				}
-				assert.True(t, found, "expected credential.helper to be configured")
 			}
+			assert.Equal(t, tt.expectHeader, found)
 		})
 	}
 }

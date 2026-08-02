@@ -65,8 +65,10 @@ ehthumbs.db
 *.backup
 *.old
 
-# Docker files (don't need to copy these into context)
-docker/
+# Docker files (test helper assets are copied by Dockerfile.test)
+docker/*
+!docker/test/
+!docker/test/**
 Dockerfile
 .dockerignore
 docker-compose.yml

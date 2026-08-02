@@ -16,6 +16,7 @@ import (
 
 	"github.com/alecthomas/errors"
 
+	"github.com/block/cachew/gitcredential"
 	"github.com/block/cachew/internal/logging"
 )
 
@@ -73,10 +74,8 @@ type Config struct {
 	RepackThreads    int           `hcl:"repack-threads,optional" help:"Threads for git repack operations. Limits memory since windowMemory and deltaCacheSize are per-thread. 0 = pack-threads." default:"4"`
 }
 
-// CredentialProvider provides credentials for git operations.
-type CredentialProvider interface {
-	GetTokenForURL(ctx context.Context, url string) (string, error)
-}
+// CredentialProvider provides repository-scoped credentials for Git operations.
+type CredentialProvider = gitcredential.Provider
 
 type CredentialProviderProvider func() (CredentialProvider, error)
 

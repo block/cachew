@@ -23,6 +23,7 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 
+	"github.com/block/cachew/gitcredential"
 	"github.com/block/cachew/internal/cache"
 	"github.com/block/cachew/internal/config"
 	"github.com/block/cachew/internal/gitclone"
@@ -48,14 +49,15 @@ type GlobalConfig struct {
 	ShutdownReadinessDelay time.Duration `hcl:"shutdown-readiness-delay,optional" default:"5s" help:"Delay between flipping readiness to 503 on SIGTERM and starting graceful shutdown."`
 	// ShutdownTimeout must be less than the pod's terminationGracePeriodSeconds
 	// (minus ShutdownReadinessDelay) or the kubelet will SIGKILL before Shutdown returns.
-	ShutdownTimeout  time.Duration       `hcl:"shutdown-timeout,optional" default:"150s" help:"Maximum time to wait for in-flight requests to drain on graceful shutdown."`
-	SchedulerConfig  jobscheduler.Config `hcl:"scheduler,block"`
-	LoggingConfig    logging.Config      `hcl:"log,block"`
-	MetricsConfig    metrics.Config      `hcl:"metrics,block"`
-	GitCloneConfig   gitclone.Config     `hcl:"git-clone,block"`
-	S3Config         s3client.Config     `hcl:"s3,block,optional"`
-	GithubAppConfigs []githubapp.Config  `hcl:"github-app,block,optional"`
-	OPAConfig        opa.Config          `hcl:"opa,block"`
+	ShutdownTimeout       time.Duration                 `hcl:"shutdown-timeout,optional" default:"150s" help:"Maximum time to wait for in-flight requests to drain on graceful shutdown."`
+	SchedulerConfig       jobscheduler.Config           `hcl:"scheduler,block"`
+	LoggingConfig         logging.Config                `hcl:"log,block"`
+	MetricsConfig         metrics.Config                `hcl:"metrics,block"`
+	GitCloneConfig        gitclone.Config               `hcl:"git-clone,block"`
+	S3Config              s3client.Config               `hcl:"s3,block,optional"`
+	GithubAppConfigs      []githubapp.Config            `hcl:"github-app,block,optional"`
+	GitCredentialCommands []gitcredential.CommandConfig `hcl:"git-credential-command,block,optional"`
+	OPAConfig             opa.Config                    `hcl:"opa,block"`
 }
 
 // Populated via -ldflags at build time.
@@ -98,6 +100,12 @@ func main() {
 	defer stopSignals()
 	logger, ctx := logging.Configure(ctx, globalConfig.LoggingConfig)
 
+	if cli.Schema {
+		cr, mr, sr := newRegistries(nil, nil, nil, nil)
+		printSchema(kctx, cr, mr, sr)
+		return
+	}
+
 	// Flipped on SIGTERM so /_readiness fails before the listener closes.
 	var shuttingDown atomic.Bool
 
@@ -117,10 +125,8 @@ func main() {
 	reaper.Start(ctx)
 
 	// Start initialising
-	tokenManagerProvider := githubapp.NewTokenManagerProvider(globalConfig.GithubAppConfigs, logger)
-	gitManagerProvider := gitclone.NewManagerProvider(ctx, globalConfig.GitCloneConfig, func() (gitclone.CredentialProvider, error) {
-		return tokenManagerProvider()
-	})
+	gitManagerProvider, tokenManagerProvider, err := newGitProviders(ctx, globalConfig, logger)
+	fatalIfError(ctx, logger, err, "Failed to configure Git credential commands")
 	s3ClientProvider := s3client.NewClientProvider(ctx, globalConfig.S3Config)
 
 	// The scheduler gets its own context so workers keep running during
@@ -130,13 +136,6 @@ func main() {
 	schedulerProvider := jobscheduler.NewProvider(schedulerCtx, globalConfig.SchedulerConfig)
 
 	cr, mr, sr := newRegistries(schedulerProvider, gitManagerProvider, tokenManagerProvider, s3ClientProvider)
-
-	// Commands
-	switch { //nolint:gocritic
-	case cli.Schema:
-		printSchema(kctx, cr, mr, sr)
-		return
-	}
 
 	mux, err := newMux(ctx, &shuttingDown, cr, mr, sr, providersConfigHCL, envars)
 	fatalIfError(ctx, logger, err, "Failed to load config")
@@ -242,6 +241,26 @@ func drainScheduler(ctx context.Context, logger *slog.Logger, provider jobschedu
 	case <-time.After(schedulerDrainTimeout):
 		logger.WarnContext(ctx, "Scheduler drain timed out, exiting with in-flight jobs")
 	}
+}
+
+func newGitProviders(
+	ctx context.Context,
+	config GlobalConfig,
+	logger *slog.Logger,
+) (gitclone.ManagerProvider, githubapp.TokenManagerProvider, error) {
+	tokenManagerProvider := githubapp.NewTokenManagerProvider(config.GithubAppConfigs, logger)
+	commandProvider, err := gitcredential.NewCommandProvider(config.GitCredentialCommands)
+	if err != nil {
+		return nil, nil, errors.WithStack(err)
+	}
+	credentialProviderProvider := func() (gitclone.CredentialProvider, error) {
+		tokenManager, err := tokenManagerProvider()
+		if err != nil {
+			return nil, errors.WithStack(err)
+		}
+		return gitcredential.Composite{commandProvider, githubapp.NewGitCredentialProvider(tokenManager)}, nil
+	}
+	return gitclone.NewManagerProvider(ctx, config.GitCloneConfig, credentialProviderProvider), tokenManagerProvider, nil
 }
 
 func newRegistries(

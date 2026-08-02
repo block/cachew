@@ -33,6 +33,14 @@ opa {
 #   installations = { "myorg" : "installation-id" }
 # }
 
+# External commands can provide credentials for exact private Git remotes.
+# git-credential-command "ado" {
+#   command = ["/usr/local/bin/cachew-azure-git-credential", "--audience", "499b84ac-1321-427f-aa17-267ca6975798"]
+#   remotes = ["https://dev.azure.com/example/project/_git/repository"]
+#   timeout = "5s"
+#   refresh-before = "5m"
+# }
+
 metrics {}
 
 strategy git {

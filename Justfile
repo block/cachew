@@ -41,7 +41,7 @@ build GOOS=(GOOS) GOARCH=(GOARCH):
     #!/usr/bin/env bash
     set -euo pipefail
     mkdir -p {{ RELEASE }}
-    for binary in cachew cachewd; do
+    for binary in cachew cachewd cachew-azure-git-credential; do
       echo "⏲ Building dist/$binary-{{ GOOS }}-{{ GOARCH }}"
       CGO_ENABLED=0 GOOS={{ GOOS }} GOARCH={{ GOARCH }} \
           go build -trimpath -o {{ RELEASE }}/${binary}-{{ GOOS }}-{{ GOARCH }} \

@@ -1,0 +1,12 @@
+ARG BASE_IMAGE=cachew:local
+FROM ${BASE_IMAGE}
+
+COPY --chown=cachew:cachew --chmod=0755 docker/test/git-credential-command /app/bin/git-credential-command
+COPY --chown=cachew:cachew docker/test/git-credential-command.hcl /app/git-credential-command.hcl
+
+RUN cat /app/cachew.hcl /app/git-credential-command.hcl > /app/cachew-test.hcl
+
+ENV CACHEW_TEST_GIT_REMOTE=https://git.example.test/platform/source \
+    CACHEW_TEST_GIT_TOKEN=cachew-test-token
+
+CMD ["--config", "/app/cachew-test.hcl"]

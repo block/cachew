@@ -16,6 +16,7 @@ WORKDIR /app
 # Copy pre-built binary from host (built by Justfile)
 COPY dist/cachewd-linux-${TARGETARCH} /usr/local/bin/cachewd
 COPY dist/cachew-linux-${TARGETARCH} /usr/local/bin/cachew
+COPY dist/cachew-azure-git-credential-linux-${TARGETARCH} /usr/local/bin/cachew-azure-git-credential
 
 # Copy default configuration file
 COPY cachew.hcl /app/cachew.hcl

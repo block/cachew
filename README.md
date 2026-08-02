@@ -207,6 +207,76 @@ github-app {
 
 Installations can also be discovered dynamically via the GitHub API.
 
+## External Git Credentials
+
+Background mirror operations can authenticate to an exact private HTTPS remote by invoking an external credential command:
+
+```hcl
+git-credential-command "ado-aks" {
+  command = ["/usr/local/bin/aks-code-credential"]
+  remotes = [
+    "https://dev.azure.com/example/project/_git/repository",
+  ]
+  timeout        = "5s"
+  refresh-before = "5m"
+}
+```
+
+Cachew sends `{"version":1,"remote_url":"https://..."}` followed by a newline on stdin. `remote_url` is the canonical upstream Git remote URL. The command must return one JSON object on stdout:
+
+```json
+{"version":1,"authorization":"Bearer ...","expires_at":"2026-08-10T12:00:00Z"}
+```
+
+The command is executed directly without a shell. Remotes are canonicalized and matched exactly, credentials are cached only in memory, and a matched provider failure prevents Git from running. The command must write no credentials to stderr.
+
+External providers written in Go can import `github.com/block/cachew/gitcredential`. `CommandMain` uses Kong to populate a provider-defined options struct and handles signals, stdin/stdout, protocol validation, and errors; the provider supplies only construction and credential logic:
+
+```go
+type Options struct {
+    Audience string `help:"Token audience." required:""`
+}
+
+func main() {
+    gitcredential.CommandMain(&Options{}, func(ctx context.Context, options *Options) (gitcredential.CommandHandler, error) {
+        return gitcredential.CommandHandlerFunc(func(ctx context.Context, remoteURL string) (gitcredential.CommandResult, error) {
+            token, expiresAt, err := obtainToken(ctx, options.Audience, remoteURL)
+            return gitcredential.CommandResult{Authorization: "Bearer " + token, ExpiresAt: expiresAt}, err
+        }), nil
+    })
+}
+```
+
+`ServeCommand`, `DecodeRequest`, and `EncodeResponse` are also available for executables that need custom CLI or process handling. Cachew's `Provider` interface remains separate and supports in-process providers; the GitHub App adapter uses that path without a subprocess.
+
+Cachew images include an Azure Identity helper for Azure DevOps. The helper defaults to Workload Identity, requires an explicit access-token audience, and verifies that the repository URL supplied by Cachew uses `dev.azure.com`:
+
+```hcl
+git-credential-command "ado-aks" {
+  command = [
+    "/usr/local/bin/cachew-azure-git-credential",
+    "--audience", "499b84ac-1321-427f-aa17-267ca6975798",
+  ]
+  remotes = ["https://dev.azure.com/example/project/_git/repository"]
+}
+```
+
+For AKS Workload Identity, provide `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, and `AZURE_FEDERATED_TOKEN_FILE`. The service principal or managed identity must also be added to the Azure DevOps organization with repository read permission. For development, append `--credential=default`; `--credential=managed-identity` selects the system-assigned managed identity directly. `--audience` is required; the example uses the Azure DevOps application ID, and the helper appends `/.default` when needed. This is the access-token audience, not the projected Kubernetes token audience (`api://AzureADTokenExchange`). Tokens are never logged.
+
+A local test image includes a deterministic provider that validates the requested URL and returns a test-only bearer token:
+
+```sh
+just docker build-test
+docker run --rm -p 8080:8080 \
+  -e CACHEW_TEST_GIT_REMOTE=https://git.example.test/platform/source \
+  -e CACHEW_TEST_GIT_TOKEN=replace-with-test-server-token \
+  cachew:credential-test
+
+git ls-remote http://localhost:8080/git/git.example.test/platform/source
+```
+
+Point `CACHEW_TEST_GIT_REMOTE` at an HTTPS repository served by the test system. The helper accepts only an alphanumeric, `.`, `_`, or `-` token and uses a fixed test expiration. Do not deploy this image or use production credentials with it.
+
 ## CLI
 
 ### Server (`cachewd`)
@@ -274,6 +344,11 @@ metrics {}
 github-app {
   app-id           = "12345"
   private-key-path = "./github-app.pem"
+}
+
+git-credential-command "private-git" {
+  command = ["/usr/local/bin/private-git-credential"]
+  remotes = ["https://git.example.com/platform/source"]
 }
 
 git-clone {}
