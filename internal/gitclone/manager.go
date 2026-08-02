@@ -175,6 +175,15 @@ func (m *Manager) Config() Config {
 	return m.config
 }
 
+// Credential returns the configured credential provider result for a repository URL.
+func (m *Manager) Credential(ctx context.Context, repositoryURL string) (gitcredential.Credential, bool, error) {
+	if m.credentialProvider == nil {
+		return gitcredential.Credential{}, false, nil
+	}
+	credential, matched, err := m.credentialProvider.Credential(ctx, repositoryURL)
+	return credential, matched, errors.WithStack(err)
+}
+
 func (m *Manager) GetOrCreate(_ context.Context, upstreamURL string) (*Repository, error) {
 	m.clonesMu.RLock()
 	repo, exists := m.clones[upstreamURL]

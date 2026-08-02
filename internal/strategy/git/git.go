@@ -188,7 +188,7 @@ func New(
 			req.Host = req.URL.Host
 
 			// Inject GitHub App authentication for github.com requests
-			if s.tokenManager != nil && req.URL.Host == "github.com" {
+			if !upstreamCredentialApplied(req.Context()) && s.tokenManager != nil && req.URL.Host == "github.com" {
 				// Extract org from path (e.g., /squareup/blox.git/...)
 				parts := strings.Split(strings.TrimPrefix(req.URL.Path, "/"), "/")
 				if len(parts) >= 1 && parts[0] != "" {

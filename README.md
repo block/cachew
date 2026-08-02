@@ -209,7 +209,7 @@ Installations can also be discovered dynamically via the GitHub API.
 
 ## External Git Credentials
 
-Background mirror operations can authenticate to an exact private HTTPS remote by invoking an external credential command:
+Background mirror operations and direct upstream Git HTTP requests can authenticate to an exact private HTTPS remote by invoking an external credential command:
 
 ```hcl
 git-credential-command "ado-aks" {
@@ -228,7 +228,7 @@ Cachew sends `{"version":1,"remote_url":"https://..."}` followed by a newline on
 {"version":1,"authorization":"Bearer ...","expires_at":"2026-08-10T12:00:00Z"}
 ```
 
-The command is executed directly without a shell. Remotes are canonicalized and matched exactly, credentials are cached only in memory, and a matched provider failure prevents Git from running. The command must write no credentials to stderr.
+The command is executed directly without a shell. Remotes are canonicalized and matched exactly, credentials are cached only in memory, and a matched provider failure prevents Git or the upstream HTTP request from running. Direct authentication covers cache-miss and stale-ref fallbacks, push, and Git LFS requests; unmatched requests preserve the incoming authorization behavior. The command must write no credentials to stderr.
 
 External providers written in Go can import `github.com/block/cachew/gitcredential`. `CommandMain` uses Kong to populate a provider-defined options struct and handles signals, stdin/stdout, protocol validation, and errors; the provider supplies only construction and credential logic:
 
