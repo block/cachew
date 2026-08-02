@@ -5,7 +5,10 @@ package gitclone
 import (
 	"bufio"
 	"context"
+	"math"
+	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 
 	"github.com/alecthomas/errors"
@@ -40,6 +43,8 @@ func (r *Repository) GitCommand(ctx context.Context, args ...string) (*exec.Cmd,
 		allArgs = append(allArgs, configArgs...)
 	}
 
+	var credentialConfigKey string
+	var credentialConfigValue string
 	if authorization != "" {
 		if strings.TrimSpace(authorization) != authorization || strings.ContainsAny(authorization, "\r\n\x00") {
 			return nil, errors.New("credential provider returned an invalid authorization value")
@@ -51,12 +56,55 @@ func (r *Repository) GitCommand(ctx context.Context, args ...string) (*exec.Cmd,
 		if credentialScope != expectedScope {
 			return nil, errors.New("credential provider returned an invalid URL scope")
 		}
-		allArgs = append(allArgs, "-c", "http."+credentialScope+".extraHeader=Authorization: "+authorization)
+		credentialConfigKey = "http." + credentialScope + ".extraHeader"
+		credentialConfigValue = "Authorization: " + authorization
 	}
 
 	allArgs = append(allArgs, args...)
 
-	return exec.CommandContext(ctx, "git", allArgs...), nil
+	cmd := exec.CommandContext(ctx, "git", allArgs...)
+	if credentialConfigKey != "" {
+		cmd.Env, err = appendGitConfigEnv(os.Environ(), credentialConfigKey, credentialConfigValue)
+		if err != nil {
+			return nil, errors.Wrap(err, "configure Git credential environment")
+		}
+	}
+	return cmd, nil
+}
+
+func appendGitConfigEnv(env []string, key, value string) ([]string, error) {
+	count := 0
+	if rawCount, ok := envValue(env, "GIT_CONFIG_COUNT"); ok {
+		parsed, err := strconv.Atoi(rawCount)
+		if err != nil || parsed < 0 || parsed == math.MaxInt {
+			return nil, errors.Errorf("invalid GIT_CONFIG_COUNT %q", rawCount)
+		}
+		count = parsed
+	}
+	env = setEnv(env, "GIT_CONFIG_COUNT", strconv.Itoa(count+1))
+	env = setEnv(env, "GIT_CONFIG_KEY_"+strconv.Itoa(count), key)
+	env = setEnv(env, "GIT_CONFIG_VALUE_"+strconv.Itoa(count), value)
+	return env, nil
+}
+
+func envValue(env []string, key string) (string, bool) {
+	for i := len(env) - 1; i >= 0; i-- {
+		if envKey, value, ok := strings.Cut(env[i], "="); ok && envKey == key {
+			return value, true
+		}
+	}
+	return "", false
+}
+
+func setEnv(env []string, key, value string) []string {
+	result := make([]string, 0, len(env)+1)
+	for _, entry := range env {
+		if envKey, _, ok := strings.Cut(entry, "="); ok && envKey == key {
+			continue
+		}
+		result = append(result, entry)
+	}
+	return append(result, key+"="+value)
 }
 
 func getInsteadOfDisableArgsForURL(ctx context.Context, targetURL string) ([]string, error) {
