@@ -27,6 +27,7 @@ import (
 	"github.com/block/cachew/internal/cache"
 	"github.com/block/cachew/internal/gitclone"
 	"github.com/block/cachew/internal/githubapp"
+	cachewhttputil "github.com/block/cachew/internal/httputil"
 	"github.com/block/cachew/internal/jobscheduler"
 	"github.com/block/cachew/internal/logging"
 	"github.com/block/cachew/internal/metadatadb"
@@ -52,7 +53,7 @@ type Config struct {
 	BundleCacheTTL         time.Duration `hcl:"bundle-cache-ttl,optional" help:"TTL of cached server-side git bundles." default:"2h"`
 
 	SnapshotFilters         map[string]string `hcl:"snapshot-filters,optional" help:"Per-repository git partial-clone filter applied to workstation snapshots, keyed by host/org/repo (e.g. {\"github.com/org/repo\": \"blob:none\"}). Filtered snapshots contain full history metadata but only the blobs needed for the HEAD checkout; clients lazily fetch historical blobs through cachew on demand."`
-	IncrementalPullthrough  bool              `hcl:"incremental-pullthrough,optional" help:"Serve partially-cached upload-pack requests by fetching only missing objects into the local mirror instead of proxying the full response from upstream." default:"true"`
+	IncrementalPullthrough  bool              `hcl:"incremental-pullthrough,optional" help:"Serve partially-cached upload-pack requests by fetching only missing objects into the local mirror instead of proxying the full response from upstream. When enabled, upload-pack bodies are capped at 8 MiB (2× the parse limit); larger bodies receive 413." default:"true"`
 	IncrementalFetchTimeout time.Duration     `hcl:"incremental-fetch-timeout,optional" help:"Upper bound on the synchronous request-path fetch performed by incremental pull-through. The coalescing and verified attempts share this budget, and the coalescing attempt is capped at half so a verified retry still has room. On timeout the request falls back to upstream. Each underlying git fetch also honors fetch-timeout, and the preceding ref-staleness check is bounded separately by ls-remote-timeout." default:"2m"`
 }
 
@@ -382,6 +383,15 @@ func (s *Strategy) handleGitRequest(w http.ResponseWriter, r *http.Request, host
 		return
 	}
 
+	// Only incremental pull-through buffers and parses upload-pack bodies, so the
+	// body cap belongs behind the same kill switch: with incremental disabled the
+	// body streams straight through and a legitimately large one must not start
+	// failing with 413.
+	if s.config.IncrementalPullthrough && isUploadPackPost(r, pathValue) &&
+		r.Body != nil && r.Body != http.NoBody {
+		r.Body = http.MaxBytesReader(w, r.Body, 2*uploadPackParseLimit)
+	}
+
 	// Increment after GetOrCreate so unvalidated URLs can't bloat the keyspace.
 	if isClone, cerr := RequestIsClone(pathValue, r); cerr != nil {
 		logger.WarnContext(ctx, "Failed to inspect upload-pack body for clone counting", "error", cerr)
@@ -409,6 +419,11 @@ func (s *Strategy) handleGitRequest(w http.ResponseWriter, r *http.Request, host
 			})
 		}
 		if err := s.serveWithSpool(w, r, host, pathValue, upstreamURL); err != nil {
+			var maxErr *http.MaxBytesError
+			if errors.As(err, &maxErr) {
+				cachewhttputil.ErrorResponse(w, r, http.StatusRequestEntityTooLarge, "request body too large")
+				return
+			}
 			logger.WarnContext(ctx, "Spool failed, forwarding to upstream", "error", err)
 			s.forwardToUpstream(w, r, host, pathValue)
 		}
@@ -438,6 +453,11 @@ func (s *Strategy) serveReadyRepo(w http.ResponseWriter, r *http.Request, repo *
 		var readErr error
 		bodyBytes, readErr = io.ReadAll(r.Body)
 		if readErr != nil {
+			var maxErr *http.MaxBytesError
+			if errors.As(readErr, &maxErr) {
+				cachewhttputil.ErrorResponse(w, r, http.StatusRequestEntityTooLarge, "request body too large")
+				return nil
+			}
 			return errors.Wrap(readErr, "read request body")
 		}
 		replayRequestBody(r, bodyBytes)

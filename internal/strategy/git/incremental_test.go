@@ -2072,6 +2072,79 @@ func TestIncrementalStaleInfoRefsForwardedThenBackgroundFetch(t *testing.T) {
 	assertIncrementalServeMetrics(ctx, t, reader, "local_hit", hostPort+"/org/stale-repo", false)
 }
 
+func TestIncrementalUploadPackRejectsOversizedBody(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not found in PATH")
+	}
+
+	_, ctx := logging.Configure(context.Background(), logging.Config{})
+	tmpDir := t.TempDir()
+
+	const host = "127.0.0.1"
+	const repoPath = "org/bigbodyrepo"
+	mirrorRoot := filepath.Join(tmpDir, "mirrors")
+	upstreamPath := filepath.Join(tmpDir, "upstream")
+	mirrorPath := filepath.Join(mirrorRoot, host, repoPath)
+	assert.NoError(t, os.MkdirAll(mirrorPath, 0o755))
+
+	setupMirrorWithUpstream(t, upstreamPath, mirrorPath)
+
+	s, cachewSrv := setupE2EStrategy(ctx, t, mirrorRoot, git.Config{
+		IncrementalPullthrough:  true,
+		IncrementalFetchTimeout: 30 * time.Second,
+	})
+	waitForReady(t, s)
+
+	oversized := make([]byte, 2*git.UploadPackParseLimit+1)
+	url := fmt.Sprintf("%s/git/%s/%s/git-upload-pack", cachewSrv.URL, e2eUpstreamHost, repoPath)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(oversized))
+	assert.NoError(t, err)
+	req.Header.Set("Content-Type", "application/x-git-upload-pack-request")
+	client := &http.Client{Transport: http.DefaultTransport}
+	resp, err := client.Do(req)
+	assert.NoError(t, err)
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusRequestEntityTooLarge, resp.StatusCode)
+}
+
+func TestUploadPackOversizedBodyAcceptedWhenIncrementalDisabled(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not found in PATH")
+	}
+
+	_, ctx := logging.Configure(context.Background(), logging.Config{})
+	tmpDir := t.TempDir()
+
+	const host = "127.0.0.1"
+	const repoPath = "org/bigbodydisabledrepo"
+	mirrorRoot := filepath.Join(tmpDir, "mirrors")
+	upstreamPath := filepath.Join(tmpDir, "upstream")
+	mirrorPath := filepath.Join(mirrorRoot, host, repoPath)
+	assert.NoError(t, os.MkdirAll(mirrorPath, 0o755))
+
+	setupMirrorWithUpstream(t, upstreamPath, mirrorPath)
+
+	s, cachewSrv := setupE2EStrategy(ctx, t, mirrorRoot, git.Config{
+		IncrementalPullthrough:  false, // the body cap must not apply
+		IncrementalFetchTimeout: 30 * time.Second,
+	})
+	waitForReady(t, s)
+
+	oversized := make([]byte, 2*git.UploadPackParseLimit+1)
+	url := fmt.Sprintf("%s/git/%s/%s/git-upload-pack", cachewSrv.URL, e2eUpstreamHost, repoPath)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(oversized))
+	assert.NoError(t, err)
+	req.Header.Set("Content-Type", "application/x-git-upload-pack-request")
+	client := &http.Client{Transport: http.DefaultTransport}
+	resp, err := client.Do(req)
+	assert.NoError(t, err)
+	defer resp.Body.Close()
+	// The body is garbage, so the local backend's verdict is git's business; the
+	// contract under test is only that cachew itself does not reject the size.
+	assert.NotEqual(t, http.StatusRequestEntityTooLarge, resp.StatusCode,
+		"the body cap must be gated on IncrementalPullthrough")
+}
+
 func TestWantRefForwardedIncrementalDisabled(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not found in PATH")
