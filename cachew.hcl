@@ -41,6 +41,10 @@ opa {
 #   refresh-before = "5m"
 # }
 
+# azure-blob {
+#   account-url = "https://account.blob.core.windows.net"
+# }
+
 metrics {}
 
 strategy git {
@@ -80,3 +84,11 @@ cache disk {
 }
 
 metadata memory {}
+
+# cache azure-blob {
+#   container = "cachew"
+#   max-ttl = "8h"
+# }
+# metadata azure-blob {
+#   container = "cachew"
+# }

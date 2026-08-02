@@ -24,6 +24,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 
 	"github.com/block/cachew/gitcredential"
+	"github.com/block/cachew/internal/azureblobclient"
 	"github.com/block/cachew/internal/cache"
 	"github.com/block/cachew/internal/config"
 	"github.com/block/cachew/internal/gitclone"
@@ -31,6 +32,7 @@ import (
 	"github.com/block/cachew/internal/jobscheduler"
 	"github.com/block/cachew/internal/logging"
 	"github.com/block/cachew/internal/metadatadb"
+	metadataazureblob "github.com/block/cachew/internal/metadatadb/azureblob"
 	metadatas3 "github.com/block/cachew/internal/metadatadb/s3"
 	"github.com/block/cachew/internal/metrics"
 	"github.com/block/cachew/internal/opa"
@@ -55,6 +57,7 @@ type GlobalConfig struct {
 	MetricsConfig         metrics.Config                `hcl:"metrics,block"`
 	GitCloneConfig        gitclone.Config               `hcl:"git-clone,block"`
 	S3Config              s3client.Config               `hcl:"s3,block,optional"`
+	AzureBlobConfig       azureblobclient.Config        `hcl:"azure-blob,block,optional"`
 	GithubAppConfigs      []githubapp.Config            `hcl:"github-app,block,optional"`
 	GitCredentialCommands []gitcredential.CommandConfig `hcl:"git-credential-command,block,optional"`
 	OPAConfig             opa.Config                    `hcl:"opa,block"`
@@ -101,7 +104,7 @@ func main() {
 	logger, ctx := logging.Configure(ctx, globalConfig.LoggingConfig)
 
 	if cli.Schema {
-		cr, mr, sr := newRegistries(nil, nil, nil, nil)
+		cr, mr, sr := newRegistries(nil, nil, nil, nil, nil)
 		printSchema(kctx, cr, mr, sr)
 		return
 	}
@@ -127,7 +130,7 @@ func main() {
 	// Start initialising
 	gitManagerProvider, tokenManagerProvider, err := newGitProviders(ctx, globalConfig, logger)
 	fatalIfError(ctx, logger, err, "Failed to configure Git credential commands")
-	s3ClientProvider := s3client.NewClientProvider(ctx, globalConfig.S3Config)
+	s3ClientProvider, azureBlobClientProvider := newStorageProviders(ctx, globalConfig)
 
 	// The scheduler gets its own context so workers keep running during
 	// graceful shutdown while in-flight HTTP handlers drain. We cancel it
@@ -135,7 +138,8 @@ func main() {
 	schedulerCtx, cancelScheduler := context.WithCancel(context.WithoutCancel(ctx))
 	schedulerProvider := jobscheduler.NewProvider(schedulerCtx, globalConfig.SchedulerConfig)
 
-	cr, mr, sr := newRegistries(schedulerProvider, gitManagerProvider, tokenManagerProvider, s3ClientProvider)
+	cr, mr, sr := newRegistries(schedulerProvider, gitManagerProvider, tokenManagerProvider, s3ClientProvider,
+		azureBlobClientProvider)
 
 	mux, err := newMux(ctx, &shuttingDown, cr, mr, sr, providersConfigHCL, envars)
 	fatalIfError(ctx, logger, err, "Failed to load config")
@@ -243,6 +247,13 @@ func drainScheduler(ctx context.Context, logger *slog.Logger, provider jobschedu
 	}
 }
 
+func newStorageProviders(
+	ctx context.Context,
+	config GlobalConfig,
+) (s3client.ClientProvider, azureblobclient.ClientProvider) {
+	return s3client.NewClientProvider(ctx, config.S3Config), azureblobclient.NewClientProvider(ctx, config.AzureBlobConfig)
+}
+
 func newGitProviders(
 	ctx context.Context,
 	config GlobalConfig,
@@ -268,6 +279,7 @@ func newRegistries(
 	cloneManagerProvider gitclone.ManagerProvider,
 	tokenManagerProvider githubapp.TokenManagerProvider,
 	s3ClientProvider s3client.ClientProvider,
+	azureBlobClientProvider azureblobclient.ClientProvider,
 ) (
 	*cache.Registry,
 	*metadatadb.Registry,
@@ -277,10 +289,12 @@ func newRegistries(
 	cache.RegisterMemory(cr)
 	cache.RegisterDisk(cr)
 	cache.RegisterS3(cr, s3ClientProvider)
+	cache.RegisterAzureBlob(cr, azureBlobClientProvider)
 
 	mr := metadatadb.NewRegistry()
 	metadatadb.RegisterMemory(mr)
 	metadatas3.Register(mr, s3ClientProvider)
+	metadataazureblob.Register(mr, azureBlobClientProvider)
 
 	sr := strategy.NewRegistry()
 	strategy.RegisterAPIV1(sr)

@@ -277,6 +277,27 @@ git ls-remote http://localhost:8080/git/git.example.test/platform/source
 
 Point `CACHEW_TEST_GIT_REMOTE` at an HTTPS repository served by the test system. The helper accepts only an alphanumeric, `.`, `_`, or `-` token and uses a fixed test expiration. Do not deploy this image or use production credentials with it.
 
+## Azure Blob Storage
+
+Cache and metadata state can use native Azure Blob Storage with Workload Identity or any credential supported by `DefaultAzureCredential`:
+
+```hcl
+azure-blob {
+  account-url = "https://account.blob.core.windows.net"
+}
+
+cache azure-blob {
+  container = "cachew"
+  max-ttl   = "8h"
+}
+
+metadata azure-blob {
+  container = "cachew"
+}
+```
+
+The container must already exist and the identity needs `Storage Blob Data Contributor`. Set `AZURE_STORAGE_CONNECTION_STRING` to use Azurite or explicit connection-string authentication in tests. Cache objects use atomic block-blob commits and companion metadata; metadata namespaces use ETag-conditional compare-and-swap updates across replicas.
+
 ## CLI
 
 ### Server (`cachewd`)
