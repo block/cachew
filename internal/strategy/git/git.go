@@ -51,7 +51,9 @@ type Config struct {
 	ZstdThreads            int           `hcl:"zstd-threads,optional" help:"Threads for zstd compression/decompression. 0 = all CPU cores; useful for short-lived CLI invocations but risky on a long-running server where multiple snapshot/restore operations can run concurrently." default:"4"`
 	BundleCacheTTL         time.Duration `hcl:"bundle-cache-ttl,optional" help:"TTL of cached server-side git bundles." default:"2h"`
 
-	SnapshotFilters map[string]string `hcl:"snapshot-filters,optional" help:"Per-repository git partial-clone filter applied to workstation snapshots, keyed by host/org/repo (e.g. {\"github.com/org/repo\": \"blob:none\"}). Filtered snapshots contain full history metadata but only the blobs needed for the HEAD checkout; clients lazily fetch historical blobs through cachew on demand."`
+	SnapshotFilters         map[string]string `hcl:"snapshot-filters,optional" help:"Per-repository git partial-clone filter applied to workstation snapshots, keyed by host/org/repo (e.g. {\"github.com/org/repo\": \"blob:none\"}). Filtered snapshots contain full history metadata but only the blobs needed for the HEAD checkout; clients lazily fetch historical blobs through cachew on demand."`
+	IncrementalPullthrough  bool              `hcl:"incremental-pullthrough,optional" help:"Serve partially-cached upload-pack requests by fetching only missing objects into the local mirror instead of proxying the full response from upstream." default:"true"`
+	IncrementalFetchTimeout time.Duration     `hcl:"incremental-fetch-timeout,optional" help:"Upper bound on the synchronous request-path fetch performed by incremental pull-through. The coalescing and verified attempts share this budget, and the coalescing attempt is capped at half so a verified retry still has room. On timeout the request falls back to upstream. Each underlying git fetch also honors fetch-timeout, and the preceding ref-staleness check is bounded separately by ls-remote-timeout." default:"2m"`
 }
 
 type Strategy struct {
@@ -69,6 +71,7 @@ type Strategy struct {
 	snapshotSpools      sync.Map // keyed by upstream URL, values are *snapshotSpoolEntry
 	coldSnapshotMu      sync.Map // keyed by upstream URL, values are *coldSnapshotEntry
 	deferredRestoreOnce sync.Map // keyed by upstream URL, ensures at most one deferred restore per repo
+	forcedFetches       sync.Map // keyed by upstream URL, ensures at most one cooldown-bypassing fetch is queued per repo
 	metrics             *gitMetrics
 	repoCounts          *RepoCounts
 	snapshotCoord       *SnapshotCoordinator
@@ -91,6 +94,12 @@ func New(
 	}
 	if config.BundleCacheTTL == 0 {
 		config.BundleCacheTTL = 2 * time.Hour
+	}
+	if config.IncrementalFetchTimeout == 0 {
+		config.IncrementalFetchTimeout = 2 * time.Minute
+	}
+	if config.IncrementalFetchTimeout < 0 {
+		return nil, errors.Errorf("incremental-fetch-timeout must be positive, got %v", config.IncrementalFetchTimeout)
 	}
 	if config.SnapshotInterval > 0 {
 		for _, bin := range []string{"tar", "pzstd"} {
@@ -212,7 +221,9 @@ func New(
 	mux.Handle("GET /git/{host}/{path...}", http.HandlerFunc(s.handleRequest))
 	mux.Handle("POST /git/{host}/{path...}", http.HandlerFunc(s.handleRequest))
 
-	logger.InfoContext(ctx, "Git strategy initialized", "snapshot_interval", config.SnapshotInterval)
+	logger.InfoContext(ctx, "Git strategy initialized", "snapshot_interval", config.SnapshotInterval,
+		"incremental_pullthrough", config.IncrementalPullthrough,
+		"incremental_fetch_timeout", config.IncrementalFetchTimeout)
 
 	return s, nil
 }
@@ -406,6 +417,9 @@ func (s *Strategy) handleGitRequest(w http.ResponseWriter, r *http.Request, host
 
 func (s *Strategy) serveReadyRepo(w http.ResponseWriter, r *http.Request, repo *gitclone.Repository, host, pathValue string, isInfoRefs bool) error {
 	ctx := r.Context()
+	// Started at handler entry so the incremental duration metric covers the whole
+	// latency this handler adds on the request path.
+	incrementalStart := time.Now()
 
 	if isInfoRefs && s.checkRefsStale(ctx, repo) {
 		// Mirror is behind upstream. Forward to upstream so the client gets
@@ -426,24 +440,99 @@ func (s *Strategy) serveReadyRepo(w http.ResponseWriter, r *http.Request, repo *
 		if readErr != nil {
 			return errors.Wrap(readErr, "read request body")
 		}
-		r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-		r.ContentLength = int64(len(bodyBytes))
-		r.TransferEncoding = nil
+		replayRequestBody(r, bodyBytes)
+	}
+
+	// incrementalParse has no side effects, so wants are computed even when the
+	// feature is off. That lets the eligibility metric below cover
+	// config-disabled traffic.
+	wants, wantRefs := incrementalParse(r, pathValue, bodyBytes)
+	// Use host/repoPath (matching sibling git metrics) rather than the full
+	// upstream URL so the repository attribute joins across metrics.
+	incrementalRepo := host + "/" + ExtractRepoPath(pathValue)
+	if isUploadPackPost(r, pathValue) {
+		s.metrics.recordIncrementalEligible(ctx, len(wants) > 0, incrementalRepo)
+	}
+	// Outcome metrics are recorded only once the serve outcome is known: a request
+	// the incremental path cleared can still end as a full upstream passthrough on
+	// "not our ref", which must not count as a local_hit or fetched success.
+	// incrementalOutcome stays empty when incremental did not run.
+	var (
+		incrementalOutcome  string
+		incrementalDuration time.Duration
+	)
+	recordIncremental := func(outcome string) {
+		s.metrics.recordIncrementalServe(ctx, outcome, incrementalRepo)
+		s.metrics.recordIncrementalFetchDuration(ctx, outcome, incrementalRepo, incrementalDuration)
+	}
+
+	// A want-ref body asks the mirror to resolve ref names locally. Mirrors do not
+	// advertise ref-in-want, so their upload-pack cannot serve such a body at all.
+	// Forwarding is also safer: local ref-name resolution can serve a stale tip and
+	// regress the client's FETCH_HEAD, and nothing on this path proves the mirror's
+	// refs are current.
+	//
+	// Not gated on IncrementalPullthrough: what the mirror advertises comes from
+	// its on-disk config, not the flag.
+	if wantRefs {
+		logging.FromContext(ctx).InfoContext(ctx, "Forwarding want-ref request: mirror does not serve ref-in-want", "path", pathValue)
+		s.forwardWithBody(w, r, host, pathValue, bodyBytes)
+		return nil
+	}
+
+	if s.config.IncrementalPullthrough && len(wants) > 0 {
+		outcome, herr := s.ensureWantsAvailable(ctx, repo, wants)
+		// The incremental latency ends with the fetch, so capture the duration here
+		// even though the outcome is recorded after the local serve.
+		incrementalOutcome, incrementalDuration = outcome, time.Since(incrementalStart)
+		if herr != nil || outcome == incrementalFallbackMissing {
+			logging.FromContext(ctx).InfoContext(ctx, "Incremental pull-through falling back to upstream",
+				"outcome", outcome, "error", herr, "path", pathValue)
+			// A fetch failure (or a client disconnect before the verified retry)
+			// leaves the mirror cold; kick a background catch-up so subsequent
+			// requests do not each pay the synchronous timeout. The forced
+			// variant is required because the failed attempt itself satisfies
+			// NeedsFetch's cooldown.
+			if outcome == incrementalFallbackFetchFailed || outcome == incrementalClientGone {
+				s.submitFetchForce(repo)
+			}
+			recordIncremental(outcome)
+			s.forwardWithBody(w, r, host, pathValue, bodyBytes)
+			return nil
+		}
 	}
 
 	if s.serveFromBackend(w, r, repo) {
 		// The mirror is missing the requested object — most likely a commit
 		// that was advertised before a concurrent force-push fetch orphaned
 		// it. Fall back to upstream so the client is not left with an error.
-		logging.FromContext(ctx).InfoContext(ctx, "Falling back to upstream due to 'not our ref'", "path", pathValue)
-		if bodyBytes != nil {
-			r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-			r.ContentLength = int64(len(bodyBytes))
-			r.TransferEncoding = nil
+		if incrementalOutcome != "" {
+			incrementalOutcome = incrementalOutcomeAfterNotOurRef(incrementalOutcome)
 		}
-		s.forwardToUpstream(w, r, host, pathValue)
+		logging.FromContext(ctx).InfoContext(ctx, "Falling back to upstream due to 'not our ref'", "path", pathValue)
+		s.forwardWithBody(w, r, host, pathValue, bodyBytes)
+	}
+	if incrementalOutcome != "" {
+		recordIncremental(incrementalOutcome)
 	}
 	return nil
+}
+
+// replayRequestBody replaces r.Body with a fresh reader over bodyBytes so the
+// request can be re-served (local backend or upstream forward) after buffering
+// consumed the body.
+func replayRequestBody(r *http.Request, bodyBytes []byte) {
+	r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+	r.ContentLength = int64(len(bodyBytes))
+	r.TransferEncoding = nil
+}
+
+// forwardWithBody replays bodyBytes onto r (when non-nil) and forwards to upstream.
+func (s *Strategy) forwardWithBody(w http.ResponseWriter, r *http.Request, host, pathValue string, bodyBytes []byte) {
+	if bodyBytes != nil {
+		replayRequestBody(r, bodyBytes)
+	}
+	s.forwardToUpstream(w, r, host, pathValue)
 }
 
 // SpoolKeyForRequest returns the spool key for a request, or empty string if the
@@ -747,7 +836,7 @@ func (s *Strategy) tryRestoreSnapshot(ctx context.Context, repo *gitclone.Reposi
 }
 
 // submitFetch schedules a background fetch when the mirror may be behind
-// upstream and the fetch cooldown has elapsed.
+// upstream and a fetch cooldown has expired.
 func (s *Strategy) submitFetch(repo *gitclone.Repository) {
 	if !repo.NeedsFetch(s.cloneManager.Config().RefCheckInterval) {
 		return
@@ -756,6 +845,32 @@ func (s *Strategy) submitFetch(repo *gitclone.Repository) {
 	// behind long-running jobs on the same upstream URL queue.
 	s.scheduler.Submit(repo.UpstreamURL()+"/fetch", "fetch", func(ctx context.Context) error {
 		return s.doFetch(ctx, repo)
+	})
+}
+
+// submitFetchForce schedules a background fetch even when the fetch cooldown has
+// not expired. Recovery paths need this: executeFetch stamps the attempt before
+// the network call, so a fetch that has just failed already satisfies
+// NeedsFetch's cooldown, and submitFetch would then do nothing just when the
+// mirror needs to catch up.
+//
+// The scheduler neither dedupes queued jobs nor runs two jobs from one queue
+// concurrently, so the fetch semaphore cannot collapse duplicates that are only
+// queued. forcedFetches keeps at most one forced fetch pending per repository,
+// bounding a burst of failing requests to a single catch-up.
+//
+// The job fetches verified rather than coalescing: a coalescing fetch that
+// merely waits on a non-fetching semaphore holder, such as a snapshot tar,
+// returns success without contacting upstream, which would clear forcedFetches
+// and leave the mirror exactly as cold as the failure that queued the job.
+func (s *Strategy) submitFetchForce(repo *gitclone.Repository) {
+	key := repo.UpstreamURL()
+	if _, pending := s.forcedFetches.LoadOrStore(key, struct{}{}); pending {
+		return
+	}
+	s.scheduler.Submit(key+"/fetch", "fetch", func(ctx context.Context) error {
+		defer s.forcedFetches.Delete(key)
+		return s.doFetchVerified(ctx, repo, "background")
 	})
 }
 
@@ -773,8 +888,88 @@ func (s *Strategy) doFetch(ctx context.Context, repo *gitclone.Repository) error
 	return s.fetchMirror(ctx, repo, repo.Fetch, "background")
 }
 
+// doFetchReporting is doFetch plus a flag reporting whether this call ran a git
+// fetch (true) or coalesced onto another semaphore holder (false), so the
+// incremental path can skip a redundant verified fetch after a real one.
+// Operation metrics and the success log are recorded only for a real fetch; a
+// coalesce wait must not inflate the request-path fetch SLO, and that holds for
+// failures too: a coalesce wait can end in error without ever contacting
+// upstream, so only an attempted fetch records an error.
+func (s *Strategy) doFetchReporting(ctx context.Context, repo *gitclone.Repository) (fetched bool, returnErr error) {
+	ctx, span := tracer.Start(ctx, "git.fetch",
+		trace.WithAttributes(
+			attribute.String("cachew.operation", "fetch"),
+			attribute.String("cachew.upstream", repo.UpstreamURL()),
+			attribute.String("cachew.trigger", "incremental"),
+		),
+	)
+	defer func() {
+		if returnErr != nil {
+			span.RecordError(returnErr)
+			span.SetStatus(codes.Error, returnErr.Error())
+		}
+		span.End()
+	}()
+
+	logger := logging.FromContext(ctx)
+	start := time.Now()
+	attempted, err := repo.FetchCoalescing(ctx)
+	if err != nil {
+		if attempted {
+			s.metrics.recordOperation(ctx, "fetch", "error", "incremental", time.Since(start))
+		}
+		return false, errors.Errorf("fetch failed: %w", err)
+	}
+	if !attempted {
+		span.SetAttributes(attribute.Bool("cachew.coalesced", true))
+		return false, nil
+	}
+	s.metrics.recordOperation(ctx, "fetch", "success", "incremental", time.Since(start))
+	logger.InfoContext(ctx, "Fetch completed", "upstream", repo.UpstreamURL(), "duration", time.Since(start))
+	return true, nil
+}
+
+// doFetchVerifiedIfAbsent waits for the fetch semaphore and runs a git fetch only
+// when wants are still missing after the coalescing attempt. As with
+// doFetchReporting, only a call that actually ran a fetch records an operation
+// metric; giving up while waiting for the semaphore never contacted upstream.
+func (s *Strategy) doFetchVerifiedIfAbsent(ctx context.Context, repo *gitclone.Repository, wants []string) (returnErr error) {
+	ctx, span := tracer.Start(ctx, "git.fetch",
+		trace.WithAttributes(
+			attribute.String("cachew.operation", "fetch"),
+			attribute.String("cachew.upstream", repo.UpstreamURL()),
+			attribute.String("cachew.trigger", "incremental"),
+		),
+	)
+	defer func() {
+		if returnErr != nil {
+			span.RecordError(returnErr)
+			span.SetStatus(codes.Error, returnErr.Error())
+		}
+		span.End()
+	}()
+
+	logger := logging.FromContext(ctx)
+	start := time.Now()
+	attempted, err := repo.FetchVerifiedIfAbsent(ctx, wants)
+	if err != nil {
+		if attempted {
+			s.metrics.recordOperation(ctx, "fetch", "error", "incremental", time.Since(start))
+		}
+		return errors.Errorf("fetch failed: %w", err)
+	}
+	if !attempted {
+		span.SetAttributes(attribute.Bool("cachew.coalesced", true))
+		return nil
+	}
+	s.metrics.recordOperation(ctx, "fetch", "success", "incremental", time.Since(start))
+	logger.InfoContext(ctx, "Fetch completed", "upstream", repo.UpstreamURL(), "duration", time.Since(start))
+	return nil
+}
+
 // doFetchVerified is doFetch minus fetch coalescing: nil guarantees this call
-// ran a successful git fetch, so the caller can assert upstream state.
+// ran a successful git fetch, so the caller can assert upstream state. trigger
+// is "incremental" when invoked from the request path and "background" otherwise.
 func (s *Strategy) doFetchVerified(ctx context.Context, repo *gitclone.Repository, trigger string) error {
 	return s.fetchMirror(ctx, repo, repo.FetchVerified, trigger)
 }
