@@ -436,14 +436,24 @@ func (s *Strategy) serveReadyRepo(w http.ResponseWriter, r *http.Request, repo *
 	// latency this handler adds on the request path.
 	incrementalStart := time.Now()
 
-	if isInfoRefs && s.checkRefsStale(ctx, repo) {
-		// Mirror is behind upstream. Forward to upstream so the client gets
-		// fresh refs immediately, and kick off a background fetch so the
-		// mirror catches up for subsequent requests.
-		logging.FromContext(ctx).InfoContext(ctx, "Refs stale, forwarding to upstream and fetching in background", "upstream", repo.UpstreamURL())
-		s.submitFetch(repo)
-		s.forwardToUpstream(w, r, host, pathValue)
-		return nil
+	if isInfoRefs {
+		stale, err := s.checkRefsStale(ctx, repo)
+		if err != nil {
+			// A failed check is treated as "not stale" so a flaky ls-remote cannot
+			// take the mirror out of service. Logged at debug only: this runs on
+			// every info/refs request, so an unreachable upstream would otherwise
+			// emit a warning per request.
+			logging.FromContext(ctx).DebugContext(ctx, "Ref staleness check failed, treating mirror as fresh",
+				"upstream", repo.UpstreamURL(), "error", errors.Wrap(err, "check upstream refs"))
+		} else if stale {
+			// Mirror is behind upstream. Forward to upstream so the client gets
+			// fresh refs immediately, and kick off a background fetch so the
+			// mirror catches up for subsequent requests.
+			logging.FromContext(ctx).InfoContext(ctx, "Refs stale, forwarding to upstream and fetching in background", "upstream", repo.UpstreamURL())
+			s.submitFetch(repo)
+			s.forwardToUpstream(w, r, host, pathValue)
+			return nil
+		}
 	}
 
 	// Buffer the request body so it can be replayed if serveFromBackend
