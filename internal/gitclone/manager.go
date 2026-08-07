@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -87,10 +88,17 @@ type Repository struct {
 	path               string
 	upstreamURL        string
 	lastFetch          time.Time
+	lastFetchAttempt   time.Time // set when a git fetch starts, including failures; gates NeedsFetch
 	lastRefCheck       time.Time
 	refCheckValid      bool
+	refCheckStale      bool
+	refCheckErr        error
+	refCheckErrAt      time.Time // set when a ref check fails; gates the failure backoff
+	refCheckInFlight   chan struct{}
 	fetchSem           chan struct{}
 	credentialProvider CredentialProvider
+	lsRemoteRuns       atomic.Int64
+	fetchActive        atomic.Bool // true while an executeFetch call is running
 }
 
 type Manager struct {
@@ -340,7 +348,24 @@ func (r *Repository) LastFetch() time.Time {
 func (r *Repository) NeedsFetch(fetchInterval time.Duration) bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	return time.Since(r.lastFetch) >= fetchInterval
+	last := r.lastFetch
+	if r.lastFetchAttempt.After(last) {
+		last = r.lastFetchAttempt
+	}
+	return time.Since(last) >= fetchInterval
+}
+
+// FetchInFlight reports whether executeFetch is currently running.
+//
+// Why: lastFetchAttempt is stamped on entry, not completion, so NeedsFetch
+// cannot tell an in-progress fetch from one that just finished. Check this
+// before treating the cooldown as a reason to skip a coalescing wait. A
+// caller that waits may still block up to the in-flight fetch's timeout.
+//
+// Not based on fetchSem: that lock is also held by non-fetch operations
+// (e.g. WithFetchExclusion's snapshot tar).
+func (r *Repository) FetchInFlight() bool {
+	return r.fetchActive.Load()
 }
 
 func (r *Repository) WithReadLock(fn func() error) error {
@@ -364,6 +389,7 @@ func (r *Repository) ResetToEmpty() {
 	defer r.mu.Unlock()
 	r.state = StateEmpty
 	r.lastFetch = time.Time{}
+	r.lastFetchAttempt = time.Time{}
 }
 
 // TryStartCloning atomically transitions the repository from StateEmpty to
@@ -569,7 +595,19 @@ func (r *Repository) Fetch(ctx context.Context) error {
 // for catch-up fetches after snapshot restore where the delta may be large and
 // the default Config.FetchTimeout is too short.
 func (r *Repository) FetchWithTimeout(ctx context.Context, timeout time.Duration) error {
-	return r.fetchInternal(ctx, timeout, true, true)
+	_, err := r.fetchInternal(ctx, timeout, true, true)
+	return err
+}
+
+// FetchCoalescing fetches from upstream, coalescing with a concurrent semaphore
+// holder rather than issuing a redundant network call. The attempted flag
+// reports whether this call ran a git fetch itself (true, whether or not it
+// succeeded) or piggy-backed on another holder's work (false), so a caller can
+// tell a failed fetch from a coalesce wait that timed out without ever
+// contacting upstream. Callers that need a guaranteed fetch should fall back to
+// FetchVerified only when attempted is false.
+func (r *Repository) FetchCoalescing(ctx context.Context) (attempted bool, err error) {
+	return r.fetchInternal(ctx, r.config.FetchTimeout, true, true)
 }
 
 // FetchLenient fetches from upstream with the given timeout but without the
@@ -578,7 +616,8 @@ func (r *Repository) FetchWithTimeout(ctx context.Context, timeout time.Duration
 // stall at near-zero transfer rate for minutes — the same situation that
 // executeClone handles by omitting lowSpeedLimit.
 func (r *Repository) FetchLenient(ctx context.Context, timeout time.Duration) error {
-	return r.fetchInternal(ctx, timeout, false, true)
+	_, err := r.fetchInternal(ctx, timeout, false, true)
+	return err
 }
 
 // FetchVerified fetches from upstream, waiting for the fetch semaphore if
@@ -587,17 +626,47 @@ func (r *Repository) FetchLenient(ctx context.Context, timeout time.Duration) er
 // WithFetchExclusion) or its fetch may have failed — so a nil return
 // guarantees this call ran a successful git fetch.
 func (r *Repository) FetchVerified(ctx context.Context) error {
-	return r.fetchInternal(ctx, r.config.FetchTimeout, true, false)
+	_, err := r.fetchInternal(ctx, r.config.FetchTimeout, true, false)
+	return err
 }
 
-func (r *Repository) fetchInternal(ctx context.Context, timeout time.Duration, enforceSpeedLimit, coalesce bool) error {
+// FetchVerifiedIfAbsent waits for the fetch semaphore and runs a git fetch only
+// when oids are still missing. If a concurrent fetch already brought the objects
+// in while this call waited, or the wait itself was cut short, it returns
+// attempted=false without hitting upstream.
+func (r *Repository) FetchVerifiedIfAbsent(ctx context.Context, oids []string) (attempted bool, err error) {
+	select {
+	case <-r.fetchSem:
+		defer func() { r.fetchSem <- struct{}{} }()
+	case <-ctx.Done():
+		return false, errors.Wrap(ctx.Err(), "context cancelled before acquiring fetch semaphore")
+	}
+
+	missing, err := r.MissingObjects(ctx, oids)
+	if err != nil {
+		return false, err
+	}
+	if len(missing) == 0 {
+		return false, nil
+	}
+
+	fetchCtx, cancel := context.WithTimeout(ctx, r.config.FetchTimeout)
+	defer cancel()
+	return true, r.executeFetch(fetchCtx, true)
+}
+
+// fetchInternal returns attempted=true when this call ran the git fetch itself,
+// whether or not the fetch succeeded, and attempted=false when it never reached
+// upstream: a coalescing caller piggy-backed on another semaphore holder, or the
+// context ended while waiting for the semaphore.
+func (r *Repository) fetchInternal(ctx context.Context, timeout time.Duration, enforceSpeedLimit, coalesce bool) (attempted bool, err error) {
 	select {
 	case <-r.fetchSem:
 		defer func() {
 			r.fetchSem <- struct{}{}
 		}()
 	case <-ctx.Done():
-		return errors.Wrap(ctx.Err(), "context cancelled before acquiring fetch semaphore")
+		return false, errors.Wrap(ctx.Err(), "context cancelled before acquiring fetch semaphore")
 	default:
 		// The semaphore is held. Coalescing callers treat the holder's work as
 		// their fetch; verified callers wait their turn and fetch themselves.
@@ -605,9 +674,9 @@ func (r *Repository) fetchInternal(ctx context.Context, timeout time.Duration, e
 			select {
 			case <-r.fetchSem:
 				r.fetchSem <- struct{}{}
-				return nil
+				return false, nil
 			case <-ctx.Done():
-				return errors.Wrap(ctx.Err(), "context cancelled while waiting for fetch")
+				return false, errors.Wrap(ctx.Err(), "context cancelled while waiting for fetch")
 			}
 		}
 		select {
@@ -616,12 +685,29 @@ func (r *Repository) fetchInternal(ctx context.Context, timeout time.Duration, e
 				r.fetchSem <- struct{}{}
 			}()
 		case <-ctx.Done():
-			return errors.Wrap(ctx.Err(), "context cancelled before acquiring fetch semaphore")
+			return false, errors.Wrap(ctx.Err(), "context cancelled before acquiring fetch semaphore")
 		}
 	}
 
 	fetchCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+
+	return true, r.executeFetch(fetchCtx, enforceSpeedLimit)
+}
+
+// executeFetch runs git fetch against upstream. The caller must hold fetchSem.
+func (r *Repository) executeFetch(ctx context.Context, enforceSpeedLimit bool) error {
+	// Marks the whole call, not just the subprocess. Kept separate from
+	// fetchSem, which non-fetch operations also hold.
+	r.fetchActive.Store(true)
+	defer r.fetchActive.Store(false)
+
+	// Record the attempt before the network call so a failure or timeout still
+	// trips NeedsFetch's cooldown and serial requests do not each pay a full
+	// IncrementalFetchTimeout / FetchTimeout during an upstream outage.
+	r.mu.Lock()
+	r.lastFetchAttempt = time.Now()
+	r.mu.Unlock()
 
 	config := DefaultGitTuningConfig()
 
@@ -637,7 +723,7 @@ func (r *Repository) fetchInternal(ctx context.Context, timeout time.Duration, e
 	}
 	args = append(args, "fetch", "--prune", "--prune-tags")
 
-	cmd, err := r.GitCommand(fetchCtx, args...)
+	cmd, err := r.GitCommand(ctx, args...)
 	if err != nil {
 		return errors.Wrap(err, "create git command")
 	}
@@ -655,6 +741,10 @@ func (r *Repository) fetchInternal(ctx context.Context, timeout time.Duration, e
 
 	r.mu.Lock()
 	r.lastFetch = time.Now()
+	// Drop any cached ref-staleness verdict so the next check reopens instead of
+	// serving a stale "behind" result for the rest of the interval. This also
+	// clears a cached failure, since upstream is now known reachable.
+	r.invalidateRefCheckLocked()
 	r.mu.Unlock()
 	return nil
 }
@@ -663,30 +753,124 @@ func (r *Repository) fetchInternal(ctx context.Context, timeout time.Duration, e
 // If refs are stale it returns NeedsFetch=true so the caller can schedule a
 // background fetch via the job scheduler, rather than fetching synchronously
 // on the request path (which would acquire a write lock and block all serving).
+//
+// Concurrent callers share one check: the first runs the ls-remote while later
+// callers wait on refCheckInFlight and reuse its outcome. Without this, a burst
+// of requests landing in the same window would each issue their own ls-remote
+// against upstream.
 func (r *Repository) EnsureRefsUpToDate(ctx context.Context) (needsFetch bool, err error) {
 	r.mu.Lock()
 	if r.refCheckValid && time.Since(r.lastRefCheck) < r.config.RefCheckInterval {
+		stale, checkErr := r.refCheckStale, r.refCheckErr
 		r.mu.Unlock()
-		return false, nil
+		return stale, checkErr
 	}
+	// A failed check is cached for a short backoff window so that during an
+	// upstream outage serial requests do not each run their own ls-remote and wait
+	// out LsRemoteTimeout. The window is a fraction of RefCheckInterval so
+	// recovery is still noticed promptly, and it is keyed off the failure
+	// timestamp rather than refCheckValid so a check in flight is never mistaken
+	// for a completed one.
+	if r.refCheckErr != nil && time.Since(r.refCheckErrAt) < r.refCheckFailureBackoff() {
+		checkErr := r.refCheckErr
+		r.mu.Unlock()
+		return false, checkErr
+	}
+	if r.refCheckInFlight != nil {
+		ch := r.refCheckInFlight
+		r.mu.Unlock()
+		select {
+		case <-ch:
+		case <-ctx.Done():
+			return false, errors.Wrap(ctx.Err(), "context cancelled waiting for in-flight ref check")
+		}
+		r.mu.Lock()
+		stale, checkErr := r.refCheckStale, r.refCheckErr
+		r.mu.Unlock()
+		return stale, checkErr
+	}
+	// Record the check time to rate-limit re-entry after a successful check, but
+	// do NOT set refCheckValid=true until the ls-remote succeeds. Otherwise
+	// concurrent callers read a cached "refs up to date" result while the check
+	// is still in flight and skip a fetch they needed.
 	r.lastRefCheck = time.Now()
-	r.refCheckValid = true
+	r.refCheckInFlight = make(chan struct{})
+	inFlight := r.refCheckInFlight
 	r.mu.Unlock()
+
+	defer func() {
+		r.mu.Lock()
+		close(inFlight)
+		r.refCheckInFlight = nil
+		r.mu.Unlock()
+	}()
+
+	// Detach from the caller's context so a disconnecting client cannot fail every
+	// waiter with a cancellation error. runRefCheck applies LsRemoteTimeout
+	// internally.
+	return r.runRefCheck(context.WithoutCancel(ctx))
+}
+
+// refCheckFailureBackoff is how long a failed ref check is cached before another
+// caller may retry it. It is a fraction of RefCheckInterval: long enough to
+// collapse a burst of serial requests during an upstream outage, short enough
+// that recovery is picked up quickly.
+func (r *Repository) refCheckFailureBackoff() time.Duration {
+	return r.config.RefCheckInterval / 4
+}
+
+// invalidateRefCheckLocked drops any cached ref-check verdict, including a
+// cached failure, so the next check reopens. The caller must hold r.mu.
+func (r *Repository) invalidateRefCheckLocked() {
+	r.refCheckValid = false
+	r.refCheckErr = nil
+	r.refCheckErrAt = time.Time{}
+}
+
+// runRefCheck performs the ls-remote comparison for the caller that started the
+// check and records the outcome for callers waiting on it.
+func (r *Repository) runRefCheck(ctx context.Context) (bool, error) {
+	// Bound the whole check, not just the ls-remote: GetLocalRefs holds the
+	// repository read lock across a for-each-ref subprocess, so a hang there
+	// would otherwise wedge the refCheckInFlight singleflight slot forever.
+	ctx, cancel := context.WithTimeout(ctx, r.config.LsRemoteTimeout)
+	defer cancel()
+
+	r.mu.RLock()
+	lastFetchBefore := r.lastFetch
+	r.mu.RUnlock()
+
+	record := func(valid, stale bool, err error) {
+		r.mu.Lock()
+		// A fetch that landed while this check was in flight already invalidated
+		// the cache; do not overwrite that with a pre-fetch verdict.
+		if r.lastFetch.After(lastFetchBefore) {
+			r.mu.Unlock()
+			return
+		}
+		r.refCheckValid = valid
+		r.refCheckStale = stale
+		r.refCheckErr = err
+		if err != nil {
+			r.refCheckErrAt = time.Now()
+		} else {
+			r.refCheckErrAt = time.Time{}
+		}
+		r.mu.Unlock()
+	}
 
 	localRefs, err := r.GetLocalRefs(ctx)
 	if err != nil {
-		return false, errors.Wrap(err, "get local refs")
+		err = errors.Wrap(err, "get local refs")
+		record(false, false, err)
+		return false, err
 	}
 
-	lsCtx, cancel := context.WithTimeout(ctx, r.config.LsRemoteTimeout)
-	defer cancel()
-
-	upstreamRefs, err := r.GetUpstreamRefs(lsCtx)
+	upstreamRefs, err := r.GetUpstreamRefs(ctx)
 	if err != nil {
-		r.mu.Lock()
-		r.refCheckValid = false
-		r.mu.Unlock()
-		return false, errors.Wrap(err, "get upstream refs")
+		err = errors.Wrap(err, "get upstream refs")
+		record(false, false, err)
+		return false, err
 	}
 
 	for ref, upstreamSHA := range upstreamRefs {
@@ -698,13 +882,17 @@ func (r *Repository) EnsureRefsUpToDate(ctx context.Context) (needsFetch bool, e
 		}
 		localSHA, exists := localRefs[ref]
 		if !exists || localSHA != upstreamSHA {
-			r.mu.Lock()
-			r.refCheckValid = false
-			r.mu.Unlock()
+			// Cache the stale verdict under RefCheckInterval so a behind
+			// mirror does not re-issue ls-remote on every serial request;
+			// a successful fetch clears the cache so the next check reopens.
+			record(true, true, nil)
 			return true, nil
 		}
 	}
 
+	// The check succeeded and refs match. Cache the result so subsequent calls
+	// within the interval skip the ls-remote round trip.
+	record(true, false, nil)
 	return false, nil
 }
 
@@ -743,7 +931,7 @@ func (r *Repository) EnsureRefs(
 	// Invalidate the cached ref-check so the normal transparent path also
 	// re-evaluates after our forced fetch.
 	r.mu.Lock()
-	r.refCheckValid = false
+	r.invalidateRefCheckLocked()
 	r.mu.Unlock()
 
 	localRefs, err = r.GetLocalRefs(ctx)
@@ -820,6 +1008,7 @@ func (r *Repository) GetLocalRefs(ctx context.Context) (map[string]string, error
 }
 
 func (r *Repository) GetUpstreamRefs(ctx context.Context) (map[string]string, error) {
+	r.lsRemoteRuns.Add(1)
 	// #nosec G204 - r.upstreamURL is controlled by us
 	cmd, err := r.GitCommand(ctx, "ls-remote", r.upstreamURL)
 	if err != nil {

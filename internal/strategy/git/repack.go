@@ -46,7 +46,7 @@ func (s *Strategy) scheduleRepackJobs(repo *gitclone.Repository) {
 		if err != nil {
 			status = "error"
 		}
-		s.metrics.recordOperation(ctx, "repack", status, time.Since(start))
+		s.metrics.recordOperation(ctx, "repack", status, "background", time.Since(start))
 
 		if after, countErr := countPackFiles(repo.Path()); countErr == nil {
 			s.metrics.recordRepackPackCount(ctx, upstream, "after", after)

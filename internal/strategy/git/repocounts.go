@@ -70,6 +70,12 @@ var (
 // Detection: POST /git-upload-pack whose pkt-line body contains no "have <oid>"
 // line. v2 command=ls-refs (discovery) is also rejected. The body is buffered
 // and replayed via io.NopCloser.
+//
+// ParseUploadPackRequest in uploadpack.go fully parses the body for incremental
+// pull-through. Both exist on purpose: RequestIsClone only needs a prefix to
+// detect haves, while the incremental path needs the full want list. If you
+// change pkt-line handling here, check whether uploadpack.go needs the same
+// fix.
 func RequestIsClone(pathValue string, r *http.Request) (bool, error) {
 	if r.Method != http.MethodPost || !strings.HasSuffix(pathValue, "/git-upload-pack") {
 		return false, nil

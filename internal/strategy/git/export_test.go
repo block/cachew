@@ -3,6 +3,7 @@ package git
 import (
 	"context"
 	"io"
+	"net/http"
 	"time"
 
 	"github.com/block/cachew/internal/cache"
@@ -33,4 +34,33 @@ func (s *Strategy) RunCoordinatedSnapshot(ctx context.Context, repo *gitclone.Re
 // CacheBundle exports cacheBundle for testing.
 func (s *Strategy) CacheBundle(ctx context.Context, key cache.Key, r io.Reader) error {
 	return s.cacheBundle(ctx, key, r)
+}
+
+// IsUploadPackPost exports isUploadPackPost for testing.
+func IsUploadPackPost(r *http.Request, pathValue string) bool {
+	return isUploadPackPost(r, pathValue)
+}
+
+// IncrementalParse exports incrementalParse for testing.
+func IncrementalParse(r *http.Request, pathValue string, body []byte) ([]string, bool) {
+	return incrementalParse(r, pathValue, body)
+}
+
+// UploadPackParseLimit exports uploadPackParseLimit for testing.
+const UploadPackParseLimit = uploadPackParseLimit
+
+// SubmitFetch exports submitFetch for testing.
+func SubmitFetch(s *Strategy, repo *gitclone.Repository) { s.submitFetch(repo) }
+
+// SubmitFetchForce exports submitFetchForce for testing.
+func SubmitFetchForce(s *Strategy, repo *gitclone.Repository) { s.submitFetchForce(repo) }
+
+// EnsureWantsAvailable exports ensureWantsAvailable for testing.
+func EnsureWantsAvailable(ctx context.Context, s *Strategy, repo *gitclone.Repository, wants []string) (string, error) {
+	return s.ensureWantsAvailable(ctx, repo, wants)
+}
+
+// IncrementalOutcomeAfterNotOurRef exports incrementalOutcomeAfterNotOurRef for testing.
+func IncrementalOutcomeAfterNotOurRef(outcome string) string {
+	return incrementalOutcomeAfterNotOurRef(outcome)
 }

@@ -11,8 +11,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/alecthomas/errors"
-
 	"github.com/block/cachew/internal/gitclone"
 	"github.com/block/cachew/internal/httputil"
 	"github.com/block/cachew/internal/logging"
@@ -171,7 +169,7 @@ func (s *Strategy) serveFromBackend(w http.ResponseWriter, r *http.Request, repo
 	if stderrBuf.Len() > 0 {
 		stderr := stderrBuf.String()
 		logger.ErrorContext(r.Context(), "git http-backend error", "stderr", stderr, "path", backendPath)
-		if !bw.committed && strings.Contains(stderr, "not our ref") {
+		if !bw.committed && (strings.Contains(stderr, "not our ref") || strings.Contains(stderr, "unknown ref")) {
 			return true
 		}
 	}
@@ -184,9 +182,5 @@ func (s *Strategy) serveFromBackend(w http.ResponseWriter, r *http.Request, repo
 // Returns true if a fetch is needed. The caller decides whether to fetch
 // synchronously or fall back to upstream.
 func (s *Strategy) checkRefsStale(ctx context.Context, repo *gitclone.Repository) (bool, error) {
-	needsFetch, err := repo.EnsureRefsUpToDate(ctx)
-	if err != nil {
-		return false, errors.Wrap(err, "check upstream refs")
-	}
-	return needsFetch, nil
+	return repo.EnsureRefsUpToDate(ctx)
 }

@@ -96,6 +96,10 @@ func TestIntegrationGitCloneViaProxy(t *testing.T) {
 		t.Skip("skipping integration test in short mode")
 	}
 
+	if os.Getenv("CI") != "" {
+		t.Skip("skipping: requires real network access to github.com, unavailable from CI runners")
+	}
+
 	// Check if git is available
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not found in PATH")
@@ -175,6 +179,10 @@ func TestIntegrationGitCloneViaProxy(t *testing.T) {
 func TestIntegrationGitFetchViaProxy(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")
+	}
+
+	if os.Getenv("CI") != "" {
+		t.Skip("skipping: requires real network access to github.com, unavailable from CI runners")
 	}
 
 	if _, err := exec.LookPath("git"); err != nil {
