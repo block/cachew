@@ -112,9 +112,10 @@ func (s *Strategy) ensureWantsAvailable(ctx context.Context, repo *gitclone.Repo
 	if len(missing) == 0 {
 		return incrementalLocalHit, nil
 	}
-	// A fetch this recent already had its chance to bring the want in. Retrying
-	// would only amplify upstream traffic.
-	if !repo.NeedsFetch(s.cloneManager.Config().RefCheckInterval) {
+	// Cooldown alone is not enough. A recently-completed fetch means retrying
+	// would amplify traffic, but an in-flight fetch should be coalesced onto
+	// below, not skipped past.
+	if !repo.NeedsFetch(s.cloneManager.Config().RefCheckInterval) && !repo.FetchInFlight() {
 		return incrementalFallbackMissing, nil
 	}
 

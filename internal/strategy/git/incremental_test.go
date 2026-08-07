@@ -736,6 +736,68 @@ func TestEnsureWantsAvailable(t *testing.T) {
 		assert.Equal(t, before, repo.LastFetch(), "cooldown must skip the fetch")
 	})
 
+	t.Run("CooldownSkippedWhenFetchInFlight", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		upstreamPath := filepath.Join(tmpDir, "upstream")
+		mirrorRoot := filepath.Join(tmpDir, "mirrors")
+		mirrorPath := filepath.Join(mirrorRoot, relMirrorPath)
+		assert.NoError(t, os.MkdirAll(mirrorPath, 0o755))
+
+		setupMirrorWithUpstream(t, upstreamPath, mirrorPath)
+
+		// Long RefCheckInterval keeps NeedsFetch false once the fetch below
+		// stamps lastFetchAttempt. Tests the in-flight case, not the recent one.
+		s, manager := newTestStrategyForMirrorWithRefCheck(ctx, t, mirrorRoot, git.Config{
+			IncrementalPullthrough:  true,
+			IncrementalFetchTimeout: 30 * time.Second,
+		}, time.Hour)
+		waitForReady(t, s)
+
+		repo, err := manager.GetOrCreate(ctx, fakeUpstreamURL)
+		assert.NoError(t, err)
+
+		// Advance upstream so newSHA is missing. Stall upload-pack so the fetch
+		// below stays running until released.
+		newSHA := pushCommitToUpstream(t, upstreamPath)
+		startedMarker, releaseFetch := stallUpstream(t, mirrorPath)
+
+		fetchDone := make(chan error, 1)
+		go func() {
+			fetchDone <- repo.Fetch(ctx)
+		}()
+		waitForFile(t, startedMarker)
+
+		// Fetch is in flight and lastFetchAttempt is fresh: the case the old
+		// guard short-circuited on without checking FetchInFlight.
+		assert.False(t, repo.NeedsFetch(time.Hour), "cooldown must be active")
+		assert.True(t, repo.FetchInFlight(), "fetch must be in flight")
+
+		type result struct {
+			outcome string
+			err     error
+		}
+		done := make(chan result, 1)
+		start := time.Now()
+		go func() {
+			outcome, err := git.EnsureWantsAvailable(ctx, s, repo, []string{newSHA})
+			done <- result{outcome, err}
+		}()
+
+		// Let the request reach the coalescing wait before releasing. Otherwise a
+		// broken guard could return fallback_missing before this fires.
+		time.Sleep(50 * time.Millisecond)
+		releaseFetch()
+		assert.NoError(t, <-fetchDone, "background fetch must succeed")
+
+		res := <-done
+		elapsed := time.Since(start)
+		assert.NoError(t, res.err)
+		assert.Equal(t, "fetched", res.outcome,
+			"a request arriving while a fetch is in flight must wait for it instead of falling back")
+		assert.True(t, elapsed >= 50*time.Millisecond,
+			"outcome must come from waiting on the in-flight fetch, not an instant fallback (elapsed %v)", elapsed)
+	})
+
 	t.Run("PullRefOnlyFetches", func(t *testing.T) {
 		tmpDir := t.TempDir()
 		upstreamPath := filepath.Join(tmpDir, "upstream")

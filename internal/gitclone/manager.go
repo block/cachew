@@ -98,6 +98,7 @@ type Repository struct {
 	fetchSem           chan struct{}
 	credentialProvider CredentialProvider
 	lsRemoteRuns       atomic.Int64
+	fetchActive        atomic.Bool // true while an executeFetch call is running
 }
 
 type Manager struct {
@@ -352,6 +353,19 @@ func (r *Repository) NeedsFetch(fetchInterval time.Duration) bool {
 		last = r.lastFetchAttempt
 	}
 	return time.Since(last) >= fetchInterval
+}
+
+// FetchInFlight reports whether executeFetch is currently running.
+//
+// Why: lastFetchAttempt is stamped on entry, not completion, so NeedsFetch
+// cannot tell an in-progress fetch from one that just finished. Check this
+// before treating the cooldown as a reason to skip a coalescing wait. A
+// caller that waits may still block up to the in-flight fetch's timeout.
+//
+// Not based on fetchSem: that lock is also held by non-fetch operations
+// (e.g. WithFetchExclusion's snapshot tar).
+func (r *Repository) FetchInFlight() bool {
+	return r.fetchActive.Load()
 }
 
 func (r *Repository) WithReadLock(fn func() error) error {
@@ -683,6 +697,11 @@ func (r *Repository) fetchInternal(ctx context.Context, timeout time.Duration, e
 
 // executeFetch runs git fetch against upstream. The caller must hold fetchSem.
 func (r *Repository) executeFetch(ctx context.Context, enforceSpeedLimit bool) error {
+	// Marks the whole call, not just the subprocess. Kept separate from
+	// fetchSem, which non-fetch operations also hold.
+	r.fetchActive.Store(true)
+	defer r.fetchActive.Store(false)
+
 	// Record the attempt before the network call so a failure or timeout still
 	// trips NeedsFetch's cooldown and serial requests do not each pay a full
 	// IncrementalFetchTimeout / FetchTimeout during an upstream outage.
