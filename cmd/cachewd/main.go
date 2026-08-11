@@ -23,6 +23,7 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 
+	"github.com/block/cachew/internal/accesslog"
 	"github.com/block/cachew/internal/cache"
 	"github.com/block/cachew/internal/config"
 	"github.com/block/cachew/internal/gitclone"
@@ -54,6 +55,7 @@ type GlobalConfig struct {
 	MetricsConfig    metrics.Config      `hcl:"metrics,block"`
 	GitCloneConfig   gitclone.Config     `hcl:"git-clone,block"`
 	S3Config         s3client.Config     `hcl:"s3,block,optional"`
+	AccessLogConfig  accesslog.Config    `hcl:"access-log,block,optional"`
 	GithubAppConfigs []githubapp.Config  `hcl:"github-app,block,optional"`
 	OPAConfig        opa.Config          `hcl:"opa,block"`
 }
@@ -141,21 +143,18 @@ func main() {
 	mux, err := newMux(ctx, &shuttingDown, cr, mr, sr, providersConfigHCL, envars)
 	fatalIfError(ctx, logger, err, "Failed to load config")
 
-	metricsClient, err := metrics.New(ctx, globalConfig.MetricsConfig)
-	fatalIfError(ctx, logger, err, "Failed to create metrics client")
+	metricsClient := startMetrics(ctx, logger, globalConfig.MetricsConfig)
 	defer func() {
 		if err := metricsClient.Close(); err != nil {
 			logger.ErrorContext(ctx, "Failed to close metrics client", "error", err)
 		}
 	}()
 
-	if err := metricsClient.ServeMetrics(ctx); err != nil {
-		fatalIfError(ctx, logger, err, "Failed to start metrics server")
-	}
-
 	runOPATests(ctx, logger, globalConfig.OPAConfig)
 
 	logger.InfoContext(ctx, "Starting cachewd", "bind", globalConfig.Bind)
+
+	accessLogWriter := newAccessLogWriter(ctx, logger, globalConfig.AccessLogConfig, s3ClientProvider)
 
 	server, err := newServer(
 		ctx,
@@ -164,6 +163,8 @@ func main() {
 		globalConfig.MetricsConfig,
 		globalConfig.OPAConfig,
 		globalConfig.LoggingConfig,
+		globalConfig.AccessLogConfig,
+		accessLogWriter,
 	)
 	fatalIfError(ctx, logger, err, "Failed to create server")
 
@@ -186,8 +187,44 @@ func main() {
 
 	gracefulShutdown(ctx, logger, server, &shuttingDown, globalConfig.ShutdownReadinessDelay, globalConfig.ShutdownTimeout)
 
+	closeAccessLogWriter(ctx, logger, accessLogWriter)
+
 	cancelScheduler()
 	drainScheduler(ctx, logger, schedulerProvider)
+}
+
+// startMetrics creates the metrics client and starts the metrics server,
+// exiting the process on failure.
+func startMetrics(ctx context.Context, logger *slog.Logger, config metrics.Config) *metrics.Client {
+	metricsClient, err := metrics.New(ctx, config)
+	fatalIfError(ctx, logger, err, "Failed to create metrics client")
+	if err := metricsClient.ServeMetrics(ctx); err != nil {
+		fatalIfError(ctx, logger, err, "Failed to start metrics server")
+	}
+	return metricsClient
+}
+
+// newAccessLogWriter returns nil when access log export is not configured,
+// exiting the process on invalid configuration.
+func newAccessLogWriter(ctx context.Context, logger *slog.Logger, config accesslog.Config, provider s3client.ClientProvider) *accesslog.Writer {
+	if config.Bucket == "" {
+		return nil
+	}
+	fatalIfError(ctx, logger, config.Validate(), "Invalid access log config")
+	return accesslog.NewWriter(ctx, config, provider)
+}
+
+const accessLogCloseTimeout = 30 * time.Second
+
+func closeAccessLogWriter(ctx context.Context, logger *slog.Logger, writer *accesslog.Writer) {
+	if writer == nil {
+		return
+	}
+	closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), accessLogCloseTimeout)
+	defer cancel()
+	if err := writer.Close(closeCtx); err != nil {
+		logger.ErrorContext(ctx, "Failed to flush access log writer", "error", err)
+	}
 }
 
 // gracefulShutdown fails readiness, waits readinessDelay for load balancers
@@ -380,6 +417,8 @@ func newServer(
 	metricsConfig metrics.Config,
 	opaConfig opa.Config,
 	logConfig logging.Config,
+	accessLogConfig accesslog.Config,
+	accessLogWriter *accesslog.Writer,
 ) (*http.Server, error) {
 	var handler http.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		labeler, _ := otelhttp.LabelerFromContext(r.Context())
@@ -390,6 +429,11 @@ func newServer(
 	handler, err := opa.Middleware(ctx, opaConfig, handler)
 	if err != nil {
 		return nil, errors.Errorf("initialise OPA middleware: %w", err)
+	}
+
+	// Wrap outside OPA so denied requests are captured too.
+	if accessLogWriter != nil {
+		handler = accesslog.Middleware(handler, accessLogWriter, accessLogConfig)
 	}
 
 	// Add standard otelhttp middleware
