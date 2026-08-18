@@ -35,7 +35,9 @@ git {
 
 Caches public and private GitHub release assets. Private orgs use a token or GitHub App for authentication.
 
-**URL pattern:** `/github-releases/{owner}/{repo}/{tag}/{asset}`
+**URL pattern:** `/github.com/{owner}/{repo}/releases/download/{tag}/{asset}`
+
+The path mirrors the upstream GitHub download URL, so clients only need the cache host prefixed.
 
 ```hcl
 github-releases {
