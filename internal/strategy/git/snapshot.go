@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -28,6 +29,71 @@ import (
 )
 
 const lfsFetchTimeout = 25 * time.Minute
+
+const bundleBuildTimeout = 5 * time.Minute
+
+type bundleBuild struct {
+	done          chan struct{}
+	verifiedEmpty bool
+	file          *os.File
+	size          int64
+	refs          atomic.Int64
+}
+
+func newBundleBuild() *bundleBuild {
+	build := &bundleBuild{done: make(chan struct{})}
+	build.refs.Store(1)
+	return build
+}
+
+func (b *bundleBuild) retain() bool {
+	for refs := b.refs.Load(); refs > 0; refs = b.refs.Load() {
+		if b.refs.CompareAndSwap(refs, refs+1) {
+			return true
+		}
+	}
+	return false
+}
+
+func (b *bundleBuild) release() {
+	if b.refs.Add(-1) == 0 && b.file != nil {
+		_ = b.file.Close()
+	}
+}
+
+func (b *bundleBuild) reader() *io.SectionReader {
+	return io.NewSectionReader(b.file, 0, b.size)
+}
+
+func (s *Strategy) finishBundleBuild(key cache.Key, build *bundleBuild) {
+	if build.file == nil {
+		s.bundleBuilds.Delete(key)
+		close(build.done)
+	}
+	build.release()
+}
+
+func (s *Strategy) publishBundle(ctx context.Context, key cache.Key, build *bundleBuild, file *os.File) error {
+	info, err := file.Stat()
+	if err != nil {
+		_ = file.Close()
+		return errors.Wrap(err, "stat generated bundle")
+	}
+	build.file, build.size = file, info.Size()
+	build.retain()
+	close(build.done)
+	deadline, _ := ctx.Deadline()
+	go func() {
+		defer build.release()
+		defer s.bundleBuilds.Delete(key)
+		publishCtx, cancel := context.WithDeadline(s.ctx, deadline)
+		defer cancel()
+		if err := s.cacheBundle(publishCtx, key, build.reader()); err != nil {
+			logging.FromContext(ctx).WarnContext(publishCtx, "Failed to cache bundle", "key", key, "error", err)
+		}
+	}()
+	return nil
+}
 
 func snapshotDirForURL(mirrorRoot, upstreamURL string) (string, error) {
 	repoPath, err := gitclone.RepoPathFromURL(upstreamURL)
@@ -52,6 +118,8 @@ func bundleCacheKey(upstreamURL, baseCommit string) cache.Key {
 // commitSHARe matches a full SHA-1 or SHA-256 commit hash. Bundle bases are
 // validated against it so untrusted query values are never passed to git.
 var commitSHARe = regexp.MustCompile(`^[0-9a-f]{40}([0-9a-f]{24})?$`)
+
+var errEmptyBundle = errors.New("bundle contains no commits")
 
 func lfsSnapshotCacheKey(upstreamURL string) cache.Key {
 	return cache.NewKey(upstreamURL + ".lfs-snapshot")
@@ -190,7 +258,7 @@ func (s *Strategy) generateAndUploadSnapshot(ctx context.Context, repo *gitclone
 	if err := s.withSnapshotClone(ctx, repo, "base", filter, func(workDir string) error {
 		// Capture the snapshot's HEAD so we can later build a delta bundle between
 		// the cached snapshot and the current mirror state.
-		headSHA, err := revParse(ctx, workDir, "HEAD")
+		headSHA, err := mirrorHead(ctx, workDir)
 		if err != nil {
 			return errors.Wrap(err, "rev-parse HEAD for snapshot")
 		}
@@ -655,27 +723,81 @@ func (s *Strategy) handleBundleRequest(w http.ResponseWriter, r *http.Request, h
 		s.metrics.recordBundleServe(ctx, source, repoName, bytes, time.Since(start))
 	}()
 
-	// Try serving from cache first — works on any pod. Forwarding the
-	// conditional/range set lets clients revalidate and fetch large bundles with
-	// bounded parallel range requests, just like snapshots.
-	reader, headers, openErr := s.cache.Open(ctx, bKey, httputil.ConditionalOptions(r)...)
-	switch {
-	case openErr == nil,
-		errors.Is(openErr, cache.ErrNotModified),
-		errors.Is(openErr, cache.ErrPreconditionFailed),
-		errors.Is(openErr, cache.ErrRangeNotSatisfiable):
-		decorate := func(rw http.ResponseWriter, _ http.Header) {
-			rw.Header().Set("Content-Type", "application/x-git-bundle")
+	serveGenerated := func(build *bundleBuild) {
+		w.Header().Set("Content-Type", "application/x-git-bundle")
+		n, err := io.Copy(w, build.reader())
+		bytes, source = n, "generated"
+		if err != nil {
+			logger.WarnContext(ctx, "Failed to stream bundle", "upstream", upstreamURL, "error", err)
+			span.RecordError(err)
 		}
-		_, n, serveErr := httputil.ServeCacheHit(w, headers, reader, openErr, httputil.WithResponseDecorator(decorate))
-		bytes = n
-		source = "cache"
-		if serveErr != nil {
-			logger.WarnContext(ctx, "Failed to stream cached bundle", "upstream", upstreamURL, "error", serveErr)
-			span.RecordError(serveErr)
-		}
-		return
 	}
+	build := newBundleBuild()
+	releaseBuild := func() {}
+	for acquired := false; ; {
+		reader, headers, openErr := s.cache.Open(ctx, bKey, httputil.ConditionalOptions(r)...)
+		switch {
+		case openErr == nil,
+			errors.Is(openErr, cache.ErrNotModified),
+			errors.Is(openErr, cache.ErrPreconditionFailed),
+			errors.Is(openErr, cache.ErrRangeNotSatisfiable):
+			releaseBuild()
+			decorate := func(rw http.ResponseWriter, _ http.Header) {
+				rw.Header().Set("Content-Type", "application/x-git-bundle")
+			}
+			_, n, serveErr := httputil.ServeCacheHit(w, headers, reader, openErr, httputil.WithResponseDecorator(decorate))
+			bytes = n
+			source = "cache"
+			if serveErr != nil {
+				logger.WarnContext(ctx, "Failed to stream cached bundle", "upstream", upstreamURL, "error", serveErr)
+				span.RecordError(serveErr)
+			}
+			return
+		}
+		if acquired {
+			break
+		}
+		if existing, loaded := s.bundleBuilds.LoadOrStore(bKey, build); loaded {
+			pending := existing.(*bundleBuild)
+			if !pending.retain() {
+				continue
+			}
+			waitCtx, cancel := context.WithDeadline(ctx, start.Add(bundleBuildTimeout))
+			select {
+			case <-pending.done:
+			case <-waitCtx.Done():
+			}
+			err := waitCtx.Err()
+			cancel()
+			if err != nil {
+				pending.release()
+				http.Error(w, "Bundle not available", http.StatusServiceUnavailable)
+				span.RecordError(err)
+				return
+			}
+			if pending.verifiedEmpty {
+				pending.release()
+				source = "up_to_date"
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+			if pending.file != nil {
+				defer pending.release()
+				serveGenerated(pending)
+				return
+			}
+			pending.release()
+		} else {
+			acquired = true
+			releaseBuild = sync.OnceFunc(func() {
+				s.finishBundleBuild(bKey, build)
+			})
+			defer releaseBuild()
+		}
+	}
+
+	ctx, cancel := context.WithDeadline(ctx, start.Add(bundleBuildTimeout))
+	defer cancel()
 
 	// Fallback: generate from local mirror.
 	repo, repoErr := s.cloneManager.GetOrCreate(ctx, upstreamURL)
@@ -694,89 +816,61 @@ func (s *Strategy) handleBundleRequest(w http.ResponseWriter, r *http.Request, h
 		return
 	}
 
-	// Mirrors are per-pod but the cache (and thus the advertised bundle URL)
-	// is shared, so this pod's mirror can lag the pod that advertised the
-	// bundle: base may be missing here, or HEAD may still equal base. Freshen
-	// once and re-evaluate instead of failing the request, which would force
-	// the client into a needless full freshen.
-	head := s.getMirrorHead(ctx, repo)
-	var freshenErr error
-	switch {
-	case head == base:
-		// An up-to-date verdict tells clients to skip their fallback freshen
-		// entirely, so it must be backed by a fetch this call actually ran —
-		// not the rate-limited skip or a coalesced concurrent holder.
-		freshenErr = s.doFetchVerified(ctx, repo)
-	case !repo.HasCommit(ctx, base):
-		// Rate-limited so client-supplied bogus bases cannot hammer upstream;
-		// a 404 here only sends the client to its safe fallback freshen.
-		freshenErr = s.freshenMirror(ctx, repo)
-	}
-	if freshenErr != nil {
-		logger.WarnContext(ctx, "Failed to freshen mirror for bundle", "upstream", upstreamURL, "error", freshenErr)
-		span.RecordError(freshenErr)
-	}
-	head = s.getMirrorHead(ctx, repo)
-	hasBase := repo.HasCommit(ctx, base)
-	switch {
-	case freshenErr != nil && (head == base || !hasBase):
-		// The mirror could not be verified against upstream, so make the
-		// client fall back rather than trust a possibly stale verdict.
-		source = "miss_stale"
-		http.Error(w, "Bundle not available", http.StatusNotFound)
-		return
-	case !hasBase:
-		// Unknown even after freshening: bogus or force-pushed away.
-		source = "miss_bad_base"
-		logger.WarnContext(ctx, "Bundle base not in mirror after freshen", "upstream", upstreamURL, "base", base)
-		http.Error(w, "Bundle not available", http.StatusNotFound)
-		return
-	case head == base:
-		source = "up_to_date"
-		w.WriteHeader(http.StatusNoContent)
-		return
+	if !repo.HasCommit(ctx, base) {
+		freshenErr := s.freshenMirror(ctx, repo)
+		if freshenErr != nil {
+			logger.WarnContext(ctx, "Failed to freshen mirror for bundle", "upstream", upstreamURL, "error", freshenErr)
+			span.RecordError(freshenErr)
+		}
+		if !repo.HasCommit(ctx, base) {
+			if freshenErr != nil {
+				source = "miss_stale"
+			} else {
+				source = "miss_bad_base"
+			}
+			logger.WarnContext(ctx, "Bundle base not in mirror after freshen", "upstream", upstreamURL, "base", base)
+			http.Error(w, "Bundle not available", http.StatusNotFound)
+			return
+		}
 	}
 
 	bundleFile, err := s.createBundle(ctx, repo, base)
+	if errors.Is(err, errEmptyBundle) {
+		if freshenErr := s.doFetchVerified(ctx, repo); freshenErr != nil {
+			source = "miss_stale"
+			logger.WarnContext(ctx, "Failed to verify mirror for empty bundle", "upstream", upstreamURL, "error", freshenErr)
+			http.Error(w, "Bundle not available", http.StatusNotFound)
+			span.RecordError(freshenErr)
+			return
+		}
+		if !repo.HasCommit(ctx, base) {
+			source = "miss_bad_base"
+			logger.WarnContext(ctx, "Bundle base not in mirror after verified fetch", "upstream", upstreamURL, "base", base)
+			http.Error(w, "Bundle not available", http.StatusNotFound)
+			return
+		}
+		bundleFile, err = s.createBundle(ctx, repo, base)
+		if errors.Is(err, errEmptyBundle) {
+			build.verifiedEmpty = true
+			releaseBuild()
+			source = "up_to_date"
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+	}
 	if err != nil {
 		logger.WarnContext(ctx, "Failed to create bundle", "upstream", upstreamURL, "base", base, "error", err)
 		http.Error(w, "Bundle not available", http.StatusNotFound)
 		span.RecordError(err)
 		return
 	}
-	defer bundleFile.Close()
-
-	w.Header().Set("Content-Type", "application/x-git-bundle")
-
-	// Stream to client and cache simultaneously so the bundle never has to be
-	// buffered in memory. If creating the cache writer fails we still serve
-	// the client.
-	wc, cacheErr := s.cache.Create(ctx, bKey, http.Header{"Content-Type": {"application/x-git-bundle"}}, s.config.BundleCacheTTL)
-	if cacheErr != nil {
-		logger.WarnContext(ctx, "Failed to create bundle cache writer", "upstream", upstreamURL, "error", cacheErr)
-		n, err := io.Copy(w, bundleFile)
-		bytes = n
-		source = "generated"
-		if err != nil {
-			logger.WarnContext(ctx, "Failed to stream bundle", "upstream", upstreamURL, "error", err)
-			span.RecordError(err)
-		}
+	if err := s.publishBundle(ctx, bKey, build, bundleFile); err != nil {
+		logger.WarnContext(ctx, "Failed to publish bundle", "upstream", upstreamURL, "error", err)
+		http.Error(w, "Bundle not available", http.StatusServiceUnavailable)
+		span.RecordError(err)
 		return
 	}
-	n, copyErr := io.Copy(io.MultiWriter(w, wc), bundleFile)
-	bytes = n
-	source = "generated"
-	if copyErr != nil {
-		logger.WarnContext(ctx, "Failed to stream bundle", "upstream", upstreamURL, "error", copyErr)
-		span.RecordError(copyErr)
-		if abortErr := wc.Abort(copyErr); abortErr != nil {
-			logger.WarnContext(ctx, "Failed to abort bundle cache writer", "upstream", upstreamURL, "error", abortErr)
-		}
-		return
-	}
-	if err := wc.Close(); err != nil {
-		logger.WarnContext(ctx, "Failed to close bundle cache writer", "upstream", upstreamURL, "error", err)
-	}
+	serveGenerated(build)
 }
 
 func (s *Strategy) serveSnapshotWithBundle(ctx context.Context, w http.ResponseWriter, _ *http.Request, reader io.ReadCloser, headers http.Header, openErr error, repo *gitclone.Repository, upstreamURL, repoName string, start time.Time) error {
@@ -855,17 +949,31 @@ func snapshotServeSource(base string, headers http.Header) string {
 // pregenerateBundle builds and caches the delta bundle for snapshotCommit in the
 // background so any pod can later serve it without regenerating.
 func (s *Strategy) pregenerateBundle(ctx context.Context, repo *gitclone.Repository, upstreamURL, snapshotCommit string) {
+	bKey := bundleCacheKey(upstreamURL, snapshotCommit)
+	build := newBundleBuild()
+	if _, loaded := s.bundleBuilds.LoadOrStore(bKey, build); loaded {
+		return
+	}
 	go func() {
-		bgCtx := context.WithoutCancel(ctx)
+		defer s.finishBundleBuild(bKey, build)
+		bgCtx, cancel := context.WithTimeout(s.ctx, bundleBuildTimeout)
+		defer cancel()
+		bgCtx = logging.ContextWithLogger(bgCtx, logging.FromContext(ctx))
 		logger := logging.FromContext(bgCtx)
+		if reader, _, err := s.cache.Open(bgCtx, bKey); err == nil {
+			_ = reader.Close()
+			return
+		}
 		bundleFile, err := s.createBundle(bgCtx, repo, snapshotCommit)
 		if err != nil {
+			if errors.Is(err, errEmptyBundle) {
+				return
+			}
 			logger.WarnContext(bgCtx, "Failed to pre-generate bundle", "upstream", upstreamURL, "error", err)
 			return
 		}
-		defer bundleFile.Close()
-		if err := s.cacheBundle(bgCtx, bundleCacheKey(upstreamURL, snapshotCommit), bundleFile); err != nil {
-			logger.WarnContext(bgCtx, "Failed to cache bundle", "upstream", upstreamURL, "error", err)
+		if err := s.publishBundle(bgCtx, bKey, build, bundleFile); err != nil {
+			logger.WarnContext(bgCtx, "Failed to publish bundle", "upstream", upstreamURL, "error", err)
 		}
 	}()
 }
@@ -904,8 +1012,6 @@ func applySnapshotCacheHeaders(w http.ResponseWriter, headers http.Header) {
 	}
 }
 
-// cacheBundle streams r into the cache under key. Used by the bundle
-// pre-generation path; handleBundleRequest caches inline via io.MultiWriter.
 func (s *Strategy) cacheBundle(ctx context.Context, key cache.Key, r io.Reader) error {
 	headers := http.Header{"Content-Type": {"application/x-git-bundle"}}
 	wc, err := s.cache.Create(ctx, key, headers, s.config.BundleCacheTTL)
@@ -918,17 +1024,17 @@ func (s *Strategy) cacheBundle(ctx context.Context, key cache.Key, r io.Reader) 
 	return errors.Wrap(wc.Close(), "close bundle cache writer")
 }
 
-func revParse(ctx context.Context, repoDir, ref string) (string, error) {
-	cmd := exec.CommandContext(ctx, "git", "-C", repoDir, "rev-parse", ref) // #nosec G204 G702
+func mirrorHead(ctx context.Context, repoDir string) (string, error) {
+	cmd := exec.CommandContext(ctx, "git", "-C", repoDir, "rev-parse", "HEAD") // #nosec G204 G702
 	output, err := cmd.Output()
 	if err != nil {
-		return "", errors.Wrapf(err, "git rev-parse %s", ref)
+		return "", errors.Wrap(err, "git rev-parse HEAD")
 	}
 	return strings.TrimSpace(string(output)), nil
 }
 
 func (s *Strategy) getMirrorHead(ctx context.Context, repo *gitclone.Repository) string {
-	head, _ := revParse(ctx, repo.Path(), "HEAD") //nolint:errcheck // best-effort; empty string signals failure to callers
+	head, _ := mirrorHead(ctx, repo.Path()) //nolint:errcheck // best-effort; empty string signals failure to callers
 	return head
 }
 
@@ -938,8 +1044,24 @@ func (s *Strategy) getMirrorHead(ctx context.Context, repo *gitclone.Repository)
 // so the open file descriptor is what keeps the data alive. The caller must
 // Close() the returned file.
 func (s *Strategy) createBundle(ctx context.Context, repo *gitclone.Repository, baseCommit string) (*os.File, error) {
-	// No read lock needed: git bundle create reads objects through git's own
-	// file-level locking, safe to run concurrently with fetches.
+	ctx, cancel := context.WithTimeout(ctx, bundleBuildTimeout)
+	defer cancel()
+	var bundleFile *os.File
+	err := repo.WithFetchExclusion(ctx, func() error {
+		head, err := mirrorHead(ctx, repo.Path())
+		if err != nil {
+			return err
+		}
+		if head == baseCommit {
+			return errEmptyBundle
+		}
+		bundleFile, err = createBundleFile(ctx, repo, baseCommit)
+		return err
+	})
+	return bundleFile, errors.WithStack(err)
+}
+
+func createBundleFile(ctx context.Context, repo *gitclone.Repository, baseCommit string) (*os.File, error) {
 	headRef := "HEAD"
 	if out, err := exec.CommandContext(ctx, "git", "-C", repo.Path(), "symbolic-ref", "HEAD").Output(); err == nil { //nolint:gosec // repo.Path() is controlled by us
 		headRef = strings.TrimSpace(string(out))
@@ -957,6 +1079,10 @@ func (s *Strategy) createBundle(ctx context.Context, repo *gitclone.Repository, 
 
 	cmd := exec.CommandContext(ctx, "git", "-C", repo.Path(), "bundle", "create", //nolint:gosec // baseCommit is a SHA string from rev-parse
 		bundlePath, headRef, "^"+baseCommit)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
 	if output, err := cmd.CombinedOutput(); err != nil {
 		_ = os.Remove(bundlePath) //nolint:gosec // bundlePath is from os.CreateTemp
 		return nil, errors.Wrapf(err, "git bundle create: %s", string(output))
@@ -1438,7 +1564,7 @@ func (s *Strategy) generateAndUploadLFSSnapshot(ctx context.Context, repo *gitcl
 		// Record the clone's actual HEAD: a concurrent fetch can advance the
 		// mirror between the earlier unchanged check and this clone, and the
 		// coordination record must match the archived content.
-		headSHA, err := revParse(ctx, workDir, "HEAD")
+		headSHA, err := mirrorHead(ctx, workDir)
 		if err != nil {
 			return errors.Wrap(err, "rev-parse HEAD for LFS snapshot")
 		}

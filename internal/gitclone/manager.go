@@ -634,6 +634,7 @@ func (r *Repository) FetchVerified(ctx context.Context) error {
 }
 
 func (r *Repository) fetchInternal(ctx context.Context, timeout time.Duration, enforceSpeedLimit, coalesce bool) error {
+	lastFetch := r.LastFetch()
 	select {
 	case <-r.fetchSem:
 		defer func() {
@@ -642,22 +643,14 @@ func (r *Repository) fetchInternal(ctx context.Context, timeout time.Duration, e
 	case <-ctx.Done():
 		return errors.Wrap(ctx.Err(), "context cancelled before acquiring fetch semaphore")
 	default:
-		// The semaphore is held. Coalescing callers treat the holder's work as
-		// their fetch; verified callers wait their turn and fetch themselves.
-		if coalesce {
-			select {
-			case <-r.fetchSem:
-				r.fetchSem <- struct{}{}
-				return nil
-			case <-ctx.Done():
-				return errors.Wrap(ctx.Err(), "context cancelled while waiting for fetch")
-			}
-		}
 		select {
 		case <-r.fetchSem:
 			defer func() {
 				r.fetchSem <- struct{}{}
 			}()
+			if coalesce && r.LastFetch().After(lastFetch) {
+				return nil
+			}
 		case <-ctx.Done():
 			return errors.Wrap(ctx.Err(), "context cancelled before acquiring fetch semaphore")
 		}
