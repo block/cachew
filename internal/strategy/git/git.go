@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"io"
 	"maps"
+	"math/rand/v2"
 	"net/http"
 	"net/http/httputil"
 	"os"
@@ -55,26 +56,30 @@ type Config struct {
 }
 
 type Strategy struct {
-	config              Config
-	cache               cache.Cache
-	cloneManager        *gitclone.Manager
-	httpClient          *http.Client
-	proxy               *httputil.ReverseProxy
-	ctx                 context.Context
-	scheduler           jobscheduler.Scheduler
-	spoolsMu            sync.Mutex
-	spools              map[string]*RepoSpools
-	tokenManager        *githubapp.TokenManager
-	snapshotMu          sync.Map // keyed by upstream URL, values are *sync.Mutex
-	snapshotSpools      sync.Map // keyed by upstream URL, values are *snapshotSpoolEntry
-	coldSnapshotMu      sync.Map // keyed by upstream URL, values are *coldSnapshotEntry
-	deferredRestoreOnce sync.Map // keyed by upstream URL, ensures at most one deferred restore per repo
-	metrics             *gitMetrics
-	repoCounts          *RepoCounts
-	snapshotCoord       *SnapshotCoordinator
-	metadataWired       chan struct{} // closed by SetMetadataStore; gates warm-up
-	wiredOnce           sync.Once
-	ready               atomic.Bool
+	config                Config
+	cache                 cache.Cache
+	cloneManager          *gitclone.Manager
+	httpClient            *http.Client
+	proxy                 *httputil.ReverseProxy
+	ctx                   context.Context
+	scheduler             jobscheduler.Scheduler
+	spoolsMu              sync.Mutex
+	spools                map[string]*RepoSpools
+	tokenManager          *githubapp.TokenManager
+	snapshotMu            sync.Map // keyed by upstream URL, values are *sync.Mutex
+	snapshotSpools        sync.Map // keyed by upstream URL, values are *snapshotSpoolEntry
+	snapshotJobsScheduled sync.Map // One entry per upstream URL prevents duplicate periodic jobs.
+	repackJobsScheduled   sync.Map // One entry per upstream URL prevents duplicate periodic jobs.
+	coldSnapshotMu        sync.Map // keyed by upstream URL, values are *coldSnapshotEntry
+	mirrorPreparations    sync.Map // One entry per upstream URL prevents duplicate preparation jobs.
+	deferredRestoreOnce   sync.Map // keyed by upstream URL, ensures at most one deferred restore per repo
+	metrics               *gitMetrics
+	repoCounts            *RepoCounts
+	snapshotCoord         *SnapshotCoordinator
+	coldPreparationDelay  func() time.Duration
+	metadataWired         chan struct{} // closed by SetMetadataStore; gates warm-up
+	wiredOnce             sync.Once
+	ready                 atomic.Bool
 }
 
 func New(
@@ -145,6 +150,9 @@ func New(
 		tokenManager:  tokenManager,
 		metrics:       m,
 		metadataWired: make(chan struct{}),
+		coldPreparationDelay: func() time.Duration {
+			return rand.N(coldPreparationSpread) //nolint:gosec // The delay does not protect sensitive data.
+		},
 	}
 	// Run startup fetches in the background so the HTTP listener (and
 	// /_liveness) come up immediately. /_readiness gates on Ready() so the
@@ -575,24 +583,24 @@ func ExtractRepoPath(pathValue string) string {
 // goroutine is already cloning (StateCloning), it polls until completion or the
 // context is cancelled. Returns an error if the clone fails or the context is done.
 func (s *Strategy) ensureCloneReady(ctx context.Context, repo *gitclone.Repository) error {
-	if repo.State() == gitclone.StateEmpty {
-		if err := s.startClone(ctx, repo); err != nil {
-			return err
+	for {
+		switch repo.State() {
+		case gitclone.StateReady:
+			return nil
+		case gitclone.StateEmpty:
+			if err := s.startClone(ctx, repo); err != nil {
+				return err
+			}
+		case gitclone.StateCloning:
+			t := time.NewTimer(500 * time.Millisecond)
+			select {
+			case <-ctx.Done():
+				t.Stop()
+				return errors.Wrap(ctx.Err(), "cancelled waiting for clone")
+			case <-t.C:
+			}
 		}
 	}
-	for repo.State() == gitclone.StateCloning {
-		t := time.NewTimer(500 * time.Millisecond)
-		select {
-		case <-ctx.Done():
-			t.Stop()
-			return errors.Wrap(ctx.Err(), "cancelled waiting for clone")
-		case <-t.C:
-		}
-	}
-	if repo.State() != gitclone.StateReady {
-		return errors.New("repository unavailable after clone attempt")
-	}
-	return nil
 }
 
 func (s *Strategy) startClone(ctx context.Context, repo *gitclone.Repository) (returnErr error) {
@@ -623,8 +631,11 @@ func (s *Strategy) startClone(ctx context.Context, repo *gitclone.Repository) (r
 
 	logger.InfoContext(ctx, "Attempting mirror snapshot restore", "upstream", upstream)
 
-	if err := s.tryRestoreSnapshot(ctx, repo); err != nil {
-		logger.InfoContext(ctx, "Mirror snapshot restore failed, falling back to clone", "upstream", upstream, "error", err)
+	restoreCtx, cancelRestore := context.WithTimeout(ctx, s.cloneManager.Config().CloneTimeout)
+	restoreErr := s.tryRestoreSnapshot(restoreCtx, repo)
+	cancelRestore()
+	if restoreErr != nil {
+		logger.InfoContext(ctx, "Mirror snapshot restore failed, falling back to clone", "upstream", upstream, "error", restoreErr)
 	} else {
 		logger.InfoContext(ctx, "Mirror snapshot restored, fetching to freshen", "upstream", upstream)
 
@@ -641,8 +652,8 @@ func (s *Strategy) startClone(ctx context.Context, repo *gitclone.Repository) (r
 				"upstream", upstream, "error", err)
 			// The restored snapshot may be corrupt or empty. Remove it and
 			// fall through to a fresh clone so we don't re-upload bad data.
-			repo.ResetToEmpty()
 			if rmErr := os.RemoveAll(repo.Path()); rmErr != nil {
+				repo.ResetToEmpty()
 				return errors.Wrapf(rmErr, "remove corrupt mirror for %s", upstream)
 			}
 		} else {
@@ -667,7 +678,7 @@ func (s *Strategy) startClone(ctx context.Context, repo *gitclone.Repository) (r
 	logger.InfoContext(ctx, "Starting clone", "upstream", upstream, "path", repo.Path())
 
 	cloneStart := time.Now()
-	err := repo.Clone(ctx)
+	err := repo.CloneClaimed(ctx)
 
 	// Clean up spools regardless of clone success or failure, so that subsequent
 	// requests either serve from the local backend or go directly to upstream.
@@ -677,7 +688,6 @@ func (s *Strategy) startClone(ctx context.Context, repo *gitclone.Repository) (r
 
 	if err != nil {
 		s.metrics.recordOperation(ctx, "clone", "error", time.Since(cloneStart))
-		repo.ResetToEmpty()
 		return errors.Wrapf(err, "clone %s", upstream)
 	}
 

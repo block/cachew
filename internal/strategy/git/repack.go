@@ -16,6 +16,9 @@ import (
 )
 
 func (s *Strategy) scheduleRepackJobs(repo *gitclone.Repository) {
+	if _, loaded := s.repackJobsScheduled.LoadOrStore(repo.UpstreamURL(), true); loaded {
+		return
+	}
 	s.scheduler.SubmitPeriodicJob(repo.UpstreamURL(), "repack-periodic", s.config.RepackInterval, func(ctx context.Context) (returnErr error) {
 		upstream := repo.UpstreamURL()
 		ctx, span := tracer.Start(ctx, "git.repack",

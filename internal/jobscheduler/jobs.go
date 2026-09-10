@@ -48,6 +48,8 @@ type Scheduler interface {
 	//
 	// Jobs run concurrently across queues, but never within a queue.
 	Submit(queue, id string, run func(ctx context.Context) error)
+	// TrySubmit adds a job only if fewer than maxQueued jobs wait across all queues.
+	TrySubmit(queue, id string, maxQueued int, run func(ctx context.Context) error) bool
 	// SubmitPeriodicJob submits a job to the queue that runs immediately, and then periodically after the interval.
 	//
 	// Jobs run concurrently across queues, but never within a queue.
@@ -61,6 +63,10 @@ type prefixedScheduler struct {
 
 func (p *prefixedScheduler) Submit(queue, id string, run func(ctx context.Context) error) {
 	p.scheduler.Submit(queue, p.prefix+id, run)
+}
+
+func (p *prefixedScheduler) TrySubmit(queue, id string, maxQueued int, run func(ctx context.Context) error) bool {
+	return p.scheduler.TrySubmit(queue, p.prefix+id, maxQueued, run)
 }
 
 func (p *prefixedScheduler) SubmitPeriodicJob(queue, id string, interval time.Duration, run func(ctx context.Context) error) {
@@ -188,6 +194,20 @@ func (q *RootScheduler) Submit(queue, id string, run func(ctx context.Context) e
 	q.metrics.queueDepth.Record(context.Background(), int64(len(q.queue)))
 	q.lock.Unlock()
 	q.cond.Signal()
+}
+
+// TrySubmit limits the queue size without a wait. It rejects new jobs during shutdown.
+func (q *RootScheduler) TrySubmit(queue, id string, maxQueued int, run func(ctx context.Context) error) bool {
+	q.lock.Lock()
+	if q.done || q.draining || maxQueued <= 0 || len(q.queue) >= maxQueued {
+		q.lock.Unlock()
+		return false
+	}
+	q.queue = append(q.queue, queueJob{queue: queue, id: id, run: run})
+	q.metrics.queueDepth.Record(context.Background(), int64(len(q.queue)))
+	q.lock.Unlock()
+	q.cond.Signal()
+	return true
 }
 
 func (q *RootScheduler) SubmitPeriodicJob(queue, id string, interval time.Duration, run func(ctx context.Context) error) {

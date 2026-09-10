@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/alecthomas/assert/v2"
+	"github.com/alecthomas/errors"
 
 	"github.com/block/cachew/internal/logging"
 )
@@ -413,6 +414,41 @@ func TestRepository_Clone_StateVisibleDuringClone(t *testing.T) {
 	// Wait for clone to finish
 	assert.NoError(t, <-cloneDone)
 	assert.Equal(t, StateReady, repo.State())
+}
+
+func TestRepositoryCloneWaitsForCurrentOwner(t *testing.T) {
+	repo := &Repository{
+		state:       StateCloning,
+		config:      testRepoConfig(),
+		path:        filepath.Join(t.TempDir(), "clone"),
+		upstreamURL: "https://example.test/example/repo",
+		fetchSem:    make(chan struct{}, 1),
+	}
+	repo.fetchSem <- struct{}{}
+	ready := make(chan struct{})
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		repo.MarkReady()
+		close(ready)
+	}()
+
+	assert.NoError(t, repo.Clone(t.Context()))
+	<-ready
+	assert.Equal(t, StateReady, repo.State())
+}
+
+func TestRepositoryCloneWaitTimeout(t *testing.T) {
+	repo := &Repository{
+		state:       StateCloning,
+		config:      testRepoConfig(),
+		path:        filepath.Join(t.TempDir(), "clone"),
+		upstreamURL: "https://example.test/example/repo",
+		fetchSem:    make(chan struct{}, 1),
+	}
+	repo.fetchSem <- struct{}{}
+
+	err := repo.CloneWithWaitTimeout(t.Context(), 20*time.Millisecond)
+	assert.True(t, errors.Is(err, context.DeadlineExceeded))
 }
 
 func TestRepository_CloneSetsMirrorConfig(t *testing.T) {
