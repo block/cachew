@@ -415,13 +415,56 @@ func (r *Repository) MarkReady() {
 	r.mu.Unlock()
 }
 
+// Clone starts one mirror clone. Other callers wait for the result.
 func (r *Repository) Clone(ctx context.Context) error {
+	return r.clone(ctx, 0)
+}
+
+// CloneWithWaitTimeout limits how long a caller waits for another clone.
+// The limit does not apply to the caller that starts the clone.
+func (r *Repository) CloneWithWaitTimeout(ctx context.Context, waitTimeout time.Duration) error {
+	return r.clone(ctx, waitTimeout)
+}
+
+func (r *Repository) clone(ctx context.Context, waitTimeout time.Duration) error {
+	if r.TryStartCloning() {
+		return r.CloneClaimed(ctx)
+	}
+	if waitTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, waitTimeout)
+		defer cancel()
+	}
+
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		switch r.State() {
+		case StateReady:
+			return nil
+		case StateEmpty:
+			return errors.New("repository clone did not complete")
+		case StateCloning:
+		}
+		select {
+		case <-ctx.Done():
+			return errors.Wrap(ctx.Err(), "wait for repository clone")
+		case <-ticker.C:
+		}
+	}
+}
+
+// CloneClaimed requires the caller to acquire ownership with TryStartCloning first.
+func (r *Repository) CloneClaimed(ctx context.Context) error {
 	r.mu.Lock()
 	if r.state == StateReady {
 		r.mu.Unlock()
 		return nil
 	}
-	r.state = StateCloning
+	if r.state != StateCloning {
+		r.mu.Unlock()
+		return errors.New("repository clone was not claimed")
+	}
 	r.mu.Unlock()
 
 	err := r.executeClone(ctx)

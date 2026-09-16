@@ -2,12 +2,23 @@ package git //nolint:testpackage // white-box testing required for clock injecti
 
 import (
 	"context"
+	"fmt"
+	"io"
 	"log/slog"
+	"net/http"
+	"os"
+	"os/exec"
+	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/alecthomas/assert/v2"
+	"github.com/alecthomas/errors"
 
+	"github.com/block/cachew/internal/cache"
+	"github.com/block/cachew/internal/gitclone"
+	"github.com/block/cachew/internal/jobscheduler"
 	"github.com/block/cachew/internal/logging"
 	"github.com/block/cachew/internal/metadatadb"
 )
@@ -25,6 +36,156 @@ func newTestSnapshotCoordinators(t *testing.T, now func() time.Time, replicas in
 	return coords
 }
 
+type coldSnapshotProbeCache struct {
+	cache.Cache
+	probeErr error
+	probes   int
+}
+
+func (c *coldSnapshotProbeCache) AuthoritativeStat(ctx context.Context, key cache.Key, options ...cache.Option) (http.Header, error) {
+	c.probes++
+	if c.probes <= 2 {
+		return nil, c.probeErr
+	}
+	return c.Cache.Stat(ctx, key, options...)
+}
+
+type snapshotScheduleRecorder struct {
+	jobscheduler.Scheduler
+	jobs chan string
+}
+
+func (s *snapshotScheduleRecorder) SubmitPeriodicJob(_, id string, _ time.Duration, _ func(context.Context) error) {
+	s.jobs <- id
+}
+
+type coldSnapshotSlowCache struct {
+	cache.Cache
+	beforeCreate func() error
+}
+
+func (c *coldSnapshotSlowCache) Create(ctx context.Context, key cache.Key, headers http.Header, ttl time.Duration, options ...cache.Option) (cache.Writer, error) {
+	if err := c.beforeCreate(); err != nil {
+		return nil, err
+	}
+	return c.Cache.Create(ctx, key, headers, ttl, options...)
+}
+
+func TestColdSnapshotDefersInitialBaseJob(t *testing.T) {
+	for _, publishErr := range []error{nil, errors.New("upload failed")} {
+		t.Run(fmt.Sprint(publishErr), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				ctx := logging.ContextWithLogger(t.Context(), slog.Default())
+				manager, err := gitclone.NewManager(ctx, gitclone.Config{MirrorRoot: t.TempDir()}, nil)
+				assert.NoError(t, err)
+				repo, err := manager.GetOrCreate(ctx, "https://example.test/org/repo")
+				assert.NoError(t, err)
+				for _, args := range [][]string{
+					{"init", repo.Path()},
+					{"-C", repo.Path(), "-c", "user.name=Test", "-c", "user.email=test@example.com",
+						"commit", "--allow-empty", "--no-gpg-sign", "-m", "initial"},
+				} {
+					output, err := exec.CommandContext(ctx, "git", args...).CombinedOutput()
+					assert.NoError(t, err, string(output))
+				}
+				repo.MarkReady()
+				scheduler := &snapshotScheduleRecorder{jobs: make(chan string, 3)}
+				mem, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: time.Hour})
+				assert.NoError(t, err)
+				s := &Strategy{
+					scheduler: scheduler, cloneManager: manager, metrics: newGitMetrics(),
+					config: Config{SnapshotInterval: time.Hour, ZstdThreads: 1},
+				}
+				s.cache = &coldSnapshotSlowCache{Cache: mem, beforeCreate: func() error {
+					s.scheduleSnapshotJobs(repo)
+					time.Sleep(2 * time.Hour)
+					synctest.Wait()
+					assert.Equal(t, 0, len(scheduler.jobs))
+					return publishErr
+				}}
+				s.mirrorPreparations.Store(repo.UpstreamURL(), true)
+				err = s.prepareColdSnapshot(ctx, repo)
+				if publishErr != nil {
+					assert.True(t, errors.Is(err, publishErr))
+				} else {
+					assert.NoError(t, err)
+					_, err = mem.Stat(ctx, snapshotCacheKey(repo.UpstreamURL()))
+					assert.NoError(t, err)
+				}
+				s.mirrorPreparations.Delete(repo.UpstreamURL())
+				synctest.Wait()
+				assert.Equal(t, 2, len(scheduler.jobs))
+				assert.Equal(t, snapshotJobLFS+"-periodic", <-scheduler.jobs)
+				assert.Equal(t, snapshotJobMirror+"-periodic", <-scheduler.jobs)
+				time.Sleep(time.Hour - time.Nanosecond)
+				synctest.Wait()
+				assert.Equal(t, 0, len(scheduler.jobs))
+				time.Sleep(time.Nanosecond)
+				synctest.Wait()
+				assert.Equal(t, 1, len(scheduler.jobs))
+				assert.Equal(t, snapshotJobBase+"-periodic", <-scheduler.jobs)
+			})
+		})
+	}
+}
+
+func TestColdSnapshotSkipPreservesCompletion(t *testing.T) {
+	for _, probeErr := range []error{os.ErrNotExist, errors.New("stat unavailable")} {
+		t.Run(probeErr.Error(), func(t *testing.T) {
+			ctx := logging.ContextWithLogger(t.Context(), slog.Default())
+			const upstream = "https://example.test/org/repo"
+			manager, err := gitclone.NewManager(ctx, gitclone.Config{MirrorRoot: t.TempDir()}, nil)
+			assert.NoError(t, err)
+			repo, err := manager.GetOrCreate(ctx, upstream)
+			assert.NoError(t, err)
+			for _, args := range [][]string{
+				{"init", repo.Path()},
+				{"-C", repo.Path(), "-c", "user.name=Test", "-c", "user.email=test@example.com",
+					"commit", "--allow-empty", "--no-gpg-sign", "-m", "initial"},
+			} {
+				output, err := exec.CommandContext(ctx, "git", args...).CombinedOutput()
+				assert.NoError(t, err, string(output))
+			}
+			head, err := exec.CommandContext(ctx, "git", "-C", repo.Path(), "rev-parse", "HEAD").Output()
+			assert.NoError(t, err)
+			commit := strings.TrimSpace(string(head))
+			repo.MarkReady()
+
+			clock := time.Date(2026, 5, 5, 12, 0, 0, 0, time.UTC)
+			coord := newTestSnapshotCoordinators(t, func() time.Time { return clock }, 1)[0]
+			assert.NoError(t, coord.Complete(snapshotJobBase, upstream, commit))
+			completedAt := clock
+			clock = clock.Add(30 * time.Minute)
+			mem, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: time.Hour})
+			assert.NoError(t, err)
+			assert.NoError(t, cache.WriteFunc(ctx, mem, snapshotCacheKey(upstream), nil, time.Hour, func(w io.Writer) error {
+				_, err := io.WriteString(w, "existing snapshot")
+				return err
+			}))
+			c := &coldSnapshotProbeCache{Cache: mem, probeErr: probeErr}
+			s := &Strategy{
+				config:               Config{SnapshotInterval: time.Hour, SnapshotMaxAge: time.Hour},
+				cache:                c,
+				cloneManager:         manager,
+				snapshotCoord:        coord,
+				metrics:              newGitMetrics(),
+				coldPreparationDelay: func() time.Duration { return 0 },
+			}
+			s.snapshotJobsScheduled.Store(upstream, true)
+			assert.NoError(t, s.prepareColdSnapshot(ctx, repo))
+			assert.Equal(t, 3, c.probes)
+			rec, ok := coord.gens.Get(snapshotGenKey(snapshotJobBase, upstream))
+			assert.True(t, ok)
+			assert.Equal(t, completedAt, rec.CompletedAt)
+			assert.Equal(t, clock, rec.CheckedAt)
+			assert.Zero(t, rec.ClaimID)
+			assert.True(t, coord.Unchanged(snapshotJobBase, upstream, commit, time.Hour))
+			clock = completedAt.Add(time.Hour)
+			assert.False(t, coord.Unchanged(snapshotJobBase, upstream, commit, time.Hour))
+		})
+	}
+}
+
 func TestSnapshotCoordinatorNilSafe(t *testing.T) {
 	var c *SnapshotCoordinator
 	claimed, err := c.Claim("snapshot", "https://github.com/foo/bar", time.Hour)
@@ -32,9 +193,64 @@ func TestSnapshotCoordinatorNilSafe(t *testing.T) {
 	assert.True(t, claimed)
 	assert.NoError(t, c.Complete("snapshot", "https://github.com/foo/bar", "abc123"))
 	assert.NoError(t, c.Skip("snapshot", "https://github.com/foo/bar"))
+	assert.NoError(t, c.SkipClaim(context.Background(), "snapshot", "https://github.com/foo/bar", "claim"))
+	assert.NoError(t, c.Fail(context.Background(), "snapshot", "https://github.com/foo/bar", "claim"))
 	assert.False(t, c.Unchanged("snapshot", "https://github.com/foo/bar", "abc123", time.Hour))
 	assert.NoError(t, c.Prime(context.Background()))
 	assert.Zero(t, NewSnapshotCoordinator(nil))
+}
+
+func TestSnapshotCoordinatorFailedClaimCanRetryImmediately(t *testing.T) {
+	clock := time.Date(2026, 5, 5, 12, 0, 0, 0, time.UTC)
+	coords := newTestSnapshotCoordinators(t, func() time.Time { return clock }, 2)
+	const upstream = "https://github.com/example/repo"
+
+	claimID, claimed, err := coords[0].ClaimWithTTL(snapshotJobBase, upstream, snapshotClaimTTL, time.Hour)
+	assert.NoError(t, err)
+	assert.True(t, claimed)
+	assert.NotZero(t, claimID)
+	assert.NoError(t, coords[0].Fail(context.Background(), snapshotJobBase, upstream, claimID))
+
+	claimed, err = coords[1].Claim(snapshotJobBase, upstream, snapshotClaimTTL)
+	assert.NoError(t, err)
+	assert.True(t, claimed)
+}
+
+func TestSnapshotCoordinatorOwnedClaimSurvivesStaleRelease(t *testing.T) {
+	clock := time.Date(2026, 5, 5, 12, 0, 0, 0, time.UTC)
+	coords := newTestSnapshotCoordinators(t, func() time.Time { return clock }, 3)
+	const upstream = "https://github.com/example/repo"
+
+	firstID, claimed, err := coords[0].ClaimWithTTL(snapshotJobBase, upstream, 0, time.Hour)
+	assert.NoError(t, err)
+	assert.True(t, claimed)
+	clock = clock.Add(time.Hour)
+	secondID, claimed, err := coords[1].ClaimWithTTL(snapshotJobBase, upstream, 0, time.Hour)
+	assert.NoError(t, err)
+	assert.True(t, claimed)
+	assert.NotEqual(t, firstID, secondID)
+
+	assert.NoError(t, coords[0].Fail(context.Background(), snapshotJobBase, upstream, firstID))
+	assert.NoError(t, coords[0].CompleteClaim(context.Background(), snapshotJobBase, upstream, firstID, "stale"))
+	assert.NoError(t, coords[0].SkipClaim(context.Background(), snapshotJobBase, upstream, firstID))
+	_, claimed, err = coords[2].ClaimWithTTL(snapshotJobBase, upstream, 0, time.Hour)
+	assert.NoError(t, err)
+	assert.False(t, claimed)
+	assert.NoError(t, coords[1].CompleteClaim(context.Background(), snapshotJobBase, upstream, secondID, "abc123"))
+}
+
+func TestSnapshotCoordinatorCustomClaimTTL(t *testing.T) {
+	clock := time.Date(2026, 5, 5, 12, 0, 0, 0, time.UTC)
+	coords := newTestSnapshotCoordinators(t, func() time.Time { return clock }, 2)
+	const upstream = "https://github.com/example/repo"
+
+	_, claimed, err := coords[0].ClaimWithTTL(snapshotJobBase, upstream, 0, 2*time.Hour)
+	assert.NoError(t, err)
+	assert.True(t, claimed)
+	clock = clock.Add(snapshotClaimTTL)
+	claimed, err = coords[1].Claim(snapshotJobBase, upstream, 0)
+	assert.NoError(t, err)
+	assert.False(t, claimed)
 }
 
 func TestSnapshotCoordinatorUnchanged(t *testing.T) {

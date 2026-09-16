@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/alecthomas/errors"
+	"github.com/google/uuid"
 
 	"github.com/block/cachew/internal/metadatadb"
 )
@@ -22,15 +23,16 @@ const (
 	snapshotClaimTTL = 30 * time.Minute
 )
 
-// snapshotGenRecord is the shared per-artifact generation state. StartedAt is
-// the most recent claim; CompletedAt is the most recent successful generation;
-// CheckedAt is the most recent claim that ended in a skip (nothing uploaded);
-// Commit is the mirror HEAD that generation captured.
+// snapshotGenRecord stores the generation state for each artifact.
+// ClaimID identifies the owner for release and completion checks.
+// ClaimExpiresAt gives all replicas the same expiration time.
 type snapshotGenRecord struct {
-	StartedAt   time.Time `json:"started_at"`
-	CompletedAt time.Time `json:"completed_at,omitzero"`
-	CheckedAt   time.Time `json:"checked_at,omitzero"`
-	Commit      string    `json:"commit,omitempty"`
+	StartedAt      time.Time `json:"started_at"`
+	CompletedAt    time.Time `json:"completed_at,omitzero"`
+	CheckedAt      time.Time `json:"checked_at,omitzero"`
+	ClaimExpiresAt time.Time `json:"claim_expires_at,omitzero"`
+	Commit         string    `json:"commit,omitempty"`
+	ClaimID        string    `json:"claim_id,omitempty"`
 }
 
 // SnapshotCoordinator shares per-artifact generation state across replicas so
@@ -76,8 +78,18 @@ func (c *SnapshotCoordinator) Prime(ctx context.Context) error {
 // completed a generation or checked-and-skipped within the interval, or
 // holds an unexpired in-progress claim.
 func (c *SnapshotCoordinator) Claim(job, upstreamURL string, interval time.Duration) (bool, error) {
+	_, claimed, err := c.ClaimWithTTL(job, upstreamURL, interval, snapshotClaimTTL)
+	return claimed, err
+}
+
+// ClaimWithTTL lets the caller set the claim duration.
+// The caller must use the returned claim ID to complete or release the claim.
+func (c *SnapshotCoordinator) ClaimWithTTL(job, upstreamURL string, interval, claimTTL time.Duration) (string, bool, error) {
 	if c == nil {
-		return true, nil
+		return "", true, nil
+	}
+	if claimTTL <= 0 {
+		claimTTL = snapshotClaimTTL
 	}
 	key := snapshotGenKey(job, upstreamURL)
 	now := c.now()
@@ -88,25 +100,31 @@ func (c *SnapshotCoordinator) Claim(job, upstreamURL string, interval time.Durat
 		// just before the generator's next one sees an almost-interval-old
 		// completion and skips rather than duplicating the imminent generation.
 		if !rec.CompletedAt.IsZero() && now.Sub(rec.CompletedAt) < interval {
-			return false, nil
+			return "", false, nil
 		}
 		// A checked-and-skipped decision is as fresh as a completion for
 		// claiming purposes: without it, once the last upload ages past the
 		// interval every replica would re-fetch an unchanged repo each
 		// interval instead of one.
 		if !rec.CheckedAt.IsZero() && now.Sub(rec.CheckedAt) < interval {
-			return false, nil
+			return "", false, nil
 		}
 		inProgress := rec.CompletedAt.Before(rec.StartedAt)
-		if inProgress && now.Sub(rec.StartedAt) < snapshotClaimTTL {
-			return false, nil
+		claimExpiresAt := rec.ClaimExpiresAt
+		if claimExpiresAt.IsZero() {
+			claimExpiresAt = rec.StartedAt.Add(snapshotClaimTTL)
+		}
+		if inProgress && now.Before(claimExpiresAt) {
+			return "", false, nil
 		}
 	}
 	rec.StartedAt = now
+	rec.ClaimID = uuid.NewString()
+	rec.ClaimExpiresAt = now.Add(claimTTL)
 	if err := c.gens.Set(key, rec); err != nil {
-		return true, errors.Wrap(err, "record snapshot claim")
+		return rec.ClaimID, true, errors.Wrap(err, "record snapshot claim")
 	}
-	return true, nil
+	return rec.ClaimID, true, nil
 }
 
 // Complete records a successful generation and the commit it captured so
@@ -119,7 +137,29 @@ func (c *SnapshotCoordinator) Complete(job, upstreamURL, commit string) error {
 	rec, _ := c.gens.Get(key)
 	rec.CompletedAt = c.now()
 	rec.Commit = commit
+	rec.ClaimID = ""
+	rec.ClaimExpiresAt = time.Time{}
 	return errors.Wrap(c.gens.Set(key, rec), "record snapshot completion")
+}
+
+// CompleteClaim reads the shared state again. It completes the claim only if the claim ID still matches.
+func (c *SnapshotCoordinator) CompleteClaim(ctx context.Context, job, upstreamURL, claimID, commit string) error {
+	if c == nil || claimID == "" {
+		return nil
+	}
+	if err := c.Prime(ctx); err != nil {
+		return errors.Wrap(err, "refresh before completing snapshot claim")
+	}
+	key := snapshotGenKey(job, upstreamURL)
+	rec, ok := c.gens.Get(key)
+	if !ok || rec.ClaimID != claimID {
+		return nil
+	}
+	rec.CompletedAt = c.now()
+	rec.Commit = commit
+	rec.ClaimID = ""
+	rec.ClaimExpiresAt = time.Time{}
+	return errors.Wrap(c.gens.Set(key, rec), "record owned snapshot completion")
 }
 
 // Skip records a claim that ended without an upload (unchanged artifact or
@@ -137,7 +177,51 @@ func (c *SnapshotCoordinator) Skip(job, upstreamURL string) error {
 	if rec.CompletedAt.Before(rec.StartedAt) {
 		rec.StartedAt = rec.CompletedAt
 	}
+	rec.ClaimID = ""
+	rec.ClaimExpiresAt = time.Time{}
 	return errors.Wrap(c.gens.Set(key, rec), "record snapshot skip")
+}
+
+// SkipClaim reads the shared state again. It records a skip only if the claim ID still matches.
+func (c *SnapshotCoordinator) SkipClaim(ctx context.Context, job, upstreamURL, claimID string) error {
+	if c == nil || claimID == "" {
+		return nil
+	}
+	if err := c.Prime(ctx); err != nil {
+		return errors.Wrap(err, "refresh before skipping snapshot claim")
+	}
+	key := snapshotGenKey(job, upstreamURL)
+	rec, ok := c.gens.Get(key)
+	if !ok || rec.ClaimID != claimID {
+		return nil
+	}
+	rec.CheckedAt = c.now()
+	if rec.CompletedAt.Before(rec.StartedAt) {
+		rec.StartedAt = rec.CompletedAt
+	}
+	rec.ClaimID = ""
+	rec.ClaimExpiresAt = time.Time{}
+	return errors.Wrap(c.gens.Set(key, rec), "record owned snapshot skip")
+}
+
+// Fail releases a failed claim only if the claim ID still matches the shared state.
+// It does not record a successful check, so another caller can try again immediately.
+func (c *SnapshotCoordinator) Fail(ctx context.Context, job, upstreamURL, claimID string) error {
+	if c == nil || claimID == "" {
+		return nil
+	}
+	if err := c.Prime(ctx); err != nil {
+		return errors.Wrap(err, "refresh before releasing snapshot claim")
+	}
+	key := snapshotGenKey(job, upstreamURL)
+	rec, ok := c.gens.Get(key)
+	if !ok || rec.ClaimID != claimID || !rec.CompletedAt.Before(rec.StartedAt) {
+		return nil
+	}
+	rec.StartedAt = rec.CompletedAt
+	rec.ClaimID = ""
+	rec.ClaimExpiresAt = time.Time{}
+	return errors.Wrap(c.gens.Set(key, rec), "release failed snapshot claim")
 }
 
 // Unchanged reports whether the last completed generation captured the same

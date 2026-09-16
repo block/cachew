@@ -84,8 +84,6 @@ func TestSnapshotHTTPEndpoint(t *testing.T) {
 	assert.Equal(t, "application/zstd", w.Header().Get("Content-Type"))
 	assert.Equal(t, snapshotData, w.Body.Bytes())
 
-	// Test snapshot not found - repo has no mirror, so clone is attempted but
-	// fails immediately because the context is cancelled.
 	cancelCtx, cancel := context.WithCancel(ctx)
 	cancel()
 	req = httptest.NewRequest(http.MethodGet, "/git/github.com/org/nonexistent/snapshot.tar.zst", nil)
@@ -96,7 +94,8 @@ func TestSnapshotHTTPEndpoint(t *testing.T) {
 
 	handler.ServeHTTP(w, req)
 
-	assert.Equal(t, 503, w.Code)
+	assert.Equal(t, http.StatusNotFound, w.Code)
+	assert.Equal(t, "no-store", w.Header().Get("Cache-Control"))
 }
 
 func TestSnapshotOnDemandGenerationViaHTTP(t *testing.T) {
@@ -758,6 +757,7 @@ func TestSnapshotHeadServesMetadataWithoutBody(t *testing.T) {
 	missResp := httptest.NewRecorder()
 	handler.ServeHTTP(missResp, missReq)
 	assert.Equal(t, 404, missResp.Code, "HEAD on an uncached snapshot must not trigger generation")
+	assert.Equal(t, "no-store", missResp.Header().Get("Cache-Control"))
 
 	waitForReady(t, s)
 	err = s.GenerateAndUploadSnapshot(ctx, repo)

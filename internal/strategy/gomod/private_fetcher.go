@@ -28,6 +28,8 @@ type privateFetcher struct {
 	cloneManager *gitclone.Manager
 }
 
+const privateCloneWaitTimeout = 30 * time.Minute
+
 type moduleInfo struct {
 	Version string `json:"Version"`
 	Time    string `json:"Time"`
@@ -125,29 +127,10 @@ func (p *privateFetcher) ensureReady(ctx context.Context, repo *gitclone.Reposit
 		return nil
 	}
 
-	if err := repo.Clone(ctx); err != nil {
+	if err := repo.CloneWithWaitTimeout(ctx, privateCloneWaitTimeout); err != nil {
 		return errors.Wrap(err, "clone repository")
 	}
-
-	ticker := time.NewTicker(100 * time.Millisecond)
-	defer ticker.Stop()
-
-	timeout := time.After(30 * time.Minute) // reasonable timeout for cloning
-
-	for {
-		if repo.State() == gitclone.StateReady {
-			return nil
-		}
-
-		select {
-		case <-ticker.C:
-			// Continue polling
-		case <-timeout:
-			return errors.Errorf("timeout waiting for repository %s to be ready", repo.UpstreamURL())
-		case <-ctx.Done():
-			return errors.Wrap(ctx.Err(), "context cancelled while waiting for clone")
-		}
-	}
+	return nil
 }
 
 func (p *privateFetcher) modulePathToGitURL(modulePath string) string {

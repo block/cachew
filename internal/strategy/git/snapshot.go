@@ -279,6 +279,12 @@ const (
 	snapshotJobMirror = "mirror-snapshot"
 )
 
+const coldPreparationSpread = 30 * time.Second
+
+const coldPreparationQueueLimit = 128
+
+const snapshotClaimCleanupTimeout = 30 * time.Second
+
 // snapshotUnchanged reports whether generation can be skipped: the last
 // completed generation captured the same commit recently enough that its
 // cache entry cannot have expired, and the entry still exists in
@@ -301,10 +307,23 @@ func (s *Strategy) snapshotUnchanged(ctx context.Context, job string, key cache.
 const snapshotStartupSpread = 5 * time.Minute
 
 func (s *Strategy) scheduleSnapshotJobs(repo *gitclone.Repository) {
+	if _, preparing := s.mirrorPreparations.Load(repo.UpstreamURL()); preparing {
+		return
+	}
+	s.scheduleSnapshotJobsAfter(repo, 0)
+}
+
+func (s *Strategy) scheduleSnapshotJobsAfter(repo *gitclone.Repository, baseDelay time.Duration) {
 	upstream := repo.UpstreamURL()
+	if _, loaded := s.snapshotJobsScheduled.LoadOrStore(upstream, true); loaded {
+		return
+	}
 	submit := func(job string, interval time.Duration, generate func(ctx context.Context) (string, error)) {
 		run := s.coordinatedSnapshotJob(job, repo, interval, generate)
 		delay, interval := s.snapshotSchedule(interval)
+		if job == snapshotJobBase {
+			delay = max(delay, baseDelay)
+		}
 		if delay == 0 {
 			s.scheduler.SubmitPeriodicJob(upstream, job+"-periodic", interval, run)
 			return
@@ -358,32 +377,50 @@ func (s *Strategy) coordinatedSnapshotJob(job string, repo *gitclone.Repository,
 	upstream := repo.UpstreamURL()
 	return func(ctx context.Context) error {
 		logger := logging.FromContext(ctx)
-		claimed, err := s.snapshotCoord.Claim(job, upstream, interval)
+		claimID, claimed, err := s.snapshotCoord.ClaimWithTTL(job, upstream, interval, snapshotClaimTTL)
 		if err != nil {
 			logger.WarnContext(ctx, "Snapshot coordination claim failed, generating anyway", "job", job, "upstream", upstream, "error", err)
+			claimID = ""
 		} else if !claimed {
 			logger.DebugContext(ctx, "Skipping snapshot generation, fresh or in progress on another replica", "job", job, "upstream", upstream)
 			return nil
 		}
 		commit, err := generate(ctx)
 		if err != nil {
-			return err
+			return errors.Join(err, s.failSnapshotClaim(ctx, job, upstream, claimID))
 		}
 		if commit == "" {
 			// Nothing was uploaded, so record a skip rather than a
 			// completion: CompletedAt must keep tracking the last actual
 			// upload, while the skip's CheckedAt keeps peers from re-fetching
 			// an unchanged repo every interval.
-			if err := s.snapshotCoord.Skip(job, upstream); err != nil {
+			if err := s.snapshotCoord.SkipClaim(ctx, job, upstream, claimID); err != nil {
 				logger.WarnContext(ctx, "Failed to record snapshot skip", "job", job, "upstream", upstream, "error", err)
+				if releaseErr := s.failSnapshotClaim(ctx, job, upstream, claimID); releaseErr != nil {
+					logger.WarnContext(ctx, "Failed to release snapshot claim after skip error", "job", job,
+						"upstream", upstream, "error", releaseErr)
+				}
 			}
 			return nil
 		}
-		if err := s.snapshotCoord.Complete(job, upstream, commit); err != nil {
+		if err := s.snapshotCoord.CompleteClaim(ctx, job, upstream, claimID, commit); err != nil {
 			logger.WarnContext(ctx, "Failed to record snapshot completion", "job", job, "upstream", upstream, "error", err)
+			if releaseErr := s.failSnapshotClaim(ctx, job, upstream, claimID); releaseErr != nil {
+				logger.WarnContext(ctx, "Failed to release snapshot claim after completion error", "job", job,
+					"upstream", upstream, "error", releaseErr)
+			}
 		}
 		return nil
 	}
+}
+
+func (s *Strategy) failSnapshotClaim(ctx context.Context, job, upstream, claimID string) error {
+	if claimID == "" {
+		return nil
+	}
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), snapshotClaimCleanupTimeout)
+	defer cancel()
+	return s.snapshotCoord.Fail(cleanupCtx, job, upstream, claimID)
 }
 
 // jitterInterval spreads replicas' periodic snapshot schedules apart so that
@@ -479,11 +516,10 @@ func (s *Strategy) handleSnapshotRequest(w http.ResponseWriter, r *http.Request,
 		}
 	}
 
-	// Either the mirror is already ready or no cached snapshot exists — fall
-	// through to the original path which blocks until the mirror is available.
-	if cloneErr := s.ensureCloneReady(ctx, repo); cloneErr != nil {
-		logger.ErrorContext(ctx, "Clone unavailable for snapshot", "upstream", upstreamURL, "error", cloneErr)
-		http.Error(w, "Repository unavailable", http.StatusServiceUnavailable)
+	if repo.State() != gitclone.StateReady {
+		s.scheduleColdSnapshotPreparation(ctx, repo)
+		w.Header().Set("Cache-Control", "no-store")
+		http.Error(w, "Snapshot not cached", http.StatusNotFound)
 		return
 	}
 
@@ -503,6 +539,11 @@ func (s *Strategy) handleSnapshotRequest(w http.ResponseWriter, r *http.Request,
 			span.SetStatus(codes.Error, serveErr.Error())
 		}
 	case errors.Is(err, os.ErrNotExist):
+		if _, preparing := s.mirrorPreparations.Load(upstreamURL); preparing {
+			w.Header().Set("Cache-Control", "no-store")
+			http.Error(w, "Snapshot not cached", http.StatusNotFound)
+			return
+		}
 		if spoolErr := s.serveSnapshotWithSpool(w, r, repo, upstreamURL, repoName, start); spoolErr != nil {
 			logger.ErrorContext(ctx, "Failed to serve snapshot via spool", "upstream", upstreamURL, "error", spoolErr)
 			span.RecordError(spoolErr)
@@ -523,6 +564,7 @@ func (s *Strategy) serveSnapshotHead(ctx context.Context, w http.ResponseWriter,
 	headers, err := s.cache.Stat(ctx, cacheKey)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
+			w.Header().Set("Cache-Control", "no-store")
 			http.Error(w, "Snapshot not cached", http.StatusNotFound)
 			return
 		}
@@ -1166,6 +1208,134 @@ func (s *Strategy) scheduleDeferredMirrorRestore(ctx context.Context, repo *gitc
 		}
 		return nil
 	})
+}
+
+func (s *Strategy) scheduleColdSnapshotPreparation(ctx context.Context, repo *gitclone.Repository) {
+	upstream := repo.UpstreamURL()
+	if _, loaded := s.mirrorPreparations.LoadOrStore(upstream, true); loaded {
+		return
+	}
+
+	logging.FromContext(ctx).InfoContext(ctx, "Scheduling cold snapshot preparation", "upstream", upstream)
+	accepted := s.scheduler.TrySubmit(upstream, "cold-snapshot-clone", coldPreparationQueueLimit, func(ctx context.Context) error {
+		defer s.mirrorPreparations.Delete(upstream)
+		ctx, cancel := context.WithTimeout(ctx, s.coldPreparationTimeout())
+		defer cancel()
+		return s.prepareColdSnapshot(ctx, repo)
+	})
+	if !accepted {
+		s.mirrorPreparations.Delete(upstream)
+		logging.FromContext(ctx).WarnContext(ctx, "Cold snapshot preparation queue is full", "upstream", upstream)
+	}
+}
+
+func (s *Strategy) coldPreparationTimeout() time.Duration {
+	const maxDuration = time.Duration(1<<63 - 1)
+	cloneTimeout := s.cloneManager.Config().CloneTimeout
+	if cloneTimeout > (maxDuration-snapshotClaimTTL)/3 {
+		return maxDuration
+	}
+	return 3*cloneTimeout + snapshotClaimTTL
+}
+
+func (s *Strategy) coldSnapshotPublished(ctx context.Context, upstream string) (bool, error) {
+	_, err := cache.StatAuthoritative(ctx, s.cache, snapshotCacheKey(upstream))
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	return err == nil, errors.Wrap(err, "check shared snapshot")
+}
+
+func (s *Strategy) prepareColdSnapshot(ctx context.Context, repo *gitclone.Repository) (returnErr error) {
+	upstream := repo.UpstreamURL()
+	defer func() {
+		if repo.State() == gitclone.StateReady && s.config.SnapshotInterval > 0 {
+			s.scheduleSnapshotJobsAfter(repo, s.config.SnapshotInterval)
+		}
+	}()
+	if published, err := s.coldSnapshotPublished(ctx, upstream); err != nil {
+		logging.FromContext(ctx).WarnContext(ctx, "Shared snapshot recheck failed, preparing anyway",
+			"upstream", upstream, "error", err)
+	} else if published {
+		return nil
+	}
+	if repo.State() == gitclone.StateReady && s.config.SnapshotInterval == 0 {
+		return nil
+	}
+
+	claimID, claimed := "", true
+	if s.config.SnapshotInterval > 0 && s.snapshotCoord != nil {
+		timer := time.NewTimer(s.coldPreparationDelay())
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return errors.Wrap(ctx.Err(), "wait to coordinate cold snapshot preparation")
+		case <-timer.C:
+		}
+		primeErr := s.snapshotCoord.Prime(ctx)
+		if primeErr != nil {
+			logging.FromContext(ctx).WarnContext(ctx, "Cold preparation coordination refresh failed, preparing anyway",
+				"upstream", upstream, "error", primeErr)
+		}
+		if published, err := s.coldSnapshotPublished(ctx, upstream); err != nil {
+			logging.FromContext(ctx).WarnContext(ctx, "Shared snapshot recheck failed, preparing anyway",
+				"upstream", upstream, "error", err)
+		} else if published {
+			return nil
+		}
+		if primeErr == nil {
+			var err error
+			claimID, claimed, err = s.snapshotCoord.ClaimWithTTL(snapshotJobBase, upstream, 0,
+				s.coldPreparationTimeout())
+			if err != nil {
+				logging.FromContext(ctx).WarnContext(ctx, "Cold preparation coordination claim failed, preparing anyway",
+					"upstream", upstream, "error", err)
+				claimed = true
+			}
+		}
+	}
+	if !claimed {
+		return nil
+	}
+	if claimID != "" {
+		defer func() {
+			if returnErr != nil {
+				returnErr = errors.Join(returnErr, s.failSnapshotClaim(ctx, snapshotJobBase, upstream, claimID))
+			}
+		}()
+	}
+
+	if err := s.ensureCloneReady(ctx, repo); err != nil {
+		return err
+	}
+	if s.config.RepackInterval > 0 {
+		s.scheduleRepackJobs(repo)
+	}
+	publishedCommit := ""
+	if s.config.SnapshotInterval > 0 {
+		commit, err := s.generateAndUploadSnapshot(ctx, repo)
+		if err != nil {
+			return errors.Wrap(err, "publish prepared snapshot")
+		}
+		publishedCommit = commit
+	}
+	if claimID != "" {
+		var err error
+		if publishedCommit == "" {
+			err = s.snapshotCoord.SkipClaim(ctx, snapshotJobBase, upstream, claimID)
+		} else {
+			err = s.snapshotCoord.CompleteClaim(ctx, snapshotJobBase, upstream, claimID, publishedCommit)
+		}
+		if err != nil {
+			logging.FromContext(ctx).WarnContext(ctx, "Failed to record cold snapshot preparation result",
+				"upstream", upstream, "error", err)
+			if releaseErr := s.failSnapshotClaim(ctx, snapshotJobBase, upstream, claimID); releaseErr != nil {
+				logging.FromContext(ctx).WarnContext(ctx, "Failed to release cold snapshot claim after recording error",
+					"upstream", upstream, "error", releaseErr)
+			}
+		}
+	}
+	return nil
 }
 
 // snapshotSpoolEntry holds a spool and a ready channel used to coordinate

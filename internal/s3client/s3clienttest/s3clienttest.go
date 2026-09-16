@@ -134,7 +134,7 @@ func startContainer(t *testing.T) {
 			"-p", Port+":9000",
 			"-e", "MINIO_ROOT_USER="+Username,
 			"-e", "MINIO_ROOT_PASSWORD="+Password,
-			"minio/minio", "server", "/data",
+			"quay.io/minio/minio", "server", "/data",
 		)
 		output, err := cmd.CombinedOutput()
 		if err == nil {
