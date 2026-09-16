@@ -68,6 +68,7 @@ type Strategy struct {
 	tokenManager          *githubapp.TokenManager
 	snapshotMu            sync.Map // keyed by upstream URL, values are *sync.Mutex
 	snapshotSpools        sync.Map // keyed by upstream URL, values are *snapshotSpoolEntry
+	bundleBuilds          sync.Map
 	snapshotJobsScheduled sync.Map // One entry per upstream URL prevents duplicate periodic jobs.
 	repackJobsScheduled   sync.Map // One entry per upstream URL prevents duplicate periodic jobs.
 	coldSnapshotMu        sync.Map // keyed by upstream URL, values are *coldSnapshotEntry

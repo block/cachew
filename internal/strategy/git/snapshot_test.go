@@ -1288,9 +1288,9 @@ func newBundleTestStrategy(ctx context.Context, t *testing.T, mirrorRoot string,
 
 func requestBundle(ctx context.Context, mux *testMux, base string) *httptest.ResponseRecorder {
 	handler := mux.handlers["GET /git/{host}/{path...}"]
-	req := httptest.NewRequest(http.MethodGet, "/git/github.com/org/repo/snapshot.bundle?base="+base, nil)
+	req := httptest.NewRequest(http.MethodGet, "/git/example.com/org/repo/snapshot.bundle?base="+base, nil)
 	req = req.WithContext(ctx)
-	req.SetPathValue("host", "github.com")
+	req.SetPathValue("host", "example.com")
 	req.SetPathValue("path", "org/repo/snapshot.bundle")
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
@@ -1304,8 +1304,8 @@ func TestBundleRequestUpToDateReturnsNoContent(t *testing.T) {
 
 	_, ctx := logging.Configure(context.Background(), logging.Config{})
 	mirrorRoot := filepath.Join(t.TempDir(), "mirrors")
-	mirrorPath := filepath.Join(mirrorRoot, "github.com", "org", "repo")
-	createUpstreamAndMirror(t, mirrorPath)
+	mirrorPath := filepath.Join(mirrorRoot, "example.com", "org", "repo")
+	upstream := createUpstreamAndMirror(t, mirrorPath)
 	mux := newBundleTestStrategy(ctx, t, mirrorRoot, time.Millisecond)
 
 	head, err := exec.Command("git", "-C", mirrorPath, "rev-parse", "HEAD").Output()
@@ -1314,6 +1314,11 @@ func TestBundleRequestUpToDateReturnsNoContent(t *testing.T) {
 	w := requestBundle(ctx, mux, strings.TrimSpace(string(head)))
 	assert.Equal(t, http.StatusNoContent, w.Code)
 	assert.Equal(t, 0, w.Body.Len())
+
+	commitUpstream(t, upstream, "second")
+	w = requestBundle(ctx, mux, strings.TrimSpace(string(head)))
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.True(t, strings.HasPrefix(w.Body.String(), "# v2 git bundle"))
 }
 
 func TestBundleRequestFreshensStaleMirror(t *testing.T) {
@@ -1323,7 +1328,7 @@ func TestBundleRequestFreshensStaleMirror(t *testing.T) {
 
 	_, ctx := logging.Configure(context.Background(), logging.Config{})
 	mirrorRoot := filepath.Join(t.TempDir(), "mirrors")
-	mirrorPath := filepath.Join(mirrorRoot, "github.com", "org", "repo")
+	mirrorPath := filepath.Join(mirrorRoot, "example.com", "org", "repo")
 	upstream := createUpstreamAndMirror(t, mirrorPath)
 	mux := newBundleTestStrategy(ctx, t, mirrorRoot, time.Millisecond)
 
@@ -1346,7 +1351,7 @@ func TestBundleRequestUpToDateFetchesDespiteRecentRefCheck(t *testing.T) {
 
 	_, ctx := logging.Configure(context.Background(), logging.Config{})
 	mirrorRoot := filepath.Join(t.TempDir(), "mirrors")
-	mirrorPath := filepath.Join(mirrorRoot, "github.com", "org", "repo")
+	mirrorPath := filepath.Join(mirrorRoot, "example.com", "org", "repo")
 	upstream := createUpstreamAndMirror(t, mirrorPath)
 	// A long RefCheckInterval so the startup fetch would suppress a
 	// rate-limited freshen for the rest of the test.
@@ -1374,7 +1379,7 @@ func TestBundleRequestFreshenFailureIsNotUpToDate(t *testing.T) {
 
 	_, ctx := logging.Configure(context.Background(), logging.Config{})
 	mirrorRoot := filepath.Join(t.TempDir(), "mirrors")
-	mirrorPath := filepath.Join(mirrorRoot, "github.com", "org", "repo")
+	mirrorPath := filepath.Join(mirrorRoot, "example.com", "org", "repo")
 	upstream := createUpstreamAndMirror(t, mirrorPath)
 	mux := newBundleTestStrategy(ctx, t, mirrorRoot, time.Millisecond)
 
@@ -1390,6 +1395,31 @@ func TestBundleRequestFreshenFailureIsNotUpToDate(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, w.Code)
 }
 
+func TestBundleRequestCreationFailureIsNotUpToDate(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not found in PATH")
+	}
+
+	_, ctx := logging.Configure(context.Background(), logging.Config{})
+	mirrorRoot := filepath.Join(t.TempDir(), "mirrors")
+	mirrorPath := filepath.Join(mirrorRoot, "example.com", "org", "repo")
+	upstream := createUpstreamAndMirror(t, mirrorPath)
+	baseOut, err := exec.Command("git", "-C", mirrorPath, "rev-parse", "HEAD").Output()
+	assert.NoError(t, err)
+	base := strings.TrimSpace(string(baseOut))
+	head := commitUpstream(t, upstream, "second")
+	cmd := exec.Command("git", "-C", mirrorPath, "-c", "fetch.unpackLimit=1000", "fetch", "origin")
+	output, err := cmd.CombinedOutput()
+	assert.NoError(t, err, string(output))
+	mux := newBundleTestStrategy(ctx, t, mirrorRoot, time.Millisecond)
+
+	headObject := filepath.Join(mirrorPath, "objects", head[:2], head[2:])
+	assert.NoError(t, os.Remove(headObject))
+
+	w := requestBundle(ctx, mux, base)
+	assert.Equal(t, http.StatusNotFound, w.Code)
+}
+
 func TestBundleRequestUnknownBase(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not found in PATH")
@@ -1397,7 +1427,7 @@ func TestBundleRequestUnknownBase(t *testing.T) {
 
 	_, ctx := logging.Configure(context.Background(), logging.Config{})
 	mirrorRoot := filepath.Join(t.TempDir(), "mirrors")
-	mirrorPath := filepath.Join(mirrorRoot, "github.com", "org", "repo")
+	mirrorPath := filepath.Join(mirrorRoot, "example.com", "org", "repo")
 	createUpstreamAndMirror(t, mirrorPath)
 	mux := newBundleTestStrategy(ctx, t, mirrorRoot, time.Millisecond)
 
