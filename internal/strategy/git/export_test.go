@@ -71,3 +71,11 @@ func ColdPreparationQueueLimitForTest() int {
 func (s *Strategy) ClaimSnapshotForTest(upstream string) (bool, error) {
 	return s.snapshotCoord.Claim(snapshotJobBase, upstream, 0)
 }
+
+// HoldUploadPackCloneSlotForTest acquires a clone-shaped upload-pack slot
+// and returns a release func. admitted is false if the limiter rejected or
+// the context was cancelled.
+func (s *Strategy) HoldUploadPackCloneSlotForTest(ctx context.Context, repo string) (release func(), admitted bool) {
+	release, result, _ := s.uploadPackLimiter.acquire(ctx, repo)
+	return release, result == acquireOK
+}

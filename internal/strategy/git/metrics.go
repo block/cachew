@@ -13,47 +13,51 @@ import (
 )
 
 type gitMetrics struct {
-	operationDuration      metric.Float64Histogram
-	operationTotal         metric.Int64Counter
-	requestTotal           metric.Int64Counter
-	snapshotServeTotal     metric.Int64Counter
-	snapshotServeSize      metric.Float64Histogram
-	snapshotServeDuration  metric.Float64Histogram
-	bundleServeTotal       metric.Int64Counter
-	bundleServeSize        metric.Float64Histogram
-	bundleServeDuration    metric.Float64Histogram
-	ensureRefsTotal        metric.Int64Counter
-	ensureRefsDuration     metric.Float64Histogram
-	spoolWriterDuration    metric.Float64Histogram
-	spoolFollowerWaitTotal metric.Int64Counter
-	spoolFollowerWait      metric.Float64Histogram
-	repackPackCount        metric.Float64Histogram
-	snapshotServeBandwidth metric.Float64Histogram
-	lfsPhaseDuration       metric.Float64Histogram
-	lfsPhaseBytes          metric.Float64Histogram
+	operationDuration        metric.Float64Histogram
+	operationTotal           metric.Int64Counter
+	requestTotal             metric.Int64Counter
+	snapshotServeTotal       metric.Int64Counter
+	snapshotServeSize        metric.Float64Histogram
+	snapshotServeDuration    metric.Float64Histogram
+	bundleServeTotal         metric.Int64Counter
+	bundleServeSize          metric.Float64Histogram
+	bundleServeDuration      metric.Float64Histogram
+	ensureRefsTotal          metric.Int64Counter
+	ensureRefsDuration       metric.Float64Histogram
+	spoolWriterDuration      metric.Float64Histogram
+	spoolFollowerWaitTotal   metric.Int64Counter
+	spoolFollowerWait        metric.Float64Histogram
+	repackPackCount          metric.Float64Histogram
+	snapshotServeBandwidth   metric.Float64Histogram
+	lfsPhaseDuration         metric.Float64Histogram
+	lfsPhaseBytes            metric.Float64Histogram
+	uploadPackCloneGateTotal metric.Int64Counter
+	uploadPackCloneQueueWait metric.Float64Histogram
 }
 
 func newGitMetrics() *gitMetrics {
 	meter := otel.Meter("cachew.git")
 	return &gitMetrics{
-		operationDuration:      metrics.NewHistogram(meter, "cachew.git.operation_duration_seconds", "s", "Duration of git operations (clone, fetch, repack, snapshot)", metrics.LatencyBuckets()),
-		operationTotal:         metrics.NewMetric[metric.Int64Counter](meter, "cachew.git.operations_total", "{operations}", "Total number of git operations"),
-		requestTotal:           metrics.NewMetric[metric.Int64Counter](meter, "cachew.git.requests_total", "{requests}", "Total number of git HTTP requests by type"),
-		snapshotServeTotal:     metrics.NewMetric[metric.Int64Counter](meter, "cachew.git.snapshot_serves_total", "{serves}", "Snapshot serve events by source (cache, spool, cold_cache, generated) and repository"),
-		snapshotServeSize:      metrics.NewHistogram(meter, "cachew.git.snapshot_serve_bytes", "By", "Size of served snapshots in bytes", metrics.ByteBuckets()),
-		snapshotServeDuration:  metrics.NewHistogram(meter, "cachew.git.snapshot_serve_duration_seconds", "s", "Wall-clock duration of snapshot serves, from handler entry to last byte sent", metrics.LatencyBuckets()),
-		bundleServeTotal:       metrics.NewMetric[metric.Int64Counter](meter, "cachew.git.bundle_serves_total", "{serves}", "Bundle serve events by source (cache, generated, up_to_date, miss_bad_base, miss) and repository"),
-		bundleServeSize:        metrics.NewHistogram(meter, "cachew.git.bundle_serve_bytes", "By", "Size of served bundles in bytes", metrics.ByteBuckets()),
-		bundleServeDuration:    metrics.NewHistogram(meter, "cachew.git.bundle_serve_duration_seconds", "s", "Wall-clock duration of bundle serves, including any on-demand generation", metrics.LatencyBuckets()),
-		ensureRefsTotal:        metrics.NewMetric[metric.Int64Counter](meter, "cachew.git.ensure_refs_total", "{requests}", "EnsureRefs requests by fetched and status"),
-		ensureRefsDuration:     metrics.NewHistogram(meter, "cachew.git.ensure_refs_duration_seconds", "s", "Duration of EnsureRefs requests, including any upstream fetch", metrics.FastLatencyBuckets()),
-		spoolWriterDuration:    metrics.NewHistogram(meter, "cachew.git.spool_writer_duration_seconds", "s", "Time the snapshot spool writer spent producing the stream", metrics.LatencyBuckets()),
-		spoolFollowerWaitTotal: metrics.NewMetric[metric.Int64Counter](meter, "cachew.git.spool_follower_waits_total", "{waits}", "Snapshot spool follower events, by outcome (served, writer_failed)"),
-		spoolFollowerWait:      metrics.NewHistogram(meter, "cachew.git.spool_follower_wait_seconds", "s", "Time a snapshot spool follower spent waiting for the writer to publish headers", metrics.FastLatencyBuckets()),
-		repackPackCount:        metrics.NewHistogram(meter, "cachew.git.repack_pack_count", "{packs}", "Pack file count observed before and after repack, by stage (before, after)", metrics.SmallCountBuckets()),
-		snapshotServeBandwidth: metrics.NewHistogram(meter, "cachew.git.snapshot_serve_bandwidth_mbps", "MiBy/s", "Per-request snapshot serve throughput in MiB/s, by source and repository", metrics.BandwidthMbpsBuckets()),
-		lfsPhaseDuration:       metrics.NewHistogram(meter, "cachew.git.lfs_phase_duration_seconds", "s", "Duration of an LFS-snapshot generation phase (discover, clone, fetch, archive_upload), by status and repository", metrics.LatencyBuckets()),
-		lfsPhaseBytes:          metrics.NewHistogram(meter, "cachew.git.lfs_phase_bytes", "By", "Bytes processed in an LFS-snapshot generation phase, by phase and repository (e.g. .git/lfs size after fetch)", metrics.ByteBuckets()),
+		operationDuration:        metrics.NewHistogram(meter, "cachew.git.operation_duration_seconds", "s", "Duration of git operations (clone, fetch, repack, snapshot)", metrics.LatencyBuckets()),
+		operationTotal:           metrics.NewMetric[metric.Int64Counter](meter, "cachew.git.operations_total", "{operations}", "Total number of git operations"),
+		requestTotal:             metrics.NewMetric[metric.Int64Counter](meter, "cachew.git.requests_total", "{requests}", "Total number of git HTTP requests by type"),
+		snapshotServeTotal:       metrics.NewMetric[metric.Int64Counter](meter, "cachew.git.snapshot_serves_total", "{serves}", "Snapshot serve events by source (cache, spool, cold_cache, generated) and repository"),
+		snapshotServeSize:        metrics.NewHistogram(meter, "cachew.git.snapshot_serve_bytes", "By", "Size of served snapshots in bytes", metrics.ByteBuckets()),
+		snapshotServeDuration:    metrics.NewHistogram(meter, "cachew.git.snapshot_serve_duration_seconds", "s", "Wall-clock duration of snapshot serves, from handler entry to last byte sent", metrics.LatencyBuckets()),
+		bundleServeTotal:         metrics.NewMetric[metric.Int64Counter](meter, "cachew.git.bundle_serves_total", "{serves}", "Bundle serve events by source (cache, generated, up_to_date, miss_bad_base, miss) and repository"),
+		bundleServeSize:          metrics.NewHistogram(meter, "cachew.git.bundle_serve_bytes", "By", "Size of served bundles in bytes", metrics.ByteBuckets()),
+		bundleServeDuration:      metrics.NewHistogram(meter, "cachew.git.bundle_serve_duration_seconds", "s", "Wall-clock duration of bundle serves, including any on-demand generation", metrics.LatencyBuckets()),
+		ensureRefsTotal:          metrics.NewMetric[metric.Int64Counter](meter, "cachew.git.ensure_refs_total", "{requests}", "EnsureRefs requests by fetched and status"),
+		ensureRefsDuration:       metrics.NewHistogram(meter, "cachew.git.ensure_refs_duration_seconds", "s", "Duration of EnsureRefs requests, including any upstream fetch", metrics.FastLatencyBuckets()),
+		spoolWriterDuration:      metrics.NewHistogram(meter, "cachew.git.spool_writer_duration_seconds", "s", "Time the snapshot spool writer spent producing the stream", metrics.LatencyBuckets()),
+		spoolFollowerWaitTotal:   metrics.NewMetric[metric.Int64Counter](meter, "cachew.git.spool_follower_waits_total", "{waits}", "Snapshot spool follower events, by outcome (served, writer_failed)"),
+		spoolFollowerWait:        metrics.NewHistogram(meter, "cachew.git.spool_follower_wait_seconds", "s", "Time a snapshot spool follower spent waiting for the writer to publish headers", metrics.FastLatencyBuckets()),
+		repackPackCount:          metrics.NewHistogram(meter, "cachew.git.repack_pack_count", "{packs}", "Pack file count observed before and after repack, by stage (before, after)", metrics.SmallCountBuckets()),
+		snapshotServeBandwidth:   metrics.NewHistogram(meter, "cachew.git.snapshot_serve_bandwidth_mbps", "MiBy/s", "Per-request snapshot serve throughput in MiB/s, by source and repository", metrics.BandwidthMbpsBuckets()),
+		lfsPhaseDuration:         metrics.NewHistogram(meter, "cachew.git.lfs_phase_duration_seconds", "s", "Duration of an LFS-snapshot generation phase (discover, clone, fetch, archive_upload), by status and repository", metrics.LatencyBuckets()),
+		lfsPhaseBytes:            metrics.NewHistogram(meter, "cachew.git.lfs_phase_bytes", "By", "Bytes processed in an LFS-snapshot generation phase, by phase and repository (e.g. .git/lfs size after fetch)", metrics.ByteBuckets()),
+		uploadPackCloneGateTotal: metrics.NewMetric[metric.Int64Counter](meter, "cachew.git.upload_pack_clone_gate_total", "{requests}", "Clone-shaped git-upload-pack admissions, rejections, and cancellations"),
+		uploadPackCloneQueueWait: metrics.NewHistogram(meter, "cachew.git.upload_pack_clone_queue_wait_seconds", "s", "Time spent waiting for a clone-shaped upload-pack slot", metrics.FastLatencyBuckets()),
 	}
 }
 
@@ -182,4 +186,20 @@ func (m *gitMetrics) recordLFSPhaseBytes(ctx context.Context, repo, phase string
 		attribute.String("repository", repo),
 		attribute.String("phase", phase),
 	))
+}
+
+// recordUploadPackCloneGate records the outcome of the clone-shaped
+// upload-pack concurrency gate. Result is "admitted", "rejected", or "canceled".
+func (m *gitMetrics) recordUploadPackCloneGate(ctx context.Context, result, repo string, waited time.Duration) {
+	if m == nil {
+		return
+	}
+	attrs := metric.WithAttributes(
+		attribute.String("result", result),
+		attribute.String("repository", repo),
+	)
+	m.uploadPackCloneGateTotal.Add(ctx, 1, attrs)
+	if waited > 0 {
+		m.uploadPackCloneQueueWait.Record(ctx, waited.Seconds(), attrs)
+	}
 }

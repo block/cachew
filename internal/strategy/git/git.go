@@ -53,6 +53,14 @@ type Config struct {
 	BundleCacheTTL         time.Duration `hcl:"bundle-cache-ttl,optional" help:"TTL of cached server-side git bundles." default:"2h"`
 
 	SnapshotFilters map[string]string `hcl:"snapshot-filters,optional" help:"Per-repository git partial-clone filter applied to workstation snapshots, keyed by host/org/repo (e.g. {\"github.com/org/repo\": \"blob:none\"}). Filtered snapshots contain full history metadata but only the blobs needed for the HEAD checkout; clients lazily fetch historical blobs through cachew on demand."`
+
+	// Clone-shaped git-upload-pack gating. Incremental fetches (pkt-lines
+	// containing "have ") are never limited. 0 concurrency is unlimited and
+	// matches historical behaviour.
+	UploadPackCloneConcurrency        int           `hcl:"upload-pack-clone-concurrency,optional" help:"Max concurrent clone-shaped git-upload-pack responses (no 'have' lines). 0 is unlimited." default:"0"`
+	UploadPackClonePerRepoConcurrency int           `hcl:"upload-pack-clone-per-repo-concurrency,optional" help:"Max concurrent clone-shaped git-upload-pack responses per repository. 0 is unlimited." default:"0"`
+	UploadPackCloneQueueTimeout       time.Duration `hcl:"upload-pack-clone-queue-timeout,optional" help:"How long a clone-shaped upload-pack may wait for a slot before 503. 0 fails immediately when at capacity." default:"0"`
+	UploadPackCloneRetryAfter         time.Duration `hcl:"upload-pack-clone-retry-after,optional" help:"Retry-After value sent with 503 overload responses." default:"30s"`
 }
 
 type Strategy struct {
@@ -75,6 +83,7 @@ type Strategy struct {
 	mirrorPreparations    sync.Map // One entry per upstream URL prevents duplicate preparation jobs.
 	deferredRestoreOnce   sync.Map // keyed by upstream URL, ensures at most one deferred restore per repo
 	metrics               *gitMetrics
+	uploadPackLimiter     *uploadPackLimiter
 	repoCounts            *RepoCounts
 	snapshotCoord         *SnapshotCoordinator
 	coldPreparationDelay  func() time.Duration
@@ -141,16 +150,17 @@ func New(
 	m := newGitMetrics()
 
 	s := &Strategy{
-		config:        config,
-		cache:         cache,
-		cloneManager:  cloneManager,
-		httpClient:    http.DefaultClient,
-		ctx:           ctx,
-		scheduler:     scheduler.WithQueuePrefix("git"),
-		spools:        make(map[string]*RepoSpools),
-		tokenManager:  tokenManager,
-		metrics:       m,
-		metadataWired: make(chan struct{}),
+		config:            config,
+		cache:             cache,
+		cloneManager:      cloneManager,
+		httpClient:        http.DefaultClient,
+		ctx:               ctx,
+		scheduler:         scheduler.WithQueuePrefix("git"),
+		spools:            make(map[string]*RepoSpools),
+		tokenManager:      tokenManager,
+		metrics:           m,
+		uploadPackLimiter: newUploadPackLimiter(config),
+		metadataWired:     make(chan struct{}),
 		coldPreparationDelay: func() time.Duration {
 			return rand.N(coldPreparationSpread) //nolint:gosec // The delay does not protect sensitive data.
 		},
@@ -221,7 +231,11 @@ func New(
 	mux.Handle("GET /git/{host}/{path...}", http.HandlerFunc(s.handleRequest))
 	mux.Handle("POST /git/{host}/{path...}", http.HandlerFunc(s.handleRequest))
 
-	logger.InfoContext(ctx, "Git strategy initialized", "snapshot_interval", config.SnapshotInterval)
+	logger.InfoContext(ctx, "Git strategy initialized",
+		"snapshot_interval", config.SnapshotInterval,
+		"upload_pack_clone_concurrency", config.UploadPackCloneConcurrency,
+		"upload_pack_clone_per_repo_concurrency", config.UploadPackClonePerRepoConcurrency,
+		"upload_pack_clone_queue_timeout", config.UploadPackCloneQueueTimeout)
 
 	return s, nil
 }
@@ -387,6 +401,11 @@ func (s *Strategy) handleGitRequest(w http.ResponseWriter, r *http.Request, host
 		if err := s.repoCounts.IncrementClone(upstreamURL); err != nil {
 			logger.WarnContext(ctx, "Failed to increment repo clone count", "error", err)
 		}
+		release, admitted := s.gateCloneUploadPack(w, r, upstreamURL)
+		if !admitted {
+			return
+		}
+		defer release()
 	}
 
 	state := repo.State()
