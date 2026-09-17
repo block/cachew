@@ -5,7 +5,10 @@ package gitclone
 import (
 	"bufio"
 	"context"
+	"encoding/base64"
+	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 
 	"github.com/alecthomas/errors"
@@ -35,18 +38,48 @@ func (r *Repository) GitCommand(ctx context.Context, args ...string) (*exec.Cmd,
 		allArgs = append(allArgs, configArgs...)
 	}
 
-	// Add credential helper configuration if we have a token
-	// This ensures git uses the GitHub App token for authentication
-	// for all operations (clone, fetch, remote update, etc.)
+	var credentialConfigKey string
+	var credentialConfigValue string
 	if token != "" {
-		escapedToken := strings.ReplaceAll(token, "'", "'\\''")
-		credHelper := "!f() { test \"$1\" = get && echo username=x-access-token && printf 'password=%s\\n' '" + escapedToken + "'; }; f"
-		allArgs = append(allArgs, "-c", "credential.helper="+credHelper)
+		credentialConfigKey = "http." + repoURL + ".extraHeader"
+		basicToken := base64.StdEncoding.EncodeToString([]byte("x-access-token:" + token))
+		credentialConfigValue = "Authorization: Basic " + basicToken
 	}
 
 	allArgs = append(allArgs, args...)
 
-	return exec.CommandContext(ctx, "git", allArgs...), nil
+	cmd := exec.CommandContext(ctx, "git", allArgs...)
+	if credentialConfigKey != "" {
+		cmd.Env = appendGitConfigEnv(os.Environ(), credentialConfigKey, credentialConfigValue)
+	}
+	return cmd, nil
+}
+
+func appendGitConfigEnv(env []string, key, value string) []string {
+	index := 0
+	result := make([]string, 0, len(env)+3)
+	for _, entry := range env {
+		name, _, _ := strings.Cut(entry, "=")
+		if name == "GIT_CONFIG_COUNT" {
+			continue
+		}
+		result = append(result, entry)
+		for _, prefix := range []string{"GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_"} {
+			suffix, ok := strings.CutPrefix(name, prefix)
+			if !ok {
+				continue
+			}
+			candidate, err := strconv.Atoi(suffix)
+			if err == nil && candidate >= index {
+				index = candidate + 1
+			}
+		}
+	}
+	return append(result,
+		"GIT_CONFIG_COUNT="+strconv.Itoa(index+1),
+		"GIT_CONFIG_KEY_"+strconv.Itoa(index)+"="+key,
+		"GIT_CONFIG_VALUE_"+strconv.Itoa(index)+"="+value,
+	)
 }
 
 func getInsteadOfDisableArgsForURL(ctx context.Context, targetURL string) ([]string, error) {
