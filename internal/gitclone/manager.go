@@ -705,8 +705,6 @@ func (r *Repository) EnsureRefsUpToDate(ctx context.Context) (needsFetch bool, e
 		r.mu.Unlock()
 		return false, nil
 	}
-	// Keep in-progress checks invalid so overlapping requests perform their own
-	// check instead of treating unfinished work as proof that refs are fresh.
 	r.refCheckValid = false
 	r.mu.Unlock()
 
