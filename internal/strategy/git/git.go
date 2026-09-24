@@ -417,14 +417,23 @@ func (s *Strategy) serveReadyRepo(w http.ResponseWriter, r *http.Request, repo *
 	ctx := r.Context()
 	logger := logging.FromContext(ctx)
 
+	isDiscovery := isInfoRefs
+	if !isDiscovery {
+		var err error
+		isDiscovery, err = requestIsLsRefs(pathValue, r)
+		if err != nil {
+			return errors.Wrap(err, "inspect ls-refs request")
+		}
+	}
+
 	stale, err := s.checkRefsStale(ctx, repo)
-	if isInfoRefs && err != nil {
+	if isDiscovery && err != nil {
 		logger.ErrorContext(ctx, "Failed to check refs freshness, forwarding to upstream", "upstream", repo.UpstreamURL(),
 			"error", err)
 		s.forwardToUpstream(w, r, host, pathValue)
 		return nil
 	}
-	if isInfoRefs && stale {
+	if isDiscovery && stale {
 		// Mirror is behind upstream. Forward to upstream so the client gets
 		// fresh refs immediately, and kick off a background fetch so the
 		// mirror catches up for subsequent requests.

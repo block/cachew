@@ -732,6 +732,9 @@ func (r *Repository) EnsureRefsUpToDate(ctx context.Context) (needsFetch bool, e
 		}
 		localSHA, exists := localRefs[ref]
 		if !exists || localSHA != upstreamSHA {
+			r.mu.Lock()
+			r.refCheckValid = false
+			r.mu.Unlock()
 			return true, nil
 		}
 	}

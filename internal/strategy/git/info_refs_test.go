@@ -137,6 +137,18 @@ func (f *infoRefsFixture) request(t *testing.T) *httptest.ResponseRecorder {
 	return w
 }
 
+func (f *infoRefsFixture) requestLsRefs(t *testing.T) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequestWithContext(f.ctx, http.MethodPost,
+		"/git/example.test/org/repo/git-upload-pack", strings.NewReader("0014command=ls-refs\n0000"))
+	req.Header.Set("Git-Protocol", "version=2")
+	req.SetPathValue("host", "example.test")
+	req.SetPathValue("path", "org/repo/git-upload-pack")
+	w := httptest.NewRecorder()
+	f.handler.ServeHTTP(w, req)
+	return w
+}
+
 func (f *infoRefsFixture) commitUpstream(t *testing.T) string {
 	t.Helper()
 	assert.NoError(t, os.WriteFile(filepath.Join(f.workPath, "file.txt"), []byte("updated"), 0o644))
@@ -156,6 +168,18 @@ func TestInfoRefsCheckErrorForwardsUpstream(t *testing.T) {
 	assert.Equal(t, int32(1), fixture.transport.hits.Load())
 	assert.Contains(t, fixture.logs.String(), "Failed to check refs freshness, forwarding to upstream")
 	assert.Contains(t, fixture.logs.String(), "check upstream refs")
+}
+
+func TestLsRefsCheckErrorForwardsUpstream(t *testing.T) {
+	fixture := newInfoRefsFixture(t)
+	setInfoRefsLsRemote(t, "", true)
+
+	w := fixture.requestLsRefs(t)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "proxied-info-refs", w.Body.String())
+	assert.Equal(t, int32(1), fixture.transport.hits.Load())
+	assert.Contains(t, fixture.logs.String(), "Failed to check refs freshness, forwarding to upstream")
 }
 
 func TestInfoRefsStaleForwardsAndFetches(t *testing.T) {
