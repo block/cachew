@@ -705,8 +705,9 @@ func (r *Repository) EnsureRefsUpToDate(ctx context.Context) (needsFetch bool, e
 		r.mu.Unlock()
 		return false, nil
 	}
-	r.lastRefCheck = time.Now()
-	r.refCheckValid = true
+	// Keep in-progress checks invalid so overlapping requests perform their own
+	// check instead of treating unfinished work as proof that refs are fresh.
+	r.refCheckValid = false
 	r.mu.Unlock()
 
 	localRefs, err := r.GetLocalRefs(ctx)
@@ -719,9 +720,6 @@ func (r *Repository) EnsureRefsUpToDate(ctx context.Context) (needsFetch bool, e
 
 	upstreamRefs, err := r.GetUpstreamRefs(lsCtx)
 	if err != nil {
-		r.mu.Lock()
-		r.refCheckValid = false
-		r.mu.Unlock()
 		return false, errors.Wrap(err, "get upstream refs")
 	}
 
@@ -734,13 +732,14 @@ func (r *Repository) EnsureRefsUpToDate(ctx context.Context) (needsFetch bool, e
 		}
 		localSHA, exists := localRefs[ref]
 		if !exists || localSHA != upstreamSHA {
-			r.mu.Lock()
-			r.refCheckValid = false
-			r.mu.Unlock()
 			return true, nil
 		}
 	}
 
+	r.mu.Lock()
+	r.lastRefCheck = time.Now()
+	r.refCheckValid = true
+	r.mu.Unlock()
 	return false, nil
 }
 

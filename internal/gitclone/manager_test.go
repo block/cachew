@@ -725,6 +725,88 @@ func TestRepository_EnsureRefs(t *testing.T) {
 	assert.Equal(t, newSHA, resolved[head])
 }
 
+func TestRepositoryEnsureRefsUpToDateDoesNotCacheLocalError(t *testing.T) {
+	config := testRepoConfig()
+	config.RefCheckInterval = time.Hour
+	repo := &Repository{
+		config:      config,
+		path:        filepath.Join(t.TempDir(), "missing"),
+		upstreamURL: filepath.Join(t.TempDir(), "upstream.git"),
+	}
+
+	_, err := repo.EnsureRefsUpToDate(t.Context())
+
+	assert.Error(t, err)
+	repo.mu.Lock()
+	defer repo.mu.Unlock()
+	assert.False(t, repo.refCheckValid)
+}
+
+func TestRepositoryEnsureRefsUpToDateDoesNotCacheInFlightCheck(t *testing.T) {
+	tmpDir := t.TempDir()
+	upstreamPath := createBareRepo(t, tmpDir)
+	config := testRepoConfig()
+	config.RefCheckInterval = time.Hour
+	repo := &Repository{
+		state:       StateEmpty,
+		config:      config,
+		path:        filepath.Join(tmpDir, "clone"),
+		upstreamURL: upstreamPath,
+		fetchSem:    make(chan struct{}, 1),
+	}
+	repo.fetchSem <- struct{}{}
+	assert.NoError(t, repo.Clone(t.Context()))
+
+	realGit, err := exec.LookPath("git")
+	assert.NoError(t, err)
+	binDir := t.TempDir()
+	started := filepath.Join(binDir, "started")
+	release := filepath.Join(binDir, "release")
+	script := fmt.Sprintf(`#!/bin/sh
+if [ "$1" = "ls-remote" ]; then
+  touch %q
+  while [ ! -e %q ]; do sleep 0.01; done
+fi
+exec %q "$@"
+`, started, release, realGit)
+	assert.NoError(t, os.WriteFile(filepath.Join(binDir, "git"), []byte(script), 0o755))
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	type result struct {
+		stale bool
+		err   error
+	}
+	resultCh := make(chan result, 1)
+	go func() {
+		stale, err := repo.EnsureRefsUpToDate(t.Context())
+		resultCh <- result{stale: stale, err: err}
+	}()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(started); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("ls-remote did not start")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	repo.mu.Lock()
+	valid := repo.refCheckValid
+	repo.mu.Unlock()
+	assert.False(t, valid)
+	assert.NoError(t, os.WriteFile(release, nil, 0o644))
+
+	got := <-resultCh
+	assert.NoError(t, got.err)
+	assert.False(t, got.stale)
+	repo.mu.Lock()
+	defer repo.mu.Unlock()
+	assert.True(t, repo.refCheckValid)
+}
+
 // TestMirrorConfigAllowsUnreachableSHA verifies that the mirror config lets
 // git upload-pack serve objects that are present in the ODB but unreachable
 // from any ref (e.g. after a force-push orphans a commit).
