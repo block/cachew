@@ -705,8 +705,7 @@ func (r *Repository) EnsureRefsUpToDate(ctx context.Context) (needsFetch bool, e
 		r.mu.Unlock()
 		return false, nil
 	}
-	r.lastRefCheck = time.Now()
-	r.refCheckValid = true
+	r.refCheckValid = false
 	r.mu.Unlock()
 
 	localRefs, err := r.GetLocalRefs(ctx)
@@ -719,9 +718,6 @@ func (r *Repository) EnsureRefsUpToDate(ctx context.Context) (needsFetch bool, e
 
 	upstreamRefs, err := r.GetUpstreamRefs(lsCtx)
 	if err != nil {
-		r.mu.Lock()
-		r.refCheckValid = false
-		r.mu.Unlock()
 		return false, errors.Wrap(err, "get upstream refs")
 	}
 
@@ -741,6 +737,10 @@ func (r *Repository) EnsureRefsUpToDate(ctx context.Context) (needsFetch bool, e
 		}
 	}
 
+	r.mu.Lock()
+	r.lastRefCheck = time.Now()
+	r.refCheckValid = true
+	r.mu.Unlock()
 	return false, nil
 }
 

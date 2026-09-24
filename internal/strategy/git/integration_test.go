@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/http/cgi"
 	"net/http/httptest"
 	"os"
 	"os/exec"
@@ -90,14 +91,14 @@ func testServerWithLogging(ctx context.Context, handler http.Handler) *httptest.
 }
 
 // TestIntegrationGitCloneViaProxy tests cloning a repository through the git proxy.
-// This test requires git to be installed and network access.
 func TestIntegrationGitCloneViaProxy(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")
 	}
 
 	// Check if git is available
-	if _, err := exec.LookPath("git"); err != nil {
+	gitPath, err := exec.LookPath("git")
+	if err != nil {
 		t.Skip("git not found in PATH")
 	}
 
@@ -105,9 +106,30 @@ func TestIntegrationGitCloneViaProxy(t *testing.T) {
 	tmpDir := t.TempDir()
 	clonesDir := filepath.Join(tmpDir, "clones")
 	workDir := filepath.Join(tmpDir, "work")
+	upstreamRoot := filepath.Join(tmpDir, "upstream")
+	upstreamRepo := filepath.Join(upstreamRoot, "repo")
+	sourceDir := filepath.Join(tmpDir, "source")
 
-	err := os.MkdirAll(workDir, 0o750)
+	err = os.MkdirAll(workDir, 0o750)
 	assert.NoError(t, err)
+	runGit(t, "", "init", "--bare", upstreamRepo)
+	runGit(t, "", "clone", upstreamRepo, sourceDir)
+	assert.NoError(t, os.WriteFile(filepath.Join(sourceDir, "README"), []byte("test repository\n"), 0o644))
+	runGit(t, sourceDir, "add", "README")
+	runGit(t, sourceDir, "commit", "-m", "initial commit")
+	runGit(t, sourceDir, "push", "origin", "HEAD:main")
+	runGit(t, upstreamRepo, "symbolic-ref", "HEAD", "refs/heads/main")
+
+	upstreamServer := httptest.NewTLSServer(&cgi.Handler{
+		Path: gitPath,
+		Args: []string{"http-backend"},
+		Env: []string{
+			"GIT_PROJECT_ROOT=" + upstreamRoot,
+			"GIT_HTTP_EXPORT_ALL=true",
+		},
+	})
+	defer upstreamServer.Close()
+	t.Setenv("GIT_SSL_NO_VERIFY", "true")
 
 	// Create the git strategy
 	gc := gitclone.NewManagerProvider(ctx, gitclone.Config{
@@ -117,16 +139,16 @@ func TestIntegrationGitCloneViaProxy(t *testing.T) {
 	mux := http.NewServeMux()
 	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: time.Hour})
 	assert.NoError(t, err)
-	_, err = git.New(ctx, git.Config{}, newTestScheduler(ctx, t), memCache, mux, gc, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
+	strategy, err := git.New(ctx, git.Config{}, newTestScheduler(ctx, t), memCache, mux, gc, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
 	assert.NoError(t, err)
+	strategy.SetHTTPTransport(upstreamServer.Client().Transport)
 
 	// Start a test server with logging middleware
 	server := testServerWithLogging(ctx, mux)
 	defer server.Close()
 
-	// Clone a small public repository through the proxy
-	// Using a small test repo to keep the test fast
-	repoURL := fmt.Sprintf("%s/git/github.com/octocat/Hello-World", server.URL)
+	upstreamHost := strings.TrimPrefix(upstreamServer.URL, "https://")
+	repoURL := fmt.Sprintf("%s/git/%s/repo", server.URL, upstreamHost)
 
 	// First clone - should forward to upstream and start background clone
 	cmd := exec.Command("git", "clone", repoURL, filepath.Join(workDir, "repo1"))
@@ -142,8 +164,17 @@ func TestIntegrationGitCloneViaProxy(t *testing.T) {
 	_, err = os.Stat(readmePath)
 	assert.NoError(t, err)
 
-	// Wait a bit for background clone to complete
-	time.Sleep(2 * time.Second)
+	clonePath := filepath.Join(clonesDir, upstreamHost, "repo")
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(filepath.Join(clonePath, "HEAD")); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("background mirror clone did not complete")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 
 	// Second clone - should be served from local cache
 	cmd = exec.Command("git", "clone", repoURL, filepath.Join(workDir, "repo2"))
@@ -160,7 +191,6 @@ func TestIntegrationGitCloneViaProxy(t *testing.T) {
 	assert.NoError(t, err)
 
 	// Verify the clone was created
-	clonePath := filepath.Join(clonesDir, "github.com", "octocat", "Hello-World")
 	info, err := os.Stat(clonePath)
 	assert.NoError(t, err)
 	assert.True(t, info.IsDir())
@@ -177,7 +207,8 @@ func TestIntegrationGitFetchViaProxy(t *testing.T) {
 		t.Skip("skipping integration test in short mode")
 	}
 
-	if _, err := exec.LookPath("git"); err != nil {
+	gitPath, err := exec.LookPath("git")
+	if err != nil {
 		t.Skip("git not found in PATH")
 	}
 
@@ -185,9 +216,30 @@ func TestIntegrationGitFetchViaProxy(t *testing.T) {
 	tmpDir := t.TempDir()
 	clonesDir := filepath.Join(tmpDir, "clones")
 	workDir := filepath.Join(tmpDir, "work")
+	upstreamRoot := filepath.Join(tmpDir, "upstream")
+	upstreamRepo := filepath.Join(upstreamRoot, "repo")
+	sourceDir := filepath.Join(tmpDir, "source")
 
-	err := os.MkdirAll(workDir, 0o750)
+	err = os.MkdirAll(workDir, 0o750)
 	assert.NoError(t, err)
+	runGit(t, "", "init", "--bare", upstreamRepo)
+	runGit(t, "", "clone", upstreamRepo, sourceDir)
+	assert.NoError(t, os.WriteFile(filepath.Join(sourceDir, "README"), []byte("test repository\n"), 0o644))
+	runGit(t, sourceDir, "add", "README")
+	runGit(t, sourceDir, "commit", "-m", "initial commit")
+	runGit(t, sourceDir, "push", "origin", "HEAD:main")
+	runGit(t, upstreamRepo, "symbolic-ref", "HEAD", "refs/heads/main")
+
+	upstreamServer := httptest.NewTLSServer(&cgi.Handler{
+		Path: gitPath,
+		Args: []string{"http-backend"},
+		Env: []string{
+			"GIT_PROJECT_ROOT=" + upstreamRoot,
+			"GIT_HTTP_EXPORT_ALL=true",
+		},
+	})
+	defer upstreamServer.Close()
+	t.Setenv("GIT_SSL_NO_VERIFY", "true")
 
 	gc := gitclone.NewManagerProvider(ctx, gitclone.Config{
 		MirrorRoot:    clonesDir,
@@ -197,13 +249,15 @@ func TestIntegrationGitFetchViaProxy(t *testing.T) {
 	mux := http.NewServeMux()
 	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: time.Hour})
 	assert.NoError(t, err)
-	_, err = git.New(ctx, git.Config{}, newTestScheduler(ctx, t), memCache, mux, gc, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
+	strategy, err := git.New(ctx, git.Config{}, newTestScheduler(ctx, t), memCache, mux, gc, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
 	assert.NoError(t, err)
+	strategy.SetHTTPTransport(upstreamServer.Client().Transport)
 
 	server := testServerWithLogging(ctx, mux)
 	defer server.Close()
 
-	repoURL := fmt.Sprintf("%s/git/github.com/octocat/Hello-World", server.URL)
+	upstreamHost := strings.TrimPrefix(upstreamServer.URL, "https://")
+	repoURL := fmt.Sprintf("%s/git/%s/repo", server.URL, upstreamHost)
 
 	// Clone first
 	cmd := exec.Command("git", "clone", repoURL, filepath.Join(workDir, "repo"))
@@ -214,8 +268,17 @@ func TestIntegrationGitFetchViaProxy(t *testing.T) {
 	}
 	assert.NoError(t, err)
 
-	// Wait for background clone
-	time.Sleep(2 * time.Second)
+	clonePath := filepath.Join(clonesDir, upstreamHost, "repo")
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(filepath.Join(clonePath, "HEAD")); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("background mirror clone did not complete")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 
 	// Fetch should work
 	cmd = exec.Command("git", "-C", filepath.Join(workDir, "repo"), "fetch", "origin")

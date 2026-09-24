@@ -415,13 +415,29 @@ func (s *Strategy) handleGitRequest(w http.ResponseWriter, r *http.Request, host
 
 func (s *Strategy) serveReadyRepo(w http.ResponseWriter, r *http.Request, repo *gitclone.Repository, host, pathValue string, isInfoRefs bool) error {
 	ctx := r.Context()
+	logger := logging.FromContext(ctx)
 
-	stale, _ := s.checkRefsStale(ctx, repo) //nolint:errcheck // best-effort; treat as non-stale on failure
-	if isInfoRefs && stale {
+	isDiscovery := isInfoRefs
+	if !isDiscovery {
+		var err error
+		isDiscovery, err = requestIsLsRefs(pathValue, r)
+		if err != nil {
+			return errors.Wrap(err, "inspect ls-refs request")
+		}
+	}
+
+	stale, err := s.checkRefsStale(ctx, repo)
+	if isDiscovery && err != nil {
+		logger.ErrorContext(ctx, "Failed to check refs freshness, forwarding to upstream", "upstream", repo.UpstreamURL(),
+			"error", err)
+		s.forwardToUpstream(w, r, host, pathValue)
+		return nil
+	}
+	if isDiscovery && stale {
 		// Mirror is behind upstream. Forward to upstream so the client gets
 		// fresh refs immediately, and kick off a background fetch so the
 		// mirror catches up for subsequent requests.
-		logging.FromContext(ctx).InfoContext(ctx, "Refs stale, forwarding to upstream and fetching in background", "upstream", repo.UpstreamURL())
+		logger.InfoContext(ctx, "Refs stale, forwarding to upstream and fetching in background", "upstream", repo.UpstreamURL())
 		s.submitFetch(repo)
 		s.forwardToUpstream(w, r, host, pathValue)
 		return nil
@@ -445,7 +461,7 @@ func (s *Strategy) serveReadyRepo(w http.ResponseWriter, r *http.Request, repo *
 		// The mirror is missing the requested object — most likely a commit
 		// that was advertised before a concurrent force-push fetch orphaned
 		// it. Fall back to upstream so the client is not left with an error.
-		logging.FromContext(ctx).InfoContext(ctx, "Falling back to upstream due to 'not our ref'", "path", pathValue)
+		logger.InfoContext(ctx, "Falling back to upstream due to 'not our ref'", "path", pathValue)
 		if bodyBytes != nil {
 			r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 			r.ContentLength = int64(len(bodyBytes))

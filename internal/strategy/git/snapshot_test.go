@@ -3,6 +3,7 @@ package git_test
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -402,13 +403,24 @@ func TestSnapshotGenerationWithFilterFailsWhenMirrorIgnoresFilter(t *testing.T) 
 
 	waitForReady(t, s)
 
-	// A mirror missing uploadpack.allowFilter makes git silently fall back to
-	// a full clone; generation must fail rather than cache the full artifact.
-	// Unset only after waitForReady: startup warming reruns configureMirror,
-	// which would re-enable the capability.
 	cmd := exec.Command("git", "-C", mirrorPath, "config", "--unset", "uploadpack.allowfilter")
 	output, err := cmd.CombinedOutput()
 	assert.NoError(t, err, string(output))
+
+	realGit, err := exec.LookPath("git")
+	assert.NoError(t, err)
+	binDir := t.TempDir()
+	gitWrapper := filepath.Join(binDir, "git")
+	script := fmt.Sprintf(`#!/bin/sh
+%q "$@"
+git_status=$?
+if [ "$1" = "clone" ] && [ "$git_status" -eq 0 ]; then
+  echo "warning: filtering not recognized by server, ignoring" >&2
+fi
+exit "$git_status"
+`, realGit)
+	assert.NoError(t, os.WriteFile(gitWrapper, []byte(script), 0o755))
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	err = s.GenerateAndUploadSnapshot(ctx, repo)
 	assert.Error(t, err)

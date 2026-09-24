@@ -77,10 +77,37 @@ func RequestIsClone(pathValue string, r *http.Request) (bool, error) {
 	if r.Body == nil || r.Body == http.NoBody {
 		return true, nil
 	}
+	inspect, err := inspectUploadPackBody(r)
+	if err != nil {
+		return false, err
+	}
+	if isLsRefsBody(inspect) {
+		return false, nil
+	}
+	// Trailing space disambiguates from capability tokens and repo names.
+	if bytes.Contains(inspect, haveNeedle) {
+		return false, nil
+	}
+	return true, nil
+}
+
+func requestIsLsRefs(pathValue string, r *http.Request) (bool, error) {
+	if r.Method != http.MethodPost || !strings.HasSuffix(pathValue, "/git-upload-pack") ||
+		r.Body == nil || r.Body == http.NoBody {
+		return false, nil
+	}
+	inspect, err := inspectUploadPackBody(r)
+	if err != nil {
+		return false, err
+	}
+	return isLsRefsBody(inspect), nil
+}
+
+func inspectUploadPackBody(r *http.Request) ([]byte, error) {
 	prefix := make([]byte, uploadPackBodyInspectLimit)
 	n, err := io.ReadFull(r.Body, prefix)
 	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
-		return false, errors.Wrap(err, "read upload-pack body")
+		return nil, errors.Wrap(err, "read upload-pack body")
 	}
 	prefix = prefix[:n]
 	// Replay: prefix + the rest of the body, untouched. ContentLength stays
@@ -99,19 +126,15 @@ func RequestIsClone(pathValue string, r *http.Request) (bool, error) {
 			inspect = decoded
 		}
 	}
+	return inspect, nil
+}
 
+func isLsRefsBody(inspect []byte) bool {
 	head := inspect
 	if len(head) > lsRefsLookahead {
 		head = head[:lsRefsLookahead]
 	}
-	if bytes.Contains(head, lsRefsNeedle) {
-		return false, nil
-	}
-	// Trailing space disambiguates from capability tokens and repo names.
-	if bytes.Contains(inspect, haveNeedle) {
-		return false, nil
-	}
-	return true, nil
+	return bytes.Contains(head, lsRefsNeedle)
 }
 
 // RepoCount is one row of the histogram.
