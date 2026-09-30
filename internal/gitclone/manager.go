@@ -81,11 +81,15 @@ type CredentialProvider interface {
 type CredentialProviderProvider func() (CredentialProvider, error)
 
 type Repository struct {
-	mu                 sync.RWMutex
-	config             Config
-	state              State
-	path               string
-	upstreamURL        string
+	// mu guards state and is read-held for minutes during snapshot
+	// generation; a queued writer would park every new reader behind it.
+	mu          sync.RWMutex
+	config      Config
+	state       State
+	path        string
+	upstreamURL string
+	// metaMu guards per-request/per-fetch bookkeeping so it never writes mu.
+	metaMu             sync.Mutex
 	lastFetch          time.Time
 	lastRefCheck       time.Time
 	refCheckValid      bool
@@ -332,15 +336,19 @@ func (r *Repository) UpstreamURL() string {
 }
 
 func (r *Repository) LastFetch() time.Time {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
+	r.metaMu.Lock()
+	defer r.metaMu.Unlock()
 	return r.lastFetch
 }
 
+func (r *Repository) setLastFetch(at time.Time) {
+	r.metaMu.Lock()
+	defer r.metaMu.Unlock()
+	r.lastFetch = at
+}
+
 func (r *Repository) NeedsFetch(fetchInterval time.Duration) bool {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	return time.Since(r.lastFetch) >= fetchInterval
+	return time.Since(r.LastFetch()) >= fetchInterval
 }
 
 func (r *Repository) WithReadLock(fn func() error) error {
@@ -361,9 +369,9 @@ func WithReadLockReturn[T any](repo *Repository, fn func() (T, error)) (T, error
 // be replaced with a fresh clone.
 func (r *Repository) ResetToEmpty() {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	r.state = StateEmpty
-	r.lastFetch = time.Time{}
+	r.mu.Unlock()
+	r.setLastFetch(time.Time{})
 }
 
 // TryStartCloning atomically transitions the repository from StateEmpty to
@@ -411,8 +419,8 @@ func (r *Repository) ConfigureMirror(ctx context.Context, repoPath string) error
 func (r *Repository) MarkReady() {
 	r.mu.Lock()
 	r.state = StateReady
-	r.lastFetch = time.Now()
 	r.mu.Unlock()
+	r.setLastFetch(time.Now())
 }
 
 // Clone starts one mirror clone. Other callers wait for the result.
@@ -477,8 +485,8 @@ func (r *Repository) CloneClaimed(ctx context.Context) error {
 	}
 
 	r.state = StateReady
-	r.lastFetch = time.Now()
 	r.mu.Unlock()
+	r.setLastFetch(time.Now())
 	return nil
 }
 
@@ -689,24 +697,22 @@ func (r *Repository) fetchInternal(ctx context.Context, timeout time.Duration, e
 		return errors.Wrapf(err, "git fetch: %s", string(output))
 	}
 
-	r.mu.Lock()
-	r.lastFetch = time.Now()
-	r.mu.Unlock()
+	r.setLastFetch(time.Now())
 	return nil
 }
 
 // EnsureRefsUpToDate checks whether the local mirror's refs match upstream.
 // If refs are stale it returns NeedsFetch=true so the caller can schedule a
 // background fetch via the job scheduler, rather than fetching synchronously
-// on the request path (which would acquire a write lock and block all serving).
+// on the request path.
 func (r *Repository) EnsureRefsUpToDate(ctx context.Context) (needsFetch bool, err error) {
-	r.mu.Lock()
+	r.metaMu.Lock()
 	if r.refCheckValid && time.Since(r.lastRefCheck) < r.config.RefCheckInterval {
-		r.mu.Unlock()
+		r.metaMu.Unlock()
 		return false, nil
 	}
 	r.refCheckValid = false
-	r.mu.Unlock()
+	r.metaMu.Unlock()
 
 	localRefs, err := r.GetLocalRefs(ctx)
 	if err != nil {
@@ -730,17 +736,17 @@ func (r *Repository) EnsureRefsUpToDate(ctx context.Context) (needsFetch bool, e
 		}
 		localSHA, exists := localRefs[ref]
 		if !exists || localSHA != upstreamSHA {
-			r.mu.Lock()
+			r.metaMu.Lock()
 			r.refCheckValid = false
-			r.mu.Unlock()
+			r.metaMu.Unlock()
 			return true, nil
 		}
 	}
 
-	r.mu.Lock()
+	r.metaMu.Lock()
 	r.lastRefCheck = time.Now()
 	r.refCheckValid = true
-	r.mu.Unlock()
+	r.metaMu.Unlock()
 	return false, nil
 }
 
@@ -778,9 +784,9 @@ func (r *Repository) EnsureRefs(
 
 	// Invalidate the cached ref-check so the normal transparent path also
 	// re-evaluates after our forced fetch.
-	r.mu.Lock()
+	r.metaMu.Lock()
 	r.refCheckValid = false
-	r.mu.Unlock()
+	r.metaMu.Unlock()
 
 	localRefs, err = r.GetLocalRefs(ctx)
 	if err != nil {

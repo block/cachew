@@ -457,18 +457,32 @@ func (s *Strategy) serveReadyRepo(w http.ResponseWriter, r *http.Request, repo *
 		r.TransferEncoding = nil
 	}
 
-	if s.serveFromBackend(w, r, repo) {
-		// The mirror is missing the requested object — most likely a commit
-		// that was advertised before a concurrent force-push fetch orphaned
-		// it. Fall back to upstream so the client is not left with an error.
-		logger.InfoContext(ctx, "Falling back to upstream due to 'not our ref'", "path", pathValue)
+	if !s.serveFromBackend(w, r, repo) {
+		return nil
+	}
+	replayBody := func() {
 		if bodyBytes != nil {
 			r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 			r.ContentLength = int64(len(bodyBytes))
 			r.TransferEncoding = nil
 		}
-		s.forwardToUpstream(w, r, host, pathValue)
 	}
+
+	// The missing object is usually a commit the stale mirror has not fetched
+	// yet; fetching is far cheaper than proxying the whole pack from upstream.
+	if err := repo.Fetch(ctx); err != nil {
+		logger.WarnContext(ctx, "Fetch after 'not our ref' failed, forwarding to upstream", "upstream", repo.UpstreamURL(),
+			"error", err)
+	} else {
+		replayBody()
+		if !s.serveFromBackend(w, r, repo) {
+			logger.InfoContext(ctx, "Served from mirror after fetching object missing for 'not our ref'", "path", pathValue)
+			return nil
+		}
+	}
+	logger.InfoContext(ctx, "Falling back to upstream due to 'not our ref'", "path", pathValue)
+	replayBody()
+	s.forwardToUpstream(w, r, host, pathValue)
 	return nil
 }
 

@@ -289,9 +289,9 @@ func TestRepository_NeedsFetch(t *testing.T) {
 
 	assert.False(t, repo.NeedsFetch(30*time.Minute))
 
-	repo.mu.Lock()
+	repo.metaMu.Lock()
 	repo.lastFetch = time.Now()
-	repo.mu.Unlock()
+	repo.metaMu.Unlock()
 
 	assert.False(t, repo.NeedsFetch(15*time.Minute))
 }
@@ -737,8 +737,8 @@ func TestRepositoryEnsureRefsUpToDateDoesNotCacheLocalError(t *testing.T) {
 	_, err := repo.EnsureRefsUpToDate(t.Context())
 
 	assert.Error(t, err)
-	repo.mu.Lock()
-	defer repo.mu.Unlock()
+	repo.metaMu.Lock()
+	defer repo.metaMu.Unlock()
 	assert.False(t, repo.refCheckValid)
 }
 
@@ -793,17 +793,17 @@ exec %q "$@"
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	repo.mu.Lock()
+	repo.metaMu.Lock()
 	valid := repo.refCheckValid
-	repo.mu.Unlock()
+	repo.metaMu.Unlock()
 	assert.False(t, valid)
 	assert.NoError(t, os.WriteFile(release, nil, 0o644))
 
 	got := <-resultCh
 	assert.NoError(t, got.err)
 	assert.False(t, got.stale)
-	repo.mu.Lock()
-	defer repo.mu.Unlock()
+	repo.metaMu.Lock()
+	defer repo.metaMu.Unlock()
 	assert.True(t, repo.refCheckValid)
 }
 
@@ -878,16 +878,16 @@ exec %q "$@"
 	fresh, err := repo.EnsureRefsUpToDate(t.Context())
 	assert.NoError(t, err)
 	assert.False(t, fresh)
-	repo.mu.Lock()
+	repo.metaMu.Lock()
 	assert.True(t, repo.refCheckValid)
-	repo.mu.Unlock()
+	repo.metaMu.Unlock()
 
 	assert.NoError(t, os.WriteFile(releaseStale, nil, 0o644))
 	got := <-staleResult
 	assert.NoError(t, got.err)
 	assert.True(t, got.stale)
-	repo.mu.Lock()
-	defer repo.mu.Unlock()
+	repo.metaMu.Lock()
+	defer repo.metaMu.Unlock()
 	assert.False(t, repo.refCheckValid)
 }
 
@@ -956,5 +956,48 @@ func TestMirrorConfigAllowsUnreachableSHA(t *testing.T) {
 	uploadOut, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("upload-pack rejected unreachable SHA (mirror config should allow it):\n%s", uploadOut)
+	}
+}
+
+func TestRepositoryRequestPathNotBlockedByLongReadLock(t *testing.T) {
+	config := testRepoConfig()
+	config.RefCheckInterval = time.Hour
+	repo := &Repository{
+		state:         StateReady,
+		config:        config,
+		path:          t.TempDir(),
+		upstreamURL:   "https://example.test/org/repo",
+		fetchSem:      make(chan struct{}, 1),
+		refCheckValid: true,
+		lastRefCheck:  time.Now(),
+	}
+	repo.fetchSem <- struct{}{}
+
+	held := make(chan struct{})
+	release := make(chan struct{})
+	defer close(release)
+	go func() {
+		_ = repo.WithReadLock(func() error {
+			close(held)
+			<-release
+			return nil
+		})
+	}()
+	<-held
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		stale, err := repo.EnsureRefsUpToDate(t.Context())
+		assert.NoError(t, err)
+		assert.False(t, stale)
+		repo.setLastFetch(time.Now())
+		assert.False(t, repo.NeedsFetch(time.Hour))
+		assert.Equal(t, StateReady, repo.State())
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("request-path bookkeeping blocked behind a held read lock")
 	}
 }

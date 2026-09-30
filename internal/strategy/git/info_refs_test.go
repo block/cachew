@@ -45,6 +45,7 @@ func (t *infoRefsTransport) RoundTrip(req *http.Request) (*http.Response, error)
 type infoRefsFixture struct {
 	ctx          context.Context
 	handler      http.Handler
+	uploadPack   http.Handler
 	transport    *infoRefsTransport
 	logs         *bytes.Buffer
 	upstreamPath string
@@ -86,10 +87,13 @@ func newInfoRefsFixture(t *testing.T) *infoRefsFixture {
 	strategy.SetHTTPTransport(transport)
 	handler := mux.handlers["GET /git/{host}/{path...}"]
 	assert.NotZero(t, handler)
+	uploadPack := mux.handlers["POST /git/{host}/{path...}"]
+	assert.NotZero(t, uploadPack)
 
 	return &infoRefsFixture{
 		ctx:          ctx,
 		handler:      handler,
+		uploadPack:   uploadPack,
 		transport:    transport,
 		logs:         logs,
 		upstreamPath: upstreamPath,
