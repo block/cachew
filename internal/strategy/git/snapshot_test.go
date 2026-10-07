@@ -109,6 +109,7 @@ func TestSnapshotOnDemandGenerationViaHTTP(t *testing.T) {
 	mirrorRoot := filepath.Join(tmpDir, "mirrors")
 	mirrorPath := filepath.Join(mirrorRoot, "github.com", "org", "repo")
 	createTestMirrorRepo(t, mirrorPath)
+	addSnapshotGarbage(t, mirrorPath)
 
 	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: time.Hour})
 	assert.NoError(t, err)
@@ -136,6 +137,42 @@ func TestSnapshotOnDemandGenerationViaHTTP(t *testing.T) {
 	// Allow background goroutines (spool cleanup, cache backfill) to finish
 	// before TempDir cleanup runs.
 	time.Sleep(2 * time.Second)
+
+	restoreDir := t.TempDir()
+	assert.NoError(t, snapshot.Extract(ctx, w.Body, restoreDir, 0))
+	assertSnapshotGitFiles(t, mirrorPath, filepath.Join(restoreDir, ".git"))
+}
+
+func addSnapshotGarbage(t *testing.T, mirrorPath string) {
+	t.Helper()
+	output, err := exec.Command("git", "-C", mirrorPath, "repack", "-ad").CombinedOutput()
+	assert.NoError(t, err, string(output))
+	for _, name := range []string{"objects/pack/tmp_pack_unused", "objects/pack/tmp_idx_unused", "objects/pack/stale.lock"} {
+		assert.NoError(t, os.WriteFile(filepath.Join(mirrorPath, name), []byte("garbage"), 0o644))
+	}
+}
+
+func assertSnapshotGitFiles(t *testing.T, mirrorPath, restoredGitDir string) {
+	t.Helper()
+	for _, name := range []string{"objects/pack/tmp_pack_unused", "objects/pack/tmp_idx_unused", "objects/pack/stale.lock"} {
+		_, err := os.Stat(filepath.Join(restoredGitDir, name))
+		assert.True(t, os.IsNotExist(err), "snapshot should exclude %s", name)
+		data, err := os.ReadFile(filepath.Join(mirrorPath, name))
+		assert.NoError(t, err)
+		assert.Equal(t, "garbage", string(data))
+	}
+	packs, err := filepath.Glob(filepath.Join(mirrorPath, "objects/pack/pack-*"))
+	assert.NoError(t, err)
+	assert.True(t, len(packs) >= 2, "expected a real pack and index")
+	for _, pack := range packs {
+		want, err := os.ReadFile(pack)
+		assert.NoError(t, err)
+		got, err := os.ReadFile(filepath.Join(restoredGitDir, "objects/pack", filepath.Base(pack)))
+		assert.NoError(t, err)
+		assert.Equal(t, want, got)
+	}
+	output, err := exec.CommandContext(t.Context(), "git", "-C", restoredGitDir, "-c", "core.fsmonitor=false", "fsck", "--full").CombinedOutput()
+	assert.NoError(t, err, string(output))
 }
 
 // createTestMirrorRepo creates a bare mirror-style repo at mirrorPath with one commit.
@@ -460,7 +497,7 @@ func createTestMirrorRepoWithHistory(t *testing.T, mirrorPath string) string {
 	return historicalBlob
 }
 
-func TestSnapshotGenerationIncludesTrackedLockFiles(t *testing.T) {
+func TestSnapshotGenerationExcludesGitGarbage(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not found in PATH")
 	}
@@ -472,10 +509,12 @@ func TestSnapshotGenerationIncludesTrackedLockFiles(t *testing.T) {
 
 	mirrorPath := filepath.Join(mirrorRoot, "github.com", "org", "repo")
 	createTestMirrorRepoWithFiles(t, mirrorPath, map[string]string{
-		"hello.txt":           "hello\n",
-		"package-lock.json":   "{\n  \"name\": \"repo\"\n}\n",
-		"subdir/Gemfile.lock": "GEM\n",
+		"hello.txt":                  "hello\n",
+		"package-lock.json":          "{\n  \"name\": \"repo\"\n}\n",
+		"subdir/Gemfile.lock":        "GEM\n",
+		"objects/pack/tmp_pack_test": "tracked fixture\n",
 	})
+	addSnapshotGarbage(t, mirrorPath)
 
 	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: time.Hour})
 	assert.NoError(t, err)
@@ -507,6 +546,11 @@ func TestSnapshotGenerationIncludesTrackedLockFiles(t *testing.T) {
 	data, err = os.ReadFile(filepath.Join(restoreDir, "subdir", "Gemfile.lock"))
 	assert.NoError(t, err)
 	assert.Equal(t, "GEM\n", string(data))
+
+	data, err = os.ReadFile(filepath.Join(restoreDir, "objects", "pack", "tmp_pack_test"))
+	assert.NoError(t, err)
+	assert.Equal(t, "tracked fixture\n", string(data))
+	assertSnapshotGitFiles(t, mirrorPath, filepath.Join(restoreDir, ".git"))
 }
 
 func TestMirrorSnapshotRestoreDirectly(t *testing.T) {
@@ -522,6 +566,7 @@ func TestMirrorSnapshotRestoreDirectly(t *testing.T) {
 	// Create a mirror repo and generate a mirror snapshot (bare tarball).
 	mirrorPath := filepath.Join(mirrorRoot, "github.com", "org", "repo")
 	createTestMirrorRepo(t, mirrorPath)
+	addSnapshotGarbage(t, mirrorPath)
 
 	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: time.Hour})
 	assert.NoError(t, err)
@@ -545,6 +590,7 @@ func TestMirrorSnapshotRestoreDirectly(t *testing.T) {
 	cacheKey := cache.NewKey(upstreamURL + ".mirror-snapshot")
 	err = snapshot.Restore(ctx, memCache, cacheKey, restoreDir, 0)
 	assert.NoError(t, err)
+	assertSnapshotGitFiles(t, mirrorPath, restoreDir)
 
 	// Should be bare already (no .git subdir).
 	_, err = os.Stat(filepath.Join(restoreDir, ".git"))
