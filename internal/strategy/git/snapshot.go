@@ -220,6 +220,10 @@ func (s *Strategy) withSnapshotClone(ctx context.Context, repo *gitclone.Reposit
 	return fn(workDir)
 }
 
+func snapshotExcludePatterns(gitDir string) []string {
+	return []string{gitDir + "/*.lock", gitDir + "/objects/pack/tmp_*"}
+}
+
 func (s *Strategy) generateAndUploadSnapshot(ctx context.Context, repo *gitclone.Repository) (commit string, returnErr error) {
 	upstream := repo.UpstreamURL()
 	ctx, span := tracer.Start(ctx, "git.snapshot.generate",
@@ -266,7 +270,7 @@ func (s *Strategy) generateAndUploadSnapshot(ctx context.Context, repo *gitclone
 		extraHeaders := http.Header{}
 		extraHeaders.Set("X-Cachew-Snapshot-Commit", headSHA)
 
-		return snapshot.Create(ctx, s.cache, cacheKey, workDir, 0, nil, s.config.ZstdThreads, extraHeaders)
+		return snapshot.Create(ctx, s.cache, cacheKey, workDir, 0, snapshotExcludePatterns("./.git"), s.config.ZstdThreads, extraHeaders)
 	}); err != nil {
 		return "", errors.Wrap(err, "create snapshot")
 	}
@@ -306,7 +310,7 @@ func (s *Strategy) generateAndUploadMirrorSnapshot(ctx context.Context, repo *gi
 	defer mu.Unlock()
 
 	cacheKey := mirrorSnapshotCacheKey(upstream)
-	excludePatterns := []string{"*.lock"}
+	excludePatterns := snapshotExcludePatterns(".")
 
 	// Hold the fetch semaphore while tar-ing the bare mirror directory.
 	// Without this, a concurrent git fetch can replace packed-refs mid-read,
@@ -1174,7 +1178,7 @@ func (s *Strategy) streamSnapshotDirect(w http.ResponseWriter, r *http.Request, 
 	w.Header().Set("Content-Type", "application/zstd")
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filepath.Base(repoDir)+".tar.zst"))
 
-	return errors.Wrap(snapshot.StreamTo(ctx, w, repoDir, nil, s.config.ZstdThreads), "stream snapshot to client")
+	return errors.Wrap(snapshot.StreamTo(ctx, w, repoDir, snapshotExcludePatterns("./.git"), s.config.ZstdThreads), "stream snapshot to client")
 }
 
 // prepareSnapshotSpool creates the spool and clones the mirror into a temp directory,
@@ -1237,7 +1241,7 @@ func (s *Strategy) writeSnapshotSpool(w http.ResponseWriter, r *http.Request, re
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filepath.Base(repoDir)+".tar.zst"))
 
 	tw := NewSpoolTeeWriter(w, spool)
-	streamErr := snapshot.StreamTo(ctx, tw, repoDir, nil, s.config.ZstdThreads)
+	streamErr := snapshot.StreamTo(ctx, tw, repoDir, snapshotExcludePatterns("./.git"), s.config.ZstdThreads)
 	if streamErr != nil {
 		spool.MarkError(streamErr)
 		s.metrics.recordSpoolWriter(ctx, repoName, "error", time.Since(writerStart))
