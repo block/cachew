@@ -2,6 +2,7 @@ package gitclone //nolint:testpackage // Internal functions need to be tested
 
 import (
 	"context"
+	"encoding/base64"
 	"strings"
 	"testing"
 
@@ -91,27 +92,24 @@ func TestGitCommandWithCredentialProvider(t *testing.T) {
 	ctx := context.Background()
 
 	tests := []struct {
-		name          string
-		token         string
-		expectHelper  bool
-		expectedToken string
+		name             string
+		token            string
+		expectCredential bool
 	}{
 		{
-			name:          "WithValidToken",
-			token:         "ghp_test123456",
-			expectHelper:  true,
-			expectedToken: "ghp_test123456",
+			name:             "WithValidToken",
+			token:            "ghp_test123456",
+			expectCredential: true,
 		},
 		{
-			name:          "WithTokenContainingSingleQuote",
-			token:         "token'with'quotes",
-			expectHelper:  true,
-			expectedToken: "token'with'quotes",
+			name:             "WithTokenContainingSingleQuote",
+			token:            "token'with'quotes",
+			expectCredential: true,
 		},
 		{
-			name:         "WithEmptyToken",
-			token:        "",
-			expectHelper: false,
+			name:             "WithEmptyToken",
+			token:            "",
+			expectCredential: false,
 		},
 	}
 
@@ -128,19 +126,55 @@ func TestGitCommandWithCredentialProvider(t *testing.T) {
 			assert.NoError(t, err)
 			assert.NotZero(t, cmd)
 
-			if tt.expectHelper {
-				found := false
-				for i, arg := range cmd.Args {
-					if arg == "-c" && i+1 < len(cmd.Args) {
-						if strings.Contains(cmd.Args[i+1], "credential.helper=") {
-							found = true
-							assert.True(t, strings.Contains(cmd.Args[i+1], "username=x-access-token"))
-							break
-						}
-					}
+			for _, arg := range cmd.Args {
+				assert.False(t, strings.Contains(arg, "extraHeader"))
+				if tt.token != "" {
+					assert.False(t, strings.Contains(arg, tt.token))
 				}
-				assert.True(t, found, "expected credential.helper to be configured")
 			}
+			found := false
+			for _, entry := range cmd.Env {
+				if strings.HasPrefix(entry, "GIT_CONFIG_KEY_") && strings.HasSuffix(entry, ".extraHeader") {
+					found = true
+				}
+			}
+			assert.Equal(t, tt.expectCredential, found)
 		})
 	}
+}
+
+func TestGitCommandCredentialEnvironmentConfiguresGit(t *testing.T) {
+	t.Setenv("GIT_CONFIG_COUNT", "1")
+	t.Setenv("GIT_CONFIG_KEY_0", "protocol.version")
+	t.Setenv("GIT_CONFIG_VALUE_0", "2")
+	repo := &Repository{
+		upstreamURL:        "https://github.com/org/repo",
+		credentialProvider: &mockCredentialProvider{token: "test-token"},
+	}
+	cmd, err := repo.GitCommand(t.Context(), "config", "--get-urlmatch", "http.extraHeader", repo.upstreamURL)
+	assert.NoError(t, err)
+	output, err := cmd.Output()
+	assert.NoError(t, err)
+	basicToken := base64.StdEncoding.EncodeToString([]byte("x-access-token:test-token"))
+	assert.Equal(t, "Authorization: Basic "+basicToken+"\n", string(output))
+}
+
+func TestAppendGitConfigEnvUsesNextIndex(t *testing.T) {
+	env := appendGitConfigEnv([]string{
+		"GIT_CONFIG_COUNT=2",
+		"GIT_CONFIG_KEY_0=protocol.version",
+		"GIT_CONFIG_VALUE_0=2",
+		"GIT_CONFIG_KEY_1=http.version",
+		"GIT_CONFIG_VALUE_1=HTTP/2",
+	}, "http.https://github.com/org/repo.extraHeader", "Authorization: Basic secret")
+	countEntries := 0
+	for _, entry := range env {
+		if strings.HasPrefix(entry, "GIT_CONFIG_COUNT=") {
+			countEntries++
+		}
+	}
+	assert.Equal(t, 1, countEntries)
+	assert.Equal(t, "GIT_CONFIG_COUNT=3", env[len(env)-3])
+	assert.Equal(t, "GIT_CONFIG_KEY_2=http.https://github.com/org/repo.extraHeader", env[len(env)-2])
+	assert.Equal(t, "GIT_CONFIG_VALUE_2=Authorization: Basic secret", env[len(env)-1])
 }
