@@ -43,6 +43,8 @@ strategy git {
   #snapshot-filters = {
   #  "github.com/org/repo": "blob:none",
   #}
+  # Serve snapshot.tar.zst?ref=<branch> for up to this many branches per repo.
+  #branch-snapshot-max-refs = 10
 }
 
 strategy host "https://ghcr.io" {

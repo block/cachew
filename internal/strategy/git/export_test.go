@@ -16,7 +16,7 @@ import (
 func IsGitRequest(pathValue string) bool { return isGitRequest(pathValue) }
 
 func (s *Strategy) GenerateAndUploadSnapshot(ctx context.Context, repo *gitclone.Repository) error {
-	_, err := s.generateAndUploadSnapshot(ctx, repo)
+	_, err := s.generateAndUploadSnapshot(ctx, repo, "")
 	return err
 }
 
@@ -28,7 +28,7 @@ func (s *Strategy) GenerateAndUploadMirrorSnapshot(ctx context.Context, repo *gi
 // RunCoordinatedSnapshot exports the coordinated base-snapshot job for tests.
 func (s *Strategy) RunCoordinatedSnapshot(ctx context.Context, repo *gitclone.Repository, interval time.Duration) error {
 	return s.coordinatedSnapshotJob(snapshotJobBase, repo, interval, func(ctx context.Context) (string, error) {
-		return s.generateAndUploadSnapshot(ctx, repo)
+		return s.generateAndUploadSnapshot(ctx, repo, "")
 	})(ctx)
 }
 
@@ -71,3 +71,10 @@ func ColdPreparationQueueLimitForTest() int {
 func (s *Strategy) ClaimSnapshotForTest(upstream string) (bool, error) {
 	return s.snapshotCoord.Claim(snapshotJobBase, upstream, 0)
 }
+
+func ValidBranchName(ref string) bool { return validBranchName(ref) }
+
+// TrackRef and ActiveRefs expose branch-snapshot tracking for tests.
+func (s *Strategy) TrackRef(upstream, ref string) { s.trackRef(upstream, ref) }
+
+func (s *Strategy) ActiveRefs(upstream string) []string { return s.activeRefs(upstream) }

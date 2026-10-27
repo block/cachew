@@ -111,18 +111,44 @@ type GitSnapshot struct {
 // Close releases the underlying response body.
 func (s *GitSnapshot) Close() error { return errors.WithStack(s.Body.Close()) }
 
+// GitSnapshotOption configures a snapshot request.
+type GitSnapshotOption func(*gitSnapshotOptions)
+
+type gitSnapshotOptions struct {
+	ref string
+}
+
+// WithRef requests the snapshot of a branch instead of the repository's
+// default branch. The server builds a branch snapshot on its first request
+// and returns os.ErrNotExist until it is ready, so callers should fall back
+// to the default snapshot on a miss.
+func WithRef(ref string) GitSnapshotOption {
+	return func(o *gitSnapshotOptions) { o.ref = ref }
+}
+
+func gitSnapshotSuffix(name string, opts []GitSnapshotOption) string {
+	var o gitSnapshotOptions
+	for _, opt := range opts {
+		opt(&o)
+	}
+	if o.ref == "" {
+		return name
+	}
+	return name + "?ref=" + url.QueryEscape(o.ref)
+}
+
 // OpenGitSnapshot fetches a working-tree snapshot for repoURL from cachew.
 // The caller is responsible for extracting the returned zstd-compressed
 // tarball (e.g. via the snapshot package). Returns os.ErrNotExist when the
 // server has no snapshot available.
-func (c *Client) OpenGitSnapshot(ctx context.Context, repoURL string) (*GitSnapshot, error) {
-	return c.openGitArtifact(ctx, repoURL, "snapshot.tar.zst")
+func (c *Client) OpenGitSnapshot(ctx context.Context, repoURL string, opts ...GitSnapshotOption) (*GitSnapshot, error) {
+	return c.openGitArtifact(ctx, repoURL, gitSnapshotSuffix("snapshot.tar.zst", opts))
 }
 
 // OpenGitLFSSnapshot fetches the LFS-object snapshot for repoURL. Returns
 // os.ErrNotExist when the server has no LFS snapshot cached.
-func (c *Client) OpenGitLFSSnapshot(ctx context.Context, repoURL string) (*GitSnapshot, error) {
-	return c.openGitArtifact(ctx, repoURL, "lfs-snapshot.tar.zst")
+func (c *Client) OpenGitLFSSnapshot(ctx context.Context, repoURL string, opts ...GitSnapshotOption) (*GitSnapshot, error) {
+	return c.openGitArtifact(ctx, repoURL, gitSnapshotSuffix("lfs-snapshot.tar.zst", opts))
 }
 
 // ErrUpToDate is returned by OpenGitBundle when the server reports the
@@ -205,14 +231,14 @@ func (c *Client) openGitArtifact(ctx context.Context, repoURL, suffix string) (*
 // download. A concurrency of 1 streams a single plain request with no
 // buffering; a server without range support falls back to a single full
 // download. Returns os.ErrNotExist when the server has no snapshot.
-func (c *Client) OpenGitSnapshotParallel(ctx context.Context, repoURL string, chunkSize int64, concurrency int) (*GitSnapshot, error) {
+func (c *Client) OpenGitSnapshotParallel(ctx context.Context, repoURL string, chunkSize int64, concurrency int, opts ...GitSnapshotOption) (*GitSnapshot, error) {
 	if concurrency <= 1 {
-		return c.OpenGitSnapshot(ctx, repoURL)
+		return c.OpenGitSnapshot(ctx, repoURL, opts...)
 	}
 	if err := validateParallelParams(chunkSize, concurrency); err != nil {
 		return nil, err
 	}
-	endpoint, err := gitEndpointURL(c.baseURL, repoURL, "snapshot.tar.zst")
+	endpoint, err := gitEndpointURL(c.baseURL, repoURL, gitSnapshotSuffix("snapshot.tar.zst", opts))
 	if err != nil {
 		return nil, err
 	}

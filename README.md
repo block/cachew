@@ -31,6 +31,11 @@ git {
 }
 ```
 
+Snapshots cover the default branch. With `branch-snapshot-max-refs` set, `snapshot.tar.zst?ref=<branch>` serves a
+snapshot of that branch instead. The first request returns 404 and builds it in the background; it then refreshes on
+`snapshot-interval` until it goes unrequested for `branch-snapshot-idle-timeout`. Its delta bundle and LFS snapshot take
+the same `ref` parameter.
+
 ### GitHub Releases
 
 Caches public and private GitHub release assets. Private orgs use a token or GitHub App for authentication.
