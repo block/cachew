@@ -6,6 +6,7 @@ import (
 	"io"
 	"math/rand/v2"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -103,16 +104,18 @@ func snapshotDirForURL(mirrorRoot, upstreamURL string) (string, error) {
 	return filepath.Join(mirrorRoot, ".snapshots", repoPath), nil
 }
 
-func snapshotCacheKey(upstreamURL string) cache.Key {
-	return cache.NewKey(upstreamURL + ".snapshot")
+// Cache keys take a branch name for snapshots of a non-default branch; an
+// empty ref keeps the default branch's original key.
+func snapshotCacheKey(upstreamURL, ref string) cache.Key {
+	return cache.NewKey(upstreamURL + ".snapshot" + refKeySuffix(ref))
 }
 
 func mirrorSnapshotCacheKey(upstreamURL string) cache.Key {
 	return cache.NewKey(upstreamURL + ".mirror-snapshot")
 }
 
-func bundleCacheKey(upstreamURL, baseCommit string) cache.Key {
-	return cache.NewKey(upstreamURL + ".bundle." + baseCommit)
+func bundleCacheKey(upstreamURL, ref, baseCommit string) cache.Key {
+	return cache.NewKey(upstreamURL + ".bundle." + baseCommit + refKeySuffix(ref))
 }
 
 // commitSHARe matches a full SHA-1 or SHA-256 commit hash. Bundle bases are
@@ -121,17 +124,21 @@ var commitSHARe = regexp.MustCompile(`^[0-9a-f]{40}([0-9a-f]{24})?$`)
 
 var errEmptyBundle = errors.New("bundle contains no commits")
 
-func lfsSnapshotCacheKey(upstreamURL string) cache.Key {
-	return cache.NewKey(upstreamURL + ".lfs-snapshot")
+func lfsSnapshotCacheKey(upstreamURL, ref string) cache.Key {
+	return cache.NewKey(upstreamURL + ".lfs-snapshot" + refKeySuffix(ref))
 }
 
 // cloneForSnapshot clones the mirror into destDir under repo's read lock,
 // then fixes the remote URL to point through cachew (or upstream). A non-empty
 // filter produces a partial clone (e.g. blob:none) that carries full history
-// metadata but only the blobs needed for the HEAD checkout.
-func (s *Strategy) cloneForSnapshot(ctx context.Context, repo *gitclone.Repository, destDir, filter string) error {
+// metadata but only the blobs needed for the checkout. A non-empty ref checks
+// out that branch instead of the mirror's HEAD.
+func (s *Strategy) cloneForSnapshot(ctx context.Context, repo *gitclone.Repository, destDir, filter, ref string) error {
 	if err := repo.WithReadLock(func() error {
 		args := []string{"clone"}
+		if ref != "" {
+			args = append(args, "--branch", ref)
+		}
 		if filter != "" {
 			// Local (hardlink) clones copy the entire object store and silently
 			// ignore --filter; --no-local forces the transport path so the filter
@@ -188,14 +195,14 @@ func (s *Strategy) snapshotFilterFor(upstreamURL string) string {
 	return s.config.SnapshotFilters[repoPath]
 }
 
-func (s *Strategy) withSnapshotClone(ctx context.Context, repo *gitclone.Repository, suffix, filter string, fn func(workDir string) error) error {
+func (s *Strategy) withSnapshotClone(ctx context.Context, repo *gitclone.Repository, suffix, filter, ref string, fn func(workDir string) error) error {
 	logger := logging.FromContext(ctx)
 	mirrorRoot := s.cloneManager.Config().MirrorRoot
 	workDir, err := snapshotDirForURL(mirrorRoot, repo.UpstreamURL())
 	if err != nil {
 		return err
 	}
-	workDir = filepath.Join(workDir, suffix)
+	workDir = filepath.Join(workDir, suffix+refDirSuffix(ref))
 
 	// Clean any previous snapshot working directory.
 	if err := os.RemoveAll(workDir); err != nil {
@@ -205,7 +212,7 @@ func (s *Strategy) withSnapshotClone(ctx context.Context, repo *gitclone.Reposit
 		return errors.Wrap(err, "create snapshot work dir parent")
 	}
 
-	if err := s.cloneForSnapshot(ctx, repo, workDir, filter); err != nil {
+	if err := s.cloneForSnapshot(ctx, repo, workDir, filter, ref); err != nil {
 		_ = os.RemoveAll(workDir)
 		return err
 	}
@@ -224,12 +231,13 @@ func snapshotExcludePatterns(gitDir string) []string {
 	return []string{gitDir + "/*.lock", gitDir + "/objects/pack/tmp_*"}
 }
 
-func (s *Strategy) generateAndUploadSnapshot(ctx context.Context, repo *gitclone.Repository) (commit string, returnErr error) {
+func (s *Strategy) generateAndUploadSnapshot(ctx context.Context, repo *gitclone.Repository, ref string) (commit string, returnErr error) {
 	upstream := repo.UpstreamURL()
 	ctx, span := tracer.Start(ctx, "git.snapshot.generate",
 		trace.WithAttributes(
 			attribute.String("cachew.operation", "snapshot_generate"),
 			attribute.String("cachew.upstream", upstream),
+			attribute.String("cachew.ref", ref),
 		),
 	)
 	defer func() {
@@ -247,19 +255,19 @@ func (s *Strategy) generateAndUploadSnapshot(ctx context.Context, repo *gitclone
 	if filter != "" {
 		span.SetAttributes(attribute.String("cachew.snapshot.filter", filter))
 	}
-	logger.InfoContext(ctx, "Snapshot generation started", "upstream", upstream, "filter", filter)
+	logger.InfoContext(ctx, "Snapshot generation started", "upstream", upstream, "ref", ref, "filter", filter)
 
-	mu := s.snapshotMutexFor(upstream)
+	mu := s.snapshotMutexFor(upstream + refKeySuffix(ref))
 	mu.Lock()
 	defer mu.Unlock()
 
-	cacheKey := snapshotCacheKey(upstream)
-	if head := s.getMirrorHead(ctx, repo); s.snapshotUnchanged(ctx, snapshotJobBase, cacheKey, upstream, head) {
+	cacheKey := snapshotCacheKey(upstream, ref)
+	if head := s.getMirrorTip(ctx, repo, ref); s.snapshotUnchanged(ctx, refJob(snapshotJobBase, ref), cacheKey, upstream, head) {
 		s.metrics.recordOperation(ctx, "snapshot", "unchanged", time.Since(start))
-		logger.InfoContext(ctx, "Snapshot unchanged, skipping generation", "upstream", upstream, "commit", head)
+		logger.InfoContext(ctx, "Snapshot unchanged, skipping generation", "upstream", upstream, "ref", ref, "commit", head)
 		return "", nil
 	}
-	if err := s.withSnapshotClone(ctx, repo, "base", filter, func(workDir string) error {
+	if err := s.withSnapshotClone(ctx, repo, "base", filter, ref, func(workDir string) error {
 		// Capture the snapshot's HEAD so we can later build a delta bundle between
 		// the cached snapshot and the current mirror state.
 		headSHA, err := mirrorHead(ctx, workDir)
@@ -276,7 +284,7 @@ func (s *Strategy) generateAndUploadSnapshot(ctx context.Context, repo *gitclone
 	}
 
 	s.metrics.recordOperation(ctx, "snapshot", "success", time.Since(start))
-	logger.InfoContext(ctx, "Snapshot generation completed", "upstream", upstream)
+	logger.InfoContext(ctx, "Snapshot generation completed", "upstream", upstream, "ref", ref)
 	return commit, nil
 }
 
@@ -410,10 +418,10 @@ func (s *Strategy) scheduleSnapshotJobsAfter(repo *gitclone.Repository, baseDela
 		if err := s.doFetch(ctx, repo); err != nil {
 			logging.FromContext(ctx).WarnContext(ctx, "Pre-snapshot fetch failed", "upstream", upstream, "error", err)
 		}
-		return s.generateAndUploadSnapshot(ctx, repo)
+		return s.generateAndUploadSnapshot(ctx, repo, "")
 	})
 	submit(snapshotJobLFS, s.config.SnapshotInterval, func(ctx context.Context) (string, error) {
-		return s.generateAndUploadLFSSnapshot(ctx, repo)
+		return s.generateAndUploadLFSSnapshot(ctx, repo, "")
 	})
 	mirrorInterval := s.config.MirrorSnapshotInterval
 	if mirrorInterval == 0 {
@@ -528,7 +536,12 @@ func (s *Strategy) handleSnapshotRequest(w http.ResponseWriter, r *http.Request,
 	r = r.WithContext(ctx)
 	logger := logging.FromContext(ctx)
 
-	cacheKey := snapshotCacheKey(upstreamURL)
+	if r.URL.Query().Has("ref") {
+		s.handleRefSnapshotRequest(w, r, upstreamURL, repoName, r.URL.Query().Get("ref"), start)
+		return
+	}
+
+	cacheKey := snapshotCacheKey(upstreamURL, "")
 
 	// HEAD is answered from cache metadata alone so probes never read or
 	// generate the snapshot body, and never warm up a mirror.
@@ -605,7 +618,7 @@ func (s *Strategy) handleSnapshotRequest(w http.ResponseWriter, r *http.Request,
 		errors.Is(err, cache.ErrNotModified),
 		errors.Is(err, cache.ErrPreconditionFailed),
 		errors.Is(err, cache.ErrRangeNotSatisfiable):
-		if serveErr := s.serveSnapshotWithBundle(ctx, w, r, reader, headers, err, repo, upstreamURL, repoName, start); serveErr != nil {
+		if serveErr := s.serveSnapshotWithBundle(ctx, w, reader, headers, err, repo, upstreamURL, "", repoName, start); serveErr != nil {
 			logger.ErrorContext(ctx, "Failed to serve snapshot", "upstream", upstreamURL, "error", serveErr)
 			span.RecordError(serveErr)
 			span.SetStatus(codes.Error, serveErr.Error())
@@ -717,7 +730,15 @@ func (s *Strategy) handleBundleRequest(w http.ResponseWriter, r *http.Request, h
 	}
 	span.SetAttributes(attribute.String("cachew.base_commit", base))
 
-	bKey := bundleCacheKey(upstreamURL, base)
+	ref := r.URL.Query().Get("ref")
+	if r.URL.Query().Has("ref") && !validBranchName(ref) {
+		http.Error(w, "ref query parameter must be a branch name", http.StatusBadRequest)
+		span.SetAttributes(attribute.String("cachew.source", "bad_request"))
+		return
+	}
+	span.SetAttributes(attribute.String("cachew.ref", ref))
+
+	bKey := bundleCacheKey(upstreamURL, ref, base)
 
 	// Source and bytes are recorded by the deferred metric call.
 	source := "miss"
@@ -838,7 +859,7 @@ func (s *Strategy) handleBundleRequest(w http.ResponseWriter, r *http.Request, h
 		}
 	}
 
-	bundleFile, err := s.createBundle(ctx, repo, base)
+	bundleFile, err := s.createBundle(ctx, repo, base, ref)
 	if errors.Is(err, errEmptyBundle) {
 		if freshenErr := s.doFetchVerified(ctx, repo); freshenErr != nil {
 			source = "miss_stale"
@@ -853,7 +874,7 @@ func (s *Strategy) handleBundleRequest(w http.ResponseWriter, r *http.Request, h
 			http.Error(w, "Bundle not available", http.StatusNotFound)
 			return
 		}
-		bundleFile, err = s.createBundle(ctx, repo, base)
+		bundleFile, err = s.createBundle(ctx, repo, base, ref)
 		if errors.Is(err, errEmptyBundle) {
 			build.verifiedEmpty = true
 			releaseBuild()
@@ -877,14 +898,14 @@ func (s *Strategy) handleBundleRequest(w http.ResponseWriter, r *http.Request, h
 	serveGenerated(build)
 }
 
-func (s *Strategy) serveSnapshotWithBundle(ctx context.Context, w http.ResponseWriter, _ *http.Request, reader io.ReadCloser, headers http.Header, openErr error, repo *gitclone.Repository, upstreamURL, repoName string, start time.Time) error {
+func (s *Strategy) serveSnapshotWithBundle(ctx context.Context, w http.ResponseWriter, reader io.ReadCloser, headers http.Header, openErr error, repo *gitclone.Repository, upstreamURL, ref, repoName string, start time.Time) error {
 	// The snapshot commit is stored alongside the object and surfaces via the
 	// copied headers; only the delta-bundle URL is computed per request. Both are
 	// advertised on full (200) and ranged (206) responses so a client.ParallelGet
 	// learns from its discovery chunk whether to apply a bundle after downloading.
 	var snapshotCommit, bundleURL string
 	if openErr == nil {
-		snapshotCommit, bundleURL = s.snapshotMetadata(ctx, headers, repo, upstreamURL)
+		snapshotCommit, bundleURL = s.snapshotMetadata(ctx, headers, repo, upstreamURL, ref)
 	}
 
 	decorate := func(rw http.ResponseWriter, _ http.Header) {
@@ -898,7 +919,7 @@ func (s *Strategy) serveSnapshotWithBundle(ctx context.Context, w http.ResponseW
 	// Bundle negotiation applies only to whole-snapshot downloads: a ranged chunk
 	// (Content-Range present) skips it and is served as-is.
 	if openErr == nil && bundleURL != "" && headers.Get("Content-Range") == "" {
-		s.pregenerateBundle(ctx, repo, upstreamURL, snapshotCommit)
+		s.pregenerateBundle(ctx, repo, upstreamURL, ref, snapshotCommit)
 	}
 
 	handled, n, err := httputil.ServeCacheHit(w, headers, reader, openErr, httputil.WithResponseDecorator(decorate))
@@ -952,8 +973,8 @@ func snapshotServeSource(base string, headers http.Header) string {
 
 // pregenerateBundle builds and caches the delta bundle for snapshotCommit in the
 // background so any pod can later serve it without regenerating.
-func (s *Strategy) pregenerateBundle(ctx context.Context, repo *gitclone.Repository, upstreamURL, snapshotCommit string) {
-	bKey := bundleCacheKey(upstreamURL, snapshotCommit)
+func (s *Strategy) pregenerateBundle(ctx context.Context, repo *gitclone.Repository, upstreamURL, ref, snapshotCommit string) {
+	bKey := bundleCacheKey(upstreamURL, ref, snapshotCommit)
 	build := newBundleBuild()
 	if _, loaded := s.bundleBuilds.LoadOrStore(bKey, build); loaded {
 		return
@@ -968,7 +989,7 @@ func (s *Strategy) pregenerateBundle(ctx context.Context, repo *gitclone.Reposit
 			_ = reader.Close()
 			return
 		}
-		bundleFile, err := s.createBundle(bgCtx, repo, snapshotCommit)
+		bundleFile, err := s.createBundle(bgCtx, repo, snapshotCommit, ref)
 		if err != nil {
 			if errors.Is(err, errEmptyBundle) {
 				return
@@ -983,24 +1004,28 @@ func (s *Strategy) pregenerateBundle(ctx context.Context, repo *gitclone.Reposit
 }
 
 // snapshotMetadata reports the snapshot's commit and, when the snapshot trails
-// the mirror's HEAD, the delta-bundle URL clients use to fast-forward (empty
-// when the snapshot is already at HEAD). It performs no response mutation so the
-// full and ranged serve paths can advertise the same freshen metadata via a
-// shared response decorator.
-func (s *Strategy) snapshotMetadata(ctx context.Context, headers http.Header, repo *gitclone.Repository, upstreamURL string) (snapshotCommit, bundleURL string) {
+// the mirror's tip of the snapshotted branch, the delta-bundle URL clients use
+// to fast-forward (empty when the snapshot is already at the tip). It performs
+// no response mutation so the full and ranged serve paths can advertise the
+// same freshen metadata via a shared response decorator.
+func (s *Strategy) snapshotMetadata(ctx context.Context, headers http.Header, repo *gitclone.Repository, upstreamURL, ref string) (snapshotCommit, bundleURL string) {
 	snapshotCommit = headers.Get("X-Cachew-Snapshot-Commit")
 	if snapshotCommit == "" {
 		return "", ""
 	}
-	mirrorHead := s.getMirrorHead(ctx, repo)
-	if mirrorHead == "" || snapshotCommit == mirrorHead {
+	tip := s.getMirrorTip(ctx, repo, ref)
+	if tip == "" || snapshotCommit == tip {
 		return snapshotCommit, ""
 	}
 	repoPath, err := gitclone.RepoPathFromURL(upstreamURL)
 	if err != nil {
 		return snapshotCommit, ""
 	}
-	return snapshotCommit, fmt.Sprintf("/git/%s/snapshot.bundle?base=%s", repoPath, snapshotCommit)
+	bundleURL = fmt.Sprintf("/git/%s/snapshot.bundle?base=%s", repoPath, snapshotCommit)
+	if ref != "" {
+		bundleURL += "&ref=" + url.QueryEscape(ref)
+	}
+	return snapshotCommit, bundleURL
 }
 
 // applySnapshotCacheHeaders forwards the cached snapshot's validators so clients
@@ -1029,46 +1054,58 @@ func (s *Strategy) cacheBundle(ctx context.Context, key cache.Key, r io.Reader) 
 }
 
 func mirrorHead(ctx context.Context, repoDir string) (string, error) {
-	cmd := exec.CommandContext(ctx, "git", "-C", repoDir, "rev-parse", "HEAD") // #nosec G204 G702
+	return mirrorRev(ctx, repoDir, "HEAD")
+}
+
+func mirrorRev(ctx context.Context, repoDir, rev string) (string, error) {
+	cmd := exec.CommandContext(ctx, "git", "-C", repoDir, "rev-parse", "--verify", "--quiet", rev+"^{commit}") // #nosec G204 G702
 	output, err := cmd.Output()
 	if err != nil {
-		return "", errors.Wrap(err, "git rev-parse HEAD")
+		return "", errors.Wrapf(err, "git rev-parse %s", rev)
 	}
 	return strings.TrimSpace(string(output)), nil
 }
 
 func (s *Strategy) getMirrorHead(ctx context.Context, repo *gitclone.Repository) string {
-	head, _ := mirrorHead(ctx, repo.Path()) //nolint:errcheck // best-effort; empty string signals failure to callers
-	return head
+	return s.getMirrorTip(ctx, repo, "")
+}
+
+// getMirrorTip returns the mirror's commit for ref, or for HEAD when ref is
+// empty. An empty result means the ref is missing or the lookup failed.
+func (s *Strategy) getMirrorTip(ctx context.Context, repo *gitclone.Repository, ref string) string {
+	tip, _ := mirrorRev(ctx, repo.Path(), tipRevision(ref)) //nolint:errcheck // best-effort; empty string signals failure to callers
+	return tip
 }
 
 // createBundle generates a git bundle for the commits between baseCommit and
-// the mirror's HEAD, writing it to a temp file. It returns an open *os.File
-// to that temp file; the file has already been removed from the filesystem,
-// so the open file descriptor is what keeps the data alive. The caller must
-// Close() the returned file.
-func (s *Strategy) createBundle(ctx context.Context, repo *gitclone.Repository, baseCommit string) (*os.File, error) {
+// the mirror's HEAD (or ref's tip when ref is set), writing it to a temp file.
+// It returns an open *os.File to that temp file; the file has already been
+// removed from the filesystem, so the open file descriptor is what keeps the
+// data alive. The caller must Close() the returned file.
+func (s *Strategy) createBundle(ctx context.Context, repo *gitclone.Repository, baseCommit, ref string) (*os.File, error) {
 	ctx, cancel := context.WithTimeout(ctx, bundleBuildTimeout)
 	defer cancel()
 	var bundleFile *os.File
 	err := repo.WithFetchExclusion(ctx, func() error {
-		head, err := mirrorHead(ctx, repo.Path())
+		tip, err := mirrorRev(ctx, repo.Path(), tipRevision(ref))
 		if err != nil {
 			return err
 		}
-		if head == baseCommit {
+		if tip == baseCommit {
 			return errEmptyBundle
 		}
-		bundleFile, err = createBundleFile(ctx, repo, baseCommit)
+		bundleFile, err = createBundleFile(ctx, repo, baseCommit, ref)
 		return err
 	})
 	return bundleFile, errors.WithStack(err)
 }
 
-func createBundleFile(ctx context.Context, repo *gitclone.Repository, baseCommit string) (*os.File, error) {
-	headRef := "HEAD"
-	if out, err := exec.CommandContext(ctx, "git", "-C", repo.Path(), "symbolic-ref", "HEAD").Output(); err == nil { //nolint:gosec // repo.Path() is controlled by us
-		headRef = strings.TrimSpace(string(out))
+func createBundleFile(ctx context.Context, repo *gitclone.Repository, baseCommit, ref string) (*os.File, error) {
+	headRef := tipRevision(ref)
+	if ref == "" {
+		if out, err := exec.CommandContext(ctx, "git", "-C", repo.Path(), "symbolic-ref", "HEAD").Output(); err == nil { //nolint:gosec // repo.Path() is controlled by us
+			headRef = strings.TrimSpace(string(out))
+		}
 	}
 
 	tmpFile, err := os.CreateTemp("", "cachew-bundle-*.bundle")
@@ -1171,7 +1208,7 @@ func (s *Strategy) streamSnapshotDirect(w http.ResponseWriter, r *http.Request, 
 	defer func() { _ = os.RemoveAll(snapshotDir) }()
 
 	repoDir := filepath.Join(snapshotDir, "repo")
-	if err := s.cloneForSnapshot(ctx, repo, repoDir, s.snapshotFilterFor(repo.UpstreamURL())); err != nil {
+	if err := s.cloneForSnapshot(ctx, repo, repoDir, s.snapshotFilterFor(repo.UpstreamURL()), ""); err != nil {
 		return errors.Wrap(err, "clone for snapshot streaming")
 	}
 
@@ -1212,7 +1249,7 @@ func (s *Strategy) prepareSnapshotSpool(ctx context.Context, repo *gitclone.Repo
 	}
 
 	repoDir = filepath.Join(snapshotDir, "repo")
-	if err := s.cloneForSnapshot(ctx, repo, repoDir, s.snapshotFilterFor(upstreamURL)); err != nil {
+	if err := s.cloneForSnapshot(ctx, repo, repoDir, s.snapshotFilterFor(upstreamURL), ""); err != nil {
 		spool.MarkError(err)
 		s.snapshotSpools.Delete(upstreamURL)
 		_ = os.RemoveAll(snapshotDir)
@@ -1266,7 +1303,7 @@ func (s *Strategy) writeSnapshotSpool(w http.ResponseWriter, r *http.Request, re
 		}
 		mu.Unlock()
 		bgCtx := context.WithoutCancel(ctx)
-		if _, err := s.generateAndUploadSnapshot(bgCtx, repo); err != nil {
+		if _, err := s.generateAndUploadSnapshot(bgCtx, repo, ""); err != nil {
 			logger.ErrorContext(bgCtx, "Background cache upload failed", "upstream", upstreamURL, "error", err)
 		}
 	}()
@@ -1369,7 +1406,7 @@ func (s *Strategy) coldPreparationTimeout() time.Duration {
 }
 
 func (s *Strategy) coldSnapshotPublished(ctx context.Context, upstream string) (bool, error) {
-	_, err := cache.StatAuthoritative(ctx, s.cache, snapshotCacheKey(upstream))
+	_, err := cache.StatAuthoritative(ctx, s.cache, snapshotCacheKey(upstream, ""))
 	if errors.Is(err, os.ErrNotExist) {
 		return false, nil
 	}
@@ -1443,7 +1480,7 @@ func (s *Strategy) prepareColdSnapshot(ctx context.Context, repo *gitclone.Repos
 	}
 	publishedCommit := ""
 	if s.config.SnapshotInterval > 0 {
-		commit, err := s.generateAndUploadSnapshot(ctx, repo)
+		commit, err := s.generateAndUploadSnapshot(ctx, repo, "")
 		if err != nil {
 			return errors.Wrap(err, "publish prepared snapshot")
 		}
@@ -1491,20 +1528,21 @@ func snapshotSpoolDirForURL(mirrorRoot, upstreamURL string) (string, error) {
 }
 
 // generateAndUploadLFSSnapshot fetches only the LFS objects needed to check out
-// the repository's default branch (HEAD) and archives them as a separate tar.zst
-// served at /git/{repo}/lfs-snapshot.tar.zst.
+// the repository's default branch (HEAD), or ref when set, and archives them as
+// a separate tar.zst served at /git/{repo}/lfs-snapshot.tar.zst.
 //
 // Only objects referenced by the current HEAD tree are included — historical
 // versions of LFS-tracked files are excluded to keep the archive small.
 //
 // The archive stores paths relative to .git/ (e.g. ./lfs/objects/xx/yy/sha256) so that
 // the client can extract it directly into the repo's .git/ directory.
-func (s *Strategy) generateAndUploadLFSSnapshot(ctx context.Context, repo *gitclone.Repository) (commit string, returnErr error) {
+func (s *Strategy) generateAndUploadLFSSnapshot(ctx context.Context, repo *gitclone.Repository, ref string) (commit string, returnErr error) {
 	upstream := repo.UpstreamURL()
 	ctx, span := tracer.Start(ctx, "git.snapshot.generate_lfs",
 		trace.WithAttributes(
 			attribute.String("cachew.operation", "lfs_snapshot_generate"),
 			attribute.String("cachew.upstream", upstream),
+			attribute.String("cachew.ref", ref),
 		),
 	)
 	defer func() {
@@ -1520,8 +1558,8 @@ func (s *Strategy) generateAndUploadLFSSnapshot(ctx context.Context, repo *gitcl
 	// LFS objects are derived from HEAD, so an unchanged HEAD means the
 	// snapshot content is unchanged. Repos without an LFS entry never pass
 	// the existence check and simply re-run the cheap discovery grep below.
-	head := s.getMirrorHead(ctx, repo)
-	if s.snapshotUnchanged(ctx, snapshotJobLFS, lfsSnapshotCacheKey(upstream), upstream, head) {
+	head := s.getMirrorTip(ctx, repo, ref)
+	if s.snapshotUnchanged(ctx, refJob(snapshotJobLFS, ref), lfsSnapshotCacheKey(upstream, ref), upstream, head) {
 		logger.InfoContext(ctx, "LFS snapshot unchanged, skipping generation", "upstream", upstream, "commit", head)
 		return "", nil
 	}
@@ -1531,7 +1569,7 @@ func (s *Strategy) generateAndUploadLFSSnapshot(ctx context.Context, repo *gitcl
 	// that only configure LFS in subdirectories.
 	discoverStart := time.Now()
 	repoPath := repo.Path()
-	grepCmd := exec.CommandContext(ctx, "git", "-C", repoPath, "grep", "-q", "filter=lfs", "HEAD", "--", "*.gitattributes") //nolint:gosec
+	grepCmd := exec.CommandContext(ctx, "git", "-C", repoPath, "grep", "-q", "filter=lfs", tipRevision(ref), "--", "*.gitattributes") //nolint:gosec
 	if err := grepCmd.Run(); err != nil {
 		// git grep exits 1 for "no match" (legitimate "no LFS in this repo");
 		// any other non-zero exit (invalid HEAD, repo corruption, command
@@ -1550,18 +1588,18 @@ func (s *Strategy) generateAndUploadLFSSnapshot(ctx context.Context, repo *gitcl
 	start := time.Now()
 	logger.InfoContext(ctx, "LFS snapshot generation started", "upstream", upstream)
 
-	mu := s.snapshotMutexFor(upstream)
+	mu := s.snapshotMutexFor(upstream + refKeySuffix(ref))
 	mu.Lock()
 	defer mu.Unlock()
 
-	cacheKey := lfsSnapshotCacheKey(upstream)
+	cacheKey := lfsSnapshotCacheKey(upstream, ref)
 	excludePatterns := []string{"*.lock"}
 	cloneStart := time.Now()
 	cloneRecorded := false
 	// The LFS clone stays unfiltered: after the remote is reset to upstream, a
 	// partial clone's lazy fetches would hit GitHub directly without the
 	// credential injection that repo.GitCommand provides.
-	if err := s.withSnapshotClone(ctx, repo, "lfs", "", func(workDir string) error {
+	if err := s.withSnapshotClone(ctx, repo, "lfs", "", ref, func(workDir string) error {
 		s.metrics.recordLFSPhase(ctx, upstream, "clone", "success", time.Since(cloneStart))
 		cloneRecorded = true
 
@@ -1583,7 +1621,8 @@ func (s *Strategy) generateAndUploadLFSSnapshot(ctx context.Context, repo *gitcl
 				"output", string(output))
 		}
 
-		// Fetch only the LFS objects referenced by HEAD (the default branch).
+		// Fetch only the LFS objects referenced by the clone's HEAD, which is
+		// the default branch or the requested ref.
 		// Timeout must stay below githubapp.RefreshBuffer (30m) so the baked-in
 		// token can't expire mid-fetch and trigger a retry storm.
 		fetchStart := time.Now()
@@ -1674,7 +1713,12 @@ func (s *Strategy) handleLFSSnapshotRequest(w http.ResponseWriter, r *http.Reque
 
 	repoPath := ExtractRepoPath(strings.TrimSuffix(pathValue, "/lfs-snapshot.tar.zst"))
 	upstreamURL := "https://" + host + "/" + repoPath
-	cacheKey := lfsSnapshotCacheKey(upstreamURL)
+	ref := r.URL.Query().Get("ref")
+	if r.URL.Query().Has("ref") && !validBranchName(ref) {
+		http.Error(w, "ref query parameter must be a branch name", http.StatusBadRequest)
+		return
+	}
+	cacheKey := lfsSnapshotCacheKey(upstreamURL, ref)
 
 	// Try cache first so we can serve even when the mirror isn't ready (cold start).
 	reader, headers, err := s.cache.Open(ctx, cacheKey)
@@ -1689,6 +1733,13 @@ func (s *Strategy) handleLFSSnapshotRequest(w http.ResponseWriter, r *http.Reque
 		if err := s.streamSnapshotArtifact(ctx, w, r, reader, headers); err != nil {
 			logger.ErrorContext(ctx, "Failed to stream LFS snapshot", "upstream", upstreamURL, "error", err)
 		}
+		return
+	}
+
+	// Branch LFS snapshots are generated alongside the branch's working-tree
+	// snapshot, which schedules them on request.
+	if ref != "" {
+		http.Error(w, "LFS snapshot not found", http.StatusNotFound)
 		return
 	}
 
