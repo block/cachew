@@ -180,7 +180,7 @@ func (m *Manager) Config() Config {
 	return m.config
 }
 
-func (m *Manager) GetOrCreate(_ context.Context, upstreamURL string) (*Repository, error) {
+func (m *Manager) GetOrCreate(ctx context.Context, upstreamURL string) (*Repository, error) {
 	m.clonesMu.RLock()
 	repo, exists := m.clones[upstreamURL]
 	m.clonesMu.RUnlock()
@@ -211,8 +211,15 @@ func (m *Manager) GetOrCreate(_ context.Context, upstreamURL string) (*Repositor
 	}
 
 	headFile := filepath.Join(clonePath, "HEAD")
-	if _, err := os.Stat(headFile); err == nil {
-		repo.state = StateReady
+	if _, err := os.Lstat(headFile); err == nil {
+		if err := repo.ConfigureMirror(ctx, clonePath); err != nil {
+			if removeErr := os.RemoveAll(clonePath); removeErr != nil {
+				return nil, errors.Join(errors.Wrap(err, "sanitize existing mirror"),
+					errors.Wrap(removeErr, "remove unsafe existing mirror"))
+			}
+		} else {
+			repo.state = StateReady
+		}
 	}
 
 	repo.fetchSem <- struct{}{}
@@ -267,31 +274,13 @@ func (m *Manager) DiscoverExisting(ctx context.Context) ([]*Repository, error) {
 		}
 		upstreamURL := "https://" + host + "/" + repoPath
 
-		repo := &Repository{
-			state:              StateReady,
-			config:             m.config,
-			path:               path,
-			upstreamURL:        upstreamURL,
-			fetchSem:           make(chan struct{}, 1),
-			credentialProvider: m.credentialProvider,
+		repo, err := m.GetOrCreate(ctx, upstreamURL)
+		if err != nil {
+			return errors.Wrapf(err, "discover mirror for %s", upstreamURL)
 		}
-		repo.fetchSem <- struct{}{}
-
-		if err := configureMirror(ctx, path, m.config.PackThreads); err != nil {
-			return errors.Wrapf(err, "configure mirror for %s", upstreamURL)
+		if repo.State() == StateReady {
+			discovered = append(discovered, repo)
 		}
-
-		if m.config.Maintenance {
-			if err := registerMaintenance(ctx, path); err != nil {
-				return errors.Wrapf(err, "register maintenance for %s", upstreamURL)
-			}
-		}
-
-		m.clonesMu.Lock()
-		m.clones[upstreamURL] = repo
-		m.clonesMu.Unlock()
-
-		discovered = append(discovered, repo)
 
 		return fs.SkipDir
 	})
@@ -310,7 +299,24 @@ func RepoPathFromURL(upstreamURL string) (string, error) {
 	if err != nil {
 		return "", errors.Wrap(err, "parse upstream URL")
 	}
-	return filepath.Join(parsed.Host, strings.TrimSuffix(parsed.Path, ".git")), nil
+	if parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" ||
+		parsed.Fragment != "" || strings.ContainsAny(parsed.Host, `/\`) {
+		return "", errors.Errorf("unsupported upstream URL %q", upstreamURL)
+	}
+	repoPath := strings.TrimSuffix(strings.TrimSuffix(strings.TrimPrefix(parsed.Path, "/"), "/"), ".git")
+	if repoPath == "" {
+		return "", errors.Errorf("upstream URL %q has no repository path", upstreamURL)
+	}
+	for segment := range strings.SplitSeq(repoPath, "/") {
+		if segment == "" || segment == "." || segment == ".." || strings.Contains(segment, `\`) {
+			return "", errors.Errorf("unsupported upstream URL path %q", parsed.Path)
+		}
+	}
+	repoPath = filepath.Join(parsed.Host, filepath.FromSlash(repoPath))
+	if !filepath.IsLocal(repoPath) {
+		return "", errors.Errorf("upstream URL path %q is not local", parsed.Path)
+	}
+	return repoPath, nil
 }
 
 func (m *Manager) clonePathForURL(upstreamURL string) (string, error) {
@@ -400,9 +406,11 @@ func (r *Repository) WithFetchExclusion(ctx context.Context, fn func() error) er
 	}
 }
 
-// ConfigureMirror configures a git directory at repoPath as a mirror with
-// the repository's pack threads and optional maintenance settings.
+// ConfigureMirror sanitizes and configures a git directory at repoPath as a mirror.
 func (r *Repository) ConfigureMirror(ctx context.Context, repoPath string) error {
+	if err := resetMirrorMetadata(ctx, repoPath, r.upstreamURL); err != nil {
+		return errors.Wrap(err, "reset mirror metadata")
+	}
 	if err := configureMirror(ctx, repoPath, r.config.PackThreads); err != nil {
 		return errors.Wrap(err, "configure mirror")
 	}
@@ -412,6 +420,106 @@ func (r *Repository) ConfigureMirror(ctx context.Context, repoPath string) error
 		}
 	}
 	return nil
+}
+
+func resetMirrorMetadata(ctx context.Context, repoPath, upstreamURL string) error {
+	configPath := filepath.Join(repoPath, "config")
+	info, err := os.Lstat(configPath)
+	if err != nil {
+		return errors.Wrap(err, "stat mirror config")
+	}
+	if !info.Mode().IsRegular() {
+		return errors.New("mirror config is not a regular file")
+	}
+	configValues, err := mirrorConfigValues(ctx, configPath)
+	if err != nil {
+		return err
+	}
+	objectFormat := configValues["extensions.objectformat"]
+	if objectFormat != "" && objectFormat != "sha1" && objectFormat != "sha256" {
+		return errors.Errorf("unsupported mirror object format %q", objectFormat)
+	}
+	refStorage := configValues["extensions.refstorage"]
+	if refStorage != "" && refStorage != "files" && refStorage != "reftable" {
+		return errors.Errorf("unsupported mirror ref storage %q", refStorage)
+	}
+	if err := filepath.WalkDir(repoPath, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.Type()&os.ModeSymlink != 0 || (!entry.IsDir() && !entry.Type().IsRegular()) {
+			return errors.Errorf("unsafe mirror entry %s", path)
+		}
+		return nil
+	}); err != nil {
+		return errors.Wrap(err, "validate mirror entries")
+	}
+
+	for _, path := range []string{
+		filepath.Join(repoPath, ".git"),
+		filepath.Join(repoPath, ".lfsconfig"),
+		filepath.Join(repoPath, "commondir"),
+		filepath.Join(repoPath, "config"),
+		filepath.Join(repoPath, "config.worktree"),
+		filepath.Join(repoPath, "hooks"),
+		filepath.Join(repoPath, "index"),
+		filepath.Join(repoPath, "objects", "info", "alternates"),
+		filepath.Join(repoPath, "objects", "info", "http-alternates"),
+		filepath.Join(repoPath, "modules"),
+		filepath.Join(repoPath, "worktrees"),
+	} {
+		if err := os.RemoveAll(path); err != nil {
+			return errors.Wrapf(err, "remove unsafe mirror metadata %s", path)
+		}
+	}
+
+	repositoryFormat := "0"
+	if objectFormat != "" || refStorage != "" {
+		repositoryFormat = "1"
+	}
+	escapedRemoteURL, err := gitConfigValue(upstreamURL)
+	if err != nil {
+		return err
+	}
+	config := "[core]\n\trepositoryformatversion = " + repositoryFormat + "\n\tfilemode = true\n\tbare = true\n" +
+		"[remote \"origin\"]\n\turl = " + escapedRemoteURL + "\n\tfetch = +refs/*:refs/*\n\tmirror = true\n"
+	if objectFormat != "" || refStorage != "" {
+		config += "[extensions]\n"
+	}
+	if objectFormat != "" {
+		config += "\tobjectFormat = " + objectFormat + "\n"
+	}
+	if refStorage != "" {
+		config += "\trefStorage = " + refStorage + "\n"
+	}
+	if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
+		return errors.Wrap(err, "create mirror config")
+	}
+	return nil
+}
+
+func gitConfigValue(value string) (string, error) {
+	if strings.ContainsAny(value, "\x00\r\n") {
+		return "", errors.New("mirror origin contains a control character")
+	}
+	value = strings.ReplaceAll(strings.ReplaceAll(value, `\`, `\\`), `"`, `\"`)
+	return `"` + value + `"`, nil
+}
+
+func mirrorConfigValues(ctx context.Context, configPath string) (map[string]string, error) {
+	cmd := exec.CommandContext(ctx, "git", "config", "--file", configPath, "--no-includes", "--null", "--list") // #nosec G204
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return nil, errors.Wrapf(err, "read mirror config: %s", string(output))
+	}
+	values := map[string]string{}
+	for entry := range strings.SplitSeq(string(output), "\x00") {
+		key, value, ok := strings.Cut(entry, "\n")
+		if ok {
+			values[strings.ToLower(key)] = value
+		}
+	}
+	return values, nil
 }
 
 // MarkReady transitions the repository to StateReady, indicating it is

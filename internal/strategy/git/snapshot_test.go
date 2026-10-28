@@ -1334,6 +1334,9 @@ func commitUpstream(t *testing.T, upstream, msg string) string {
 
 func newBundleTestStrategy(ctx context.Context, t *testing.T, mirrorRoot string, refCheckInterval time.Duration) *testMux {
 	t.Helper()
+	mirrorPath := filepath.Join(mirrorRoot, "example.com", "org", "repo")
+	upstreamURL, err := exec.Command("git", "-C", mirrorPath, "remote", "get-url", "origin").Output()
+	assert.NoError(t, err)
 	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: time.Hour})
 	assert.NoError(t, err)
 	mux := newTestMux()
@@ -1341,6 +1344,8 @@ func newBundleTestStrategy(ctx context.Context, t *testing.T, mirrorRoot string,
 	s, err := git.New(ctx, git.Config{}, newTestScheduler(ctx, t), memCache, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
 	assert.NoError(t, err)
 	waitForReady(t, s)
+	assert.NoError(t, exec.Command("git", "-C", mirrorPath, "remote", "set-url", "origin",
+		strings.TrimSpace(string(upstreamURL))).Run())
 	return mux
 }
 

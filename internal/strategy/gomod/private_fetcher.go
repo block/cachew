@@ -291,6 +291,7 @@ func (p *privateFetcher) generateZip(ctx context.Context, repo *gitclone.Reposit
 	}
 	// #nosec G204 - cloneDir and gitRef are controlled by us
 	cmd = exec.CommandContext(ctx, "git", "-C", cloneDir, "checkout", gitRef)
+	cmd.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL="+os.DevNull)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return nil, errors.Wrapf(err, "git checkout %s: %s", gitRef, string(output))
 	}

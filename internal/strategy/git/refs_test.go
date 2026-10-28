@@ -64,6 +64,7 @@ func TestEnsureRefsHandler(t *testing.T) {
 		func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
 	assert.NoError(t, err)
 	waitForReady(t, s)
+	assert.NoError(t, exec.Command("git", "-C", mirrorPath, "remote", "set-url", "origin", upstreamPath).Run())
 
 	handler := mux.handlers["POST /git/{host}/{path...}"]
 	assert.NotZero(t, handler)

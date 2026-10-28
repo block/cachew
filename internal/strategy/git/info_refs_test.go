@@ -82,6 +82,7 @@ func newInfoRefsFixture(t *testing.T) *infoRefsFixture {
 		func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
 	assert.NoError(t, err)
 	waitForReady(t, strategy)
+	runInfoRefsGit(t, "-C", mirrorPath, "config", "remote.origin.url", upstreamPath)
 
 	transport := &infoRefsTransport{}
 	strategy.SetHTTPTransport(transport)
@@ -121,7 +122,7 @@ func setInfoRefsLsRemote(t *testing.T, target string, fail bool) {
   exit 1`
 	}
 	script := fmt.Sprintf(`#!/bin/sh
-if [ "$1" = "ls-remote" ]; then
+if echo " $* " | grep -q ' ls-remote '; then
   %s
 fi
 exec %q "$@"

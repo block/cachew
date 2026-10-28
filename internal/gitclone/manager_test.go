@@ -120,6 +120,54 @@ func TestManager_GetOrCreate(t *testing.T) {
 	assert.True(t, repo == repo2, "expected same repository instance")
 }
 
+func TestRepoPathFromURLRejectsTraversal(t *testing.T) {
+	path, err := RepoPathFromURL("https://github.com/org/repo.git")
+	assert.NoError(t, err)
+	assert.Equal(t, filepath.Join("github.com", "org", "repo"), path)
+
+	for _, upstream := range []string{
+		"http://github.com/org/repo",
+		"https://user@github.com/org/repo",
+		"https://github.com/org/repo?x",
+		"https://github.com/../../tmp/repo",
+		"https://github.com/%2e%2e/%2e%2e/tmp/repo",
+		"https://github.com/org/repo%2f..%2f..%2ftmp/repo",
+	} {
+		_, err := RepoPathFromURL(upstream)
+		assert.Error(t, err)
+	}
+}
+
+func TestConfigureMirrorSanitizesExecutableMetadata(t *testing.T) {
+	_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelError})
+	repoPath := createBareRepo(t, t.TempDir())
+	hookPath := filepath.Join(repoPath, "hooks", "reference-transaction")
+	proofPath := filepath.Join(t.TempDir(), "proof")
+	assert.NoError(t, os.WriteFile(hookPath, []byte("#!/bin/sh\ntouch \""+proofPath+"\"\n"), 0o755))
+	assert.NoError(t, exec.Command("git", "-C", repoPath, "config", "remote.origin.url", "https://github.com/org/repo").Run())
+	assert.NoError(t, exec.Command("git", "-C", repoPath, "config", "credential.helper", "!touch "+proofPath).Run())
+	assert.NoError(t, exec.Command("git", "-C", repoPath, "config", "core.alternateRefsCommand", "touch "+proofPath).Run())
+	assert.NoError(t, os.WriteFile(filepath.Join(repoPath, "objects", "info", "alternates"), []byte(repoPath+"/objects\n"), 0o600))
+	assert.NoError(t, os.WriteFile(filepath.Join(repoPath, "commondir"), []byte("payload\n"), 0o600))
+
+	repo := &Repository{config: testRepoConfig(), upstreamURL: "https://github.com/org/repo"}
+	assert.NoError(t, repo.ConfigureMirror(ctx, repoPath))
+
+	_, err := os.Lstat(hookPath)
+	assert.True(t, os.IsNotExist(err))
+	_, err = os.Lstat(filepath.Join(repoPath, "objects", "info", "alternates"))
+	assert.True(t, os.IsNotExist(err))
+	_, err = os.Lstat(filepath.Join(repoPath, "commondir"))
+	assert.True(t, os.IsNotExist(err))
+	cmd := exec.Command("git", "-C", repoPath, "config", "--get", "credential.helper")
+	assert.Error(t, cmd.Run())
+	output, err := exec.Command("git", "-C", repoPath, "config", "--get", "remote.origin.url").Output()
+	assert.NoError(t, err)
+	assert.Equal(t, "https://github.com/org/repo", strings.TrimSpace(string(output)))
+	_, err = os.Lstat(proofPath)
+	assert.True(t, os.IsNotExist(err))
+}
+
 func TestManager_GetOrCreate_ExistingClone(t *testing.T) {
 	_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelError})
 	tmpDir := t.TempDir()
@@ -133,8 +181,7 @@ func TestManager_GetOrCreate_ExistingClone(t *testing.T) {
 	assert.NoError(t, err)
 
 	repoPath := filepath.Join(tmpDir, "github.com", "user", "repo")
-	assert.NoError(t, os.MkdirAll(repoPath, 0o755))
-	assert.NoError(t, os.WriteFile(filepath.Join(repoPath, "HEAD"), []byte("ref: refs/heads/main\n"), 0o644))
+	assert.NoError(t, exec.Command("git", "init", "--bare", repoPath).Run())
 
 	upstreamURL := "https://github.com/user/repo"
 	repo, err := manager.GetOrCreate(context.Background(), upstreamURL)
@@ -763,7 +810,7 @@ func TestRepositoryEnsureRefsUpToDateDoesNotCacheInFlightCheck(t *testing.T) {
 	started := filepath.Join(binDir, "started")
 	release := filepath.Join(binDir, "release")
 	script := fmt.Sprintf(`#!/bin/sh
-if [ "$1" = "ls-remote" ]; then
+if echo " $* " | grep -q ' ls-remote '; then
   touch %q
   while [ ! -e %q ]; do sleep 0.01; done
 fi
@@ -839,7 +886,7 @@ func TestRepositoryEnsureRefsUpToDateConcurrentStaleResultInvalidatesFreshResult
 	staleStarted := filepath.Join(binDir, "stale-started")
 	releaseStale := filepath.Join(binDir, "release-stale")
 	script := fmt.Sprintf(`#!/bin/sh
-if [ "$1" = "ls-remote" ]; then
+if echo " $* " | grep -q ' ls-remote '; then
   if mkdir %q 2>/dev/null; then
     touch %q
     while [ ! -e %q ]; do sleep 0.01; done
