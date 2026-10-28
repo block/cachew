@@ -30,6 +30,7 @@ func (r *Repository) GitCommand(ctx context.Context, args ...string) (*exec.Cmd,
 		return nil, errors.Wrap(err, "get insteadOf disable args")
 	}
 
+	// Cache operations do not need hooks, and enforcing this at execution prevents restored hook files from running.
 	allArgs := []string{"-c", "core.hooksPath=" + os.DevNull}
 	if len(configArgs) > 0 {
 		allArgs = append(allArgs, configArgs...)

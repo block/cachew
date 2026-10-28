@@ -212,6 +212,7 @@ func (m *Manager) GetOrCreate(ctx context.Context, upstreamURL string) (*Reposit
 
 	headFile := filepath.Join(clonePath, "HEAD")
 	if _, err := os.Lstat(headFile); err == nil {
+		// Mirrors can survive from an older process or cache restore, so they must cross the same trust boundary as new restores.
 		if err := repo.ConfigureMirror(ctx, clonePath); err != nil {
 			if removeErr := os.RemoveAll(clonePath); removeErr != nil {
 				return nil, errors.Join(errors.Wrap(err, "sanitize existing mirror"),
@@ -431,6 +432,7 @@ func resetMirrorMetadata(ctx context.Context, repoPath, upstreamURL string) erro
 	if !info.Mode().IsRegular() {
 		return errors.New("mirror config is not a regular file")
 	}
+	// Cached metadata can invoke commands; retain only storage features needed to read objects, then rebuild trusted settings.
 	configValues, err := mirrorConfigValues(ctx, configPath)
 	if err != nil {
 		return err
@@ -443,6 +445,7 @@ func resetMirrorMetadata(ctx context.Context, repoPath, upstreamURL string) erro
 	if refStorage != "" && refStorage != "files" && refStorage != "reftable" {
 		return errors.Errorf("unsupported mirror ref storage %q", refStorage)
 	}
+	// Cleanup must not resolve through a cached symlink and remove files outside the mirror.
 	if err := filepath.WalkDir(repoPath, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
@@ -455,6 +458,7 @@ func resetMirrorMetadata(ctx context.Context, repoPath, upstreamURL string) erro
 		return errors.Wrap(err, "validate mirror entries")
 	}
 
+	// Git interprets these paths as configuration, hooks, or object-store indirection rather than inert cached data.
 	for _, path := range []string{
 		filepath.Join(repoPath, ".git"),
 		filepath.Join(repoPath, ".lfsconfig"),

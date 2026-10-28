@@ -143,6 +143,7 @@ func (s *Strategy) cloneForSnapshot(ctx context.Context, repo *gitclone.Reposito
 		args = append(args, repo.Path(), destDir)
 		// #nosec G204 - repo.Path() and destDir are controlled by us
 		cmd := exec.CommandContext(ctx, "git", args...)
+		// Repository files choose checkout filters, so host-defined filters must not become an execution path for cached data.
 		// LC_ALL=C pins git's messages to English so the filter fallback
 		// warning below is detectable regardless of the host locale.
 		cmd.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL="+os.DevNull,

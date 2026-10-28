@@ -138,6 +138,7 @@ func (s *Strategy) serveFromBackend(w http.ResponseWriter, r *http.Request, repo
 
 	var stderrBuf bytes.Buffer
 
+	// Host Git configuration is unrelated to serving mirrors and can add command-backed upload-pack behavior.
 	handler := &cgi.Handler{
 		Path:   gitPath,
 		Args:   []string{"http-backend"},
