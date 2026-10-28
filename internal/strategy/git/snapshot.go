@@ -147,7 +147,7 @@ func (s *Strategy) cloneForSnapshot(ctx context.Context, repo *gitclone.Reposito
 		// LC_ALL=C pins git's messages to English so the filter fallback
 		// warning below is detectable regardless of the host locale.
 		cmd.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL="+os.DevNull,
-			"GIT_LFS_SKIP_SMUDGE=1", "LC_ALL=C")
+			"GIT_CONFIG_COUNT=0", "GIT_CONFIG_PARAMETERS=", "GIT_LFS_SKIP_SMUDGE=1", "LC_ALL=C")
 		output, err := cmd.CombinedOutput()
 		if err != nil {
 			return errors.Wrapf(err, "git clone for snapshot: %s", string(output))

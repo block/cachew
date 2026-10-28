@@ -191,6 +191,27 @@ func TestManager_GetOrCreate_ExistingClone(t *testing.T) {
 	assert.Equal(t, StateReady, repo.State())
 }
 
+func TestManager_GetOrCreate_PreservesExistingCloneWhenSanitizationCanceled(t *testing.T) {
+	_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelError})
+	tmpDir := t.TempDir()
+	manager, err := NewManager(ctx, Config{MirrorRoot: tmpDir}, nil)
+	assert.NoError(t, err)
+
+	repoPath := filepath.Join(tmpDir, "github.com", "user", "repo")
+	assert.NoError(t, exec.Command("git", "init", "--bare", repoPath).Run())
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err = manager.GetOrCreate(canceledCtx, "https://github.com/user/repo")
+	assert.Error(t, err)
+	assert.True(t, errors.Is(err, context.Canceled))
+	_, err = os.Stat(filepath.Join(repoPath, "HEAD"))
+	assert.NoError(t, err)
+	repo, err := manager.GetOrCreate(context.Background(), "https://github.com/user/repo")
+	assert.NoError(t, err)
+	assert.Equal(t, StateReady, repo.State())
+}
+
 func TestManager_Get(t *testing.T) {
 	_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelError})
 	tmpDir := t.TempDir()

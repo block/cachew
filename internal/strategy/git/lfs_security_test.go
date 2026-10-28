@@ -132,6 +132,12 @@ func TestCloneForSnapshotIgnoresGlobalFilters(t *testing.T) {
 	assert.NoError(t, os.WriteFile(configPath, []byte("[filter \"poc\"]\n\tprocess = "+filterPath+"\n\trequired = true\n"), 0o600))
 	t.Setenv("GIT_CONFIG_GLOBAL", configPath)
 	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	t.Setenv("GIT_CONFIG_COUNT", "2")
+	t.Setenv("GIT_CONFIG_KEY_0", "filter.poc.process")
+	t.Setenv("GIT_CONFIG_VALUE_0", filterPath)
+	t.Setenv("GIT_CONFIG_KEY_1", "filter.poc.required")
+	t.Setenv("GIT_CONFIG_VALUE_1", "true")
+	t.Setenv("GIT_CONFIG_PARAMETERS", "'filter.poc.process'='"+filterPath+"' 'filter.poc.required'='true'")
 
 	strategy := &Strategy{cloneManager: manager}
 	assert.NoError(t, strategy.cloneForSnapshot(ctx, repo, filepath.Join(t.TempDir(), "snapshot"), ""))

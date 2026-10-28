@@ -21,6 +21,8 @@ import (
 
 type State int
 
+var errUnsafeMirrorMetadata = errors.New("unsafe mirror metadata")
+
 const (
 	StateEmpty   State = iota // Not cloned yet
 	StateCloning              // Clone in progress
@@ -213,11 +215,16 @@ func (m *Manager) GetOrCreate(ctx context.Context, upstreamURL string) (*Reposit
 	headFile := filepath.Join(clonePath, "HEAD")
 	if _, err := os.Lstat(headFile); err == nil {
 		// Mirrors can survive from an older process or cache restore, so they must cross the same trust boundary as new restores.
-		if err := repo.ConfigureMirror(ctx, clonePath); err != nil {
+		if err := resetMirrorMetadata(ctx, clonePath, repo.upstreamURL); err != nil {
+			if !errors.Is(err, errUnsafeMirrorMetadata) {
+				return nil, errors.Wrap(err, "sanitize existing mirror")
+			}
 			if removeErr := os.RemoveAll(clonePath); removeErr != nil {
 				return nil, errors.Join(errors.Wrap(err, "sanitize existing mirror"),
 					errors.Wrap(removeErr, "remove unsafe existing mirror"))
 			}
+		} else if err := repo.configureMirror(ctx, clonePath); err != nil {
+			return nil, errors.Wrap(err, "configure existing mirror")
 		} else {
 			repo.state = StateReady
 		}
@@ -412,6 +419,10 @@ func (r *Repository) ConfigureMirror(ctx context.Context, repoPath string) error
 	if err := resetMirrorMetadata(ctx, repoPath, r.upstreamURL); err != nil {
 		return errors.Wrap(err, "reset mirror metadata")
 	}
+	return r.configureMirror(ctx, repoPath)
+}
+
+func (r *Repository) configureMirror(ctx context.Context, repoPath string) error {
 	if err := configureMirror(ctx, repoPath, r.config.PackThreads); err != nil {
 		return errors.Wrap(err, "configure mirror")
 	}
@@ -430,7 +441,7 @@ func resetMirrorMetadata(ctx context.Context, repoPath, upstreamURL string) erro
 		return errors.Wrap(err, "stat mirror config")
 	}
 	if !info.Mode().IsRegular() {
-		return errors.New("mirror config is not a regular file")
+		return errors.Wrap(errUnsafeMirrorMetadata, "mirror config is not a regular file")
 	}
 	// Cached metadata can invoke commands; retain only storage features needed to read objects, then rebuild trusted settings.
 	configValues, err := mirrorConfigValues(ctx, configPath)
@@ -439,11 +450,11 @@ func resetMirrorMetadata(ctx context.Context, repoPath, upstreamURL string) erro
 	}
 	objectFormat := configValues["extensions.objectformat"]
 	if objectFormat != "" && objectFormat != "sha1" && objectFormat != "sha256" {
-		return errors.Errorf("unsupported mirror object format %q", objectFormat)
+		return errors.Wrapf(errUnsafeMirrorMetadata, "unsupported mirror object format %q", objectFormat)
 	}
 	refStorage := configValues["extensions.refstorage"]
 	if refStorage != "" && refStorage != "files" && refStorage != "reftable" {
-		return errors.Errorf("unsupported mirror ref storage %q", refStorage)
+		return errors.Wrapf(errUnsafeMirrorMetadata, "unsupported mirror ref storage %q", refStorage)
 	}
 	// Cleanup must not resolve through a cached symlink and remove files outside the mirror.
 	if err := filepath.WalkDir(repoPath, func(path string, entry fs.DirEntry, walkErr error) error {
@@ -451,7 +462,7 @@ func resetMirrorMetadata(ctx context.Context, repoPath, upstreamURL string) erro
 			return walkErr
 		}
 		if entry.Type()&os.ModeSymlink != 0 || (!entry.IsDir() && !entry.Type().IsRegular()) {
-			return errors.Errorf("unsafe mirror entry %s", path)
+			return errors.Wrapf(errUnsafeMirrorMetadata, "unsafe mirror entry %s", path)
 		}
 		return nil
 	}); err != nil {
