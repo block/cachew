@@ -5,14 +5,14 @@ package gitclone
 import (
 	"bufio"
 	"context"
+	"os"
 	"os/exec"
 	"strings"
 
 	"github.com/alecthomas/errors"
 )
 
-// GitCommand returns a git subprocess configured with repository-scoped
-// authentication and any per-URL git config overrides disabled.
+// GitCommand returns a Git subprocess with repository hooks disabled.
 func (r *Repository) GitCommand(ctx context.Context, args ...string) (*exec.Cmd, error) {
 	repoURL := r.upstreamURL
 	var token string
@@ -30,7 +30,8 @@ func (r *Repository) GitCommand(ctx context.Context, args ...string) (*exec.Cmd,
 		return nil, errors.Wrap(err, "get insteadOf disable args")
 	}
 
-	var allArgs []string
+	// Cache operations do not need hooks, and enforcing this at execution prevents restored hook files from running.
+	allArgs := []string{"-c", "core.hooksPath=" + os.DevNull}
 	if len(configArgs) > 0 {
 		allArgs = append(allArgs, configArgs...)
 	}
