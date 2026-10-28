@@ -285,14 +285,17 @@ func (p *privateFetcher) generateZip(ctx context.Context, repo *gitclone.Reposit
 	// We use --no-checkout then checkout the specific ref so that both tagged versions and
 	// raw commit hashes (from pseudo-versions) work; --branch only accepts branch/tag names.
 	// #nosec G204 - repo.Path() and cloneDir are controlled by us
-	cmd := exec.CommandContext(ctx, "git", "clone", "--no-checkout", repo.Path(), cloneDir)
+	cmd := exec.CommandContext(ctx, "git", "-c", "core.hooksPath="+os.DevNull, "clone", "--template=", "--no-checkout", repo.Path(), cloneDir)
+	cmd.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL="+os.DevNull,
+		"GIT_CONFIG_COUNT=0", "GIT_CONFIG_PARAMETERS=", "GIT_TEMPLATE_DIR=")
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return nil, errors.Wrapf(err, "git clone: %s", string(output))
 	}
 	// #nosec G204 - cloneDir and gitRef are controlled by us
-	cmd = exec.CommandContext(ctx, "git", "-C", cloneDir, "checkout", gitRef)
-	// Module files choose checkout filters, so host-defined process filters must not execute while assembling the cached zip.
-	cmd.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL="+os.DevNull, "GIT_CONFIG_COUNT=0", "GIT_CONFIG_PARAMETERS=")
+	cmd = exec.CommandContext(ctx, "git", "-c", "core.hooksPath="+os.DevNull, "-C", cloneDir, "checkout", gitRef)
+	// Module files can activate host filters, and inherited templates can add hooks that checkout executes.
+	cmd.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL="+os.DevNull,
+		"GIT_CONFIG_COUNT=0", "GIT_CONFIG_PARAMETERS=", "GIT_TEMPLATE_DIR=")
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return nil, errors.Wrapf(err, "git checkout %s: %s", gitRef, string(output))
 	}

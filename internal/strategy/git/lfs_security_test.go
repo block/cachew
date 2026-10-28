@@ -98,7 +98,7 @@ func TestRestoreMirrorSnapshotSanitizesCachedCode(t *testing.T) {
 	assert.True(t, os.IsNotExist(err))
 }
 
-func TestCloneForSnapshotIgnoresGlobalFilters(t *testing.T) {
+func TestCloneForSnapshotIgnoresHostConfiguration(t *testing.T) {
 	_, ctx := logging.Configure(t.Context(), logging.Config{})
 	workDir := t.TempDir()
 	for _, args := range [][]string{
@@ -138,9 +138,20 @@ func TestCloneForSnapshotIgnoresGlobalFilters(t *testing.T) {
 	t.Setenv("GIT_CONFIG_KEY_1", "filter.poc.required")
 	t.Setenv("GIT_CONFIG_VALUE_1", "true")
 	t.Setenv("GIT_CONFIG_PARAMETERS", "'filter.poc.process'='"+filterPath+"' 'filter.poc.required'='true'")
+	templateDir := t.TempDir()
+	assert.NoError(t, os.MkdirAll(filepath.Join(templateDir, "hooks"), 0o700))
+	templateProofPath := filepath.Join(t.TempDir(), "template-proof")
+	assert.NoError(t, os.WriteFile(filepath.Join(templateDir, "hooks", "post-checkout"),
+		[]byte("#!/bin/sh\ntouch \""+templateProofPath+"\"\n"), 0o700))
+	t.Setenv("GIT_TEMPLATE_DIR", templateDir)
 
 	strategy := &Strategy{cloneManager: manager}
-	assert.NoError(t, strategy.cloneForSnapshot(ctx, repo, filepath.Join(t.TempDir(), "snapshot"), ""))
+	snapshotDir := filepath.Join(t.TempDir(), "snapshot")
+	assert.NoError(t, strategy.cloneForSnapshot(ctx, repo, snapshotDir, ""))
 	_, err = os.Lstat(proofPath)
+	assert.True(t, os.IsNotExist(err))
+	_, err = os.Lstat(templateProofPath)
+	assert.True(t, os.IsNotExist(err))
+	_, err = os.Lstat(filepath.Join(snapshotDir, ".git", "hooks", "post-checkout"))
 	assert.True(t, os.IsNotExist(err))
 }

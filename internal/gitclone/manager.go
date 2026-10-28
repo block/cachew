@@ -469,25 +469,6 @@ func resetMirrorMetadata(ctx context.Context, repoPath, upstreamURL string) erro
 		return errors.Wrap(err, "validate mirror entries")
 	}
 
-	// Git interprets these paths as configuration, hooks, or object-store indirection rather than inert cached data.
-	for _, path := range []string{
-		filepath.Join(repoPath, ".git"),
-		filepath.Join(repoPath, ".lfsconfig"),
-		filepath.Join(repoPath, "commondir"),
-		filepath.Join(repoPath, "config"),
-		filepath.Join(repoPath, "config.worktree"),
-		filepath.Join(repoPath, "hooks"),
-		filepath.Join(repoPath, "index"),
-		filepath.Join(repoPath, "objects", "info", "alternates"),
-		filepath.Join(repoPath, "objects", "info", "http-alternates"),
-		filepath.Join(repoPath, "modules"),
-		filepath.Join(repoPath, "worktrees"),
-	} {
-		if err := os.RemoveAll(path); err != nil {
-			return errors.Wrapf(err, "remove unsafe mirror metadata %s", path)
-		}
-	}
-
 	repositoryFormat := "0"
 	if objectFormat != "" || refStorage != "" {
 		repositoryFormat = "1"
@@ -507,8 +488,40 @@ func resetMirrorMetadata(ctx context.Context, repoPath, upstreamURL string) erro
 	if refStorage != "" {
 		config += "\trefStorage = " + refStorage + "\n"
 	}
-	if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
-		return errors.Wrap(err, "create mirror config")
+	configFile, err := os.CreateTemp(repoPath, ".cachew-config-*")
+	if err != nil {
+		return errors.Wrap(err, "create temporary mirror config")
+	}
+	configTempPath := configFile.Name()
+	defer os.Remove(configTempPath) //nolint:errcheck // best-effort cleanup on failure
+	if _, err := configFile.WriteString(config); err != nil {
+		_ = configFile.Close()
+		return errors.Wrap(err, "write temporary mirror config")
+	}
+	if err := configFile.Close(); err != nil {
+		return errors.Wrap(err, "close temporary mirror config")
+	}
+
+	// Git interprets these paths as configuration, hooks, or object-store indirection rather than inert cached data.
+	for _, path := range []string{
+		filepath.Join(repoPath, ".git"),
+		filepath.Join(repoPath, ".lfsconfig"),
+		filepath.Join(repoPath, "commondir"),
+		filepath.Join(repoPath, "config.worktree"),
+		filepath.Join(repoPath, "hooks"),
+		filepath.Join(repoPath, "index"),
+		filepath.Join(repoPath, "objects", "info", "alternates"),
+		filepath.Join(repoPath, "objects", "info", "http-alternates"),
+		filepath.Join(repoPath, "modules"),
+		filepath.Join(repoPath, "worktrees"),
+	} {
+		if err := os.RemoveAll(path); err != nil {
+			return errors.Wrapf(err, "remove unsafe mirror metadata %s", path)
+		}
+	}
+	// #nosec G703 - both paths are created within the validated mirror directory
+	if err := os.Rename(configTempPath, configPath); err != nil {
+		return errors.Wrap(err, "replace mirror config")
 	}
 	return nil
 }

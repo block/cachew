@@ -132,7 +132,7 @@ func lfsSnapshotCacheKey(upstreamURL string) cache.Key {
 // metadata but only the blobs needed for the HEAD checkout.
 func (s *Strategy) cloneForSnapshot(ctx context.Context, repo *gitclone.Repository, destDir, filter string) error {
 	if err := repo.WithReadLock(func() error {
-		args := []string{"clone"}
+		args := []string{"-c", "core.hooksPath=" + os.DevNull, "clone", "--template="}
 		if filter != "" {
 			// Local (hardlink) clones copy the entire object store and silently
 			// ignore --filter; --no-local forces the transport path so the filter
@@ -143,11 +143,11 @@ func (s *Strategy) cloneForSnapshot(ctx context.Context, repo *gitclone.Reposito
 		args = append(args, repo.Path(), destDir)
 		// #nosec G204 - repo.Path() and destDir are controlled by us
 		cmd := exec.CommandContext(ctx, "git", args...)
-		// Repository files choose checkout filters, so host-defined filters must not become an execution path for cached data.
+		// Repository files choose checkout filters, while inherited templates can add hooks that run and leak into snapshots.
 		// LC_ALL=C pins git's messages to English so the filter fallback
 		// warning below is detectable regardless of the host locale.
 		cmd.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL="+os.DevNull,
-			"GIT_CONFIG_COUNT=0", "GIT_CONFIG_PARAMETERS=", "GIT_LFS_SKIP_SMUDGE=1", "LC_ALL=C")
+			"GIT_CONFIG_COUNT=0", "GIT_CONFIG_PARAMETERS=", "GIT_TEMPLATE_DIR=", "GIT_LFS_SKIP_SMUDGE=1", "LC_ALL=C")
 		output, err := cmd.CombinedOutput()
 		if err != nil {
 			return errors.Wrapf(err, "git clone for snapshot: %s", string(output))
