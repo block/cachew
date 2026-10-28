@@ -24,6 +24,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
+	"golang.org/x/mod/semver"
 
 	"github.com/block/cachew/internal/cache"
 	"github.com/block/cachew/internal/gitclone"
@@ -37,6 +38,11 @@ import (
 
 //nolint:gochecknoglobals // OTel tracer instances are package-scoped by convention
 var tracer = otel.Tracer("github.com/block/cachew/internal/strategy/git")
+
+const minimumGitLFSVersion = "v3.8.1"
+
+//nolint:gochecknoglobals // The executable and its version are process-wide.
+var gitLFSVersionCheck = sync.OnceValue(checkGitLFSVersion)
 
 func Register(r *strategy.Registry, scheduler jobscheduler.Provider, cloneManagerProvider gitclone.ManagerProvider, tokenManagerProvider githubapp.TokenManagerProvider) {
 	strategy.Register(r, "git", "Caches Git repositories, including tarball snapshots.", func(ctx context.Context, config Config, cache cache.Cache, mux strategy.Mux) (*Strategy, error) {
@@ -108,8 +114,8 @@ func New(
 
 	logger := logging.FromContext(ctx)
 
-	if _, err := exec.LookPath("git-lfs"); err != nil {
-		return nil, errors.New("git-lfs is required but not found in PATH")
+	if err := gitLFSVersionCheck(); err != nil {
+		return nil, err
 	}
 
 	// Get GitHub App token manager if configured
@@ -224,6 +230,33 @@ func New(
 	logger.InfoContext(ctx, "Git strategy initialized", "snapshot_interval", config.SnapshotInterval)
 
 	return s, nil
+}
+
+func gitLFSVersionSupported(output []byte) bool {
+	_, versionText, ok := strings.Cut(string(output), "git-lfs/")
+	if !ok {
+		return false
+	}
+	fields := strings.Fields(versionText)
+	if len(fields) == 0 {
+		return false
+	}
+	version := "v" + fields[0]
+	return semver.IsValid(version) && semver.Compare(version, minimumGitLFSVersion) >= 0
+}
+
+func checkGitLFSVersion() error {
+	if _, err := exec.LookPath("git-lfs"); err != nil {
+		return errors.New("git-lfs is required but not found in PATH")
+	}
+	gitLFSVersion, err := exec.CommandContext(context.Background(), "git-lfs", "version").CombinedOutput()
+	if err != nil {
+		return errors.Wrapf(err, "run git-lfs version: %s", string(gitLFSVersion))
+	}
+	if !gitLFSVersionSupported(gitLFSVersion) {
+		return errors.Errorf("git-lfs %s or newer is required", strings.TrimPrefix(minimumGitLFSVersion, "v"))
+	}
+	return nil
 }
 
 var _ strategy.Strategy = (*Strategy)(nil)
