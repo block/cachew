@@ -1,6 +1,7 @@
 package client
 
 import (
+	"archive/tar"
 	"bytes"
 	"context"
 	"fmt"
@@ -10,6 +11,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
+	"time"
 
 	"github.com/alecthomas/errors"
 )
@@ -35,6 +38,9 @@ func Archive(ctx context.Context, w io.Writer, baseDir string, includePaths []st
 		return errors.Errorf("not a directory: %s", baseDir)
 	}
 	for _, path := range includePaths {
+		if strings.Contains(path, "\\") || !filepath.IsLocal(path) {
+			return errors.Errorf("include path %q must be relative and stay within base directory", path)
+		}
 		if _, err := os.Stat(filepath.Join(baseDir, path)); err != nil {
 			return errors.Wrapf(err, "failed to stat include path %q", path)
 		}
@@ -51,13 +57,12 @@ func Archive(ctx context.Context, w io.Writer, baseDir string, includePaths []st
 }
 
 // Extract decompresses a zstd+tar stream from r into directory, preserving
-// file permissions, ownership, and symlinks. threads controls zstd
-// parallelism; 0 uses all CPU cores.
+// file permissions, modification times and symlinks. threads controls zstd parallelism; 0 uses all
+// CPU cores.
 //
-// Existing read-only directories are made owner-writable so tar can replace
-// their contents. tar re-applies archived modes, and a failed extract
-// restores the originals; read-only directories absent from the archive are
-// left owner-writable.
+// Existing read-only directories are made owner-writable so entries can be
+// replaced. Archived directory modes are applied after their contents, and a
+// failed extract restores pre-existing read-only directories.
 func Extract(ctx context.Context, r io.Reader, directory string, threads int) (rerr error) {
 	if threads <= 0 {
 		threads = runtime.GOMAXPROCS(0)
@@ -67,8 +72,6 @@ func Extract(ctx context.Context, r io.Reader, directory string, threads int) (r
 		return errors.Wrap(err, "failed to create target directory")
 	}
 
-	// Relax read-only dirs (e.g. Hermit package trees) so tar can overwrite
-	// their contents, restoring the original modes if anything fails.
 	relaxed, err := makeTreeWritable(directory)
 	defer func() {
 		if rerr != nil {
@@ -80,20 +83,15 @@ func Extract(ctx context.Context, r io.Reader, directory string, threads int) (r
 	}
 
 	zstdCmd := exec.CommandContext(ctx, "zstd", "-dc", fmt.Sprintf("-T%d", threads)) //nolint:gosec
-	tarCmd := exec.CommandContext(ctx, "tar", "-xpf", "-", "-C", directory)
-
 	pr, pw, err := os.Pipe()
 	if err != nil {
 		return errors.Wrap(err, "failed to create pipe")
 	}
 
-	var zstdStderr, tarStderr bytes.Buffer
+	var zstdStderr bytes.Buffer
 	zstdCmd.Stdin = r
 	zstdCmd.Stdout = pw
 	zstdCmd.Stderr = &zstdStderr
-
-	tarCmd.Stdin = pr
-	tarCmd.Stderr = &tarStderr
 
 	if err := zstdCmd.Start(); err != nil {
 		pw.Close() //nolint:errcheck,gosec
@@ -102,23 +100,289 @@ func Extract(ctx context.Context, r io.Reader, directory string, threads int) (r
 	}
 	pw.Close() //nolint:errcheck,gosec
 
-	if err := tarCmd.Start(); err != nil {
-		pr.Close() //nolint:errcheck,gosec
-		return errors.Join(errors.Wrap(err, "failed to start tar"), zstdCmd.Wait())
+	extractErr := safeExtractTar(ctx, pr, directory)
+	if extractErr == nil {
+		// tar.Reader stops at the end-of-archive marker; drain the record padding so zstd isn't killed by SIGPIPE.
+		if _, err := io.Copy(io.Discard, pr); err != nil {
+			extractErr = errors.Wrap(err, "failed to drain archive stream")
+		}
 	}
 	pr.Close() //nolint:errcheck,gosec
-
 	zstdErr := zstdCmd.Wait()
-	tarErr := tarCmd.Wait()
 
 	var errs []error
+	if extractErr != nil {
+		errs = append(errs, extractErr)
+	}
 	if zstdErr != nil {
 		errs = append(errs, errors.Errorf("zstd failed: %w: %s", zstdErr, zstdStderr.String()))
 	}
-	if tarErr != nil {
-		errs = append(errs, errors.Errorf("tar failed: %w: %s", tarErr, tarStderr.String()))
-	}
 	return errors.Join(errs...)
+}
+
+func safeExtractTar(ctx context.Context, r io.Reader, directory string) error {
+	tr := tar.NewReader(r)
+	var dirs []extractedDir
+	for {
+		if err := ctx.Err(); err != nil {
+			return errors.WithStack(err)
+		}
+		hdr, err := tr.Next()
+		switch {
+		case errors.Is(err, io.EOF):
+			return applyDirModes(dirs)
+		case err != nil:
+			return errors.Wrap(err, "failed to read tar header")
+		}
+
+		if err := extractTarEntry(directory, hdr, tr, &dirs); err != nil {
+			return err
+		}
+	}
+}
+
+func applyDirModes(dirs []extractedDir) error {
+	for i := len(dirs) - 1; i >= 0; i-- {
+		if err := os.Chmod(dirs[i].path, dirs[i].mode); err != nil {
+			return errors.Wrapf(err, "failed to chmod %s", dirs[i].path)
+		}
+		if err := os.Chtimes(dirs[i].path, time.Time{}, dirs[i].modTime); err != nil {
+			return errors.Wrapf(err, "failed to set times on %s", dirs[i].path)
+		}
+	}
+	return nil
+}
+
+func extractTarEntry(directory string, hdr *tar.Header, r io.Reader, dirs *[]extractedDir) error {
+	target, rel, err := safeArchivePath(directory, hdr.Name)
+	if err != nil {
+		return err
+	}
+	mode := tarMode(hdr)
+	switch hdr.Typeflag {
+	case tar.TypeDir:
+		if err := mkdirAllWithin(directory, rel, mode|0o700); err != nil {
+			return err
+		}
+		*dirs = append(*dirs, extractedDir{path: target, mode: mode, modTime: hdr.ModTime})
+	case tar.TypeReg, 0:
+		return extractRegularFile(directory, rel, target, mode, hdr.ModTime, r)
+	case tar.TypeSymlink:
+		return extractSymlink(directory, rel, target, hdr.Linkname)
+	case tar.TypeLink:
+		return extractHardLink(directory, rel, target, hdr.Linkname)
+	case tar.TypeXHeader, tar.TypeXGlobalHeader:
+		return nil
+	default:
+		return errors.Errorf("unsupported tar entry %q type %d", hdr.Name, hdr.Typeflag)
+	}
+	return nil
+}
+
+func tarMode(hdr *tar.Header) fs.FileMode {
+	return fs.FileMode(uint32(hdr.Mode & int64(fs.ModePerm)))
+}
+
+func extractRegularFile(directory, rel, target string, mode fs.FileMode, modTime time.Time, r io.Reader) error {
+	if err := mkdirAllWithin(directory, filepath.Dir(rel), 0o750); err != nil {
+		return err
+	}
+	if err := ensureNoSymlinkParents(directory, rel); err != nil {
+		return err
+	}
+	if err := rejectSymlink(target); err != nil {
+		return err
+	}
+	if err := removeExistingNonDir(target); err != nil {
+		return err
+	}
+	if err := writeRegularFile(target, mode, r); err != nil {
+		return err
+	}
+	if err := os.Chtimes(target, time.Time{}, modTime); err != nil {
+		return errors.Wrapf(err, "failed to set times on %s", target)
+	}
+	return nil
+}
+
+func extractSymlink(directory, rel, target, linkname string) error {
+	if err := validateSymlinkTarget(rel, linkname); err != nil {
+		return err
+	}
+	if err := mkdirAllWithin(directory, filepath.Dir(rel), 0o750); err != nil {
+		return err
+	}
+	if err := ensureNoSymlinkParents(directory, rel); err != nil {
+		return err
+	}
+	if err := removeExistingNonDir(target); err != nil {
+		return err
+	}
+	if err := os.Symlink(linkname, target); err != nil {
+		return errors.Wrapf(err, "failed to create symlink %s", target)
+	}
+	return nil
+}
+
+func extractHardLink(directory, rel, target, linkname string) error {
+	linkTarget, linkRel, err := safeArchivePath(directory, linkname)
+	if err != nil {
+		return err
+	}
+	if err := ensureNoSymlinkParents(directory, linkRel); err != nil {
+		return err
+	}
+	if err := rejectSymlink(linkTarget); err != nil {
+		return err
+	}
+	if err := mkdirAllWithin(directory, filepath.Dir(rel), 0o750); err != nil {
+		return err
+	}
+	if err := ensureNoSymlinkParents(directory, rel); err != nil {
+		return err
+	}
+	if err := removeExistingNonDir(target); err != nil {
+		return err
+	}
+	if err := os.Link(linkTarget, target); err != nil {
+		return errors.Wrapf(err, "failed to create hard link %s", target)
+	}
+	return nil
+}
+
+func safeArchivePath(root, name string) (string, string, error) {
+	if strings.Contains(name, "\\") {
+		return "", "", errors.Errorf("archive path %q contains a path separator unsupported by tar", name)
+	}
+	rel := filepath.FromSlash(name)
+	if !filepath.IsLocal(rel) {
+		return "", "", errors.Errorf("archive path %q must be relative and stay within target directory", name)
+	}
+	rel = filepath.Clean(rel)
+	return filepath.Join(root, rel), rel, nil
+}
+
+func validateSymlinkTarget(rel, linkname string) error {
+	if strings.Contains(linkname, "\\") {
+		return errors.Errorf("symlink target %q contains a path separator unsupported by tar", linkname)
+	}
+	linkTarget := filepath.FromSlash(linkname)
+	if filepath.IsAbs(linkTarget) || !filepath.IsLocal(filepath.Join(filepath.Dir(rel), linkTarget)) {
+		return errors.Errorf("symlink target %q must be relative and stay within target directory", linkname)
+	}
+	// ".." after a name would resolve relative to wherever that name points, so chained symlinks
+	// such as "a/b -> ..", "s -> a/b", "u -> s/.." could escape despite each being lexically local.
+	sawName := false
+	for part := range strings.SplitSeq(linkname, "/") {
+		switch part {
+		case "", ".":
+		case "..":
+			if sawName {
+				return errors.Errorf("symlink target %q must only use \"..\" as leading components", linkname)
+			}
+		default:
+			sawName = true
+		}
+	}
+	return nil
+}
+
+func mkdirAllWithin(root, rel string, mode fs.FileMode) error {
+	if rel == "." {
+		return nil
+	}
+	current := root
+	for part := range strings.SplitSeq(rel, string(filepath.Separator)) {
+		current = filepath.Join(current, part)
+		info, err := os.Lstat(current)
+		switch {
+		case err == nil && info.Mode()&fs.ModeSymlink != 0:
+			return errors.Errorf("refusing to extract through symlink %s", current)
+		case err == nil && !info.IsDir():
+			return errors.Errorf("refusing to create directory over non-directory %s", current)
+		case err == nil:
+			continue
+		case !errors.Is(err, os.ErrNotExist):
+			return errors.Wrapf(err, "failed to stat %s", current)
+		}
+		if err := os.Mkdir(current, mode); err != nil && !errors.Is(err, os.ErrExist) {
+			return errors.Wrapf(err, "failed to create directory %s", current)
+		}
+	}
+	return nil
+}
+
+func ensureNoSymlinkParents(root, rel string) error {
+	dir := filepath.Dir(rel)
+	if dir == "." {
+		return nil
+	}
+	current := root
+	for part := range strings.SplitSeq(dir, string(filepath.Separator)) {
+		current = filepath.Join(current, part)
+		info, err := os.Lstat(current)
+		if err != nil {
+			return errors.Wrapf(err, "failed to stat %s", current)
+		}
+		if info.Mode()&fs.ModeSymlink != 0 {
+			return errors.Errorf("refusing to extract through symlink %s", current)
+		}
+	}
+	return nil
+}
+
+func rejectSymlink(path string) error {
+	info, err := os.Lstat(path) //nolint:gosec
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return errors.Wrapf(err, "failed to stat %s", path)
+	}
+	if info.Mode()&fs.ModeSymlink != 0 {
+		return errors.Errorf("refusing to replace symlink %s", path)
+	}
+	return nil
+}
+
+func removeExistingNonDir(path string) error {
+	info, err := os.Lstat(path) //nolint:gosec
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return errors.Wrapf(err, "failed to stat %s", path)
+	}
+	if info.IsDir() {
+		return errors.Errorf("refusing to replace directory %s", path)
+	}
+	if err := os.Remove(path); err != nil { //nolint:gosec
+		return errors.Wrapf(err, "failed to remove %s", path)
+	}
+	return nil
+}
+
+func writeRegularFile(path string, mode fs.FileMode, r io.Reader) (rerr error) {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode) //nolint:gosec
+	if err != nil {
+		return errors.Wrapf(err, "failed to create file %s", path)
+	}
+	defer func() {
+		rerr = errors.Join(rerr, f.Close())
+	}()
+	if _, err := io.Copy(f, r); err != nil {
+		return errors.Wrapf(err, "failed to write file %s", path)
+	}
+	if err := f.Chmod(mode); err != nil {
+		return errors.Wrapf(err, "failed to chmod %s", path)
+	}
+	return nil
+}
+
+type extractedDir struct {
+	path    string
+	mode    fs.FileMode
+	modTime time.Time
 }
 
 // dirMode is a directory path and its pre-relaxation mode.

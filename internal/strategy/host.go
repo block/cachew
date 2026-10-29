@@ -8,6 +8,7 @@ import (
 	"github.com/alecthomas/errors"
 
 	"github.com/block/cachew/internal/cache"
+	"github.com/block/cachew/internal/httputil"
 	"github.com/block/cachew/internal/strategy/handler"
 )
 
@@ -59,6 +60,9 @@ func NewHost(_ context.Context, config HostConfig, cache cache.Cache, mux Mux) (
 			return h.buildTargetURL(r).String()
 		}).
 		Transform(func(r *http.Request) (*http.Request, error) {
+			if err := httputil.ValidatePath(r.URL.Path); err != nil {
+				return nil, httputil.Errorf(http.StatusBadRequest, "%w", err)
+			}
 			targetURL := h.buildTargetURL(r)
 			req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, targetURL.String(), nil)
 			if err != nil {
