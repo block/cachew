@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/alecthomas/errors"
 )
@@ -56,7 +57,7 @@ func Archive(ctx context.Context, w io.Writer, baseDir string, includePaths []st
 }
 
 // Extract decompresses a zstd+tar stream from r into directory, preserving
-// file permissions and symlinks. threads controls zstd parallelism; 0 uses all
+// file permissions, modification times and symlinks. threads controls zstd parallelism; 0 uses all
 // CPU cores.
 //
 // Existing read-only directories are made owner-writable so entries can be
@@ -121,7 +122,7 @@ func Extract(ctx context.Context, r io.Reader, directory string, threads int) (r
 
 func safeExtractTar(ctx context.Context, r io.Reader, directory string) error {
 	tr := tar.NewReader(r)
-	var dirs []dirMode
+	var dirs []extractedDir
 	for {
 		if err := ctx.Err(); err != nil {
 			return errors.WithStack(err)
@@ -140,16 +141,19 @@ func safeExtractTar(ctx context.Context, r io.Reader, directory string) error {
 	}
 }
 
-func applyDirModes(dirs []dirMode) error {
+func applyDirModes(dirs []extractedDir) error {
 	for i := len(dirs) - 1; i >= 0; i-- {
 		if err := os.Chmod(dirs[i].path, dirs[i].mode); err != nil {
 			return errors.Wrapf(err, "failed to chmod %s", dirs[i].path)
+		}
+		if err := os.Chtimes(dirs[i].path, time.Time{}, dirs[i].modTime); err != nil {
+			return errors.Wrapf(err, "failed to set times on %s", dirs[i].path)
 		}
 	}
 	return nil
 }
 
-func extractTarEntry(directory string, hdr *tar.Header, r io.Reader, dirs *[]dirMode) error {
+func extractTarEntry(directory string, hdr *tar.Header, r io.Reader, dirs *[]extractedDir) error {
 	target, rel, err := safeArchivePath(directory, hdr.Name)
 	if err != nil {
 		return err
@@ -160,9 +164,9 @@ func extractTarEntry(directory string, hdr *tar.Header, r io.Reader, dirs *[]dir
 		if err := mkdirAllWithin(directory, rel, mode|0o700); err != nil {
 			return err
 		}
-		*dirs = append(*dirs, dirMode{path: target, mode: mode})
+		*dirs = append(*dirs, extractedDir{path: target, mode: mode, modTime: hdr.ModTime})
 	case tar.TypeReg, 0:
-		return extractRegularFile(directory, rel, target, mode, r)
+		return extractRegularFile(directory, rel, target, mode, hdr.ModTime, r)
 	case tar.TypeSymlink:
 		return extractSymlink(directory, rel, target, hdr.Linkname)
 	case tar.TypeLink:
@@ -179,7 +183,7 @@ func tarMode(hdr *tar.Header) fs.FileMode {
 	return fs.FileMode(uint32(hdr.Mode & int64(fs.ModePerm)))
 }
 
-func extractRegularFile(directory, rel, target string, mode fs.FileMode, r io.Reader) error {
+func extractRegularFile(directory, rel, target string, mode fs.FileMode, modTime time.Time, r io.Reader) error {
 	if err := mkdirAllWithin(directory, filepath.Dir(rel), 0o750); err != nil {
 		return err
 	}
@@ -192,7 +196,13 @@ func extractRegularFile(directory, rel, target string, mode fs.FileMode, r io.Re
 	if err := removeExistingNonDir(target); err != nil {
 		return err
 	}
-	return writeRegularFile(target, mode, r)
+	if err := writeRegularFile(target, mode, r); err != nil {
+		return err
+	}
+	if err := os.Chtimes(target, time.Time{}, modTime); err != nil {
+		return errors.Wrapf(err, "failed to set times on %s", target)
+	}
+	return nil
 }
 
 func extractSymlink(directory, rel, target, linkname string) error {
@@ -215,8 +225,11 @@ func extractSymlink(directory, rel, target, linkname string) error {
 }
 
 func extractHardLink(directory, rel, target, linkname string) error {
-	linkTarget, _, err := safeArchivePath(directory, linkname)
+	linkTarget, linkRel, err := safeArchivePath(directory, linkname)
 	if err != nil {
+		return err
+	}
+	if err := ensureNoSymlinkParents(directory, linkRel); err != nil {
 		return err
 	}
 	if err := rejectSymlink(linkTarget); err != nil {
@@ -256,6 +269,20 @@ func validateSymlinkTarget(rel, linkname string) error {
 	linkTarget := filepath.FromSlash(linkname)
 	if filepath.IsAbs(linkTarget) || !filepath.IsLocal(filepath.Join(filepath.Dir(rel), linkTarget)) {
 		return errors.Errorf("symlink target %q must be relative and stay within target directory", linkname)
+	}
+	// ".." after a name would resolve relative to wherever that name points, so chained symlinks
+	// such as "a/b -> ..", "s -> a/b", "u -> s/.." could escape despite each being lexically local.
+	sawName := false
+	for part := range strings.SplitSeq(linkname, "/") {
+		switch part {
+		case "", ".":
+		case "..":
+			if sawName {
+				return errors.Errorf("symlink target %q must only use \"..\" as leading components", linkname)
+			}
+		default:
+			sawName = true
+		}
 	}
 	return nil
 }
@@ -350,6 +377,12 @@ func writeRegularFile(path string, mode fs.FileMode, r io.Reader) (rerr error) {
 		return errors.Wrapf(err, "failed to chmod %s", path)
 	}
 	return nil
+}
+
+type extractedDir struct {
+	path    string
+	mode    fs.FileMode
+	modTime time.Time
 }
 
 // dirMode is a directory path and its pre-relaxation mode.
