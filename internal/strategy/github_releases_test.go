@@ -287,3 +287,23 @@ func (t *testTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	newReq.RequestURI = ""
 	return t.originalTransport.RoundTrip(newReq)
 }
+
+func TestGitHubReleasesRejectsPathTraversal(t *testing.T) {
+	mock, mux, ctx := setupTest(t, strategy.GitHubReleasesConfig{
+		Token:       "test-token",
+		PrivateOrgs: []string{"privateorg"},
+	})
+
+	for _, target := range []string{
+		"/github.com/privateorg/repo/releases/download/..%2F..%2F..%2Fuser/binary.tar.gz",
+		"/github.com/privateorg/%2E%2E/releases/download/v1.0.0/binary.tar.gz",
+		"/github.com/privateorg/repo/releases/download/v1.0.0/%2E%2E",
+	} {
+		req := httptest.NewRequestWithContext(ctx, http.MethodGet, target, nil)
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, req)
+		assert.Equal(t, http.StatusBadRequest, w.Code, target)
+	}
+	assert.Equal(t, 0, mock.apiCallCount)
+	assert.Equal(t, 0, mock.publicCallCount)
+}

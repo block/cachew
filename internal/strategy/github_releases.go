@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"slices"
 	"strings"
 
@@ -90,9 +91,19 @@ func splitReleasePath(rest string) (release, file string) {
 	return rest[:i], rest[i+1:]
 }
 
+// escapePathSegments escapes each slash-separated segment of path so decoded
+// characters such as "?" and "#" can't alter the structure of the URL.
+func escapePathSegments(path string) string {
+	segments := strings.Split(path, "/")
+	for i, segment := range segments {
+		segments[i] = url.PathEscape(segment)
+	}
+	return strings.Join(segments, "/")
+}
+
 // newGitHubRequest creates a new HTTP request with GitHub API headers and authentication.
-func (g *GitHubReleases) newGitHubRequest(ctx context.Context, url, accept, org string) (*http.Request, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+func (g *GitHubReleases) newGitHubRequest(ctx context.Context, reqURL, accept, org string) (*http.Request, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 	if err != nil {
 		return nil, errors.Wrap(err, "create request")
 	}
@@ -122,6 +133,16 @@ func (g *GitHubReleases) newGitHubRequest(ctx context.Context, url, accept, org 
 // For private orgs, it uses the GitHub API to find and download the asset.
 // For public orgs, it constructs a direct download URL.
 func (g *GitHubReleases) downloadRelease(ctx context.Context, org, repo, release, file string) (*http.Request, error) {
+	// These values are spliced into GitHub API URLs that may carry org credentials.
+	for _, segment := range []string{org, repo, file} {
+		if err := httputil.ValidatePathSegment(segment); err != nil {
+			return nil, httputil.Errorf(http.StatusBadRequest, "%w", err)
+		}
+	}
+	if err := httputil.ValidatePath(release); err != nil || release == "" {
+		return nil, httputil.Errorf(http.StatusBadRequest, "invalid release %q", release)
+	}
+
 	isPrivate := slices.Contains(g.config.PrivateOrgs, org)
 
 	logger := logging.FromContext(ctx).With(
@@ -130,7 +151,8 @@ func (g *GitHubReleases) downloadRelease(ctx context.Context, org, repo, release
 		"release", release,
 		"file", file)
 
-	realURL := fmt.Sprintf("https://github.com/%s/%s/releases/download/%s/%s", org, repo, release, file)
+	realURL := fmt.Sprintf("https://github.com/%s/%s/releases/download/%s/%s",
+		url.PathEscape(org), url.PathEscape(repo), escapePathSegments(release), url.PathEscape(file))
 	if !isPrivate {
 		// Public release - use direct download URL
 		logger.DebugContext(ctx, "Using public download URL")
@@ -143,7 +165,8 @@ func (g *GitHubReleases) downloadRelease(ctx context.Context, org, repo, release
 
 	// Use GitHub API to get release info and find the asset
 	logger.DebugContext(ctx, "Using GitHub API for private release")
-	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/tags/%s", org, repo, release)
+	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/tags/%s",
+		url.PathEscape(org), url.PathEscape(repo), escapePathSegments(release))
 	req, err := g.newGitHubRequest(ctx, apiURL, "application/vnd.github+json", org)
 	if err != nil {
 		return nil, httputil.Errorf(http.StatusInternalServerError, "create API request")

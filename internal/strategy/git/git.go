@@ -29,6 +29,7 @@ import (
 	"github.com/block/cachew/internal/cache"
 	"github.com/block/cachew/internal/gitclone"
 	"github.com/block/cachew/internal/githubapp"
+	cachewhttputil "github.com/block/cachew/internal/httputil"
 	"github.com/block/cachew/internal/jobscheduler"
 	"github.com/block/cachew/internal/logging"
 	"github.com/block/cachew/internal/metadatadb"
@@ -351,6 +352,12 @@ func (s *Strategy) handleRequest(w http.ResponseWriter, r *http.Request) {
 	pathValue := r.PathValue("path")
 
 	logger.DebugContext(ctx, "Git request", "method", r.Method, "host", host, "path", pathValue)
+
+	// host and path are spliced into upstream URLs that may carry GitHub App credentials.
+	if err := errors.Join(cachewhttputil.ValidatePathSegment(host), cachewhttputil.ValidatePath(pathValue)); err != nil {
+		cachewhttputil.ErrorResponse(w, r, http.StatusBadRequest, "invalid git request path")
+		return
+	}
 
 	if strings.HasSuffix(pathValue, EnsureRefsPath) {
 		s.handleEnsureRefs(w, r, host, pathValue)

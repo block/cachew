@@ -12,6 +12,7 @@ import (
 	"github.com/alecthomas/errors"
 
 	"github.com/block/cachew/internal/cache"
+	"github.com/block/cachew/internal/httputil"
 	"github.com/block/cachew/internal/jobscheduler"
 	"github.com/block/cachew/internal/logging"
 	"github.com/block/cachew/internal/strategy/handler"
@@ -122,13 +123,20 @@ func (s *Hermit) buildGitHubURL(r *http.Request) string {
 }
 
 func (s *Hermit) buildRedirectRequest(r *http.Request) (*http.Request, error) {
-	path := ensureLeadingSlash(s.githubReleasePath(r))
-	redirectURL := s.config.GitHubBaseURL + path
-	if r.URL.RawQuery != "" {
-		redirectURL += "?" + r.URL.RawQuery
+	// The redirect target may be cachew itself, so traversal could reach internal endpoints.
+	if err := errors.Join(httputil.ValidatePathSegment(r.PathValue("org")),
+		httputil.ValidatePathSegment(r.PathValue("repo")), httputil.ValidatePath(r.PathValue("path"))); err != nil {
+		return nil, httputil.Errorf(http.StatusBadRequest, "%w", err)
 	}
+	redirectURL, err := url.Parse(s.config.GitHubBaseURL)
+	if err != nil {
+		return nil, errors.Wrap(err, "parse GitHub base URL")
+	}
+	redirectURL.Path = strings.TrimSuffix(redirectURL.Path, "/") + ensureLeadingSlash(s.githubReleasePath(r))
+	redirectURL.RawPath = ""
+	redirectURL.RawQuery = r.URL.RawQuery
 
-	req, err := http.NewRequestWithContext(r.Context(), r.Method, redirectURL, nil)
+	req, err := http.NewRequestWithContext(r.Context(), r.Method, redirectURL.String(), nil)
 	if err != nil {
 		return nil, errors.Wrap(err, "create internal redirect request")
 	}
@@ -138,6 +146,10 @@ func (s *Hermit) buildRedirectRequest(r *http.Request) (*http.Request, error) {
 }
 
 func (s *Hermit) buildDirectRequest(r *http.Request) (*http.Request, error) {
+	if err := errors.Join(httputil.ValidatePathSegment(r.PathValue("host")),
+		httputil.ValidatePath(r.PathValue("path"))); err != nil {
+		return nil, httputil.Errorf(http.StatusBadRequest, "%w", err)
+	}
 	originalURL := s.buildOriginalURL(r)
 
 	s.logger.DebugContext(r.Context(), "Fetching Hermit package", "url", originalURL)
