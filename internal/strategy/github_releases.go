@@ -91,8 +91,6 @@ func splitReleasePath(rest string) (release, file string) {
 	return rest[:i], rest[i+1:]
 }
 
-// escapePathSegments escapes each slash-separated segment of path so decoded
-// characters such as "?" and "#" can't alter the structure of the URL.
 func escapePathSegments(path string) string {
 	segments := strings.Split(path, "/")
 	for i, segment := range segments {
