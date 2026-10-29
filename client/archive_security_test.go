@@ -70,15 +70,36 @@ func TestExtractAllowsSymlinkWithinTarget(t *testing.T) {
 	assert.Equal(t, "../target", target)
 }
 
+func TestExtractConsumesTrailingPadding(t *testing.T) {
+	dst := t.TempDir()
+	var tarBuf bytes.Buffer
+	tw := tar.NewWriter(&tarBuf)
+	assert.NoError(t, tw.WriteHeader(&tar.Header{Name: "file", Mode: 0o600, Size: int64(len("ok"))}))
+	_, err := tw.Write([]byte("ok"))
+	assert.NoError(t, err)
+	assert.NoError(t, tw.Close())
+	// Larger than a pipe buffer, so zstd is still writing when the tar reader hits end-of-archive.
+	tarBuf.Write(make([]byte, 1<<20))
+
+	assert.NoError(t, client.Extract(t.Context(), bytes.NewReader(zstdCompress(t, tarBuf.Bytes())), dst, 0))
+	content, err := os.ReadFile(filepath.Join(dst, "file"))
+	assert.NoError(t, err)
+	assert.Equal(t, "ok", string(content))
+}
+
 func compressedTar(t *testing.T, writeEntries func(*tar.Writer)) []byte {
 	t.Helper()
 	var tarBuf bytes.Buffer
 	tw := tar.NewWriter(&tarBuf)
 	writeEntries(tw)
 	assert.NoError(t, tw.Close())
+	return zstdCompress(t, tarBuf.Bytes())
+}
 
+func zstdCompress(t *testing.T, data []byte) []byte {
+	t.Helper()
 	cmd := exec.Command("zstd", "-q", "-c")
-	cmd.Stdin = &tarBuf
+	cmd.Stdin = bytes.NewReader(data)
 	var out, stderr bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &stderr

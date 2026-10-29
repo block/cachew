@@ -100,6 +100,12 @@ func Extract(ctx context.Context, r io.Reader, directory string, threads int) (r
 	pw.Close() //nolint:errcheck,gosec
 
 	extractErr := safeExtractTar(ctx, pr, directory)
+	if extractErr == nil {
+		// tar.Reader stops at the end-of-archive marker; drain the record padding so zstd isn't killed by SIGPIPE.
+		if _, err := io.Copy(io.Discard, pr); err != nil {
+			extractErr = errors.Wrap(err, "failed to drain archive stream")
+		}
+	}
 	pr.Close() //nolint:errcheck,gosec
 	zstdErr := zstdCmd.Wait()
 
