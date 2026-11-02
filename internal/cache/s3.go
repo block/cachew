@@ -15,6 +15,7 @@ import (
 	"os"
 	"runtime"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/alecthomas/errors"
@@ -86,6 +87,53 @@ type s3Meta struct {
 // introduced carry no tag on either object, so an empty-to-empty comparison
 // keeps them readable.
 const s3TagMetadataKey = "Tag"
+
+// s3MaxUserMetadataSize is S3's limit on the combined size of an object's
+// user-defined metadata keys and values. PutObject fails if it is exceeded.
+const s3MaxUserMetadataSize = 2048
+
+// s3EssentialHeaders are the headers kept when the full header set doesn't fit
+// in S3 user metadata, along with any X-Cachew-* headers.
+var s3EssentialHeaders = []string{ //nolint:gochecknoglobals
+	"Content-Type", "Content-Encoding", "Content-Disposition", "Content-Language",
+	"Cache-Control", ETagKey, "Last-Modified",
+}
+
+// s3UserMetadata encodes the tag and headers as data object user metadata.
+// Upstreams can send arbitrarily large response headers, so when they don't
+// fit within S3's limit only the headers needed to serve the object are kept.
+func s3UserMetadata(tag string, headers http.Header) (map[string]string, error) {
+	metadata := map[string]string{s3TagMetadataKey: tag}
+	if len(headers) == 0 {
+		return metadata, nil
+	}
+	essential := make(http.Header)
+	for _, name := range s3EssentialHeaders {
+		if values := headers.Values(name); len(values) > 0 {
+			essential[http.CanonicalHeaderKey(name)] = values
+		}
+	}
+	for name, values := range headers {
+		if strings.HasPrefix(http.CanonicalHeaderKey(name), "X-Cachew-") {
+			essential[name] = values
+		}
+	}
+	for _, candidate := range []http.Header{headers, essential} {
+		headersJSON, err := json.Marshal(candidate)
+		if err != nil {
+			return nil, errors.Errorf("failed to marshal headers: %w", err)
+		}
+		metadata["Headers"] = string(headersJSON)
+		size := 0
+		for k, v := range metadata {
+			size += len("x-amz-meta-") + len(k) + len(v)
+		}
+		if size <= s3MaxUserMetadataSize {
+			return metadata, nil
+		}
+	}
+	return nil, errors.Errorf("headers exceed S3 user metadata limit of %d bytes", s3MaxUserMetadataSize)
+}
 
 // newS3Tag returns a random hex tag used to correlate a data object with its
 // companion metadata object.
@@ -402,6 +450,11 @@ func (s *S3) Create(ctx context.Context, key Key, headers http.Header, ttl time.
 		return nil, err
 	}
 
+	userMetadata, err := s3UserMetadata(tag, clonedHeaders)
+	if err != nil {
+		return nil, err
+	}
+
 	ctx, cancel := context.WithCancelCause(ctx)
 
 	pr, pw := io.Pipe()
@@ -413,6 +466,7 @@ func (s *S3) Create(ctx context.Context, key Key, headers http.Header, ttl time.
 		pipe:      pw,
 		expiresAt: expiresAt,
 		headers:   clonedHeaders,
+		metadata:  userMetadata,
 		tag:       tag,
 		ctx:       ctx,
 		cancel:    cancel,
@@ -458,6 +512,7 @@ type s3Writer struct {
 	pipe      *io.PipeWriter
 	expiresAt time.Time
 	headers   http.Header
+	metadata  map[string]string
 	tag       string
 	ctx       context.Context
 	cancel    context.CancelCauseFunc
@@ -561,21 +616,10 @@ func (w *s3Writer) upload(pr *io.PipeReader, r io.Reader) {
 
 	objectName := w.s3.keyToPath(w.namespace, w.key)
 
-	userMetadata := map[string]string{s3TagMetadataKey: w.tag}
-	if len(w.headers) > 0 {
-		headersJSON, err := json.Marshal(w.headers)
-		if err != nil {
-			uploadErr = errors.Errorf("failed to marshal headers: %w", err)
-			w.errCh <- uploadErr
-			return
-		}
-		userMetadata["Headers"] = string(headersJSON)
-	}
-
 	// Configure upload options. CRC64-NVME is computed as data streams through and sent as a
 	// trailing header so S3 validates integrity server-side, preventing corrupt or truncated uploads.
 	opts := minio.PutObjectOptions{
-		UserMetadata: userMetadata,
+		UserMetadata: w.metadata,
 		AutoChecksum: minio.ChecksumCRC64NVME,
 		Expires:      w.expiresAt,
 	}

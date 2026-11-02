@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -436,6 +437,71 @@ func TestStreamAndCacheAbortsOnUpstreamError(t *testing.T) {
 	key := cache.NewKey("http://example.com/test")
 	_, _, err := c.Open(ctx, key)
 	assert.IsError(t, err, os.ErrNotExist)
+}
+
+type failingWriteCache struct {
+	cache.Cache
+	createErr error
+}
+
+func (c failingWriteCache) Create(ctx context.Context, key cache.Key, headers http.Header, ttl time.Duration, opts ...cache.Option) (cache.Writer, error) {
+	if c.createErr != nil {
+		return nil, c.createErr
+	}
+	w, err := c.Cache.Create(ctx, key, headers, ttl, opts...)
+	return &failingWriter{Writer: w}, errors.WithStack(err)
+}
+
+type failingWriter struct {
+	cache.Writer
+	writes int
+}
+
+func (w *failingWriter) Write(p []byte) (int, error) {
+	w.writes++
+	if w.writes > 1 {
+		return 0, errors.New("failed to put object: metadata too large")
+	}
+	return errors.WithStack2(w.Writer.Write(p))
+}
+
+func TestCacheWriteFailureDoesNotTruncateResponse(t *testing.T) {
+	payload := strings.Repeat("0123456789abcdef", 64<<10)
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Length", strconv.Itoa(len(payload)))
+		_, _ = w.Write([]byte(payload))
+	}))
+	defer backend.Close()
+
+	for _, tt := range []struct {
+		name      string
+		createErr error
+	}{
+		{name: "WriteFails"},
+		{name: "CreateFails", createErr: errors.New("headers exceed S3 metadata limit")},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			mem := mustNewMemoryCache()
+			defer mem.Close()
+			ctx := logging.ContextWithLogger(context.Background(), slog.Default())
+
+			h := handler.New(http.DefaultClient, failingWriteCache{Cache: mem, createErr: tt.createErr}).
+				Transform(func(r *http.Request) (*http.Request, error) {
+					return http.NewRequestWithContext(r.Context(), http.MethodGet, backend.URL, nil)
+				})
+
+			r := httptest.NewRequest(http.MethodGet, "http://example.com/big.zip", nil).WithContext(ctx)
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, r)
+
+			assert.Equal(t, http.StatusOK, w.Code)
+			assert.Equal(t, len(payload), w.Body.Len())
+			assert.True(t, w.Body.String() == payload, "response body differs from upstream")
+
+			_, _, err := mem.Open(ctx, cache.NewKey("http://example.com/big.zip"))
+			assert.IsError(t, err, os.ErrNotExist)
+		})
+	}
 }
 
 func mustNewMemoryCache() cache.Cache {

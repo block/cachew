@@ -2,8 +2,11 @@ package cache_test
 
 import (
 	"context"
+	"io"
 	"log/slog"
+	"net/http"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -69,6 +72,42 @@ func TestS3ContextCancellationAbortsUpload(t *testing.T) {
 	// The object must not be retrievable.
 	_, _, err = c.Open(t.Context(), key)
 	assert.IsError(t, err, os.ErrNotExist)
+}
+
+func TestS3OversizedHeadersKeepEssentials(t *testing.T) {
+	bucket := s3clienttest.Start(t)
+	c := newS3Cache(t, bucket)
+	defer c.Close()
+
+	ctx := t.Context()
+	key := cache.NewKey("oversized-headers")
+	headers := http.Header{
+		"Content-Type":             {"application/zip"},
+		"Last-Modified":            {"Mon, 02 Nov 2026 05:42:00 GMT"},
+		"X-Cachew-Snapshot-Commit": {"abc123"},
+		"Content-Security-Policy":  {strings.Repeat("default-src 'self'; ", 150)},
+	}
+
+	w, err := c.Create(ctx, key, headers, time.Hour)
+	assert.NoError(t, err)
+	_, err = w.Write([]byte("payload"))
+	assert.NoError(t, err)
+	assert.NoError(t, w.Close())
+
+	r, got, err := c.Open(ctx, key)
+	assert.NoError(t, err)
+	data, err := io.ReadAll(r)
+	assert.NoError(t, err)
+	assert.NoError(t, r.Close())
+	assert.Equal(t, "payload", string(data))
+	assert.Equal(t, "application/zip", got.Get("Content-Type"))
+	assert.Equal(t, "Mon, 02 Nov 2026 05:42:00 GMT", got.Get("Last-Modified"))
+	assert.Equal(t, "abc123", got.Get("X-Cachew-Snapshot-Commit"))
+	assert.NotEqual(t, "", got.Get(cache.ETagKey))
+	assert.Equal(t, "", got.Get("Content-Security-Policy"))
+
+	_, err = c.Create(ctx, cache.NewKey("too-large"), http.Header{"Content-Disposition": {strings.Repeat("x", 3000)}}, time.Hour)
+	assert.Error(t, err)
 }
 
 func TestS3CacheSoak(t *testing.T) {
