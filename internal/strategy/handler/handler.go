@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"cmp"
 	"io"
 	"maps"
 	"net/http"
@@ -149,14 +150,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	served, err := h.serveCached(w, r, key)
 	if err != nil {
-		logger.ErrorContext(ctx, "Failed to serve from cache", "error", err)
+		logger.ErrorContext(ctx, "Failed to serve from cache", "cache_key", parts.Path, "error", err)
 	}
 	if served {
 		return
 	}
 
 	if err := h.fetchAndCache(w, r, key); err != nil {
-		logger.ErrorContext(ctx, "Failed to fetch and cache", "error", err)
+		logger.ErrorContext(ctx, "Failed to fetch and cache", "cache_key", parts.Path, "error", err)
 	}
 }
 
@@ -212,32 +213,51 @@ func (h *Handler) streamNonOKResponse(w http.ResponseWriter, resp *http.Response
 	return nil
 }
 
+// streamAndCache streams resp to the client while writing it to the cache.
+// Cache failures never interrupt the client stream: the cache entry is
+// discarded and the response is streamed in full.
 func (h *Handler) streamAndCache(w http.ResponseWriter, r *http.Request, key cache.Key, resp *http.Response) error {
-	ttl := h.ttlFunc(r)
-	responseHeaders := maps.Clone(resp.Header)
-	cw, err := h.cache.Create(r.Context(), key, responseHeaders, ttl)
+	maps.Copy(w.Header(), resp.Header)
+
+	cw, err := h.cache.Create(r.Context(), key, maps.Clone(resp.Header), h.ttlFunc(r))
 	if err != nil {
-		h.errorHandler(httputil.Errorf(http.StatusInternalServerError, "failed to create cache entry: %w", err), w, r)
-		return nil
+		_, copyErr := io.Copy(w, resp.Body)
+		return errors.Join(errors.Wrap(err, "create cache entry"), errors.Wrap(copyErr, "stream response"))
 	}
 
+	tee := &cacheTee{w: cw}
+	cacheErrCh := make(chan error, 1)
 	pr, pw := io.Pipe()
 	go func() {
-		mw := io.MultiWriter(pw, cw)
-		_, copyErr := io.Copy(mw, resp.Body)
-		var closeErr error
-		if copyErr != nil {
-			closeErr = cw.Abort(copyErr)
+		_, copyErr := io.Copy(io.MultiWriter(pw, tee), resp.Body)
+		if abortErr := cmp.Or(copyErr, tee.err); abortErr != nil {
+			cacheErrCh <- errors.Join(tee.err, cw.Abort(abortErr))
 		} else {
-			closeErr = cw.Close()
+			cacheErrCh <- cw.Close()
 		}
-		pw.CloseWithError(errors.Join(copyErr, closeErr))
+		pw.CloseWithError(copyErr)
 	}()
 
-	maps.Copy(w.Header(), resp.Header)
 	_, copyErr := io.Copy(w, pr)
 	closeErr := pr.Close()
-	return errors.Wrap(errors.Join(copyErr, closeErr), "stream and cache response")
+	return errors.Join(
+		errors.Wrap(errors.Join(copyErr, closeErr), "stream response"),
+		errors.Wrap(<-cacheErrCh, "cache response"),
+	)
+}
+
+// cacheTee forwards writes to a cache writer until it fails, then discards
+// them, so a cache failure can't abort the copy that feeds the client.
+type cacheTee struct {
+	w   io.Writer
+	err error
+}
+
+func (t *cacheTee) Write(p []byte) (int, error) {
+	if t.err == nil {
+		_, t.err = t.w.Write(p)
+	}
+	return len(p), nil
 }
 
 func defaultErrorHandler(err error, w http.ResponseWriter, r *http.Request) {
