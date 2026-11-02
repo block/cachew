@@ -246,8 +246,6 @@ func (h *Handler) streamAndCache(w http.ResponseWriter, r *http.Request, key cac
 	)
 }
 
-// cacheTee forwards writes to a cache writer until it fails, then discards
-// them, so a cache failure can't abort the copy that feeds the client.
 type cacheTee struct {
 	w   io.Writer
 	err error

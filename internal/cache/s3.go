@@ -126,8 +126,6 @@ func s3UserMetadata(tag string, headers http.Header) (map[string]string, error) 
 		metadata["Headers"] = string(headersJSON)
 		size := 0
 		for k, v := range metadata {
-			// Count the x-amz-meta- prefix too, to stay under the limit
-			// regardless of how the store measures keys.
 			size += len("x-amz-meta-") + len(k) + len(v)
 		}
 		if size <= s3MaxUserMetadataSize {
