@@ -80,8 +80,17 @@ func (s *Strategy) handleEnsureRefs(w http.ResponseWriter, r *http.Request, host
 		return
 	}
 
+	if !s.limitRequestBody(w, r) {
+		status = "too_large"
+		return
+	}
+
 	var req EnsureRefsRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(r.Body).Decode(&req); requestTooLarge(err) {
+		writeRequestTooLarge(w, r)
+		status = "too_large"
+		return
+	} else if err != nil {
 		http.Error(w, "invalid request body: "+err.Error(), http.StatusBadRequest)
 		status = "bad_request"
 		span.RecordError(err)

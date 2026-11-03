@@ -58,6 +58,7 @@ type Config struct {
 	RepackInterval         time.Duration `hcl:"repack-interval,optional" help:"How often to run full repack. 0 disables." default:"0"`
 	ZstdThreads            int           `hcl:"zstd-threads,optional" help:"Threads for zstd compression/decompression. 0 = all CPU cores; useful for short-lived CLI invocations but risky on a long-running server where multiple snapshot/restore operations can run concurrently." default:"4"`
 	BundleCacheTTL         time.Duration `hcl:"bundle-cache-ttl,optional" help:"TTL of cached server-side git bundles." default:"2h"`
+	MaxRequestBodyMB       int           `hcl:"max-request-body-mb,optional" help:"Maximum size in megabytes of git request bodies that are buffered in memory (upload-pack negotiation and ensure-refs). Pushes and other requests streamed to upstream are not limited. 0 disables the limit." default:"100"`
 
 	SnapshotFilters map[string]string `hcl:"snapshot-filters,optional" help:"Per-repository git partial-clone filter applied to workstation snapshots, keyed by host/org/repo (e.g. {\"github.com/org/repo\": \"blob:none\"}). Filtered snapshots contain full history metadata but only the blobs needed for the HEAD checkout; clients lazily fetch historical blobs through cachew on demand."`
 }
@@ -410,6 +411,10 @@ func (s *Strategy) handleGitRequest(w http.ResponseWriter, r *http.Request, host
 	ctx := r.Context()
 	logger := logging.FromContext(ctx)
 
+	if !s.limitRequestBody(w, r) {
+		return
+	}
+
 	repoPath := ExtractRepoPath(pathValue)
 	upstreamURL := "https://" + host + "/" + repoPath
 
@@ -434,7 +439,9 @@ func (s *Strategy) handleGitRequest(w http.ResponseWriter, r *http.Request, host
 
 	switch state {
 	case gitclone.StateReady:
-		if err := s.serveReadyRepo(w, r, repo, host, pathValue, isInfoRefs); err != nil {
+		if err := s.serveReadyRepo(w, r, repo, host, pathValue, isInfoRefs); requestTooLarge(err) {
+			writeRequestTooLarge(w, r)
+		} else if err != nil {
 			logger.ErrorContext(ctx, "Failed to serve from local mirror", "error", err)
 			http.Error(w, "Internal server error", http.StatusInternalServerError)
 		}
@@ -446,7 +453,9 @@ func (s *Strategy) handleGitRequest(w http.ResponseWriter, r *http.Request, host
 				return s.startClone(ctx, repo)
 			})
 		}
-		if err := s.serveWithSpool(w, r, host, pathValue, upstreamURL); err != nil {
+		if err := s.serveWithSpool(w, r, host, pathValue, upstreamURL); requestTooLarge(err) {
+			writeRequestTooLarge(w, r)
+		} else if err != nil {
 			logger.WarnContext(ctx, "Spool failed, forwarding to upstream", "error", err)
 			s.forwardToUpstream(w, r, host, pathValue)
 		}
@@ -631,6 +640,28 @@ func (s *Strategy) serveWithSpool(w http.ResponseWriter, r *http.Request, host, 
 		return errors.Wrapf(err, "spool read failed mid-stream for key %s", key)
 	}
 	return nil
+}
+
+func (s *Strategy) limitRequestBody(w http.ResponseWriter, r *http.Request) bool {
+	if s.config.MaxRequestBodyMB <= 0 || r.Body == nil || r.Body == http.NoBody {
+		return true
+	}
+	limit := int64(s.config.MaxRequestBodyMB) << 20
+	if r.ContentLength > limit {
+		writeRequestTooLarge(w, r)
+		return false
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
+	return true
+}
+
+func requestTooLarge(err error) bool {
+	var maxErr *http.MaxBytesError
+	return errors.As(err, &maxErr)
+}
+
+func writeRequestTooLarge(w http.ResponseWriter, r *http.Request) {
+	cachewhttputil.ErrorResponse(w, r, http.StatusRequestEntityTooLarge, "request body too large")
 }
 
 // isGitRequest reports whether pathValue matches a git smart HTTP protocol

@@ -55,6 +55,11 @@ type infoRefsFixture struct {
 
 func newInfoRefsFixture(t *testing.T) *infoRefsFixture {
 	t.Helper()
+	return newInfoRefsFixtureWithConfig(t, git.Config{})
+}
+
+func newInfoRefsFixtureWithConfig(t *testing.T, config git.Config) *infoRefsFixture {
+	t.Helper()
 
 	tmpDir := t.TempDir()
 	upstreamPath := filepath.Join(tmpDir, "upstream.git")
@@ -78,7 +83,7 @@ func newInfoRefsFixture(t *testing.T) *infoRefsFixture {
 	ctx := logging.ContextWithLogger(t.Context(), logger)
 	mux := newTestMux()
 	manager := gitclone.NewManagerProvider(ctx, gitclone.Config{MirrorRoot: mirrorRoot}, nil)
-	strategy, err := git.New(ctx, git.Config{}, newTestScheduler(ctx, t), nil, mux, manager,
+	strategy, err := git.New(ctx, config, newTestScheduler(ctx, t), nil, mux, manager,
 		func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
 	assert.NoError(t, err)
 	waitForReady(t, strategy)
