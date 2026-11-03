@@ -453,7 +453,6 @@ func (s *Strategy) handleGitRequest(w http.ResponseWriter, r *http.Request, host
 				return s.startClone(ctx, repo)
 			})
 		}
-		// The body has been partially consumed, so it can't be forwarded upstream.
 		if err := s.serveWithSpool(w, r, host, pathValue, upstreamURL); requestTooLarge(err) {
 			writeRequestTooLarge(w, r)
 		} else if err != nil {
@@ -643,9 +642,6 @@ func (s *Strategy) serveWithSpool(w http.ResponseWriter, r *http.Request, host, 
 	return nil
 }
 
-// limitRequestBody caps the body of requests whose body is buffered in memory, so a client can't exhaust memory with
-// an oversized or endless body. Declared oversized bodies are rejected immediately; chunked bodies fail on read with an
-// error matched by [requestTooLarge]. It returns false if it wrote a response.
 func (s *Strategy) limitRequestBody(w http.ResponseWriter, r *http.Request) bool {
 	if s.config.MaxRequestBodyMB <= 0 || r.Body == nil || r.Body == http.NoBody {
 		return true
