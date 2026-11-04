@@ -27,6 +27,7 @@ import (
 	"github.com/block/cachew/internal/config"
 	"github.com/block/cachew/internal/gitclone"
 	"github.com/block/cachew/internal/githubapp"
+	"github.com/block/cachew/internal/httputil"
 	"github.com/block/cachew/internal/jobscheduler"
 	"github.com/block/cachew/internal/logging"
 	"github.com/block/cachew/internal/metadatadb"
@@ -391,6 +392,9 @@ func newServer(
 	if err != nil {
 		return nil, errors.Errorf("initialise OPA middleware: %w", err)
 	}
+
+	// Reject before OPA so policies can't be bypassed with encoded dot segments.
+	handler = httputil.RejectTraversal(handler)
 
 	// Add standard otelhttp middleware
 	handler = otelhttp.NewMiddleware(metricsConfig.ServiceName,

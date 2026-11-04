@@ -77,6 +77,28 @@ func apiPut(ctx context.Context, t *testing.T, handler http.Handler, key cache.K
 	return etag
 }
 
+func TestPutObjectDoesNotPersistCredentialHeaders(t *testing.T) {
+	handler, ctx := testAPISetup(t)
+	key := cache.NewKey("credential-headers")
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/object/test/"+key.String(), strings.NewReader("test data"))
+	req.Header.Set("Authorization", "Bearer secret")
+	req.Header.Set("Cookie", "session=secret")
+	req.Header.Set("Proxy-Authorization", "Basic secret")
+	req.Header.Set("X-Custom", "kept")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req.WithContext(ctx))
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	req = httptest.NewRequest(http.MethodGet, "/api/v1/object/test/"+key.String(), nil)
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, req.WithContext(ctx))
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Zero(t, w.Header().Get("Authorization"))
+	assert.Zero(t, w.Header().Get("Cookie"))
+	assert.Zero(t, w.Header().Get("Proxy-Authorization"))
+	assert.Equal(t, "kept", w.Header().Get("X-Custom"))
+}
+
 func TestConditionalGetIfNoneMatch(t *testing.T) {
 	handler, ctx := testAPISetup(t)
 	key := cache.NewKey("cond-get")

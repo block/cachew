@@ -119,7 +119,7 @@ func (d *APIV1) putObject(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Extract and filter headers from request
-	headers := httputil.FilterHeaders(r.Header, httputil.TransportHeaders...)
+	headers := apiObjectHeaders(r.Header)
 	var opts []cache.Option
 	if etag := headers.Get(cache.ETagKey); etag != "" {
 		rawETag, err := cache.RawETagFromHeader(etag)
@@ -147,6 +147,14 @@ func (d *APIV1) putObject(w http.ResponseWriter, r *http.Request) {
 		d.httpError(w, http.StatusInternalServerError, err, "Failed to close cache writer")
 		return
 	}
+}
+
+func apiObjectHeaders(headers http.Header) http.Header {
+	filtered := httputil.FilterHeaders(headers, httputil.TransportHeaders...)
+	filtered.Del("Authorization")
+	filtered.Del("Cookie")
+	filtered.Del("Proxy-Authorization")
+	return filtered
 }
 
 func (d *APIV1) deleteObject(w http.ResponseWriter, r *http.Request) {

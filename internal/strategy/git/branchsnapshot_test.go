@@ -23,8 +23,9 @@ import (
 )
 
 // pushBranchCommit commits file on branch (creating the branch from HEAD if
-// needed) and pushes it to the bare mirror and the mirror's own upstream, so a
-// pruning mirror fetch keeps it. It returns the new tip.
+// needed) and pushes it to the bare mirror, and to the mirror's upstream while
+// that is still a local path, so a pruning mirror fetch keeps it. It returns
+// the new tip.
 func pushBranchCommit(t *testing.T, mirrorPath, branch, file string) string {
 	t.Helper()
 	work := t.TempDir()
@@ -45,7 +46,9 @@ func pushBranchCommit(t *testing.T, mirrorPath, branch, file string) string {
 	run("-C", work, "add", ".")
 	run("-C", work, "commit", "-m", "update "+branch)
 	run("-C", work, "push", "origin", branch)
-	run("-C", work, "push", run("-C", mirrorPath, "config", "remote.origin.url"), branch)
+	if upstream := run("-C", mirrorPath, "config", "remote.origin.url"); filepath.IsAbs(upstream) {
+		run("-C", work, "push", upstream, branch)
+	}
 	return run("-C", work, "rev-parse", "HEAD")
 }
 

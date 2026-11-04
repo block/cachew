@@ -5,6 +5,7 @@ import (
 	"io"
 
 	"github.com/block/cachew/internal/cache"
+	"github.com/block/cachew/internal/gitclone"
 )
 
 // TestableGoproxyCacher exposes goproxyCacher.Put for external tests.
@@ -20,4 +21,9 @@ func NewTestableGoproxyCacher(c cache.Cache) *TestableGoproxyCacher {
 // Put delegates to goproxyCacher.Put.
 func (t *TestableGoproxyCacher) Put(ctx context.Context, name string, content io.ReadSeeker) error {
 	return t.inner.Put(ctx, name, content)
+}
+
+// GenerateZipForTest lets external tests cover generation without widening the production API.
+func GenerateZipForTest(ctx context.Context, repo *gitclone.Repository, modulePath, version string) (io.ReadSeekCloser, error) {
+	return (&privateFetcher{}).generateZip(ctx, repo, modulePath, version)
 }

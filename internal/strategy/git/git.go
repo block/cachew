@@ -24,10 +24,12 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
+	"golang.org/x/mod/semver"
 
 	"github.com/block/cachew/internal/cache"
 	"github.com/block/cachew/internal/gitclone"
 	"github.com/block/cachew/internal/githubapp"
+	cachewhttputil "github.com/block/cachew/internal/httputil"
 	"github.com/block/cachew/internal/jobscheduler"
 	"github.com/block/cachew/internal/logging"
 	"github.com/block/cachew/internal/metadatadb"
@@ -37,6 +39,11 @@ import (
 
 //nolint:gochecknoglobals // OTel tracer instances are package-scoped by convention
 var tracer = otel.Tracer("github.com/block/cachew/internal/strategy/git")
+
+const minimumGitLFSVersion = "v3.8.1"
+
+//nolint:gochecknoglobals // The executable and its version are process-wide.
+var gitLFSVersionCheck = sync.OnceValue(checkGitLFSVersion)
 
 func Register(r *strategy.Registry, scheduler jobscheduler.Provider, cloneManagerProvider gitclone.ManagerProvider, tokenManagerProvider githubapp.TokenManagerProvider) {
 	strategy.Register(r, "git", "Caches Git repositories, including tarball snapshots.", func(ctx context.Context, config Config, cache cache.Cache, mux strategy.Mux) (*Strategy, error) {
@@ -51,6 +58,7 @@ type Config struct {
 	RepackInterval         time.Duration `hcl:"repack-interval,optional" help:"How often to run full repack. 0 disables." default:"0"`
 	ZstdThreads            int           `hcl:"zstd-threads,optional" help:"Threads for zstd compression/decompression. 0 = all CPU cores; useful for short-lived CLI invocations but risky on a long-running server where multiple snapshot/restore operations can run concurrently." default:"4"`
 	BundleCacheTTL         time.Duration `hcl:"bundle-cache-ttl,optional" help:"TTL of cached server-side git bundles." default:"2h"`
+	MaxRequestBodyMB       int           `hcl:"max-request-body-mb,optional" help:"Maximum size in megabytes of git request bodies that are buffered in memory (upload-pack negotiation and ensure-refs). Pushes and other requests streamed to upstream are not limited. 0 disables the limit." default:"100"`
 
 	BranchSnapshotMaxRefs     int           `hcl:"branch-snapshot-max-refs,optional" help:"Maximum branches per repository that get their own snapshot when clients request snapshot.tar.zst?ref=<branch>. The least recently requested branch is dropped first. 0 disables branch snapshots." default:"0"`
 	BranchSnapshotIdleTimeout time.Duration `hcl:"branch-snapshot-idle-timeout,optional" help:"How long a branch snapshot keeps refreshing after its last request." default:"72h"`
@@ -114,8 +122,8 @@ func New(
 
 	logger := logging.FromContext(ctx)
 
-	if _, err := exec.LookPath("git-lfs"); err != nil {
-		return nil, errors.New("git-lfs is required but not found in PATH")
+	if err := gitLFSVersionCheck(); err != nil {
+		return nil, err
 	}
 
 	// Get GitHub App token manager if configured
@@ -232,6 +240,33 @@ func New(
 	return s, nil
 }
 
+func gitLFSVersionSupported(output []byte) bool {
+	_, versionText, ok := strings.Cut(string(output), "git-lfs/")
+	if !ok {
+		return false
+	}
+	fields := strings.Fields(versionText)
+	if len(fields) == 0 {
+		return false
+	}
+	version := "v" + fields[0]
+	return semver.IsValid(version) && semver.Compare(version, minimumGitLFSVersion) >= 0
+}
+
+func checkGitLFSVersion() error {
+	if _, err := exec.LookPath("git-lfs"); err != nil {
+		return errors.New("git-lfs is required but not found in PATH")
+	}
+	gitLFSVersion, err := exec.CommandContext(context.Background(), "git-lfs", "version").CombinedOutput()
+	if err != nil {
+		return errors.Wrapf(err, "run git-lfs version: %s", string(gitLFSVersion))
+	}
+	if !gitLFSVersionSupported(gitLFSVersion) {
+		return errors.Errorf("git-lfs %s or newer is required", strings.TrimPrefix(minimumGitLFSVersion, "v"))
+	}
+	return nil
+}
+
 var _ strategy.Strategy = (*Strategy)(nil)
 var _ strategy.Readier = (*Strategy)(nil)
 var _ strategy.MetadataConsumer = (*Strategy)(nil)
@@ -325,6 +360,12 @@ func (s *Strategy) handleRequest(w http.ResponseWriter, r *http.Request) {
 
 	logger.DebugContext(ctx, "Git request", "method", r.Method, "host", host, "path", pathValue)
 
+	// host and path are spliced into upstream URLs that may carry GitHub App credentials.
+	if err := errors.Join(cachewhttputil.ValidatePathSegment(host), cachewhttputil.ValidatePath(pathValue)); err != nil {
+		cachewhttputil.ErrorResponse(w, r, http.StatusBadRequest, "invalid git request path")
+		return
+	}
+
 	if strings.HasSuffix(pathValue, EnsureRefsPath) {
 		s.handleEnsureRefs(w, r, host, pathValue)
 		return
@@ -376,6 +417,10 @@ func (s *Strategy) handleGitRequest(w http.ResponseWriter, r *http.Request, host
 	ctx := r.Context()
 	logger := logging.FromContext(ctx)
 
+	if !s.limitRequestBody(w, r) {
+		return
+	}
+
 	repoPath := ExtractRepoPath(pathValue)
 	upstreamURL := "https://" + host + "/" + repoPath
 
@@ -400,7 +445,9 @@ func (s *Strategy) handleGitRequest(w http.ResponseWriter, r *http.Request, host
 
 	switch state {
 	case gitclone.StateReady:
-		if err := s.serveReadyRepo(w, r, repo, host, pathValue, isInfoRefs); err != nil {
+		if err := s.serveReadyRepo(w, r, repo, host, pathValue, isInfoRefs); requestTooLarge(err) {
+			writeRequestTooLarge(w, r)
+		} else if err != nil {
 			logger.ErrorContext(ctx, "Failed to serve from local mirror", "error", err)
 			http.Error(w, "Internal server error", http.StatusInternalServerError)
 		}
@@ -412,7 +459,9 @@ func (s *Strategy) handleGitRequest(w http.ResponseWriter, r *http.Request, host
 				return s.startClone(ctx, repo)
 			})
 		}
-		if err := s.serveWithSpool(w, r, host, pathValue, upstreamURL); err != nil {
+		if err := s.serveWithSpool(w, r, host, pathValue, upstreamURL); requestTooLarge(err) {
+			writeRequestTooLarge(w, r)
+		} else if err != nil {
 			logger.WarnContext(ctx, "Spool failed, forwarding to upstream", "error", err)
 			s.forwardToUpstream(w, r, host, pathValue)
 		}
@@ -597,6 +646,28 @@ func (s *Strategy) serveWithSpool(w http.ResponseWriter, r *http.Request, host, 
 		return errors.Wrapf(err, "spool read failed mid-stream for key %s", key)
 	}
 	return nil
+}
+
+func (s *Strategy) limitRequestBody(w http.ResponseWriter, r *http.Request) bool {
+	if s.config.MaxRequestBodyMB <= 0 || r.Body == nil || r.Body == http.NoBody {
+		return true
+	}
+	limit := int64(s.config.MaxRequestBodyMB) << 20
+	if r.ContentLength > limit {
+		writeRequestTooLarge(w, r)
+		return false
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
+	return true
+}
+
+func requestTooLarge(err error) bool {
+	var maxErr *http.MaxBytesError
+	return errors.As(err, &maxErr)
+}
+
+func writeRequestTooLarge(w http.ResponseWriter, r *http.Request) {
+	cachewhttputil.ErrorResponse(w, r, http.StatusRequestEntityTooLarge, "request body too large")
 }
 
 // isGitRequest reports whether pathValue matches a git smart HTTP protocol

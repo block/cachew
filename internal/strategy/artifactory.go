@@ -11,6 +11,7 @@ import (
 	"github.com/alecthomas/errors"
 
 	"github.com/block/cachew/internal/cache"
+	"github.com/block/cachew/internal/httputil"
 	"github.com/block/cachew/internal/logging"
 	"github.com/block/cachew/internal/strategy/handler"
 )
@@ -110,6 +111,9 @@ func (a *Artifactory) String() string { return "artifactory:" + a.target.Host + 
 
 // transformRequest transforms the incoming request before sending to upstream Artifactory.
 func (a *Artifactory) transformRequest(r *http.Request) (*http.Request, error) {
+	if err := httputil.ValidatePath(r.URL.Path); err != nil {
+		return nil, httputil.Errorf(http.StatusBadRequest, "%w", err)
+	}
 	targetURL := a.buildTargetURL(r)
 
 	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, targetURL.String(), nil)

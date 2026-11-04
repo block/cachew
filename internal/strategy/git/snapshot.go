@@ -135,7 +135,7 @@ func lfsSnapshotCacheKey(upstreamURL, ref string) cache.Key {
 // out that branch instead of the mirror's HEAD.
 func (s *Strategy) cloneForSnapshot(ctx context.Context, repo *gitclone.Repository, destDir, filter, ref string) error {
 	if err := repo.WithReadLock(func() error {
-		args := []string{"clone"}
+		args := []string{"-c", "core.hooksPath=" + os.DevNull, "clone", "--template="}
 		if ref != "" {
 			args = append(args, "--branch", ref)
 		}
@@ -149,9 +149,11 @@ func (s *Strategy) cloneForSnapshot(ctx context.Context, repo *gitclone.Reposito
 		args = append(args, repo.Path(), destDir)
 		// #nosec G204 - repo.Path() and destDir are controlled by us
 		cmd := exec.CommandContext(ctx, "git", args...)
+		// Repository files choose checkout filters, while inherited templates can add hooks that run and leak into snapshots.
 		// LC_ALL=C pins git's messages to English so the filter fallback
 		// warning below is detectable regardless of the host locale.
-		cmd.Env = append(os.Environ(), "GIT_LFS_SKIP_SMUDGE=1", "LC_ALL=C")
+		cmd.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL="+os.DevNull,
+			"GIT_CONFIG_COUNT=0", "GIT_CONFIG_PARAMETERS=", "GIT_TEMPLATE_DIR=", "GIT_LFS_SKIP_SMUDGE=1", "LC_ALL=C")
 		output, err := cmd.CombinedOutput()
 		if err != nil {
 			return errors.Wrapf(err, "git clone for snapshot: %s", string(output))
@@ -1611,6 +1613,9 @@ func (s *Strategy) generateAndUploadLFSSnapshot(ctx context.Context, repo *gitcl
 			return errors.Wrap(err, "rev-parse HEAD for LFS snapshot")
 		}
 		commit = headSHA
+		if err := replaceRepositoryLFSConfig(workDir); err != nil {
+			return err
+		}
 
 		// Set up LFS in the snapshot clone. cloneForSnapshot already restores
 		// remote.origin.url to the upstream URL, so LFS will fetch from GitHub.
@@ -1627,7 +1632,14 @@ func (s *Strategy) generateAndUploadLFSSnapshot(ctx context.Context, repo *gitcl
 		// token can't expire mid-fetch and trigger a retry storm.
 		fetchStart := time.Now()
 		fetchCtx, cancel := context.WithTimeout(ctx, lfsFetchTimeout)
-		fetchCmd, err := repo.GitCommand(fetchCtx, "-C", workDir, "lfs", "fetch", "origin", "HEAD")
+		lfsURL, err := lfsEndpointForUpstream(upstream)
+		if err != nil {
+			cancel()
+			s.metrics.recordLFSPhase(ctx, upstream, "fetch", "error", time.Since(fetchStart))
+			return errors.Wrap(err, "derive LFS endpoint")
+		}
+		fetchCmd, err := repo.GitCommand(fetchCtx, "-c", "lfs.url="+lfsURL, "-c", "lfs.basictransfersonly=true",
+			"-c", "lfs.standalonetransferagent=", "-C", workDir, "lfs", "fetch", "origin", "HEAD")
 		if err != nil {
 			cancel()
 			s.metrics.recordLFSPhase(ctx, upstream, "fetch", "error", time.Since(fetchStart))
@@ -1680,6 +1692,28 @@ func (s *Strategy) generateAndUploadLFSSnapshot(ctx context.Context, repo *gitcl
 	s.metrics.recordOperation(ctx, "lfs-snapshot", "success", time.Since(start))
 	logger.InfoContext(ctx, "LFS snapshot generation completed", "upstream", upstream)
 	return commit, nil
+}
+
+func lfsEndpointForUpstream(upstream string) (string, error) {
+	parsed, err := url.Parse(upstream)
+	if err != nil {
+		return "", errors.Wrap(err, "parse upstream URL")
+	}
+	if parsed.Scheme != "https" || parsed.Hostname() == "" || parsed.User != nil || parsed.RawQuery != "" ||
+		parsed.Fragment != "" {
+		return "", errors.Errorf("unsupported upstream URL %q", upstream)
+	}
+	parsed.Path = strings.TrimSuffix(strings.TrimSuffix(parsed.Path, "/"), ".git") + ".git/info/lfs"
+	parsed.RawPath = ""
+	return parsed.String(), nil
+}
+
+func replaceRepositoryLFSConfig(workDir string) error {
+	lfsConfigPath := filepath.Join(workDir, ".lfsconfig")
+	if err := os.RemoveAll(lfsConfigPath); err != nil {
+		return errors.Wrap(err, "remove repository LFS configuration")
+	}
+	return errors.Wrap(os.WriteFile(lfsConfigPath, nil, 0o600), "replace repository LFS configuration")
 }
 
 // dirSizeBytes returns the total size in bytes of regular files under root.

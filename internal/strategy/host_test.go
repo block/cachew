@@ -143,3 +143,29 @@ func TestHostString(t *testing.T) {
 
 	assert.Equal(t, "host:example.com/prefix", host.String())
 }
+
+func TestHostRejectsPathTraversal(t *testing.T) {
+	callCount := 0
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		callCount++
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	_, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelError})
+	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: time.Hour})
+	assert.NoError(t, err)
+	defer memCache.Close()
+
+	mux := http.NewServeMux()
+	_, err = strategy.NewHost(ctx, strategy.HostConfig{Target: backend.URL + "/prefix"}, memCache, mux)
+	assert.NoError(t, err)
+
+	u, _ := url.Parse(backend.URL)
+	req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/"+u.Host+"/prefix/..%2Fsecret", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Equal(t, 0, callCount)
+}
