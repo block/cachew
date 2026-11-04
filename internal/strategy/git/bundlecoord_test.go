@@ -204,12 +204,12 @@ func testBundleBuildCoalescing(t *testing.T, background bool, backend string) {
 		s.handleBundleRequest(w, r, "example.com", "org/repo/snapshot.bundle")
 	}
 	if background {
-		s.pregenerateBundle(requestCtx, repo, repo.UpstreamURL(), base)
+		s.pregenerateBundle(requestCtx, repo, repo.UpstreamURL(), "", base)
 	} else {
 		go serveSlowClient()
 	}
 	synctest.Wait()
-	key := bundleCacheKey(repo.UpstreamURL(), base)
+	key := bundleCacheKey(repo.UpstreamURL(), "", base)
 	entry, ok := s.bundleBuilds.Load(key)
 	assert.True(t, ok)
 	build := entry.(*bundleBuild)
@@ -217,7 +217,7 @@ func testBundleBuildCoalescing(t *testing.T, background bool, backend string) {
 	results := make(chan *httptest.ResponseRecorder, requests)
 	for range requests {
 		go func() { results <- serveTestBundle(s.ctx, s, base) }()
-		s.pregenerateBundle(s.ctx, repo, repo.UpstreamURL(), base)
+		s.pregenerateBundle(s.ctx, repo, repo.UpstreamURL(), "", base)
 	}
 	refs := int64(requests + 1)
 	if background {
@@ -273,11 +273,11 @@ func TestBundleBuildFailureAllowsRetry(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		s, repo, base, gate := newBundleBuildTest(t)
 		gate.fail.Store(true)
-		s.pregenerateBundle(s.ctx, repo, repo.UpstreamURL(), base)
+		s.pregenerateBundle(s.ctx, repo, repo.UpstreamURL(), "", base)
 		<-gate.started
 		close(gate.release)
 		synctest.Wait()
-		_, err := gate.Stat(s.ctx, bundleCacheKey(repo.UpstreamURL(), base))
+		_, err := gate.Stat(s.ctx, bundleCacheKey(repo.UpstreamURL(), "", base))
 		assert.IsError(t, err, os.ErrNotExist)
 		gate.fail.Store(false)
 		response := serveTestBundle(s.ctx, s, base)
@@ -295,7 +295,7 @@ func TestBundleWaitDeadlineSurvivesBuildFailure(t *testing.T) {
 		assert.NoError(t, err)
 		s := &Strategy{ctx: ctx, cache: mem, metrics: newGitMetrics()}
 		base := strings.Repeat("a", 40)
-		key := bundleCacheKey("https://example.com/org/repo", base)
+		key := bundleCacheKey("https://example.com/org/repo", "", base)
 		first := newBundleBuild()
 		s.bundleBuilds.Store(key, first)
 		result := make(chan *httptest.ResponseRecorder, 1)
@@ -316,7 +316,7 @@ func TestBundleRetryPublicationKeepsOriginalDeadline(t *testing.T) {
 		s, repo, base, gate := newBundleBuildTest(t)
 		ctx, cancel := context.WithTimeout(s.ctx, 10*time.Minute)
 		defer cancel()
-		key := bundleCacheKey(repo.UpstreamURL(), base)
+		key := bundleCacheKey(repo.UpstreamURL(), "", base)
 		first := newBundleBuild()
 		s.bundleBuilds.Store(key, first)
 		result := make(chan *httptest.ResponseRecorder, 1)
@@ -358,8 +358,8 @@ func TestBundleBuildCancellationReleasesFetchLock(t *testing.T) {
 			if background {
 				requestCtx := s.ctx
 				s.ctx = ctx
-				s.pregenerateBundle(requestCtx, repo, repo.UpstreamURL(), base)
-				entry, ok := s.bundleBuilds.Load(bundleCacheKey(repo.UpstreamURL(), base))
+				s.pregenerateBundle(requestCtx, repo, repo.UpstreamURL(), "", base)
+				entry, ok := s.bundleBuilds.Load(bundleCacheKey(repo.UpstreamURL(), "", base))
 				assert.True(t, ok)
 				done = entry.(*bundleBuild).done
 			} else {
@@ -367,7 +367,7 @@ func TestBundleBuildCancellationReleasesFetchLock(t *testing.T) {
 				done = completed
 				go func() {
 					defer close(completed)
-					file, err := s.createBundle(ctx, repo, base)
+					file, err := s.createBundle(ctx, repo, base, "")
 					if file != nil {
 						_ = file.Close()
 					}

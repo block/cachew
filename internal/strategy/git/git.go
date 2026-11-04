@@ -60,6 +60,9 @@ type Config struct {
 	BundleCacheTTL         time.Duration `hcl:"bundle-cache-ttl,optional" help:"TTL of cached server-side git bundles." default:"2h"`
 	MaxRequestBodyMB       int           `hcl:"max-request-body-mb,optional" help:"Maximum size in megabytes of git request bodies that are buffered in memory (upload-pack negotiation and ensure-refs). Pushes and other requests streamed to upstream are not limited. 0 disables the limit." default:"100"`
 
+	BranchSnapshotMaxRefs     int           `hcl:"branch-snapshot-max-refs,optional" help:"Maximum branches per repository that get their own snapshot when clients request snapshot.tar.zst?ref=<branch>. The least recently requested branch is dropped first. 0 disables branch snapshots." default:"0"`
+	BranchSnapshotIdleTimeout time.Duration `hcl:"branch-snapshot-idle-timeout,optional" help:"How long a branch snapshot keeps refreshing after its last request." default:"72h"`
+
 	SnapshotFilters map[string]string `hcl:"snapshot-filters,optional" help:"Per-repository git partial-clone filter applied to workstation snapshots, keyed by host/org/repo (e.g. {\"github.com/org/repo\": \"blob:none\"}). Filtered snapshots contain full history metadata but only the blobs needed for the HEAD checkout; clients lazily fetch historical blobs through cachew on demand."`
 }
 
@@ -82,6 +85,9 @@ type Strategy struct {
 	coldSnapshotMu        sync.Map // keyed by upstream URL, values are *coldSnapshotEntry
 	mirrorPreparations    sync.Map // One entry per upstream URL prevents duplicate preparation jobs.
 	deferredRestoreOnce   sync.Map // keyed by upstream URL, ensures at most one deferred restore per repo
+	branchSnapshots       sync.Map // keyed by upstream URL, values are *trackedRefs
+	branchSnapshotBuilds  sync.Map // One entry per upstream@ref prevents duplicate on-demand builds.
+	branchSnapshotJobs    sync.Map // One entry per upstream URL prevents duplicate periodic jobs.
 	metrics               *gitMetrics
 	repoCounts            *RepoCounts
 	snapshotCoord         *SnapshotCoordinator

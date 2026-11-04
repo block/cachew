@@ -109,7 +109,7 @@ func TestColdSnapshotDefersInitialBaseJob(t *testing.T) {
 					assert.True(t, errors.Is(err, publishErr))
 				} else {
 					assert.NoError(t, err)
-					_, err = mem.Stat(ctx, snapshotCacheKey(repo.UpstreamURL()))
+					_, err = mem.Stat(ctx, snapshotCacheKey(repo.UpstreamURL(), ""))
 					assert.NoError(t, err)
 				}
 				s.mirrorPreparations.Delete(repo.UpstreamURL())
@@ -158,7 +158,7 @@ func TestColdSnapshotSkipPreservesCompletion(t *testing.T) {
 			clock = clock.Add(30 * time.Minute)
 			mem, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: time.Hour})
 			assert.NoError(t, err)
-			assert.NoError(t, cache.WriteFunc(ctx, mem, snapshotCacheKey(upstream), nil, time.Hour, func(w io.Writer) error {
+			assert.NoError(t, cache.WriteFunc(ctx, mem, snapshotCacheKey(upstream, ""), nil, time.Hour, func(w io.Writer) error {
 				_, err := io.WriteString(w, "existing snapshot")
 				return err
 			}))

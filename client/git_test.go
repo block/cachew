@@ -264,6 +264,38 @@ func TestOpenGitSnapshotParallelFallsBackWithoutRange(t *testing.T) {
 	assert.Equal(t, body, got)
 }
 
+func TestOpenGitSnapshotWithRef(t *testing.T) {
+	var requests []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests = append(requests, r.URL.Path+"?"+r.URL.RawQuery)
+		assert.Equal(t, "release/1.2", r.URL.Query().Get("ref"))
+		_, _ = w.Write([]byte("snapshot-bytes")) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	api := client.NewWithHTTPClient(srv.URL, srv.Client())
+	for _, open := range []func() (*client.GitSnapshot, error){
+		func() (*client.GitSnapshot, error) {
+			return api.OpenGitSnapshot(context.Background(), "https://github.com/org/repo", client.WithRef("release/1.2"))
+		},
+		func() (*client.GitSnapshot, error) {
+			return api.OpenGitLFSSnapshot(context.Background(), "https://github.com/org/repo", client.WithRef("release/1.2"))
+		},
+		func() (*client.GitSnapshot, error) {
+			return api.OpenGitSnapshotParallel(context.Background(), "https://github.com/org/repo", 1<<20, 1, client.WithRef("release/1.2"))
+		},
+	} {
+		snap, err := open()
+		assert.NoError(t, err)
+		assert.NoError(t, snap.Close())
+	}
+	assert.Equal(t, []string{
+		"/git/github.com/org/repo/snapshot.tar.zst?ref=release%2F1.2",
+		"/git/github.com/org/repo/lfs-snapshot.tar.zst?ref=release%2F1.2",
+		"/git/github.com/org/repo/snapshot.tar.zst?ref=release%2F1.2",
+	}, requests)
+}
+
 func TestOpenGitSnapshotParallelNotFound(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)

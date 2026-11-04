@@ -147,7 +147,7 @@ func TestCloneForSnapshotIgnoresHostConfiguration(t *testing.T) {
 
 	strategy := &Strategy{cloneManager: manager}
 	snapshotDir := filepath.Join(t.TempDir(), "snapshot")
-	assert.NoError(t, strategy.cloneForSnapshot(ctx, repo, snapshotDir, ""))
+	assert.NoError(t, strategy.cloneForSnapshot(ctx, repo, snapshotDir, "", ""))
 	_, err = os.Lstat(proofPath)
 	assert.True(t, os.IsNotExist(err))
 	_, err = os.Lstat(templateProofPath)
