@@ -650,9 +650,11 @@ func TestRepository_Repack_RemovesStaleTempPacks(t *testing.T) {
 	clonePath := filepath.Join(tmpDir, "mirror")
 	assert.NoError(t, exec.Command("git", "clone", "--mirror", upstreamPath, clonePath).Run())
 
+	config := testMirrorConfig(tmpDir)
+	config.FetchTimeout = 3 * time.Hour
 	repo := &Repository{
 		state:       StateReady,
-		config:      testMirrorConfig(tmpDir),
+		config:      config,
 		path:        clonePath,
 		upstreamURL: upstreamPath,
 		fetchSem:    make(chan struct{}, 1),
@@ -662,7 +664,7 @@ func TestRepository_Repack_RemovesStaleTempPacks(t *testing.T) {
 	packDir := filepath.Join(clonePath, "objects", "pack")
 	stale := []string{"tmp_pack_abc123", ".tmp-4242-pack-deadbeef.pack", ".tmp-4242-pack-deadbeef.idx"}
 	fresh := []string{"tmp_pack_inflight", ".tmp-5151-pack-cafe.pack"}
-	old := time.Now().Add(-2 * time.Hour)
+	old := time.Now().Add(-4 * time.Hour)
 	for _, name := range stale {
 		path := filepath.Join(packDir, name)
 		assert.NoError(t, os.WriteFile(path, []byte("garbage"), 0o644))
@@ -671,6 +673,12 @@ func TestRepository_Repack_RemovesStaleTempPacks(t *testing.T) {
 	for _, name := range fresh {
 		assert.NoError(t, os.WriteFile(filepath.Join(packDir, name), []byte("in flight"), 0o644))
 	}
+	// Older than CloneTimeout but within FetchTimeout, so a fetch may still own it.
+	fetching := filepath.Join(packDir, "tmp_pack_slowfetch")
+	assert.NoError(t, os.WriteFile(fetching, []byte("in flight"), 0o644))
+	twoHoursAgo := time.Now().Add(-2 * time.Hour)
+	assert.NoError(t, os.Chtimes(fetching, twoHoursAgo, twoHoursAgo))
+	fresh = append(fresh, filepath.Base(fetching))
 
 	assert.NoError(t, repo.Repack(ctx))
 

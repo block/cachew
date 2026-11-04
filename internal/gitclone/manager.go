@@ -1029,9 +1029,10 @@ func (r *Repository) Repack(ctx context.Context) error {
 	logger.InfoContext(ctx, "Geometric repack started", "upstream", r.upstreamURL)
 
 	packDir := filepath.Join(r.path, "objects", "pack")
-	// No git operation runs longer than CloneTimeout, so older temporary
-	// packs belong to killed processes.
-	if err := removeStaleTempPacks(packDir, time.Now().Add(-r.config.CloneTimeout)); err != nil {
+	// Temporary packs older than the longest git operation timeout belong to
+	// killed processes rather than a concurrent fetch.
+	maxAge := max(r.config.CloneTimeout, r.config.FetchTimeout, r.config.RepackTimeout)
+	if err := removeStaleTempPacks(packDir, time.Now().Add(-maxAge)); err != nil {
 		return err
 	}
 
