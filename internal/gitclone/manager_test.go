@@ -40,6 +40,12 @@ func testRepoConfig() Config {
 	}
 }
 
+func testMirrorConfig(mirrorRoot string) Config {
+	config := testRepoConfig()
+	config.MirrorRoot = mirrorRoot
+	return config
+}
+
 // createBareRepo creates a bare git repository at the given path, suitable for
 // use as an upstream or as a mirror clone target.
 func createBareRepo(t *testing.T, dir string) string {
@@ -609,14 +615,18 @@ func TestRepository_Repack(t *testing.T) {
 
 	repo := &Repository{
 		state:       StateReady,
-		config:      testRepoConfig(),
+		config:      testMirrorConfig(tmpDir),
 		path:        clonePath,
 		upstreamURL: upstreamPath,
 		fetchSem:    make(chan struct{}, 1),
 	}
 	repo.fetchSem <- struct{}{}
 
+	// Another repository's mirror may be named like a suffixed marker.
+	assert.NoError(t, os.MkdirAll(clonePath+".repack-pending", 0o755))
+
 	assert.NoError(t, repo.Repack(ctx))
+	assert.False(t, repo.RepackPending())
 
 	// Verify a pack file exists after repack.
 	packs, err := filepath.Glob(filepath.Join(clonePath, "objects", "pack", "*.pack"))
@@ -642,7 +652,7 @@ func TestRepository_Repack_RemovesStaleTempPacks(t *testing.T) {
 
 	repo := &Repository{
 		state:       StateReady,
-		config:      testRepoConfig(),
+		config:      testMirrorConfig(tmpDir),
 		path:        clonePath,
 		upstreamURL: upstreamPath,
 		fetchSem:    make(chan struct{}, 1),
@@ -682,7 +692,7 @@ func TestRepository_Repack_ExtendsTimeoutAfterFailure(t *testing.T) {
 	clonePath := filepath.Join(tmpDir, "mirror")
 	assert.NoError(t, exec.Command("git", "clone", "--mirror", upstreamPath, clonePath).Run())
 
-	config := testRepoConfig()
+	config := testMirrorConfig(tmpDir)
 	config.RepackTimeout = time.Nanosecond
 	repo := &Repository{
 		state:       StateReady,
@@ -722,7 +732,7 @@ func TestRepository_Repack_CleansUpStaleLockOnFailure(t *testing.T) {
 
 	repo := &Repository{
 		state:       StateReady,
-		config:      testRepoConfig(),
+		config:      testMirrorConfig(tmpDir),
 		path:        clonePath,
 		upstreamURL: upstreamPath,
 		fetchSem:    make(chan struct{}, 1),

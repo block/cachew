@@ -1022,7 +1022,7 @@ func (r *Repository) GetUpstreamRefs(ctx context.Context) (map[string]string, er
 // packs it replaced only after that succeeds, so a failed repack leaves a
 // duplicate of every repacked object. Each duplicate slows the next repack, so
 // after a failure the next attempt may run for CloneTimeout to clear them. A
-// marker file beside the mirror records an unfinished repack, so the state
+// marker file under the mirror root records an unfinished repack, so the state
 // survives a process killed mid-repack and covers repacks still running.
 func (r *Repository) Repack(ctx context.Context) error {
 	logger := logging.FromContext(ctx)
@@ -1041,7 +1041,14 @@ func (r *Repository) Repack(ctx context.Context) error {
 		logger.WarnContext(ctx, "Extending repack timeout after unfinished repack", "upstream", r.upstreamURL,
 			"timeout", timeout)
 	}
-	if err := os.WriteFile(r.repackMarkerPath(), nil, 0o600); err != nil {
+	markerPath, err := r.repackMarkerPath()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(markerPath), 0o750); err != nil {
+		return errors.Wrap(err, "create repack marker directory")
+	}
+	if err := os.WriteFile(markerPath, nil, 0o600); err != nil {
 		return errors.Wrap(err, "write repack marker")
 	}
 	repackCtx, cancel := context.WithTimeout(ctx, timeout)
@@ -1084,7 +1091,7 @@ func (r *Repository) Repack(ctx context.Context) error {
 		}
 		return errors.Wrapf(err, "git repack: %s", string(output))
 	}
-	if err := os.Remove(r.repackMarkerPath()); err != nil {
+	if err := os.Remove(markerPath); err != nil {
 		return errors.Wrap(err, "remove repack marker")
 	}
 
@@ -1096,14 +1103,23 @@ func (r *Repository) Repack(ctx context.Context) error {
 // finish. Until a repack succeeds the mirror can hold duplicate packs, so
 // copies of it can be much larger than the repository.
 func (r *Repository) RepackPending() bool {
-	_, err := os.Lstat(r.repackMarkerPath())
+	markerPath, err := r.repackMarkerPath()
+	if err != nil {
+		return true
+	}
+	_, err = os.Lstat(markerPath)
 	return !errors.Is(err, os.ErrNotExist)
 }
 
-// repackMarkerPath sits beside the mirror rather than inside it so mirror
-// snapshots never carry it to other replicas.
-func (r *Repository) repackMarkerPath() string {
-	return r.path + ".repack-pending"
+// repackMarkerPath lives in its own namespace under the mirror root, like
+// snapshot work directories, so it cannot collide with another mirror and
+// mirror snapshots never carry it to other replicas.
+func (r *Repository) repackMarkerPath() (string, error) {
+	rel, err := filepath.Rel(r.config.MirrorRoot, r.path)
+	if err != nil || !filepath.IsLocal(rel) {
+		return "", errors.Errorf("mirror %s is outside mirror root %s", r.path, r.config.MirrorRoot)
+	}
+	return filepath.Join(r.config.MirrorRoot, ".repack-pending", rel), nil
 }
 
 // removeStaleTempPacks removes temporary pack files last modified before
