@@ -224,7 +224,18 @@ func (s *Strategy) withSnapshotClone(ctx context.Context, repo *gitclone.Reposit
 }
 
 func snapshotExcludePatterns(gitDir string) []string {
-	return []string{gitDir + "/*.lock", gitDir + "/objects/pack/tmp_*"}
+	return []string{gitDir + "/*.lock", gitDir + "/objects/pack/tmp_*", gitDir + "/objects/pack/.tmp-*"}
+}
+
+// checkRepackHealthy refuses snapshots of a mirror whose last repack failed.
+// The failed repack may have left a duplicate of every repacked object, and
+// snapshots copy the mirror's packs as they are. Returning an error releases
+// the coordination claim so a healthy replica can publish instead.
+func checkRepackHealthy(repo *gitclone.Repository) error {
+	if failures := repo.RepackFailures(); failures > 0 {
+		return errors.Errorf("mirror for %s may contain duplicate packs after %d failed repacks", repo.UpstreamURL(), failures)
+	}
+	return nil
 }
 
 func (s *Strategy) generateAndUploadSnapshot(ctx context.Context, repo *gitclone.Repository) (commit string, returnErr error) {
@@ -251,6 +262,9 @@ func (s *Strategy) generateAndUploadSnapshot(ctx context.Context, repo *gitclone
 		span.SetAttributes(attribute.String("cachew.snapshot.filter", filter))
 	}
 	logger.InfoContext(ctx, "Snapshot generation started", "upstream", upstream, "filter", filter)
+	if err := checkRepackHealthy(repo); err != nil {
+		return "", err
+	}
 
 	mu := s.snapshotMutexFor(upstream)
 	mu.Lock()
@@ -307,6 +321,9 @@ func (s *Strategy) generateAndUploadMirrorSnapshot(ctx context.Context, repo *gi
 	logger := logging.FromContext(ctx)
 
 	logger.InfoContext(ctx, "Mirror snapshot generation started", "upstream", upstream)
+	if err := checkRepackHealthy(repo); err != nil {
+		return "", err
+	}
 
 	mu := s.snapshotMutexFor(upstream)
 	mu.Lock()

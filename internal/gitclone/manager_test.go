@@ -626,6 +626,79 @@ func TestRepository_Repack(t *testing.T) {
 	// Verify multi-pack-index was written.
 	_, err = os.Stat(filepath.Join(clonePath, "objects", "pack", "multi-pack-index"))
 	assert.NoError(t, err)
+
+	bitmaps, err := filepath.Glob(filepath.Join(clonePath, "objects", "pack", "multi-pack-index-*.bitmap"))
+	assert.NoError(t, err)
+	assert.Equal(t, 1, len(bitmaps), "expected a multi-pack bitmap after repack")
+}
+
+func TestRepository_Repack_RemovesStaleTempPacks(t *testing.T) {
+	_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelError})
+	tmpDir := t.TempDir()
+	upstreamPath := createBareRepo(t, tmpDir)
+
+	clonePath := filepath.Join(tmpDir, "mirror")
+	assert.NoError(t, exec.Command("git", "clone", "--mirror", upstreamPath, clonePath).Run())
+
+	repo := &Repository{
+		state:       StateReady,
+		config:      testRepoConfig(),
+		path:        clonePath,
+		upstreamURL: upstreamPath,
+		fetchSem:    make(chan struct{}, 1),
+	}
+	repo.fetchSem <- struct{}{}
+
+	packDir := filepath.Join(clonePath, "objects", "pack")
+	stale := []string{"tmp_pack_abc123", ".tmp-4242-pack-deadbeef.pack", ".tmp-4242-pack-deadbeef.idx"}
+	fresh := []string{"tmp_pack_inflight", ".tmp-5151-pack-cafe.pack"}
+	old := time.Now().Add(-2 * time.Hour)
+	for _, name := range stale {
+		path := filepath.Join(packDir, name)
+		assert.NoError(t, os.WriteFile(path, []byte("garbage"), 0o644))
+		assert.NoError(t, os.Chtimes(path, old, old))
+	}
+	for _, name := range fresh {
+		assert.NoError(t, os.WriteFile(filepath.Join(packDir, name), []byte("in flight"), 0o644))
+	}
+
+	assert.NoError(t, repo.Repack(ctx))
+
+	for _, name := range stale {
+		_, err := os.Stat(filepath.Join(packDir, name))
+		assert.True(t, os.IsNotExist(err), "expected stale %s to be removed", name)
+	}
+	for _, name := range fresh {
+		_, err := os.Stat(filepath.Join(packDir, name))
+		assert.NoError(t, err, "expected recent %s to be kept", name)
+	}
+}
+
+func TestRepository_Repack_ExtendsTimeoutAfterFailure(t *testing.T) {
+	_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelError})
+	tmpDir := t.TempDir()
+	upstreamPath := createBareRepo(t, tmpDir)
+
+	clonePath := filepath.Join(tmpDir, "mirror")
+	assert.NoError(t, exec.Command("git", "clone", "--mirror", upstreamPath, clonePath).Run())
+
+	config := testRepoConfig()
+	config.RepackTimeout = time.Nanosecond
+	repo := &Repository{
+		state:       StateReady,
+		config:      config,
+		path:        clonePath,
+		upstreamURL: upstreamPath,
+		fetchSem:    make(chan struct{}, 1),
+	}
+	repo.fetchSem <- struct{}{}
+
+	assert.Error(t, repo.Repack(ctx))
+	assert.Equal(t, 1, repo.RepackFailures())
+
+	assert.NoError(t, repo.Repack(ctx))
+	assert.Equal(t, 0, repo.RepackFailures())
+	assert.Error(t, repo.Repack(ctx))
 }
 
 func TestRepository_Repack_CleansUpStaleLockOnFailure(t *testing.T) {
@@ -657,6 +730,10 @@ func TestRepository_Repack_CleansUpStaleLockOnFailure(t *testing.T) {
 	// The stale lock should have been removed.
 	_, statErr := os.Stat(lockPath)
 	assert.True(t, os.IsNotExist(statErr), "expected multi-pack-index.lock to be removed after failed repack")
+	assert.Equal(t, 1, repo.RepackFailures())
+
+	assert.NoError(t, repo.Repack(ctx))
+	assert.Equal(t, 0, repo.RepackFailures())
 }
 
 func TestRepository_HasCommit(t *testing.T) {
