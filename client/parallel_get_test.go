@@ -354,6 +354,18 @@ func TestParallelGetResumesBrokenChunksFromTheirOffset(t *testing.T) {
 	assert.Equal(t, 13, len(opens))
 }
 
+func TestParallelGetResumesSingleChunkObject(t *testing.T) {
+	data := patternBytes(80)
+	c := &faultyReader{
+		recordingReader: recordingReader{data: data, etag: `"v1"`},
+		cuts:            map[int64][]bodyCut{0: {{after: 30, err: io.ErrUnexpectedEOF}}},
+	}
+	got, err := collect(c, client.NewKey("k"), 100, 4)
+	assert.NoError(t, err)
+	assert.Equal(t, data, got)
+	assert.Equal(t, []openRecord{{Range: "bytes=0-99"}, {Range: "bytes=30-79", IfMatch: `"v1"`}}, c.ranges())
+}
+
 func TestParallelGetRetriesServerErrors(t *testing.T) {
 	data := patternBytes(1000)
 	c := &faultyReader{

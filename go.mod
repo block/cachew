@@ -9,6 +9,7 @@ require (
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/google/uuid v1.6.0
 	github.com/goproxy/goproxy v0.26.1
+	github.com/jpillora/backoff v1.0.0
 	github.com/lmittmann/tint v1.1.3
 	github.com/minio/minio-go/v7 v7.0.100
 	github.com/open-policy-agent/opa v1.15.2

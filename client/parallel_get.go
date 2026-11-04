@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/alecthomas/errors"
+	"github.com/jpillora/backoff"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -27,10 +28,6 @@ const chunkRetryAttempts = 4
 // responses when they drain or restart; resuming the chunk from the failed
 // offset, pinned to the discovery ETag, keeps the rest of the download.
 const chunkResumeAttempts = 3
-
-// chunkResumeBackoff is the delay before the first resume, doubling each time,
-// so a reconnect does not race the endpoint removal of a draining proxy.
-const chunkResumeBackoff = 100 * time.Millisecond
 
 // RangeReader is the subset of cache operations ParallelGet needs: a
 // conditional, Range-capable Open. Both *Client and cache.Cache satisfy it.
@@ -78,6 +75,9 @@ func ParallelGet(ctx context.Context, c RangeReader, key Key, dst io.WriterAt, c
 	}
 	if total <= chunkSize {
 		notifyDiscovery(c, headers)
+		if etag != "" {
+			return errors.Wrap(fetchChunk(ctx, c, key, etag, dst, 0, total, rc), "parallel get")
+		}
 		_, err := writeChunkAt(dst, 0, total, rc)
 		return errors.Wrap(err, "parallel get")
 	}
@@ -338,12 +338,15 @@ func fetchChunk(ctx context.Context, c RangeReader, key Key, etag string, dst io
 	}
 }
 
-// waitToResume sleeps before resume attempt+1, reporting false if ctx ends first.
+// waitToResume sleeps before resume attempt+1, reporting false if ctx ends
+// first. The backoff keeps a reconnect from racing the endpoint removal of a
+// draining proxy.
 func waitToResume(ctx context.Context, attempt int) bool {
 	if ctx.Err() != nil {
 		return false
 	}
-	timer := time.NewTimer(chunkResumeBackoff << attempt)
+	delay := (&backoff.Backoff{Min: 100 * time.Millisecond, Max: time.Second, Factor: 2, Jitter: true}).ForAttempt(float64(attempt))
+	timer := time.NewTimer(delay)
 	defer timer.Stop()
 	select {
 	case <-timer.C:
