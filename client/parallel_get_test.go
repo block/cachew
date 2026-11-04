@@ -285,6 +285,116 @@ func TestParallelGetPinsChunksWithIfMatch(t *testing.T) {
 	assert.Equal(t, expected, c.opens)
 }
 
+// faultyReader serves ranges like recordingReader but injects one fault per
+// queued entry for opens starting at an offset: an HTTP status, or a body cut
+// after the given number of bytes with the given error (io.EOF for a clean
+// early end).
+type faultyReader struct {
+	recordingReader
+
+	faultsMu sync.Mutex
+	statuses map[int64][]int
+	cuts     map[int64][]bodyCut
+}
+
+type bodyCut struct {
+	after int64
+	err   error
+}
+
+type errReader struct{ err error }
+
+func (e errReader) Read([]byte) (int, error) { return 0, e.err }
+
+func (f *faultyReader) Open(ctx context.Context, key client.Key, opts ...client.RequestOption) (io.ReadCloser, http.Header, error) {
+	body, headers, err := f.recordingReader.Open(ctx, key, opts...)
+	if err != nil {
+		return nil, headers, err
+	}
+	start, _, _ := client.NewRequestOptions(opts...).ResolveRange(int64(len(f.data)), f.etag)
+	f.faultsMu.Lock()
+	defer f.faultsMu.Unlock()
+	if statuses := f.statuses[start]; len(statuses) > 0 {
+		f.statuses[start] = statuses[1:]
+		return nil, nil, errors.Join(&client.HTTPStatusError{StatusCode: statuses[0]}, body.Close())
+	}
+	if cuts := f.cuts[start]; len(cuts) > 0 {
+		f.cuts[start] = cuts[1:]
+		return io.NopCloser(io.MultiReader(io.LimitReader(body, cuts[0].after), errReader{cuts[0].err})), headers, nil
+	}
+	return body, headers, nil
+}
+
+func (f *faultyReader) ranges() []openRecord {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	opens := slices.Clone(f.opens)
+	slices.SortFunc(opens, func(a, b openRecord) int { return strings.Compare(a.Range, b.Range) })
+	return opens
+}
+
+func TestParallelGetResumesBrokenChunksFromTheirOffset(t *testing.T) {
+	data := patternBytes(1000)
+	c := &faultyReader{
+		recordingReader: recordingReader{data: data, etag: `"v1"`},
+		cuts: map[int64][]bodyCut{
+			0:   {{after: 10, err: io.EOF}},
+			300: {{after: 40, err: io.ErrUnexpectedEOF}},
+			340: {{after: 5, err: io.ErrUnexpectedEOF}},
+		},
+	}
+	got, err := collect(c, client.NewKey("k"), 100, 4)
+	assert.NoError(t, err)
+	assert.Equal(t, data, got)
+
+	opens := c.ranges()
+	assert.SliceContains(t, opens, openRecord{Range: "bytes=10-99", IfMatch: `"v1"`})
+	assert.SliceContains(t, opens, openRecord{Range: "bytes=340-399", IfMatch: `"v1"`})
+	assert.SliceContains(t, opens, openRecord{Range: "bytes=345-399", IfMatch: `"v1"`})
+	assert.Equal(t, 13, len(opens))
+}
+
+func TestParallelGetRetriesServerErrors(t *testing.T) {
+	data := patternBytes(1000)
+	c := &faultyReader{
+		recordingReader: recordingReader{data: data, etag: `"v1"`},
+		statuses:        map[int64][]int{0: {http.StatusServiceUnavailable}, 500: {http.StatusBadGateway, http.StatusBadGateway}},
+	}
+	got, err := collect(c, client.NewKey("k"), 100, 4)
+	assert.NoError(t, err)
+	assert.Equal(t, data, got)
+	assert.Equal(t, 13, len(c.ranges()))
+}
+
+func TestParallelGetGivesUpOnPersistentlyBrokenChunk(t *testing.T) {
+	cut := bodyCut{after: 1, err: io.ErrUnexpectedEOF}
+	c := &faultyReader{
+		recordingReader: recordingReader{data: patternBytes(1000), etag: `"v1"`},
+		cuts:            map[int64][]bodyCut{500: {cut}, 501: {cut}, 502: {cut}, 503: {cut}, 504: {cut}},
+	}
+	_, err := collect(c, client.NewKey("k"), 100, 4)
+	assert.IsError(t, err, io.ErrUnexpectedEOF)
+	assert.Contains(t, err.Error(), "write chunk at offset 503")
+	assert.Equal(t, []bodyCut{cut}, c.cuts[504])
+}
+
+func TestParallelGetDoesNotRetryClientErrors(t *testing.T) {
+	c := &faultyReader{
+		recordingReader: recordingReader{data: patternBytes(1000), etag: `"v1"`},
+		statuses:        map[int64][]int{500: {http.StatusForbidden}},
+	}
+	_, err := collect(c, client.NewKey("k"), 100, 4)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "unexpected status code: 403")
+	opens := 0
+	for _, open := range c.ranges() {
+		if open.Range == "bytes=500-599" {
+			opens++
+		}
+	}
+	assert.Equal(t, 1, opens)
+}
+
 func TestParallelGetEmptyObject(t *testing.T) {
 	c := &recordingReader{data: nil, etag: `"v1"`}
 	got, err := collect(c, client.NewKey("k"), 100, 4)

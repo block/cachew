@@ -5,10 +5,12 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/alecthomas/errors"
 	"golang.org/x/sync/errgroup"
@@ -19,6 +21,16 @@ import (
 // discovery already proved range support, so a retry may route to a capable
 // replica.
 const chunkRetryAttempts = 4
+
+// chunkResumeAttempts bounds how often one chunk is reopened after its
+// response breaks mid-body or fails transiently. Proxies cut individual
+// responses when they drain or restart; resuming the chunk from the failed
+// offset, pinned to the discovery ETag, keeps the rest of the download.
+const chunkResumeAttempts = 3
+
+// chunkResumeBackoff is the delay before the first resume, doubling each time,
+// so a reconnect does not race the endpoint removal of a draining proxy.
+const chunkResumeBackoff = 100 * time.Millisecond
 
 // RangeReader is the subset of cache operations ParallelGet needs: a
 // conditional, Range-capable Open. Both *Client and cache.Cache satisfy it.
@@ -34,7 +46,9 @@ type RangeReader interface {
 // 2*concurrency*chunkSize is never exceeded and blocked writes always drain.
 //
 // Chunks are pinned to the discovery response's ETag so a mid-download rewrite
-// is rejected rather than spliced. No ETag, a range-ignoring backend, an
+// is rejected rather than spliced, which also makes it safe to resume a chunk
+// whose response breaks mid-body or fails transiently from the offset it
+// reached. No ETag, a range-ignoring backend, an
 // object that fits in the first chunk, or concurrency 1 all fall back to a
 // single full read. On error dst is left partially written and must be
 // discarded by the caller.
@@ -59,11 +73,13 @@ func ParallelGet(ctx context.Context, c RangeReader, key Key, dst io.WriterAt, c
 	// already carries the whole object (negative length = unknown size).
 	if !hasRange {
 		notifyDiscovery(c, headers)
-		return errors.Wrap(writeChunkAt(dst, 0, -1, rc), "parallel get")
+		_, err := writeChunkAt(dst, 0, -1, rc)
+		return errors.Wrap(err, "parallel get")
 	}
 	if total <= chunkSize {
 		notifyDiscovery(c, headers)
-		return errors.Wrap(writeChunkAt(dst, 0, total, rc), "parallel get")
+		_, err := writeChunkAt(dst, 0, total, rc)
+		return errors.Wrap(err, "parallel get")
 	}
 
 	// Without an ETag there is nothing to pin chunks to, so a rewrite could be
@@ -101,12 +117,8 @@ func ParallelGet(ctx context.Context, c RangeReader, key Key, dst io.WriterAt, c
 			}
 			start := seq * chunkSize
 			end := min(start+chunkSize, total)
-			body, err := openChunk(egCtx, c, key, etag, start, end)
-			if err != nil {
+			if err := fetchChunk(egCtx, c, key, etag, dst, start, end, nil); err != nil {
 				return err
-			}
-			if err := writeChunkAt(dst, start, end-start, body); err != nil {
-				return errors.WithStack(err)
 			}
 			gate.complete(seq)
 		}
@@ -118,10 +130,10 @@ func ParallelGet(ctx context.Context, c RangeReader, key Key, dst io.WriterAt, c
 	// failed sibling would leave the copy blocked; double Close is harmless.
 	eg.Go(func() error {
 		stop := context.AfterFunc(egCtx, func() { _ = rc.Close() }) //nolint:errcheck
-		err := writeChunkAt(dst, 0, min(chunkSize, total), rc)
+		err := fetchChunk(egCtx, c, key, etag, dst, 0, min(chunkSize, total), rc)
 		stop()
 		if err != nil {
-			return errors.WithStack(err)
+			return err
 		}
 		gate.complete(0)
 		return worker()
@@ -158,7 +170,12 @@ func ParallelGetReader(ctx context.Context, c RangeReader, key Key, chunkSize in
 // closing that body would abort and repeat the expensive generation. A nil rc
 // with nil err means the object is empty.
 func discoverFirstChunk(ctx context.Context, c RangeReader, key Key, chunkSize int64) (rc io.ReadCloser, headers http.Header, etag string, total int64, hasRange bool, err error) {
-	rc, headers, err = c.Open(ctx, key, Range(0, chunkSize))
+	for attempt := 0; ; attempt++ {
+		rc, headers, err = c.Open(ctx, key, Range(0, chunkSize))
+		if err == nil || attempt == chunkResumeAttempts || !resumable(err) || !waitToResume(ctx, attempt) {
+			break
+		}
+	}
 	if errors.Is(err, ErrRangeNotSatisfiable) {
 		return nil, headers, "", 0, false, nil
 	}
@@ -296,6 +313,86 @@ func openChunk(ctx context.Context, c RangeReader, key Key, etag string, start, 
 	}
 }
 
+// fetchChunk writes [start, end) to dst from body, or from a fresh pinned
+// request when body is nil. A broken response or transient reopen failure
+// resumes from the last written offset, so a proxy cutting one response costs
+// the rest of that chunk rather than the whole download.
+func fetchChunk(ctx context.Context, c RangeReader, key Key, etag string, dst io.WriterAt, start, end int64, body io.ReadCloser) error {
+	for attempt := 0; ; attempt++ {
+		var err error
+		if body == nil {
+			body, err = openChunk(ctx, c, key, etag, start, end)
+		}
+		if err == nil {
+			var n int64
+			n, err = writeChunkAt(dst, start, end-start, body)
+			start += n
+			body = nil
+			if err == nil {
+				return nil
+			}
+		}
+		if attempt == chunkResumeAttempts || !resumable(err) || !waitToResume(ctx, attempt) {
+			return errors.WithStack(err)
+		}
+	}
+}
+
+// waitToResume sleeps before resume attempt+1, reporting false if ctx ends first.
+func waitToResume(ctx context.Context, attempt int) bool {
+	if ctx.Err() != nil {
+		return false
+	}
+	timer := time.NewTimer(chunkResumeBackoff << attempt)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+// bodyError marks a chunk response that failed or ended early mid-body, as
+// opposed to a failed write to dst, which a new request cannot fix.
+type bodyError struct{ error }
+
+func (e bodyError) Unwrap() error { return e.error }
+
+// resumable reports whether a fresh request may complete a failed chunk: the
+// response broke mid-body, or the request failed in transport or with a server
+// error. A changed object, a missing object, or a client error is final.
+func resumable(err error) bool {
+	var broken bodyError
+	var status *HTTPStatusError
+	var transport *url.Error
+	switch {
+	case errors.As(err, &broken):
+		return true
+	case errors.Is(err, ErrPreconditionFailed):
+		return false
+	case errors.As(err, &status):
+		return status.StatusCode >= http.StatusInternalServerError
+	default:
+		return errors.As(err, &transport)
+	}
+}
+
+// readErrRecorder remembers a read failure so a copy error can be attributed
+// to the response rather than to the destination.
+type readErrRecorder struct {
+	r   io.Reader
+	err error
+}
+
+func (r *readErrRecorder) Read(p []byte) (int, error) {
+	n, err := r.r.Read(p)
+	if err != nil && !errors.Is(err, io.EOF) {
+		r.err = err
+	}
+	return n, err //nolint:wrapcheck // io.Reader contract: io.EOF must not be wrapped
+}
+
 // fullRead downloads the object in a single request, writing sequentially from
 // offset zero with an unknown length.
 func fullRead(ctx context.Context, c RangeReader, key Key, dst io.WriterAt) error {
@@ -304,30 +401,37 @@ func fullRead(ctx context.Context, c RangeReader, key Key, dst io.WriterAt) erro
 		return errors.Wrap(err, "parallel get: full read")
 	}
 	notifyDiscovery(c, headers)
-	return errors.Wrap(writeChunkAt(dst, 0, -1, rc), "parallel get")
+	_, err = writeChunkAt(dst, 0, -1, rc)
+	return errors.Wrap(err, "parallel get")
 }
 
-// writeChunkAt copies src to its offset in dst, closing src. length < 0 means
-// "write the whole body" (unknown size); otherwise the copy is capped at
-// length so an overlong body can never write into another chunk's range, and
-// short or overlong bodies are reported as errors.
-func writeChunkAt(dst io.WriterAt, off, length int64, src io.ReadCloser) error {
+// writeChunkAt copies src to its offset in dst, closing src, and returns the
+// bytes written. length < 0 means "write the whole body" (unknown size);
+// otherwise the copy is capped at length so an overlong body can never write
+// into another chunk's range, and short or overlong bodies are reported as
+// errors. A response that fails or ends short is reported as a bodyError.
+func writeChunkAt(dst io.WriterAt, off, length int64, src io.ReadCloser) (int64, error) {
 	w := io.NewOffsetWriter(dst, off)
+	body := &readErrRecorder{r: src}
 	if length < 0 {
-		_, err := io.Copy(w, src)
-		return errors.Join(errors.Wrap(err, "write chunk"), src.Close())
+		n, err := io.Copy(w, body)
+		return n, errors.Join(errors.Wrap(err, "write chunk"), src.Close())
 	}
-	n, err := io.Copy(w, io.LimitReader(src, length))
+	n, err := io.Copy(w, io.LimitReader(body, length))
 	if err != nil {
-		return errors.Join(errors.Errorf("write chunk at offset %d: %w", off, err), src.Close())
+		err = errors.Errorf("write chunk at offset %d: %w", off, err)
+		if body.err != nil {
+			err = bodyError{err}
+		}
+		return n, errors.Join(err, src.Close())
 	}
 	if n != length {
-		return errors.Join(errors.Errorf("chunk at offset %d: wrote %d of %d bytes", off, n, length), src.Close())
+		return n, errors.Join(bodyError{errors.Errorf("chunk at offset %d: wrote %d of %d bytes", off, n, length)}, src.Close())
 	}
 	if overlong(src) {
-		return errors.Join(errors.Errorf("chunk at offset %d: read more than the expected %d bytes", off, length), src.Close())
+		return n, errors.Join(errors.Errorf("chunk at offset %d: read more than the expected %d bytes", off, length), src.Close())
 	}
-	return errors.WithStack(src.Close())
+	return n, errors.WithStack(src.Close())
 }
 
 // overlong reports whether r has bytes left, detecting a body longer than the
