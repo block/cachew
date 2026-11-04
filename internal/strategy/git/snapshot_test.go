@@ -572,8 +572,9 @@ func TestSnapshotsRefusedAfterFailedRepack(t *testing.T) {
 
 	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: time.Hour})
 	assert.NoError(t, err)
+	mux := newTestMux()
 	cm := gitclone.NewManagerProvider(ctx, gitclone.Config{MirrorRoot: mirrorRoot}, nil)
-	s, err := git.New(ctx, git.Config{}, newTestScheduler(ctx, t), memCache, newTestMux(), cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
+	s, err := git.New(ctx, git.Config{}, newTestScheduler(ctx, t), memCache, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
 	assert.NoError(t, err)
 	manager, err := cm()
 	assert.NoError(t, err)
@@ -591,6 +592,13 @@ func TestSnapshotsRefusedAfterFailedRepack(t *testing.T) {
 	assert.True(t, os.IsNotExist(err), "no snapshot should be published from an unhealthy mirror")
 	_, err = memCache.Stat(ctx, cache.NewKey(upstreamURL+".mirror-snapshot"))
 	assert.True(t, os.IsNotExist(err), "no mirror snapshot should be published from an unhealthy mirror")
+
+	req := httptest.NewRequest(http.MethodGet, "/git/github.com/org/repo/snapshot.tar.zst", nil).WithContext(ctx)
+	req.SetPathValue("host", "github.com")
+	req.SetPathValue("path", "org/repo/snapshot.tar.zst")
+	w := httptest.NewRecorder()
+	mux.handlers["GET /git/{host}/{path...}"].ServeHTTP(w, req)
+	assert.Equal(t, http.StatusNotFound, w.Code, "a cache miss must not stream an unhealthy mirror")
 
 	assert.NoError(t, repo.Repack(ctx))
 	assert.NoError(t, s.GenerateAndUploadSnapshot(ctx, repo))

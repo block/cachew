@@ -694,11 +694,21 @@ func TestRepository_Repack_ExtendsTimeoutAfterFailure(t *testing.T) {
 	repo.fetchSem <- struct{}{}
 
 	assert.Error(t, repo.Repack(ctx))
-	assert.Equal(t, 1, repo.RepackFailures())
+	assert.True(t, repo.RepackPending())
 
-	assert.NoError(t, repo.Repack(ctx))
-	assert.Equal(t, 0, repo.RepackFailures())
-	assert.Error(t, repo.Repack(ctx))
+	restarted := &Repository{
+		state:       StateReady,
+		config:      config,
+		path:        clonePath,
+		upstreamURL: upstreamPath,
+		fetchSem:    make(chan struct{}, 1),
+	}
+	restarted.fetchSem <- struct{}{}
+	assert.True(t, restarted.RepackPending(), "an unfinished repack should survive a restart")
+
+	assert.NoError(t, restarted.Repack(ctx))
+	assert.False(t, restarted.RepackPending())
+	assert.Error(t, restarted.Repack(ctx))
 }
 
 func TestRepository_Repack_CleansUpStaleLockOnFailure(t *testing.T) {
@@ -730,10 +740,10 @@ func TestRepository_Repack_CleansUpStaleLockOnFailure(t *testing.T) {
 	// The stale lock should have been removed.
 	_, statErr := os.Stat(lockPath)
 	assert.True(t, os.IsNotExist(statErr), "expected multi-pack-index.lock to be removed after failed repack")
-	assert.Equal(t, 1, repo.RepackFailures())
+	assert.True(t, repo.RepackPending())
 
 	assert.NoError(t, repo.Repack(ctx))
-	assert.Equal(t, 0, repo.RepackFailures())
+	assert.False(t, repo.RepackPending())
 }
 
 func TestRepository_HasCommit(t *testing.T) {

@@ -95,7 +95,6 @@ type Repository struct {
 	lastFetch          time.Time
 	lastRefCheck       time.Time
 	refCheckValid      bool
-	repackFailures     int
 	fetchSem           chan struct{}
 	credentialProvider CredentialProvider
 }
@@ -1022,7 +1021,9 @@ func (r *Repository) GetUpstreamRefs(ctx context.Context) (map[string]string, er
 // git repack installs its new pack before writing the bitmap and deletes the
 // packs it replaced only after that succeeds, so a failed repack leaves a
 // duplicate of every repacked object. Each duplicate slows the next repack, so
-// after a failure the next attempt may run for CloneTimeout to clear them.
+// after a failure the next attempt may run for CloneTimeout to clear them. A
+// marker file beside the mirror records an unfinished repack, so the state
+// survives a process killed mid-repack and covers repacks still running.
 func (r *Repository) Repack(ctx context.Context) error {
 	logger := logging.FromContext(ctx)
 	logger.InfoContext(ctx, "Geometric repack started", "upstream", r.upstreamURL)
@@ -1035,10 +1036,13 @@ func (r *Repository) Repack(ctx context.Context) error {
 	}
 
 	timeout := r.config.RepackTimeout
-	if failures := r.RepackFailures(); failures > 0 && r.config.CloneTimeout > timeout {
+	if r.RepackPending() && r.config.CloneTimeout > timeout {
 		timeout = r.config.CloneTimeout
-		logger.WarnContext(ctx, "Extending repack timeout after failed repack", "upstream", r.upstreamURL,
-			"failures", failures, "timeout", timeout)
+		logger.WarnContext(ctx, "Extending repack timeout after unfinished repack", "upstream", r.upstreamURL,
+			"timeout", timeout)
+	}
+	if err := os.WriteFile(r.repackMarkerPath(), nil, 0o600); err != nil {
+		return errors.Wrap(err, "write repack marker")
 	}
 	repackCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -1069,13 +1073,6 @@ func (r *Repository) Repack(ctx context.Context) error {
 		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 	}
 	output, err := cmd.CombinedOutput()
-	r.metaMu.Lock()
-	if err != nil {
-		r.repackFailures++
-	} else {
-		r.repackFailures = 0
-	}
-	r.metaMu.Unlock()
 	if err != nil {
 		// When git repack is killed (e.g. by our timeout), it cannot clean up
 		// the multi-pack-index.lock it holds. A stale lock blocks all future
@@ -1087,19 +1084,26 @@ func (r *Repository) Repack(ctx context.Context) error {
 		}
 		return errors.Wrapf(err, "git repack: %s", string(output))
 	}
+	if err := os.Remove(r.repackMarkerPath()); err != nil {
+		return errors.Wrap(err, "remove repack marker")
+	}
 
 	logger.InfoContext(ctx, "Geometric repack completed", "upstream", r.upstreamURL)
 	return nil
 }
 
-// RepackFailures reports how many geometric repacks have failed in a row. A
-// failed repack can leave duplicate packs in the mirror until the next one
-// succeeds, so copies of the mirror taken meanwhile can be much larger than
-// the repository.
-func (r *Repository) RepackFailures() int {
-	r.metaMu.Lock()
-	defer r.metaMu.Unlock()
-	return r.repackFailures
+// RepackPending reports whether a repack is running or the last one did not
+// finish. Until a repack succeeds the mirror can hold duplicate packs, so
+// copies of it can be much larger than the repository.
+func (r *Repository) RepackPending() bool {
+	_, err := os.Lstat(r.repackMarkerPath())
+	return !errors.Is(err, os.ErrNotExist)
+}
+
+// repackMarkerPath sits beside the mirror rather than inside it so mirror
+// snapshots never carry it to other replicas.
+func (r *Repository) repackMarkerPath() string {
+	return r.path + ".repack-pending"
 }
 
 // removeStaleTempPacks removes temporary pack files last modified before
