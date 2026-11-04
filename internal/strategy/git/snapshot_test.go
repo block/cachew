@@ -143,18 +143,23 @@ func TestSnapshotOnDemandGenerationViaHTTP(t *testing.T) {
 	assertSnapshotGitFiles(t, mirrorPath, filepath.Join(restoreDir, ".git"))
 }
 
+func snapshotGarbage() []string {
+	return []string{"objects/pack/tmp_pack_unused", "objects/pack/tmp_idx_unused", "objects/pack/stale.lock",
+		"objects/pack/.tmp-4242-pack-deadbeef.pack"}
+}
+
 func addSnapshotGarbage(t *testing.T, mirrorPath string) {
 	t.Helper()
 	output, err := exec.Command("git", "-C", mirrorPath, "repack", "-ad").CombinedOutput()
 	assert.NoError(t, err, string(output))
-	for _, name := range []string{"objects/pack/tmp_pack_unused", "objects/pack/tmp_idx_unused", "objects/pack/stale.lock"} {
+	for _, name := range snapshotGarbage() {
 		assert.NoError(t, os.WriteFile(filepath.Join(mirrorPath, name), []byte("garbage"), 0o644))
 	}
 }
 
 func assertSnapshotGitFiles(t *testing.T, mirrorPath, restoredGitDir string) {
 	t.Helper()
-	for _, name := range []string{"objects/pack/tmp_pack_unused", "objects/pack/tmp_idx_unused", "objects/pack/stale.lock"} {
+	for _, name := range snapshotGarbage() {
 		_, err := os.Stat(filepath.Join(restoredGitDir, name))
 		assert.True(t, os.IsNotExist(err), "snapshot should exclude %s", name)
 		data, err := os.ReadFile(filepath.Join(mirrorPath, name))
@@ -551,6 +556,53 @@ func TestSnapshotGenerationExcludesGitGarbage(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, "tracked fixture\n", string(data))
 	assertSnapshotGitFiles(t, mirrorPath, filepath.Join(restoreDir, ".git"))
+}
+
+func TestSnapshotsRefusedAfterFailedRepack(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not found in PATH")
+	}
+
+	_, ctx := logging.Configure(context.Background(), logging.Config{})
+	tmpDir := t.TempDir()
+	mirrorRoot := filepath.Join(tmpDir, "mirrors")
+	upstreamURL := "https://github.com/org/repo"
+	mirrorPath := filepath.Join(mirrorRoot, "github.com", "org", "repo")
+	createTestMirrorRepo(t, mirrorPath)
+
+	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: time.Hour})
+	assert.NoError(t, err)
+	mux := newTestMux()
+	cm := gitclone.NewManagerProvider(ctx, gitclone.Config{MirrorRoot: mirrorRoot}, nil)
+	s, err := git.New(ctx, git.Config{}, newTestScheduler(ctx, t), memCache, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
+	assert.NoError(t, err)
+	manager, err := cm()
+	assert.NoError(t, err)
+	repo, err := manager.GetOrCreate(ctx, upstreamURL)
+	assert.NoError(t, err)
+	waitForReady(t, s)
+
+	lockPath := filepath.Join(mirrorPath, "objects", "pack", "multi-pack-index.lock")
+	assert.NoError(t, os.WriteFile(lockPath, []byte("held"), 0o644))
+	assert.Error(t, repo.Repack(ctx))
+
+	assert.Error(t, s.GenerateAndUploadSnapshot(ctx, repo))
+	assert.Error(t, s.GenerateAndUploadMirrorSnapshot(ctx, repo))
+	_, err = memCache.Stat(ctx, cache.NewKey(upstreamURL+".snapshot"))
+	assert.True(t, os.IsNotExist(err), "no snapshot should be published from an unhealthy mirror")
+	_, err = memCache.Stat(ctx, cache.NewKey(upstreamURL+".mirror-snapshot"))
+	assert.True(t, os.IsNotExist(err), "no mirror snapshot should be published from an unhealthy mirror")
+
+	req := httptest.NewRequest(http.MethodGet, "/git/github.com/org/repo/snapshot.tar.zst", nil).WithContext(ctx)
+	req.SetPathValue("host", "github.com")
+	req.SetPathValue("path", "org/repo/snapshot.tar.zst")
+	w := httptest.NewRecorder()
+	mux.handlers["GET /git/{host}/{path...}"].ServeHTTP(w, req)
+	assert.Equal(t, http.StatusNotFound, w.Code, "a cache miss must not stream an unhealthy mirror")
+
+	assert.NoError(t, repo.Repack(ctx))
+	assert.NoError(t, s.GenerateAndUploadSnapshot(ctx, repo))
+	assert.NoError(t, s.GenerateAndUploadMirrorSnapshot(ctx, repo))
 }
 
 func TestMirrorSnapshotRestoreDirectly(t *testing.T) {

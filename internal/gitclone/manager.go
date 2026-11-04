@@ -1017,11 +1017,42 @@ func (r *Repository) GetUpstreamRefs(ctx context.Context) (map[string]string, er
 // large repositories in steady state. The --write-midx and --write-bitmap-index
 // flags maintain the multi-pack index and reachability bitmaps for efficient
 // serving via git http-backend.
+//
+// git repack installs its new pack before writing the bitmap and deletes the
+// packs it replaced only after that succeeds, so a failed repack leaves a
+// duplicate of every repacked object. Each duplicate slows the next repack, so
+// after a failure the next attempt may run for CloneTimeout to clear them. A
+// marker file under the mirror root records an unfinished repack, so the state
+// survives a process killed mid-repack and covers repacks still running.
 func (r *Repository) Repack(ctx context.Context) error {
 	logger := logging.FromContext(ctx)
 	logger.InfoContext(ctx, "Geometric repack started", "upstream", r.upstreamURL)
 
-	repackCtx, cancel := context.WithTimeout(ctx, r.config.RepackTimeout)
+	packDir := filepath.Join(r.path, "objects", "pack")
+	// Temporary packs older than the longest git operation timeout belong to
+	// killed processes rather than a concurrent fetch.
+	maxAge := max(r.config.CloneTimeout, r.config.FetchTimeout, r.config.RepackTimeout)
+	if err := removeStaleTempPacks(packDir, time.Now().Add(-maxAge)); err != nil {
+		return err
+	}
+
+	timeout := r.config.RepackTimeout
+	if r.RepackPending() && r.config.CloneTimeout > timeout {
+		timeout = r.config.CloneTimeout
+		logger.WarnContext(ctx, "Extending repack timeout after unfinished repack", "upstream", r.upstreamURL,
+			"timeout", timeout)
+	}
+	markerPath, err := r.repackMarkerPath()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(markerPath), 0o750); err != nil {
+		return errors.Wrap(err, "create repack marker directory")
+	}
+	if err := os.WriteFile(markerPath, nil, 0o600); err != nil {
+		return errors.Wrap(err, "write repack marker")
+	}
+	repackCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	threads := r.config.RepackThreads
@@ -1033,11 +1064,17 @@ func (r *Repository) Repack(ctx context.Context) error {
 	// config uses high values (512m deltaCacheSize, 1g windowMemory) tuned for
 	// serving performance with many threads. Repack is a background task that
 	// can afford to be slower in exchange for bounded memory.
+	//
+	// packKeptObjects stops pack-objects from omitting objects that a
+	// concurrent fetch's .keep pack also holds. That pack is not in the new
+	// multi-pack index, so omitting them fails the bitmap with "Packfile
+	// doesn't have full closure".
 	// #nosec G204 - r.path is controlled by us
 	cmd := exec.CommandContext(repackCtx, "git", "-C", r.path,
 		"-c", "pack.threads="+strconv.Itoa(threads),
 		"-c", "pack.windowMemory=256m",
 		"-c", "pack.deltaCacheSize=128m",
+		"-c", "repack.packKeptObjects=true",
 		"repack", "-d", "--geometric=2", "--write-midx", "--write-bitmap-index")
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error {
@@ -1049,14 +1086,73 @@ func (r *Repository) Repack(ctx context.Context) error {
 		// the multi-pack-index.lock it holds. A stale lock blocks all future
 		// repacks, causing pack fragmentation that eventually degrades snapshot
 		// serving performance. Remove it so the next attempt can proceed.
-		lockPath := filepath.Join(r.path, "objects", "pack", "multi-pack-index.lock")
+		lockPath := filepath.Join(packDir, "multi-pack-index.lock")
 		if rmErr := os.Remove(lockPath); rmErr == nil {
 			logger.WarnContext(ctx, "Removed stale multi-pack-index.lock after repack failure", "upstream", r.upstreamURL)
 		}
 		return errors.Wrapf(err, "git repack: %s", string(output))
 	}
+	if err := os.Remove(markerPath); err != nil {
+		return errors.Wrap(err, "remove repack marker")
+	}
 
 	logger.InfoContext(ctx, "Geometric repack completed", "upstream", r.upstreamURL)
+	return nil
+}
+
+// RepackPending reports whether a repack is running or the last one did not
+// finish. Until a repack succeeds the mirror can hold duplicate packs, so
+// copies of it can be much larger than the repository.
+func (r *Repository) RepackPending() bool {
+	markerPath, err := r.repackMarkerPath()
+	if err != nil {
+		return true
+	}
+	_, err = os.Lstat(markerPath)
+	return !errors.Is(err, os.ErrNotExist)
+}
+
+// repackMarkerPath lives in its own namespace under the mirror root, like
+// snapshot work directories, so it cannot collide with another mirror and
+// mirror snapshots never carry it to other replicas.
+func (r *Repository) repackMarkerPath() (string, error) {
+	rel, err := filepath.Rel(r.config.MirrorRoot, r.path)
+	if err != nil || !filepath.IsLocal(rel) {
+		return "", errors.Errorf("mirror %s is outside mirror root %s", r.path, r.config.MirrorRoot)
+	}
+	return filepath.Join(r.config.MirrorRoot, ".repack-pending", rel), nil
+}
+
+// removeStaleTempPacks removes temporary pack files last modified before
+// cutoff. Killed pack-objects and index-pack processes leave tmp_* files, and
+// a repack killed between writing and installing its pack leaves .tmp-* files.
+func removeStaleTempPacks(packDir string, cutoff time.Time) error {
+	entries, err := os.ReadDir(packDir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return errors.Wrap(err, "read pack directory")
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || (!strings.HasPrefix(name, "tmp_") && !strings.HasPrefix(name, ".tmp-")) {
+			continue
+		}
+		info, err := entry.Info()
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return errors.Wrapf(err, "stat %s", name)
+		}
+		if !info.ModTime().Before(cutoff) {
+			continue
+		}
+		if err := os.Remove(filepath.Join(packDir, name)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return errors.Wrapf(err, "remove stale temporary pack %s", name)
+		}
+	}
 	return nil
 }
 

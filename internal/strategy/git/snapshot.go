@@ -224,7 +224,18 @@ func (s *Strategy) withSnapshotClone(ctx context.Context, repo *gitclone.Reposit
 }
 
 func snapshotExcludePatterns(gitDir string) []string {
-	return []string{gitDir + "/*.lock", gitDir + "/objects/pack/tmp_*"}
+	return []string{gitDir + "/*.lock", gitDir + "/objects/pack/tmp_*", gitDir + "/objects/pack/.tmp-*"}
+}
+
+// checkRepackHealthy refuses snapshots of a mirror with a running or failed
+// repack. A failed repack may have left a duplicate of every repacked object,
+// and snapshots copy the mirror's packs as they are. Returning an error
+// releases the coordination claim so a healthy replica can publish instead.
+func checkRepackHealthy(repo *gitclone.Repository) error {
+	if repo.RepackPending() {
+		return errors.Errorf("mirror for %s has an unfinished repack and may contain duplicate packs", repo.UpstreamURL())
+	}
+	return nil
 }
 
 func (s *Strategy) generateAndUploadSnapshot(ctx context.Context, repo *gitclone.Repository) (commit string, returnErr error) {
@@ -251,6 +262,9 @@ func (s *Strategy) generateAndUploadSnapshot(ctx context.Context, repo *gitclone
 		span.SetAttributes(attribute.String("cachew.snapshot.filter", filter))
 	}
 	logger.InfoContext(ctx, "Snapshot generation started", "upstream", upstream, "filter", filter)
+	if err := checkRepackHealthy(repo); err != nil {
+		return "", err
+	}
 
 	mu := s.snapshotMutexFor(upstream)
 	mu.Lock()
@@ -307,6 +321,9 @@ func (s *Strategy) generateAndUploadMirrorSnapshot(ctx context.Context, repo *gi
 	logger := logging.FromContext(ctx)
 
 	logger.InfoContext(ctx, "Mirror snapshot generation started", "upstream", upstream)
+	if err := checkRepackHealthy(repo); err != nil {
+		return "", err
+	}
 
 	mu := s.snapshotMutexFor(upstream)
 	mu.Lock()
@@ -614,7 +631,8 @@ func (s *Strategy) handleSnapshotRequest(w http.ResponseWriter, r *http.Request,
 			span.SetStatus(codes.Error, serveErr.Error())
 		}
 	case errors.Is(err, os.ErrNotExist):
-		if _, preparing := s.mirrorPreparations.Load(upstreamURL); preparing {
+		_, preparing := s.mirrorPreparations.Load(upstreamURL)
+		if preparing || checkRepackHealthy(repo) != nil {
 			w.Header().Set("Cache-Control", "no-store")
 			http.Error(w, "Snapshot not cached", http.StatusNotFound)
 			return

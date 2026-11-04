@@ -40,6 +40,12 @@ func testRepoConfig() Config {
 	}
 }
 
+func testMirrorConfig(mirrorRoot string) Config {
+	config := testRepoConfig()
+	config.MirrorRoot = mirrorRoot
+	return config
+}
+
 // createBareRepo creates a bare git repository at the given path, suitable for
 // use as an upstream or as a mirror clone target.
 func createBareRepo(t *testing.T, dir string) string {
@@ -609,14 +615,18 @@ func TestRepository_Repack(t *testing.T) {
 
 	repo := &Repository{
 		state:       StateReady,
-		config:      testRepoConfig(),
+		config:      testMirrorConfig(tmpDir),
 		path:        clonePath,
 		upstreamURL: upstreamPath,
 		fetchSem:    make(chan struct{}, 1),
 	}
 	repo.fetchSem <- struct{}{}
 
+	// Another repository's mirror may be named like a suffixed marker.
+	assert.NoError(t, os.MkdirAll(clonePath+".repack-pending", 0o755))
+
 	assert.NoError(t, repo.Repack(ctx))
+	assert.False(t, repo.RepackPending())
 
 	// Verify a pack file exists after repack.
 	packs, err := filepath.Glob(filepath.Join(clonePath, "objects", "pack", "*.pack"))
@@ -626,6 +636,97 @@ func TestRepository_Repack(t *testing.T) {
 	// Verify multi-pack-index was written.
 	_, err = os.Stat(filepath.Join(clonePath, "objects", "pack", "multi-pack-index"))
 	assert.NoError(t, err)
+
+	bitmaps, err := filepath.Glob(filepath.Join(clonePath, "objects", "pack", "multi-pack-index-*.bitmap"))
+	assert.NoError(t, err)
+	assert.Equal(t, 1, len(bitmaps), "expected a multi-pack bitmap after repack")
+}
+
+func TestRepository_Repack_RemovesStaleTempPacks(t *testing.T) {
+	_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelError})
+	tmpDir := t.TempDir()
+	upstreamPath := createBareRepo(t, tmpDir)
+
+	clonePath := filepath.Join(tmpDir, "mirror")
+	assert.NoError(t, exec.Command("git", "clone", "--mirror", upstreamPath, clonePath).Run())
+
+	config := testMirrorConfig(tmpDir)
+	config.FetchTimeout = 3 * time.Hour
+	repo := &Repository{
+		state:       StateReady,
+		config:      config,
+		path:        clonePath,
+		upstreamURL: upstreamPath,
+		fetchSem:    make(chan struct{}, 1),
+	}
+	repo.fetchSem <- struct{}{}
+
+	packDir := filepath.Join(clonePath, "objects", "pack")
+	stale := []string{"tmp_pack_abc123", ".tmp-4242-pack-deadbeef.pack", ".tmp-4242-pack-deadbeef.idx"}
+	fresh := []string{"tmp_pack_inflight", ".tmp-5151-pack-cafe.pack"}
+	old := time.Now().Add(-4 * time.Hour)
+	for _, name := range stale {
+		path := filepath.Join(packDir, name)
+		assert.NoError(t, os.WriteFile(path, []byte("garbage"), 0o644))
+		assert.NoError(t, os.Chtimes(path, old, old))
+	}
+	for _, name := range fresh {
+		assert.NoError(t, os.WriteFile(filepath.Join(packDir, name), []byte("in flight"), 0o644))
+	}
+	// Older than CloneTimeout but within FetchTimeout, so a fetch may still own it.
+	fetching := filepath.Join(packDir, "tmp_pack_slowfetch")
+	assert.NoError(t, os.WriteFile(fetching, []byte("in flight"), 0o644))
+	twoHoursAgo := time.Now().Add(-2 * time.Hour)
+	assert.NoError(t, os.Chtimes(fetching, twoHoursAgo, twoHoursAgo))
+	fresh = append(fresh, filepath.Base(fetching))
+
+	assert.NoError(t, repo.Repack(ctx))
+
+	for _, name := range stale {
+		_, err := os.Stat(filepath.Join(packDir, name))
+		assert.True(t, os.IsNotExist(err), "expected stale %s to be removed", name)
+	}
+	for _, name := range fresh {
+		_, err := os.Stat(filepath.Join(packDir, name))
+		assert.NoError(t, err, "expected recent %s to be kept", name)
+	}
+}
+
+func TestRepository_Repack_ExtendsTimeoutAfterFailure(t *testing.T) {
+	_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelError})
+	tmpDir := t.TempDir()
+	upstreamPath := createBareRepo(t, tmpDir)
+
+	clonePath := filepath.Join(tmpDir, "mirror")
+	assert.NoError(t, exec.Command("git", "clone", "--mirror", upstreamPath, clonePath).Run())
+
+	config := testMirrorConfig(tmpDir)
+	config.RepackTimeout = time.Nanosecond
+	repo := &Repository{
+		state:       StateReady,
+		config:      config,
+		path:        clonePath,
+		upstreamURL: upstreamPath,
+		fetchSem:    make(chan struct{}, 1),
+	}
+	repo.fetchSem <- struct{}{}
+
+	assert.Error(t, repo.Repack(ctx))
+	assert.True(t, repo.RepackPending())
+
+	restarted := &Repository{
+		state:       StateReady,
+		config:      config,
+		path:        clonePath,
+		upstreamURL: upstreamPath,
+		fetchSem:    make(chan struct{}, 1),
+	}
+	restarted.fetchSem <- struct{}{}
+	assert.True(t, restarted.RepackPending(), "an unfinished repack should survive a restart")
+
+	assert.NoError(t, restarted.Repack(ctx))
+	assert.False(t, restarted.RepackPending())
+	assert.Error(t, restarted.Repack(ctx))
 }
 
 func TestRepository_Repack_CleansUpStaleLockOnFailure(t *testing.T) {
@@ -639,7 +740,7 @@ func TestRepository_Repack_CleansUpStaleLockOnFailure(t *testing.T) {
 
 	repo := &Repository{
 		state:       StateReady,
-		config:      testRepoConfig(),
+		config:      testMirrorConfig(tmpDir),
 		path:        clonePath,
 		upstreamURL: upstreamPath,
 		fetchSem:    make(chan struct{}, 1),
@@ -657,6 +758,10 @@ func TestRepository_Repack_CleansUpStaleLockOnFailure(t *testing.T) {
 	// The stale lock should have been removed.
 	_, statErr := os.Stat(lockPath)
 	assert.True(t, os.IsNotExist(statErr), "expected multi-pack-index.lock to be removed after failed repack")
+	assert.True(t, repo.RepackPending())
+
+	assert.NoError(t, repo.Repack(ctx))
+	assert.False(t, repo.RepackPending())
 }
 
 func TestRepository_HasCommit(t *testing.T) {
