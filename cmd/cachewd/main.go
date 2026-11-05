@@ -381,7 +381,9 @@ func startMetrics(ctx context.Context, client *metrics.Client, provider githubap
 		return errors.Wrap(err, "create GitHub App token manager")
 	}
 	if manager != nil {
-		go githubapp.NewRateLimitPoller(manager, 0).Run(ctx)
+		go githubapp.NewRateLimitPoller(manager, 0).Run(ctx, func(err error) {
+			logging.FromContext(ctx).WarnContext(ctx, "Failed to poll GitHub rate limit", "error", err)
+		})
 	}
 	return nil
 }

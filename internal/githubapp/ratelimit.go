@@ -12,7 +12,6 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 
-	"github.com/block/cachew/internal/logging"
 	"github.com/block/cachew/internal/metrics"
 )
 
@@ -51,8 +50,8 @@ func NewRateLimitPoller(manager *TokenManager, interval time.Duration) *RateLimi
 	}
 }
 
-// Run polls immediately and then periodically until ctx is cancelled.
-func (p *RateLimitPoller) Run(ctx context.Context) {
+// Run polls until ctx is cancelled, passing each cycle's failures to onError, which must be non-nil.
+func (p *RateLimitPoller) Run(ctx context.Context, onError func(error)) {
 	if p.manager == nil {
 		return
 	}
@@ -63,7 +62,7 @@ func (p *RateLimitPoller) Run(ctx context.Context) {
 			return
 		}
 		if err := p.poll(ctx); err != nil && ctx.Err() == nil {
-			logging.FromContext(ctx).WarnContext(ctx, "Failed to poll GitHub rate limit", "error", err)
+			onError(err)
 		}
 		select {
 		case <-ctx.Done():
@@ -84,16 +83,11 @@ func (p *RateLimitPoller) poll(ctx context.Context) error {
 		}
 	}
 	for _, app := range p.manager.apps {
-		seen := map[string]bool{}
-		for owner, installationID := range app.knownInstallations() {
+		for installationID, owner := range app.knownInstallations() {
 			if ctx.Err() != nil {
 				return errors.WithStack(ctx.Err())
 			}
-			if seen[installationID] {
-				continue
-			}
-			seen[installationID] = true
-			if err := p.pollInstallation(ctx, app, owner, installationID); err != nil {
+			if err := p.pollInstallation(ctx, app, installationID); err != nil {
 				errs = append(errs, errors.Wrapf(err, "app %s installation %s (%s)", app.appID, installationID, owner))
 			}
 		}
@@ -101,10 +95,10 @@ func (p *RateLimitPoller) poll(ctx context.Context) error {
 	return errors.Join(errs...)
 }
 
-func (p *RateLimitPoller) pollInstallation(ctx context.Context, app *appState, owner, installationID string) error {
+func (p *RateLimitPoller) pollInstallation(ctx context.Context, app *appState, installationID string) error {
 	ctx, cancel := context.WithTimeout(ctx, rateLimitPollTimeout)
 	defer cancel()
-	token, err := app.getToken(ctx, owner)
+	token, owner, err := app.getInstallationToken(ctx, installationID)
 	if err != nil {
 		return errors.Wrap(err, "get installation token")
 	}
@@ -144,5 +138,5 @@ func (p *RateLimitPoller) pollInstallation(ctx context.Context, app *appState, o
 func (a *appState) knownInstallations() map[string]string {
 	a.installationMu.RLock()
 	defer a.installationMu.RUnlock()
-	return maps.Clone(a.installationCache)
+	return maps.Clone(a.installationOwners)
 }

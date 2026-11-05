@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 
 	"github.com/alecthomas/assert/v2"
@@ -200,6 +201,35 @@ func TestGetTokenForOrgNoFallback(t *testing.T) {
 	_, err := tm.GetTokenForOrg(ctx, "unknown-org")
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "no GitHub App installation found for org")
+}
+
+func TestGetTokenForOrgRetainsInstallationOwner(t *testing.T) {
+	var mints atomic.Int64
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /orgs/{org}/installation", func(w http.ResponseWriter, r *http.Request) {
+		owner := "example-org"
+		if r.PathValue("org") == "renamed-org" {
+			owner = "renamed-org"
+		}
+		assert.NoError(t, json.NewEncoder(w).Encode(map[string]any{"id": 123, "account": map[string]string{"login": owner}}))
+	})
+	mux.HandleFunc("POST /app/installations/123/access_tokens", func(w http.ResponseWriter, _ *http.Request) {
+		mints.Add(1)
+		w.WriteHeader(http.StatusCreated)
+		assert.NoError(t, json.NewEncoder(w).Encode(map[string]string{"token": "test-token", "expires_at": "2099-01-01T00:00:00Z"}))
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	manager := githubapp.NewTokenManagerForTest(t, []githubapp.Config{{AppID: "111", PrivateKeyPath: generateTestKey(t)}},
+		slog.Default(), server.URL, server.Client())
+	ctx := logging.ContextWithLogger(t.Context(), slog.Default())
+	for _, alias := range []string{"Example-Org", "example-org", "renamed-org"} {
+		token, owner, err := manager.GetTokenForOrgWithOwner(ctx, alias)
+		assert.NoError(t, err)
+		assert.Equal(t, "test-token", token)
+		assert.Equal(t, "example-org", owner)
+	}
+	assert.Equal(t, int64(1), mints.Load())
 }
 
 func TestGetTokenForOrgNilManager(t *testing.T) {

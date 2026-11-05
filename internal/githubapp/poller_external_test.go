@@ -39,7 +39,7 @@ func TestRateLimitPollerBootstrapsFallback(t *testing.T) {
 	defer cancel()
 	done := make(chan struct{})
 	go func() {
-		githubapp.NewRateLimitPoller(manager, time.Hour).Run(ctx)
+		githubapp.NewRateLimitPoller(manager, time.Hour).Run(ctx, func(err error) { t.Error(err) })
 		close(done)
 	}()
 	select {
