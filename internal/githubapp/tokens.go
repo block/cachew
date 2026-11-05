@@ -60,7 +60,7 @@ type TokenManager struct {
 }
 
 func newTokenManager(configs []Config, logger *slog.Logger) (*TokenManager, error) {
-	var apps []*appState
+	tm := &TokenManager{orgToApp: make(map[string]*appState)}
 
 	for _, config := range configs {
 		hasAny := config.AppID != "" || config.PrivateKeyPath != ""
@@ -78,38 +78,26 @@ func newTokenManager(configs []Config, logger *slog.Logger) (*TokenManager, erro
 			return nil, errors.Wrapf(err, "github app %q", config.AppID)
 		}
 
-		apps = append(apps, &appState{
+		app := &appState{
 			appID:             config.AppID,
 			jwtGenerator:      jwtGen,
 			cacheConfig:       cacheConfig,
-			httpClient:        http.DefaultClient,
+			httpClient:        NewAPIClient(http.DefaultClient),
 			apiBase:           githubAPIBase,
 			installationCache: make(map[string]string),
 			tokens:            make(map[string]*cachedToken),
-		})
+		}
+		tm.apps = append(tm.apps, app)
 
 		logger.Info("GitHub App configured", "app_id", config.AppID)
-	}
-
-	if len(apps) == 0 {
-		return nil, nil //nolint:nilnil
-	}
-
-	tm := &TokenManager{
-		orgToApp: make(map[string]*appState),
-		apps:     apps,
-	}
-
-	for i, config := range configs {
-		if config.FallbackOrg != "" {
-			if i >= len(apps) {
-				continue
-			}
-			tm.fallbackApp = apps[i]
+		if config.FallbackOrg != "" && tm.fallbackApp == nil {
+			tm.fallbackApp = app
 			tm.fallbackOrg = config.FallbackOrg
 			logger.Info("GitHub App fallback configured", "fallback_org", config.FallbackOrg, "app_id", config.AppID)
-			break
 		}
+	}
+	if len(tm.apps) == 0 {
+		return nil, nil //nolint:nilnil
 	}
 
 	return tm, nil
@@ -120,8 +108,14 @@ func newTokenManager(configs []Config, logger *slog.Logger) (*TokenManager, erro
 // caches the result, and falls back to the fallback org's token for orgs where
 // the app is not installed.
 func (tm *TokenManager) GetTokenForOrg(ctx context.Context, org string) (string, error) {
+	token, _, err := tm.GetTokenForOrgWithOwner(ctx, org)
+	return token, err
+}
+
+// GetTokenForOrgWithOwner also returns the owner whose installation minted the token.
+func (tm *TokenManager) GetTokenForOrgWithOwner(ctx context.Context, org string) (string, string, error) {
 	if tm == nil {
-		return "", errors.New("token manager not initialized")
+		return "", "", errors.New("token manager not initialized")
 	}
 
 	logger := logging.FromContext(ctx)
@@ -131,7 +125,8 @@ func (tm *TokenManager) GetTokenForOrg(ctx context.Context, org string) (string,
 	app, ok := tm.orgToApp[org]
 	tm.mu.RUnlock()
 	if ok {
-		return app.getToken(ctx, org)
+		token, err := app.getToken(ctx, org)
+		return token, org, err
 	}
 
 	// Discover installation via GitHub API
@@ -148,16 +143,21 @@ func (tm *TokenManager) GetTokenForOrg(ctx context.Context, org string) (string,
 		tm.mu.Lock()
 		tm.orgToApp[org] = app
 		tm.mu.Unlock()
-		return app.getToken(ctx, org)
+		token, err := app.getToken(ctx, org)
+		return token, org, err
 	}
 
 	// Fall back to fallback org
 	if tm.fallbackApp != nil {
 		logger.InfoContext(ctx, "Using fallback org token", "requested_org", org, "fallback_org", tm.fallbackOrg)
-		return tm.fallbackApp.getToken(ctx, tm.fallbackOrg)
+		if _, err := tm.fallbackApp.lookupInstallationID(ctx, tm.fallbackOrg); err != nil {
+			return "", "", errors.Wrap(err, "resolve fallback installation")
+		}
+		token, err := tm.fallbackApp.getToken(ctx, tm.fallbackOrg)
+		return token, tm.fallbackOrg, err
 	}
 
-	return "", errors.Errorf("no GitHub App installation found for org: %s", org)
+	return "", "", errors.Errorf("no GitHub App installation found for org: %s", org)
 }
 
 // GetTokenForURL extracts the org from a GitHub URL and returns an installation token.
@@ -194,7 +194,7 @@ func (a *appState) getToken(ctx context.Context, org string) (string, error) {
 
 	logger.DebugContext(ctx, "Fetching new GitHub App installation token", "installation_id", installationID)
 
-	token, expiresAt, err := a.fetchInstallationToken(ctx, installationID)
+	token, expiresAt, err := a.fetchInstallationToken(ctx, org, installationID)
 	if err != nil {
 		return "", errors.Wrap(err, "fetch installation token")
 	}
@@ -211,7 +211,7 @@ func (a *appState) getToken(ctx context.Context, org string) (string, error) {
 	return token, nil
 }
 
-func (a *appState) fetchInstallationToken(ctx context.Context, installationID string) (string, time.Time, error) {
+func (a *appState) fetchInstallationToken(ctx context.Context, org, installationID string) (string, time.Time, error) {
 	jwt, err := a.jwtGenerator.GenerateJWT()
 	if err != nil {
 		return "", time.Time{}, errors.Wrap(err, "generate JWT")
@@ -227,7 +227,7 @@ func (a *appState) fetchInstallationToken(ctx context.Context, installationID st
 	req.Header.Set("Authorization", "Bearer "+jwt)
 	req.Header.Set("X-Github-Api-Version", "2022-11-28")
 
-	resp, err := a.httpClient.Do(req)
+	resp, err := a.httpClient.Do(WithAPIMetrics(req, org, "create_installation_token"))
 	if err != nil {
 		return "", time.Time{}, errors.Wrap(err, "execute request")
 	}
@@ -279,7 +279,7 @@ func (a *appState) lookupInstallationID(ctx context.Context, org string) (string
 		req.Header.Set("Authorization", "Bearer "+jwt)
 		req.Header.Set("X-Github-Api-Version", "2022-11-28")
 
-		resp, err := a.httpClient.Do(req)
+		resp, err := a.httpClient.Do(WithAPIMetrics(req, org, "lookup_installation"))
 		if err != nil {
 			return "", errors.Wrap(err, "execute request")
 		}

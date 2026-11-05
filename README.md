@@ -250,6 +250,26 @@ metrics {
 
 Admin endpoints: `/_liveness`, `/_readiness`, `PUT /admin/log/level`, `/admin/pprof/`.
 
+GitHub App installations are checked at startup and every minute via `/rate_limit`.
+The poller includes dynamically discovered installations and the configured fallback organization.
+
+| Metric | Type | Labels |
+| --- | --- | --- |
+| `github.ratelimit_remaining` | Gauge | `app`, `installation_id`, `owner`, `resource` |
+| `github.ratelimit_limit` | Gauge | `app`, `installation_id`, `owner`, `resource` |
+| `github.ratelimit_used` | Gauge | `app`, `installation_id`, `owner`, `resource` |
+| `github.api_calls` | Counter | `owner`, `operation` |
+
+`app` is the configured App ID. `owner` identifies the installation actually used,
+including fallback credentials. API calls for release metadata/assets, installation
+discovery, token creation and quota polling are counted. Responses with less than
+10% of their API quota remaining produce a warning. Static release tokens receive
+API call counts and warnings, but are not polled for quota gauges.
+
+Quota gauges describe the installation's shared API budget; do not sum them across
+replicas. They do not track Git transport or LFS limits. Polling does not consume
+the primary API budget, but can count toward GitHub's secondary limits.
+
 ## Full Configuration Example
 
 ```hcl

@@ -55,7 +55,7 @@ func NewGitHubReleases(ctx context.Context, config GitHubReleasesConfig, cache c
 	s := &GitHubReleases{
 		config:       config,
 		cache:        cache,
-		client:       http.DefaultClient,
+		client:       githubapp.NewAPIClient(http.DefaultClient),
 		tokenManager: tokenManager,
 	}
 	// eg. https://github.com/alecthomas/chroma/releases/download/v2.21.1/chroma-2.21.1-darwin-amd64.tar.gz
@@ -100,7 +100,7 @@ func escapePathSegments(path string) string {
 }
 
 // newGitHubRequest creates a new HTTP request with GitHub API headers and authentication.
-func (g *GitHubReleases) newGitHubRequest(ctx context.Context, reqURL, accept, org string) (*http.Request, error) {
+func (g *GitHubReleases) newGitHubRequest(ctx context.Context, reqURL, accept, org, operation string) (*http.Request, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 	if err != nil {
 		return nil, errors.Wrap(err, "create request")
@@ -109,13 +109,15 @@ func (g *GitHubReleases) newGitHubRequest(ctx context.Context, reqURL, accept, o
 	req.Header.Set("X-Github-Api-Version", "2022-11-28")
 
 	// Try GitHub App authentication first, fall back to static token
+	owner := org
 	if g.tokenManager != nil && org != "" {
-		token, err := g.tokenManager.GetTokenForOrg(ctx, org)
+		token, resolvedOwner, err := g.tokenManager.GetTokenForOrgWithOwner(ctx, org)
 		if err != nil {
 			logging.FromContext(ctx).WarnContext(ctx, "Failed to get GitHub App token, falling back to static token", "org", org,
 				"error", err)
 		} else if token != "" {
 			req.Header.Set("Authorization", "Bearer "+token)
+			owner = resolvedOwner
 		}
 	}
 
@@ -124,7 +126,7 @@ func (g *GitHubReleases) newGitHubRequest(ctx context.Context, reqURL, accept, o
 		req.Header.Set("Authorization", "Bearer "+g.config.Token)
 	}
 
-	return req, nil
+	return githubapp.WithAPIMetrics(req, owner, operation), nil
 }
 
 // downloadRelease creates an HTTP request to download a GitHub release asset.
@@ -165,7 +167,7 @@ func (g *GitHubReleases) downloadRelease(ctx context.Context, org, repo, release
 	logger.DebugContext(ctx, "Using GitHub API for private release")
 	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/tags/%s",
 		url.PathEscape(org), url.PathEscape(repo), escapePathSegments(release))
-	req, err := g.newGitHubRequest(ctx, apiURL, "application/vnd.github+json", org)
+	req, err := g.newGitHubRequest(ctx, apiURL, "application/vnd.github+json", org, "get_release")
 	if err != nil {
 		return nil, httputil.Errorf(http.StatusInternalServerError, "create API request")
 	}
@@ -206,7 +208,7 @@ func (g *GitHubReleases) downloadRelease(ctx context.Context, org, repo, release
 	logger.DebugContext(ctx, "Found asset in release", "asset_url", assetURL)
 
 	// Create request for the asset download
-	req, err = g.newGitHubRequest(ctx, assetURL, "application/octet-stream", org)
+	req, err = g.newGitHubRequest(ctx, assetURL, "application/octet-stream", org, "download_release_asset")
 	if err != nil {
 		return nil, httputil.Errorf(http.StatusInternalServerError, "create asset request failed: %w", err)
 	}

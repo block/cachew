@@ -131,6 +131,7 @@ func TestGetTokenForOrgDynamicDiscovery(t *testing.T) {
 	logger := slog.Default()
 
 	tm := githubapp.NewTokenManagerForTest(t, []githubapp.Config{
+		{},
 		{
 			AppID:          "111",
 			PrivateKeyPath: keyPath,
@@ -140,10 +141,18 @@ func TestGetTokenForOrgDynamicDiscovery(t *testing.T) {
 
 	ctx := logging.ContextWithLogger(t.Context(), slog.Default())
 
-	t.Run("DiscoverAndCacheInstallation", func(t *testing.T) {
-		token, err := tm.GetTokenForOrg(ctx, "squareup")
+	t.Run("FallbackBeforeDiscovery", func(t *testing.T) {
+		token, owner, err := tm.GetTokenForOrgWithOwner(ctx, "unknown-org")
 		assert.NoError(t, err)
 		assert.Equal(t, "ghs_squareup_token", token)
+		assert.Equal(t, "squareup", owner)
+	})
+
+	t.Run("DiscoverAndCacheInstallation", func(t *testing.T) {
+		token, owner, err := tm.GetTokenForOrgWithOwner(ctx, "squareup")
+		assert.NoError(t, err)
+		assert.Equal(t, "ghs_squareup_token", token)
+		assert.Equal(t, "squareup", owner)
 
 		// Second call should use cache
 		token, err = tm.GetTokenForOrg(ctx, "squareup")
@@ -152,9 +161,10 @@ func TestGetTokenForOrgDynamicDiscovery(t *testing.T) {
 	})
 
 	t.Run("DiscoverNewOrg", func(t *testing.T) {
-		token, err := tm.GetTokenForOrg(ctx, "AfterpayTouch")
+		token, owner, err := tm.GetTokenForOrgWithOwner(ctx, "AfterpayTouch")
 		assert.NoError(t, err)
 		assert.Equal(t, "ghs_afterpay_token", token)
+		assert.Equal(t, "AfterpayTouch", owner)
 	})
 
 	t.Run("FallbackForUnknownOrg", func(t *testing.T) {
