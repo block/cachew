@@ -17,7 +17,7 @@ func NewTokenManagerForTest(t *testing.T, configs []Config, logger *slog.Logger,
 
 	for _, app := range tm.apps {
 		app.apiBase = apiBase
-		app.httpClient = httpClient
+		app.httpClient = NewAPIClient(httpClient)
 	}
 
 	return tm

@@ -1,19 +1,26 @@
 package githubapp_test
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 
 	"github.com/alecthomas/assert/v2"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 
 	"github.com/block/cachew/internal/githubapp"
 	"github.com/block/cachew/internal/logging"
@@ -131,6 +138,7 @@ func TestGetTokenForOrgDynamicDiscovery(t *testing.T) {
 	logger := slog.Default()
 
 	tm := githubapp.NewTokenManagerForTest(t, []githubapp.Config{
+		{},
 		{
 			AppID:          "111",
 			PrivateKeyPath: keyPath,
@@ -140,10 +148,18 @@ func TestGetTokenForOrgDynamicDiscovery(t *testing.T) {
 
 	ctx := logging.ContextWithLogger(t.Context(), slog.Default())
 
-	t.Run("DiscoverAndCacheInstallation", func(t *testing.T) {
-		token, err := tm.GetTokenForOrg(ctx, "squareup")
+	t.Run("FallbackBeforeDiscovery", func(t *testing.T) {
+		token, owner, err := tm.GetTokenForOrgWithOwner(ctx, "unknown-org")
 		assert.NoError(t, err)
 		assert.Equal(t, "ghs_squareup_token", token)
+		assert.Equal(t, "squareup", owner)
+	})
+
+	t.Run("DiscoverAndCacheInstallation", func(t *testing.T) {
+		token, owner, err := tm.GetTokenForOrgWithOwner(ctx, "squareup")
+		assert.NoError(t, err)
+		assert.Equal(t, "ghs_squareup_token", token)
+		assert.Equal(t, "squareup", owner)
 
 		// Second call should use cache
 		token, err = tm.GetTokenForOrg(ctx, "squareup")
@@ -152,9 +168,10 @@ func TestGetTokenForOrgDynamicDiscovery(t *testing.T) {
 	})
 
 	t.Run("DiscoverNewOrg", func(t *testing.T) {
-		token, err := tm.GetTokenForOrg(ctx, "AfterpayTouch")
+		token, owner, err := tm.GetTokenForOrgWithOwner(ctx, "AfterpayTouch")
 		assert.NoError(t, err)
 		assert.Equal(t, "ghs_afterpay_token", token)
+		assert.Equal(t, "AfterpayTouch", owner)
 	})
 
 	t.Run("FallbackForUnknownOrg", func(t *testing.T) {
@@ -192,11 +209,77 @@ func TestGetTokenForOrgNoFallback(t *testing.T) {
 	assert.Contains(t, err.Error(), "no GitHub App installation found for org")
 }
 
+func TestGetTokenForOrgRetainsInstallationOwner(t *testing.T) {
+	var mints atomic.Int64
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /orgs/{org}/installation", func(w http.ResponseWriter, r *http.Request) {
+		owner := "example-org"
+		if r.PathValue("org") == "renamed-org" {
+			owner = "renamed-org"
+		}
+		assert.NoError(t, json.NewEncoder(w).Encode(map[string]any{"id": 123, "account": map[string]string{"login": owner}}))
+	})
+	mux.HandleFunc("POST /app/installations/123/access_tokens", func(w http.ResponseWriter, _ *http.Request) {
+		mints.Add(1)
+		w.WriteHeader(http.StatusCreated)
+		assert.NoError(t, json.NewEncoder(w).Encode(map[string]string{"token": "test-token", "expires_at": "2099-01-01T00:00:00Z"}))
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	manager := githubapp.NewTokenManagerForTest(t, []githubapp.Config{{AppID: "111", PrivateKeyPath: generateTestKey(t)}},
+		slog.Default(), server.URL, server.Client())
+	ctx := logging.ContextWithLogger(t.Context(), slog.Default())
+	for _, alias := range []string{"Example-Org", "example-org", "renamed-org"} {
+		token, owner, err := manager.GetTokenForOrgWithOwner(ctx, alias)
+		assert.NoError(t, err)
+		assert.Equal(t, "test-token", token)
+		assert.Equal(t, "example-org", owner)
+	}
+	assert.Equal(t, int64(1), mints.Load())
+}
+
 func TestGetTokenForOrgNilManager(t *testing.T) {
 	var tm *githubapp.TokenManager
 	_, err := tm.GetTokenForOrg(t.Context(), "any")
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "not initialized")
+}
+
+func TestInstallationLookupMetricsUseBoundedOwner(t *testing.T) {
+	previous := otel.GetMeterProvider()
+	reader := sdkmetric.NewManualReader()
+	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	otel.SetMeterProvider(provider)
+	t.Cleanup(func() {
+		otel.SetMeterProvider(previous)
+		assert.NoError(t, provider.Shutdown(context.Background()))
+	})
+	server := httptest.NewServer(http.NotFoundHandler())
+	defer server.Close()
+	manager := githubapp.NewTokenManagerForTest(t, []githubapp.Config{{AppID: "111", PrivateKeyPath: generateTestKey(t)}},
+		slog.Default(), server.URL, server.Client())
+	ctx := logging.ContextWithLogger(t.Context(), slog.Default())
+	for i := range 100 {
+		_, err := manager.GetTokenForOrg(ctx, fmt.Sprintf("nonexistent-org-%d", i))
+		assert.Error(t, err)
+	}
+	var data metricdata.ResourceMetrics
+	assert.NoError(t, reader.Collect(ctx, &data))
+	var points []metricdata.DataPoint[int64]
+	for _, scope := range data.ScopeMetrics {
+		for _, m := range scope.Metrics {
+			if m.Name != "github.api_calls" {
+				continue
+			}
+			counter, ok := m.Data.(metricdata.Sum[int64])
+			assert.True(t, ok)
+			points = append(points, counter.DataPoints...)
+		}
+	}
+	assert.Equal(t, 1, len(points))
+	assert.Equal(t, int64(200), points[0].Value)
+	assert.Equal(t, attribute.NewSet(attribute.String("owner", "unknown"),
+		attribute.String("operation", "lookup_installation")), points[0].Attributes)
 }
 
 func TestGetTokenForURLNilManager(t *testing.T) {

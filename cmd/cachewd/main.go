@@ -150,9 +150,7 @@ func main() {
 		}
 	}()
 
-	if err := metricsClient.ServeMetrics(ctx); err != nil {
-		fatalIfError(ctx, logger, err, "Failed to start metrics server")
-	}
+	fatalIfError(ctx, logger, startMetrics(ctx, metricsClient, tokenManagerProvider), "Failed to start metrics")
 
 	runOPATests(ctx, logger, globalConfig.OPAConfig)
 
@@ -372,6 +370,22 @@ func extractPathPrefix(path string) string {
 	trimmed := strings.TrimPrefix(path, "/")
 	prefix, _, _ := strings.Cut(trimmed, "/")
 	return prefix
+}
+
+func startMetrics(ctx context.Context, client *metrics.Client, provider githubapp.TokenManagerProvider) error {
+	if err := client.ServeMetrics(ctx); err != nil {
+		return errors.Wrap(err, "start metrics server")
+	}
+	manager, err := provider()
+	if err != nil {
+		return errors.Wrap(err, "create GitHub App token manager")
+	}
+	if manager != nil {
+		go githubapp.NewRateLimitPoller(manager, 0).Run(ctx, func(err error) {
+			logging.FromContext(ctx).WarnContext(ctx, "Failed to poll GitHub rate limit", "error", err)
+		})
+	}
+	return nil
 }
 
 func newServer(
