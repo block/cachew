@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/alecthomas/assert/v2"
@@ -363,6 +364,27 @@ test_delete_allowed if authz.allow with input as {"method": "DELETE"}
 			assert.Equal(t, test.ExpectPass, passed)
 		})
 	}
+}
+
+func TestMiddlewareDeniedUploadClosesConnection(t *testing.T) {
+	policy := `package cachew.authz
+default allow := false
+`
+	next := http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {})
+	handler, err := opa.Middleware(t.Context(), opa.Config{Policy: policy}, next)
+	assert.NoError(t, err)
+
+	upload := httptest.NewRequest(http.MethodPost, "/api/v1/object/ns/key", strings.NewReader("data"))
+	upload = upload.WithContext(logging.ContextWithLogger(upload.Context(), slog.Default()))
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, upload)
+	assert.Equal(t, http.StatusForbidden, w.Code)
+	assert.Equal(t, "close", w.Header().Get("Connection"))
+
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, newRequest(http.MethodGet, "/api/v1/object/ns/key"))
+	assert.Equal(t, http.StatusForbidden, w.Code)
+	assert.Equal(t, "", w.Header().Get("Connection"))
 }
 
 func TestMiddlewareEmptyPolicyDeniesAll(t *testing.T) {
