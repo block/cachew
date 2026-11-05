@@ -11,6 +11,8 @@ pre-push:
   parallel: true
   commands:
     test:
-      run: just test
+      # Git sets GIT_DIR for hooks, which makes the tests' git commands write to this repository instead of their
+      # temporary repositories.
+      run: env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE just test
     lint:
       run: just lint
