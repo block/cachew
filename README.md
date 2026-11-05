@@ -261,8 +261,9 @@ The poller includes dynamically discovered installations and the configured fall
 | `github.api_calls` | Counter | `owner`, `operation` |
 
 `app` is the configured App ID. `owner` identifies the installation actually used,
-including fallback credentials. API calls for release metadata/assets, installation
-discovery, token creation and quota polling are counted. Responses with less than
+including fallback credentials. Installation discovery uses `owner=unknown` because
+it authenticates as the App before resolving an installation. API calls for release
+metadata/assets, installation discovery, token creation and quota polling are counted. Responses with less than
 10% of their API quota remaining produce a warning. Static release tokens receive
 API call counts and warnings, but are not polled for quota gauges.
 

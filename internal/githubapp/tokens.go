@@ -287,7 +287,7 @@ func (a *appState) lookupInstallationID(ctx context.Context, org string) (string
 		req.Header.Set("Authorization", "Bearer "+jwt)
 		req.Header.Set("X-Github-Api-Version", "2022-11-28")
 
-		resp, err := a.httpClient.Do(WithAPIMetrics(req, org, "lookup_installation"))
+		resp, err := a.httpClient.Do(WithAPIMetrics(req, "unknown", "lookup_installation"))
 		if err != nil {
 			return "", errors.Wrap(err, "execute request")
 		}

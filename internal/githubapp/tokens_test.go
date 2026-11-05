@@ -1,11 +1,13 @@
 package githubapp_test
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -15,6 +17,10 @@ import (
 	"testing"
 
 	"github.com/alecthomas/assert/v2"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 
 	"github.com/block/cachew/internal/githubapp"
 	"github.com/block/cachew/internal/logging"
@@ -237,6 +243,43 @@ func TestGetTokenForOrgNilManager(t *testing.T) {
 	_, err := tm.GetTokenForOrg(t.Context(), "any")
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "not initialized")
+}
+
+func TestInstallationLookupMetricsUseBoundedOwner(t *testing.T) {
+	previous := otel.GetMeterProvider()
+	reader := sdkmetric.NewManualReader()
+	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	otel.SetMeterProvider(provider)
+	t.Cleanup(func() {
+		otel.SetMeterProvider(previous)
+		assert.NoError(t, provider.Shutdown(context.Background()))
+	})
+	server := httptest.NewServer(http.NotFoundHandler())
+	defer server.Close()
+	manager := githubapp.NewTokenManagerForTest(t, []githubapp.Config{{AppID: "111", PrivateKeyPath: generateTestKey(t)}},
+		slog.Default(), server.URL, server.Client())
+	ctx := logging.ContextWithLogger(t.Context(), slog.Default())
+	for i := range 100 {
+		_, err := manager.GetTokenForOrg(ctx, fmt.Sprintf("nonexistent-org-%d", i))
+		assert.Error(t, err)
+	}
+	var data metricdata.ResourceMetrics
+	assert.NoError(t, reader.Collect(ctx, &data))
+	var points []metricdata.DataPoint[int64]
+	for _, scope := range data.ScopeMetrics {
+		for _, m := range scope.Metrics {
+			if m.Name != "github.api_calls" {
+				continue
+			}
+			counter, ok := m.Data.(metricdata.Sum[int64])
+			assert.True(t, ok)
+			points = append(points, counter.DataPoints...)
+		}
+	}
+	assert.Equal(t, 1, len(points))
+	assert.Equal(t, int64(200), points[0].Value)
+	assert.Equal(t, attribute.NewSet(attribute.String("owner", "unknown"),
+		attribute.String("operation", "lookup_installation")), points[0].Attributes)
 }
 
 func TestGetTokenForURLNilManager(t *testing.T) {
