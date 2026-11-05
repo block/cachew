@@ -40,6 +40,17 @@ func inSpan(ctx context.Context, name string, attrs []attribute.KeyValue, fn fun
 // /git/ strategy endpoints (not the generic object-store API).
 type GitCmd struct {
 	Restore GitRestoreCmd `cmd:"" help:"Restore a repository from a cachew git snapshot."`
+	Prepare GitPrepareCmd `cmd:"" help:"Prepare a SHA snapshot before CI worker fanout, without downloading it."`
+}
+
+// GitPrepareCmd waits for publication of an exact-commit snapshot.
+type GitPrepareCmd struct {
+	RepoURL string `arg:"" help:"Repository URL."`
+	SHA     string `required:"" help:"Full commit SHA to prepare."`
+}
+
+func (c *GitPrepareCmd) Run(ctx context.Context, api *client.Client) error {
+	return errors.Wrap(api.PrepareGitCommitSnapshot(ctx, c.RepoURL, c.SHA), "prepare commit snapshot")
 }
 
 // GitRestoreCmd fetches a git snapshot, extracts it, and optionally applies
@@ -49,6 +60,7 @@ type GitCmd struct {
 type GitRestoreCmd struct {
 	RepoURL             string            `arg:"" help:"Repository URL (e.g. https://github.com/org/repo)."`
 	Directory           string            `arg:"" help:"Target directory for the clone." type:"path"`
+	SHA                 string            `help:"Restore exactly this full commit SHA with no freshen. Includes target LFS files, uses depth-one history and detached HEAD. Requires a nonexistent destination. Cannot combine with --ref or --commit."`
 	Ref                 map[string]string `help:"Required refs to freshen on the server before pulling, in the form 'name=sha' (e.g. 'refs/heads/main=abc123'). An empty SHA means any SHA is acceptable. Setting this (or --commit) runs a final 'git pull' from origin so the working tree is brought up to date."`
 	Commit              []string          `help:"Required commit SHAs that must exist on the server, regardless of which ref points at them. May be repeated."`
 	NoBundle            bool              `help:"Skip applying delta bundle."`
@@ -58,6 +70,14 @@ type GitRestoreCmd struct {
 }
 
 func (c *GitRestoreCmd) Run(ctx context.Context, api *client.Client) error {
+	if c.SHA != "" {
+		if len(c.Ref) > 0 || len(c.Commit) > 0 {
+			return errors.New("--sha cannot be combined with --ref or --commit")
+		}
+		if _, err := os.Lstat(c.Directory); !errors.Is(err, os.ErrNotExist) {
+			return errors.New("--sha requires a nonexistent destination directory")
+		}
+	}
 	ctx, span := tracer.Start(ctx, "cachew.git_restore",
 		trace.WithAttributes(
 			attribute.String("cachew.repo_url", c.RepoURL),
@@ -86,6 +106,10 @@ func (c *GitRestoreCmd) Run(ctx context.Context, api *client.Client) error {
 	}
 	span.SetAttributes(attribute.String("cachew.snapshot_commit", commit))
 	fmt.Fprintf(os.Stderr, "Snapshot restored to %s\n", c.Directory) //nolint:forbidigo
+
+	if c.SHA != "" {
+		return nil
+	}
 
 	if bundleURL != "" && !c.NoBundle {
 		fmt.Fprintf(os.Stderr, "Applying delta bundle...\n") //nolint:forbidigo
@@ -125,7 +149,13 @@ func (c *GitRestoreCmd) fetchAndExtractSnapshot(ctx context.Context, api *client
 		},
 		func(ctx context.Context) error {
 			downloadStart := time.Now()
-			s, err := api.OpenGitSnapshotParallel(ctx, c.RepoURL, int64(c.DownloadChunkSizeMB)<<20, c.DownloadConcurrency)
+			var s *client.GitSnapshot
+			var err error
+			if c.SHA != "" {
+				s, err = api.OpenGitCommitSnapshot(ctx, c.RepoURL, c.SHA, int64(c.DownloadChunkSizeMB)<<20, c.DownloadConcurrency)
+			} else {
+				s, err = api.OpenGitSnapshotParallel(ctx, c.RepoURL, int64(c.DownloadChunkSizeMB)<<20, c.DownloadConcurrency)
+			}
 			if err != nil {
 				return err //nolint:wrapcheck // wrapped by caller
 			}
@@ -170,6 +200,9 @@ func (c *GitRestoreCmd) extract(ctx context.Context, body io.Reader) error {
 		defer os.RemoveAll(staging) //nolint:errcheck // best-effort cleanup; a no-op once renamed into place
 		dest, staged = staging, true
 	}
+	if c.SHA != "" && !staged {
+		return errors.New("--sha requires a nonexistent destination directory")
+	}
 
 	fmt.Fprintf(os.Stderr, "Extracting to %s...\n", c.Directory) //nolint:forbidigo,gosec // c.Directory is an operator-supplied CLI path
 	if err := inSpan(ctx, "cachew.extract",
@@ -187,6 +220,15 @@ func (c *GitRestoreCmd) extract(ctx context.Context, body io.Reader) error {
 		return err
 	}
 
+	if c.SHA != "" {
+		out, err := exec.CommandContext(ctx, "git", "-C", dest, "rev-parse", "--verify", "HEAD").Output() //nolint:gosec // internal staging path
+		if err != nil {
+			return errors.Wrap(err, "verify restored HEAD")
+		}
+		if strings.TrimSpace(string(out)) != c.SHA {
+			return errors.New("restored HEAD does not match requested SHA")
+		}
+	}
 	if staged {
 		if err := os.Rename(dest, target); err != nil {
 			return errors.Wrap(err, "move restored snapshot into place")
