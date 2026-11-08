@@ -314,10 +314,12 @@ func TestColdSnapshotPreparationReusesSharedPublication(t *testing.T) {
 	})
 
 	blockerStarted := make(chan struct{})
-	releaseBlocker := make(chan struct{})
+	blocker := make(chan struct{})
+	releaseBlocker := sync.OnceFunc(func() { close(blocker) })
+	t.Cleanup(releaseBlocker)
 	scheduler.Submit("blocker", "blocker", func(context.Context) error {
 		close(blockerStarted)
-		<-releaseBlocker
+		<-blocker
 		return nil
 	})
 	<-blockerStarted
@@ -338,7 +340,7 @@ func TestColdSnapshotPreparationReusesSharedPublication(t *testing.T) {
 			return err
 		})
 	assert.NoError(t, err)
-	close(releaseBlocker)
+	releaseBlocker()
 	waitForColdCondition(t, func() bool { return !strategy.MirrorPreparationScheduled(coldTestUpstream) })
 	repo := manager.Get(coldTestUpstream)
 	assert.True(t, repo != nil)
@@ -424,10 +426,12 @@ func TestColdSnapshotPreparationPublishesFromReadyMirror(t *testing.T) {
 	})
 
 	blockerStarted := make(chan struct{})
-	releaseBlocker := make(chan struct{})
+	blocker := make(chan struct{})
+	releaseBlocker := sync.OnceFunc(func() { close(blocker) })
+	t.Cleanup(releaseBlocker)
 	scheduler.Submit("blocker", "blocker", func(context.Context) error {
 		close(blockerStarted)
-		<-releaseBlocker
+		<-blocker
 		return nil
 	})
 	<-blockerStarted
@@ -445,7 +449,7 @@ func TestColdSnapshotPreparationPublishesFromReadyMirror(t *testing.T) {
 	assert.True(t, repo != nil)
 	createTestMirrorRepo(t, repo.Path())
 	repo.MarkReady()
-	close(releaseBlocker)
+	releaseBlocker()
 
 	select {
 	case <-gate.started:
