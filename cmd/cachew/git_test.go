@@ -3,7 +3,10 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -17,6 +20,12 @@ import (
 	"github.com/alecthomas/assert/v2"
 
 	"github.com/block/cachew/client"
+	"github.com/block/cachew/internal/cache"
+	"github.com/block/cachew/internal/gitclone"
+	"github.com/block/cachew/internal/githubapp"
+	"github.com/block/cachew/internal/jobscheduler"
+	"github.com/block/cachew/internal/logging"
+	gitstrategy "github.com/block/cachew/internal/strategy/git"
 )
 
 // TestMain drops the GIT_* variables git exports under hooks so test git
@@ -648,4 +657,149 @@ func TestGitRestoreBundleFailureNonFatal(t *testing.T) {
 	content, err := os.ReadFile(filepath.Join(dstDir, "file.txt"))
 	assert.NoError(t, err)
 	assert.Equal(t, "v1", string(content))
+}
+
+func TestGitCommitSnapshotOfflineFanout(t *testing.T) {
+	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	t.Setenv("GIT_ALLOW_PROTOCOL", "file")
+	t.Setenv("GIT_TERMINAL_PROMPT", "0")
+	t.Setenv("GIT_AUTHOR_NAME", "test")
+	t.Setenv("GIT_AUTHOR_EMAIL", "test@test.com")
+	t.Setenv("GIT_COMMITTER_NAME", "test")
+	t.Setenv("GIT_COMMITTER_EMAIL", "test@test.com")
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	_, ctx = logging.Configure(ctx, logging.Config{})
+	gitRun := func(dir string, args ...string) string {
+		t.Helper()
+		out, err := exec.CommandContext(ctx, "git", append([]string{"-C", dir}, args...)...).CombinedOutput()
+		assert.NoError(t, err, string(out))
+		return strings.TrimSpace(string(out))
+	}
+	lfsData := make([]byte, 2<<20)
+	_, err := rand.Read(lfsData)
+	assert.NoError(t, err)
+	lfsContent := string(lfsData)
+	oid := fmt.Sprintf("%x", sha256.Sum256([]byte(lfsContent)))
+	var downloads atomic.Int32
+	var available atomic.Bool
+	lfs := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !available.Load() {
+			http.NotFound(w, r)
+			return
+		}
+		if r.URL.Path == "/objects/"+oid {
+			downloads.Add(1)
+			fmt.Fprint(w, lfsContent)
+			return
+		}
+		w.Header().Set("Content-Type", "application/vnd.git-lfs+json")
+		fmt.Fprintf(w, `{"transfer":"basic","objects":[{"oid":%q,"size":%d,"actions":{"download":{"href":%q}}}]}`,
+			oid, len(lfsContent), "http://"+r.Host+"/objects/"+oid)
+	}))
+	defer lfs.Close()
+	src := t.TempDir()
+	initGitRepo(t, src, map[string]string{"file.txt": "historical blob reused by target\n"})
+	first := gitRevParse(t, src, "HEAD")
+	assert.NoError(t, os.WriteFile(filepath.Join(src, "file.txt"), []byte("default branch content\n"), 0o644))
+	gitRun(src, "commit", "-am", "main advances")
+	gitRun(src, "checkout", "-b", "target", first)
+	assert.NoError(t, os.WriteFile(filepath.Join(src, ".gitattributes"), []byte("*.bin filter=lfs diff=lfs merge=lfs -text\n"), 0o644))
+	assert.NoError(t, os.WriteFile(filepath.Join(src, ".lfsconfig"), []byte("[lfs]\nurl = "+lfs.URL+"/lfs\n"), 0o644))
+	pointer := fmt.Sprintf("version https://git-lfs.github.com/spec/v1\noid sha256:%s\nsize %d\n", oid, len(lfsContent))
+	assert.NoError(t, os.WriteFile(filepath.Join(src, "asset.bin"), []byte(pointer), 0o644))
+	gitRun(src, "add", ".")
+	gitRun(src, "commit", "-m", "target with LFS")
+	sha := gitRevParse(t, src, "HEAD")
+	gitRun(src, "checkout", "main")
+
+	root := t.TempDir()
+	mirror := filepath.Join(root, "github.com", "org", "repo")
+	gitRun(src, "clone", "--mirror", src, mirror)
+	store, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: time.Hour, LimitMB: 64})
+	assert.NoError(t, err)
+	scheduler := jobscheduler.NewProvider(ctx, jobscheduler.Config{Concurrency: 1})
+	mux := http.NewServeMux()
+	s, err := gitstrategy.New(ctx, gitstrategy.Config{
+		ZstdThreads: 1, SnapshotFilters: map[string]string{"github.com/org/repo": "blob:none"},
+	}, scheduler, store, mux, gitclone.NewManagerProvider(ctx, gitclone.Config{MirrorRoot: root}, nil),
+		func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
+	assert.NoError(t, err)
+	deadline := time.Now().Add(10 * time.Second)
+	for !s.Ready() && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	assert.True(t, s.Ready())
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mux.ServeHTTP(w, r.WithContext(logging.ContextWithLogger(r.Context(), logging.FromContext(ctx))))
+	}))
+	defer server.Close()
+	api := client.NewWithHTTPClient(server.URL, server.Client())
+	prepare := GitPrepareCmd{RepoURL: "https://github.com/org/repo", SHA: sha}
+	assert.Error(t, prepare.Run(ctx, api))
+	stats, err := store.Stats(ctx)
+	assert.NoError(t, err)
+	assert.Equal(t, int64(0), stats.Objects, "failed LFS preparation must not publish")
+	available.Store(true)
+
+	results := make(chan error, 12)
+	for range 12 {
+		go func() { results <- prepare.Run(ctx, api) }()
+	}
+	for range 12 {
+		assert.NoError(t, <-results)
+	}
+	assert.Equal(t, int32(1), downloads.Load(), "fanout must share preparation")
+
+	plainDest := filepath.Join(t.TempDir(), "plain")
+	plain := GitRestoreCmd{RepoURL: prepare.RepoURL, SHA: first, Directory: plainDest, ZstdThreads: 1}
+	assert.NoError(t, plain.Run(ctx, api), "GET miss should prepare a non-LFS commit")
+	assert.Equal(t, first, gitRevParse(t, plainDest, "HEAD"))
+
+	assert.NoError(t, os.RemoveAll(mirror))
+	assert.NoError(t, os.RemoveAll(src))
+	lfs.Close()
+	assert.NoError(t, prepare.Run(ctx, api), "preparation hit must also work offline")
+	for _, concurrency := range []int{1, 4} {
+		dest := filepath.Join(t.TempDir(), "restored")
+		restore := GitRestoreCmd{RepoURL: prepare.RepoURL, SHA: sha, Directory: dest,
+			DownloadConcurrency: concurrency, DownloadChunkSizeMB: 1, ZstdThreads: 1}
+		assert.NoError(t, restore.Run(ctx, api))
+		assert.Equal(t, sha, gitRevParse(t, dest, "HEAD"))
+		assert.Equal(t, "true", gitRun(dest, "rev-parse", "--is-shallow-repository"))
+		assert.Equal(t, "", gitRun(dest, "status", "--porcelain"))
+		assert.Equal(t, prepare.RepoURL, gitRun(dest, "remote", "get-url", "origin"))
+		for name, expected := range map[string]string{"file.txt": "historical blob reused by target\n", "asset.bin": lfsContent} {
+			data, err := os.ReadFile(filepath.Join(dest, name))
+			assert.NoError(t, err)
+			assert.Equal(t, expected, string(data))
+		}
+		gitRun(dest, "fsck", "--full")
+		gitRun(dest, "lfs", "fsck", "--objects", "HEAD")
+	}
+	assert.Equal(t, int32(1), downloads.Load())
+	prepare.SHA = strings.Repeat("0", 40)
+	assert.Error(t, prepare.Run(ctx, api), "an unavailable SHA must not fall back to a different snapshot")
+}
+
+func TestGitCommitRestoreRejectsMismatch(t *testing.T) {
+	src := t.TempDir()
+	initGitRepo(t, src, map[string]string{"file.txt": "wrong revision"})
+	archive := createTarZst(t, src)
+	want := strings.Repeat("a", 40)
+	for _, header := range []string{gitRevParse(t, src, "HEAD"), want} {
+		t.Run(header, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set(client.SnapshotCommitHeader, header)
+				w.Write(archive)
+			}))
+			defer server.Close()
+			dest := filepath.Join(t.TempDir(), "restore")
+			restore := GitRestoreCmd{RepoURL: "https://github.com/org/repo", SHA: want, Directory: dest}
+			assert.Error(t, restore.Run(t.Context(), client.NewWithHTTPClient(server.URL, server.Client())))
+			_, err := os.Stat(dest)
+			assert.True(t, os.IsNotExist(err), "invalid snapshot must not be published")
+		})
+	}
 }

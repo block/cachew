@@ -24,6 +24,45 @@ Restore a repository from a snapshot (with automatic delta bundle to reach HEAD)
 cachew git restore https://github.com/org/repo ./repo
 ```
 
+For CI workers that already know their full commit SHA, prepare once before
+fanout and restore that exact revision:
+
+```sh
+cachew git prepare https://github.com/org/repo --sha "$BUILD_COMMIT"
+cachew git restore https://github.com/org/repo ./repo --sha "$BUILD_COMMIT"
+```
+
+The SHA path creates a standalone depth-one checkout with detached HEAD, all
+blobs needed by that commit, and its LFS objects and materialized files. It does
+not use the periodic default-branch snapshot or `snapshot-filters`. On a hit,
+neither server nor client freshens Git refs, applies a bundle, or fetches from
+GitHub or LFS upstream. The CLI verifies the response SHA and extracted HEAD
+before moving the staged checkout into place. The destination must not exist.
+`--sha` cannot be combined with `--ref` or `--commit`, which retain their existing
+presence/freshness semantics. Submodules are not initialized. Builds requiring
+history, other branches, or tags must fetch those separately.
+
+`HEAD /git/{host}/{repo}/snapshots/v1/{sha}.tar.zst` prepares without downloading.
+`GET` serves the same artifact, with range support, and also prepares on a miss.
+Only full lowercase commit SHAs are accepted. Missing commits and failed LFS
+downloads fail preparation, never fall back to a different revision. Artifacts
+are published only after checkout, LFS verification, and upload complete. They
+use the cache backend's maximum TTL and normal eviction policy. Concurrent
+requests share preparation within a replica, with one SHA build running at a
+time per replica and a 30-minute deadline including queue time. Preparation
+continues if a waiting worker disconnects.
+
+This is not yet a CI capacity guarantee. Replicas can duplicate cold builds,
+and all download bytes still pass through Cachew. Rebuilt artifacts can have
+different archive bytes for the same commit, so range clients must honor ETags.
+Measure preparation as well as worker restore time when comparing against
+ci-git-cache: `cachew.git.operation_duration_seconds{operation="commit-snapshot"}`
+includes mirror preparation, checkout, LFS, and publication. The
+`git.commit_snapshot` span includes any queue/wait time. Snapshot serve metrics
+use `source="sha_hit"` or `source="sha_miss"`, with miss duration including the
+preparation wait. A separate prepare step removes that wait from worker timing,
+not from total pipeline latency.
+
 ```hcl
 git {
   snapshot-interval = "1h"
@@ -254,6 +293,8 @@ cachew restore <namespace> <directory> (--key <key> | -H <glob>)  # exit 0 hit, 
 
 # Git
 cachew git restore <repo-url> <directory> [--no-bundle]
+cachew git prepare <repo-url> --sha <full-commit-sha>
+cachew git restore <repo-url> <new-directory> --sha <full-commit-sha>
 ```
 
 **Global flags:** `--url` (`CACHEW_URL`), `--authorization` (`CACHEW_AUTHORIZATION`), `--platform` (prefix keys with `os-arch`), `--daily`/`--hourly` (prefix keys with date).

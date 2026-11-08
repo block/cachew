@@ -25,6 +25,7 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/mod/semver"
+	"golang.org/x/sync/singleflight"
 
 	"github.com/block/cachew/internal/cache"
 	"github.com/block/cachew/internal/gitclone"
@@ -77,6 +78,8 @@ type Strategy struct {
 	snapshotMu            sync.Map // keyed by upstream URL, values are *sync.Mutex
 	snapshotSpools        sync.Map // keyed by upstream URL, values are *snapshotSpoolEntry
 	bundleBuilds          sync.Map
+	commitBuilds          singleflight.Group
+	commitBuildSlot       chan struct{}
 	snapshotJobsScheduled sync.Map // One entry per upstream URL prevents duplicate periodic jobs.
 	repackJobsScheduled   sync.Map // One entry per upstream URL prevents duplicate periodic jobs.
 	coldSnapshotMu        sync.Map // keyed by upstream URL, values are *coldSnapshotEntry
@@ -149,16 +152,17 @@ func New(
 	m := newGitMetrics()
 
 	s := &Strategy{
-		config:        config,
-		cache:         cache,
-		cloneManager:  cloneManager,
-		httpClient:    http.DefaultClient,
-		ctx:           ctx,
-		scheduler:     scheduler.WithQueuePrefix("git"),
-		spools:        make(map[string]*RepoSpools),
-		tokenManager:  tokenManager,
-		metrics:       m,
-		metadataWired: make(chan struct{}),
+		config:          config,
+		cache:           cache,
+		cloneManager:    cloneManager,
+		httpClient:      http.DefaultClient,
+		ctx:             ctx,
+		scheduler:       scheduler.WithQueuePrefix("git"),
+		spools:          make(map[string]*RepoSpools),
+		tokenManager:    tokenManager,
+		metrics:         m,
+		metadataWired:   make(chan struct{}),
+		commitBuildSlot: make(chan struct{}, 1),
 		coldPreparationDelay: func() time.Duration {
 			return rand.N(coldPreparationSpread) //nolint:gosec // The delay does not protect sensitive data.
 		},
@@ -357,6 +361,11 @@ func (s *Strategy) handleRequest(w http.ResponseWriter, r *http.Request) {
 	// host and path are spliced into upstream URLs that may carry GitHub App credentials.
 	if err := errors.Join(cachewhttputil.ValidatePathSegment(host), cachewhttputil.ValidatePath(pathValue)); err != nil {
 		cachewhttputil.ErrorResponse(w, r, http.StatusBadRequest, "invalid git request path")
+		return
+	}
+
+	if repoPath, artifact, ok := strings.Cut(pathValue, "/snapshots/v1/"); ok {
+		s.handleCommitSnapshot(w, r, host, repoPath, artifact)
 		return
 	}
 

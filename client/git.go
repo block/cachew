@@ -3,6 +3,7 @@ package client
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -206,13 +207,76 @@ func (c *Client) openGitArtifact(ctx context.Context, repoURL, suffix string) (*
 // buffering; a server without range support falls back to a single full
 // download. Returns os.ErrNotExist when the server has no snapshot.
 func (c *Client) OpenGitSnapshotParallel(ctx context.Context, repoURL string, chunkSize int64, concurrency int) (*GitSnapshot, error) {
+	return c.openGitArtifactParallel(ctx, repoURL, "snapshot.tar.zst", chunkSize, concurrency)
+}
+
+// OpenGitCommitSnapshot downloads a self-contained depth-one checkout at sha,
+// including its LFS objects and materialized working tree. A cache miss prepares
+// the artifact on the server. Hits require no upstream freshening. The caller
+// must close the returned body. Submodules are not initialized.
+func (c *Client) OpenGitCommitSnapshot(ctx context.Context, repoURL, sha string, chunkSize int64, concurrency int) (*GitSnapshot, error) {
+	suffix, err := commitSnapshotSuffix(sha)
+	if err != nil {
+		return nil, err
+	}
+	snap, err := c.openGitArtifactParallel(ctx, repoURL, suffix, chunkSize, concurrency)
+	if err != nil {
+		return nil, err
+	}
+	if snap.Commit != sha {
+		return nil, errors.Join(errors.Errorf("snapshot commit %q does not match %s", snap.Commit, sha), snap.Close())
+	}
+	return snap, nil
+}
+
+// PrepareGitCommitSnapshot prepares the same artifact used by
+// OpenGitCommitSnapshot without transferring its body. CI can run this once
+// before fanning out workers. It returns only after publication succeeds.
+func (c *Client) PrepareGitCommitSnapshot(ctx context.Context, repoURL, sha string) error {
+	suffix, err := commitSnapshotSuffix(sha)
+	if err != nil {
+		return err
+	}
+	endpoint, err := gitEndpointURL(c.baseURL, repoURL, suffix)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodHead, endpoint, nil)
+	if err != nil {
+		return errors.Wrap(err, "create preparation request")
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return errors.Wrap(err, "prepare commit snapshot")
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return errors.WithStack(&HTTPStatusError{StatusCode: resp.StatusCode})
+	}
+	if resp.Header.Get(SnapshotCommitHeader) != sha {
+		return errors.Errorf("prepared snapshot commit does not match %s", sha)
+	}
+	return nil
+}
+
+func commitSnapshotSuffix(sha string) (string, error) {
+	if len(sha) != 40 && len(sha) != 64 {
+		return "", errors.New("expected a full lowercase commit SHA")
+	}
+	if _, err := hex.DecodeString(sha); err != nil || strings.ToLower(sha) != sha {
+		return "", errors.New("expected a full lowercase commit SHA")
+	}
+	return "snapshots/v1/" + sha + ".tar.zst", nil
+}
+
+func (c *Client) openGitArtifactParallel(ctx context.Context, repoURL, suffix string, chunkSize int64, concurrency int) (*GitSnapshot, error) {
 	if concurrency <= 1 {
-		return c.OpenGitSnapshot(ctx, repoURL)
+		return c.openGitArtifact(ctx, repoURL, suffix)
 	}
 	if err := validateParallelParams(chunkSize, concurrency); err != nil {
 		return nil, err
 	}
-	endpoint, err := gitEndpointURL(c.baseURL, repoURL, "snapshot.tar.zst")
+	endpoint, err := gitEndpointURL(c.baseURL, repoURL, suffix)
 	if err != nil {
 		return nil, err
 	}
