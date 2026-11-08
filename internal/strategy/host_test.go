@@ -2,14 +2,19 @@ package strategy_test
 
 import (
 	"context"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/alecthomas/assert/v2"
+	"github.com/alecthomas/hcl/v2"
 
 	"github.com/block/cachew/internal/cache"
 	"github.com/block/cachew/internal/logging"
@@ -168,4 +173,165 @@ func TestHostRejectsPathTraversal(t *testing.T) {
 
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 	assert.Equal(t, 0, callCount)
+}
+
+func TestHostFallback(t *testing.T) {
+	for _, tt := range []struct {
+		name          string
+		primaryStatus int
+		mirrorStatus  int
+		path          string
+		wantStatus    int
+		wantCalls     int
+	}{
+		{"rate limit", 429, 200, "/packages/a.jar", 200, 1},
+		{"server error", 503, 200, "/packages/a.jar", 200, 1},
+		{"transport error", 0, 200, "/packages/a.jar", 200, 1},
+		{"authoritative missing", 404, 200, "/packages/a.jar", 404, 0},
+		{"forbidden", 403, 200, "/packages/a.jar", 403, 0},
+		{"primary success", 200, 200, "/packages/a.jar", 200, 0},
+		{"mirror missing", 429, 404, "/packages/a.jar", 404, 1},
+		{"exhausted", 503, 502, "/packages/a.jar", 502, 1},
+		{"prefix boundary", 429, 200, "/packages-other/a.jar", 429, 0},
+		{"escaped path", 429, 200, "/packages/a%20b.jar", 200, 1},
+		{"mirror redirect", 429, 302, "/packages/a.jar", 200, 2},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			_, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelError})
+			c, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: time.Hour})
+			assert.NoError(t, err)
+			defer c.Close()
+			primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(tt.primaryStatus)
+				_, _ = io.WriteString(w, "primary")
+			}))
+			defer primary.Close()
+			if tt.primaryStatus == 0 {
+				primary.Close()
+			}
+			calls := 0
+			mirror := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				assert.Equal(t, "custom", r.Header.Get("X-Test"))
+				if tt.mirrorStatus == http.StatusFound {
+					if r.URL.Path != "/mirror/actual.jar" {
+						http.Redirect(w, r, "actual.jar?version=2", http.StatusFound)
+						return
+					}
+					assert.Equal(t, "version=2", r.URL.RawQuery)
+					_, _ = io.WriteString(w, "mirror")
+					return
+				}
+				assert.Equal(t, "/mirror"+tt.path[len("/packages"):]+"?version=2", r.URL.RequestURI())
+				w.WriteHeader(tt.mirrorStatus)
+				_, _ = io.WriteString(w, "mirror")
+			}))
+			defer mirror.Close()
+			mux := http.NewServeMux()
+			_, err = strategy.NewHost(ctx, strategy.HostConfig{
+				Target:    primary.URL,
+				Headers:   map[string]string{"X-Test": "custom"},
+				Fallbacks: []strategy.HostFallbackConfig{{Target: mirror.URL + "/mirror", PathPrefix: "/packages"}},
+			}, c, mux)
+			assert.NoError(t, err)
+			u, err := url.Parse(primary.URL)
+			assert.NoError(t, err)
+			for i := range 2 {
+				w := httptest.NewRecorder()
+				mux.ServeHTTP(w, httptest.NewRequestWithContext(ctx, http.MethodGet, "/"+u.Host+tt.path+"?version=2", nil))
+				assert.Equal(t, tt.wantStatus, w.Code)
+				wantBody := "primary"
+				if tt.wantCalls > 0 {
+					wantBody = "mirror"
+				}
+				assert.Equal(t, wantBody, w.Body.String())
+				wantCalls := tt.wantCalls
+				if tt.wantStatus != http.StatusOK {
+					wantCalls *= i + 1
+				}
+				assert.Equal(t, wantCalls, calls)
+			}
+			reader, _, err := c.Open(ctx, cache.NewKey(primary.URL+tt.path+"?version=2"))
+			if tt.wantStatus == http.StatusOK {
+				assert.NoError(t, err)
+				reader.Close()
+			} else {
+				assert.True(t, os.IsNotExist(err))
+			}
+			_, _, err = c.Open(ctx, cache.NewKey(mirror.URL+"/mirror"+tt.path[len("/packages"):]+"?version=2"))
+			assert.True(t, os.IsNotExist(err))
+		})
+	}
+}
+
+func TestHostFallbackOrder(t *testing.T) {
+	_, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelError})
+	c, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: time.Hour})
+	assert.NoError(t, err)
+	defer c.Close()
+	var order []int
+	var urls []string
+	for i, status := range []int{429, 503, 200} {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			order = append(order, i)
+			assert.Equal(t, "/a.jar", r.URL.Path)
+			w.WriteHeader(status)
+			_, _ = io.WriteString(w, strconv.Itoa(i))
+		}))
+		defer server.Close()
+		urls = append(urls, server.URL)
+	}
+	mux := http.NewServeMux()
+	ast, err := hcl.Parse(strings.NewReader(`host "` + urls[0] + `" {
+  fallback "` + urls[1] + `" {}
+  fallback "` + urls[2] + `" {}
+}`))
+	assert.NoError(t, err)
+	var config strategy.HostConfig
+	assert.NoError(t, hcl.UnmarshalBlock(ast.Entries[0].(*hcl.Block), &config))
+	_, err = strategy.NewHost(ctx, config, c, mux)
+	assert.NoError(t, err)
+	u, err := url.Parse(urls[0])
+	assert.NoError(t, err)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequestWithContext(ctx, http.MethodGet, "/"+u.Host+"/a.jar", nil))
+	assert.Equal(t, 200, w.Code)
+	assert.Equal(t, "2", w.Body.String())
+	assert.Equal(t, []int{0, 1, 2}, order)
+}
+
+func TestHostFallbackIncompleteResponse(t *testing.T) {
+	for _, cancelRequest := range []bool{false, true} {
+		t.Run(strconv.FormatBool(cancelRequest), func(t *testing.T) {
+			_, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelError})
+			ctx, cancel := context.WithCancel(ctx)
+			defer cancel()
+			c, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: time.Hour})
+			assert.NoError(t, err)
+			defer c.Close()
+			primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusTooManyRequests)
+			}))
+			defer primary.Close()
+			mirror := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Length", "100")
+				_, _ = io.WriteString(w, "partial")
+				w.(http.Flusher).Flush()
+				if cancelRequest {
+					cancel()
+				}
+			}))
+			defer mirror.Close()
+			mux := http.NewServeMux()
+			_, err = strategy.NewHost(ctx, strategy.HostConfig{Target: primary.URL,
+				Fallbacks: []strategy.HostFallbackConfig{{Target: mirror.URL}},
+			}, c, mux)
+			assert.NoError(t, err)
+			u, err := url.Parse(primary.URL)
+			assert.NoError(t, err)
+			mux.ServeHTTP(httptest.NewRecorder(), httptest.NewRequestWithContext(ctx, http.MethodGet, "/"+u.Host+"/a.jar", nil))
+			_, _, err = c.Open(context.Background(), cache.NewKey(primary.URL+"/a.jar"))
+			assert.True(t, os.IsNotExist(err))
+		})
+	}
 }
