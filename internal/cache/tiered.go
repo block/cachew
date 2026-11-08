@@ -14,6 +14,7 @@ import (
 
 	"github.com/block/cachew/internal/logging"
 	"github.com/block/cachew/internal/metadatadb"
+	"github.com/block/cachew/internal/metrics"
 )
 
 // The Tiered cache combines multiple caches.
@@ -47,6 +48,17 @@ func MaybeNewTiered(ctx context.Context, caches []Cache, metadata *metadatadb.St
 
 type authoritativeCache struct {
 	Cache
+}
+
+func (c authoritativeCache) Open(ctx context.Context, key Key, opts ...Option) (io.ReadCloser, http.Header, error) {
+	r, headers, err := c.Cache.Open(ctx, key, opts...)
+	metrics.ObserveCacheSource(ctx, BackendName(c.Cache), 0)
+	return r, headers, errors.WithStack(err)
+}
+
+func (c authoritativeCache) Create(ctx context.Context, key Key, headers http.Header, ttl time.Duration, opts ...Option) (Writer, error) {
+	w, err := c.Cache.Create(ctx, key, headers, ttl, opts...)
+	return observeWriter(ctx, c.Cache, 0, w, err), err
 }
 
 func (c authoritativeCache) Invalidate(context.Context, Key) error {
@@ -107,7 +119,7 @@ func (t Tiered) Create(ctx context.Context, key Key, headers http.Header, ttl ti
 			if err != nil {
 				cancel(err)
 			}
-			tw.writers[i] = w
+			tw.writers[i] = observeWriter(ctx, cache, i, w, err)
 		})
 	}
 	done := make(chan struct{})
@@ -285,6 +297,8 @@ func StatAuthoritative(ctx context.Context, c Cache, key Key, opts ...Option) (h
 // not misreported as missing versions.
 //
 // If all caches fail, all errors are returned.
+//
+//nolint:funlen // Conditional fallback and tier selection share one ordered traversal.
 func (t Tiered) Open(ctx context.Context, key Key, opts ...Option) (io.ReadCloser, http.Header, error) {
 	ro := NewRequestOptions(opts...)
 	// A Range request yields a partial body, which must never be backfilled
@@ -295,6 +309,7 @@ func (t Tiered) Open(ctx context.Context, key Key, opts ...Option) (io.ReadClose
 	// fallback, served only if no deeper tier holds the pinned version.
 	var fallback io.ReadCloser
 	var fallbackHeaders http.Header
+	fallbackTier := -1
 	var probeErrs []error
 	rejected := false // a tier failed If-Match; deeper tiers may hold the named version
 
@@ -317,6 +332,7 @@ func (t Tiered) Open(ctx context.Context, key Key, opts ...Option) (io.ReadClose
 			if fallback != nil {
 				discardTieredReader(ctx, key, fallback)
 			}
+			metrics.ObserveCacheSource(ctx, BackendName(c), i)
 			return nil, headers, errors.WithStack(err)
 		case err != nil:
 			// A hard error is definitive when no earlier tier produced a
@@ -338,12 +354,13 @@ func (t Tiered) Open(ctx context.Context, key Key, opts ...Option) (io.ReadClose
 				discardTieredReader(ctx, key, r)
 				continue
 			}
-			fallback, fallbackHeaders = r, headers
+			fallback, fallbackHeaders, fallbackTier = r, headers, i
 			continue
 		}
 		if fallback != nil {
 			discardTieredReader(ctx, key, fallback)
 		}
+		metrics.ObserveCacheSource(ctx, BackendName(c), i)
 		return t.convergeTier0(ctx, key, r, headers, c, i, partial), headers, nil
 	}
 	if len(probeErrs) > 0 {
@@ -353,6 +370,7 @@ func (t Tiered) Open(ctx context.Context, key Key, opts ...Option) (io.ReadClose
 		return nil, nil, errors.Join(probeErrs...)
 	}
 	if fallback != nil {
+		metrics.ObserveCacheSource(ctx, BackendName(t.caches[fallbackTier]), fallbackTier)
 		return fallback, fallbackHeaders, nil
 	}
 	if rejected {
@@ -372,18 +390,21 @@ func discardTieredReader(ctx context.Context, key Key, r io.ReadCloser) {
 // On error or partial read the dst entry is discarded per the Cache contract
 // (the context is cancelled, causing the writer to discard on Close).
 func (t Tiered) backfillReader(ctx context.Context, key Key, src io.ReadCloser, headers http.Header, dst Cache) io.ReadCloser {
+	ctx = metrics.WithCachePurpose(ctx, "backfill")
 	logger := logging.FromContext(ctx)
 	// Use a cancellable context so we can abort the write on failure.
 	// The Cache contract guarantees that cancelled-context writes are discarded.
 	writeCtx, cancel := context.WithCancel(ctx)
 	createOpts := backfillCreateOptions(headers)
 	w, err := dst.Create(writeCtx, key, headers, 0, createOpts...) // 0 → use the cache's max TTL
+	w = observeWriter(writeCtx, dst, 0, w, err)
 	if err != nil {
 		cancel()
+		metrics.RecordCacheFill(ctx, "create_error")
 		logger.WarnContext(ctx, "Tier backfill: failed to create writer, skipping", "error", err)
 		return src
 	}
-	return newBackfillReadCloser(ctx, src, w, cancel)
+	return newBackfillReadCloser(writeCtx, src, w, cancel)
 }
 
 const tieredETagsMap = "cache-etags"
@@ -472,6 +493,7 @@ func (h *tieredHealer) trigger(reqCtx context.Context, id healKey, heal func(con
 	h.mu.Unlock()
 
 	ctx := logging.ContextWithLogger(h.ctx, logging.FromContext(reqCtx))
+	ctx = metrics.ContinueArtifactRequest(ctx, reqCtx)
 	h.wg.Go(func() {
 		defer func() {
 			h.mu.Lock()
@@ -513,26 +535,34 @@ func (t Tiered) healTier0(reqCtx context.Context, key Key, source Cache, servedE
 }
 
 func (t Tiered) backfillTier0FromSource(ctx context.Context, key Key, source Cache, wantETag string) {
+	ctx = metrics.WithCachePurpose(ctx, "heal")
 	logger := logging.FromContext(ctx)
+	result := writeSuccess
+	defer func() { metrics.RecordCacheFill(ctx, result) }()
 	ctx, cancel := context.WithTimeout(ctx, tieredHealTimeout)
 	defer cancel()
 
 	r, headers, err := source.Open(ctx, key, IfMatch(wantETag))
 	if err != nil {
+		result = "read_error"
 		logger.WarnContext(ctx, "Tiered: ranged heal source read failed", "key", key, "etag", wantETag, "error", err)
 		return
 	}
 	defer discardTieredReader(ctx, key, r)
 	if headers.Get(ETagKey) != wantETag {
+		result = "superseded"
 		return
 	}
 
 	w, err := t.caches[0].Create(ctx, key, headers, 0, backfillCreateOptions(headers)...) // 0 → cache's max TTL
+	w = observeWriter(ctx, t.caches[0], 0, w, err)
 	if err != nil {
+		result = "create_error"
 		logger.WarnContext(ctx, "Tiered: ranged heal writer create failed", "key", key, "error", err)
 		return
 	}
 	if _, err := io.Copy(w, r); err != nil {
+		result = "transfer_error"
 		logger.WarnContext(ctx, "Tiered: ranged heal copy failed", "key", key, "error", errors.Join(err, w.Abort(err)))
 		return
 	}
@@ -540,13 +570,17 @@ func (t Tiered) backfillTier0FromSource(ctx context.Context, key Key, source Cac
 	// object that invalidateStale can no longer clean up (it only fires on an
 	// etag mismatch, not a missing entry). Re-check narrows that window.
 	if got, ok := t.etags.Get(key); !ok || got != wantETag {
+		result = "superseded"
 		if err := w.Abort(errHealSuperseded); err != nil {
 			logger.WarnContext(ctx, "Tiered: ranged heal abort failed", "key", key, "error", err)
 		}
 		return
 	}
 	if err := w.Close(); err != nil {
+		result = writeCommitError
 		logger.WarnContext(ctx, "Tiered: ranged heal commit failed", "key", key, "error", err)
+	} else if ctx.Err() != nil {
+		result = writeCanceled
 	}
 }
 
@@ -586,6 +620,16 @@ func newBackfillReadCloser(ctx context.Context, src io.ReadCloser, dst io.WriteC
 			}
 		}
 		closeErr := dst.Close()
+		result := writeSuccess
+		switch {
+		case err != nil:
+			result = "write_error"
+		case ctx.Err() != nil:
+			result = writeCanceled
+		case closeErr != nil:
+			result = writeCommitError
+		}
+		metrics.RecordCacheFill(ctx, result)
 		switch {
 		case err != nil:
 			done <- err

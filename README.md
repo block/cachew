@@ -353,6 +353,28 @@ Quota gauges describe the installation's shared API budget; do not sum them acro
 replicas. They do not track Git transport or LFS limits. Polling does not consume
 the primary API budget, but can count toward GitHub's secondary limits.
 
+### Artifact cache metrics
+
+Generic artifact handlers (host, Artifactory, Hermit, HTTP proxy and GitHub release downloads) export:
+
+| OpenTelemetry instrument | Type | Extra labels |
+| --- | --- | --- |
+| `cachew.cache.resolutions` | Counter | `result`, `source`, `tier` |
+| `cachew.origin.requests` | Counter | `status_code`, `error_type` |
+| `cachew.origin.request_duration_seconds` | Histogram | `status_code`, `error_type` |
+| `cachew.cache.fills` | Counter | `purpose`, `result` |
+| `cachew.cache.tier_writes` | Counter | `backend`, `tier`, `purpose`, `result` |
+
+All carry `strategy` and `registry`. Registry values come from configured host/Artifactory targets or fixed strategy labels; dynamic proxy/Hermit hosts use `other`. URLs, paths, cache keys, credentials and caller namespaces are not labels. Prometheus converts dots to underscores and appends `_total` to counters.
+
+A resolution is one final lookup decision: `hit`, `miss`, `error`, `conditional`, or `precondition_failed`. Hit sources identify the accepted backend (`disk`, `s3`, `memory`, `remote`, or `other`), after stale and conditional probes. `tier` is zero-based; a miss/error has source `none` and tier `-1`. This measures cache lookup, not complete body delivery.
+
+Origin metrics count HTTP exchanges in the artifact download client, including redirect hops and transport failures. `status_code=none` means no HTTP response; `error_type` is `none`, `transport`, `timeout`, or `canceled`. Duration ends at response headers or transport failure. Registry identifies the logical artifact provider, including its redirects, rather than each physical destination. These metrics do not count every low-level connection retry, Git transport, Go-module fetch, GitHub metadata lookup, or S3 operation. Internal Hermit forwarding to another Cachew route is excluded from origin/fill counts; the receiving handler measures its own work.
+
+Fills record a terminal outcome, rather than treating an origin 200 as successful publication. `purpose` separates `origin`, `backfill` and ranged `heal`. Results distinguish successful completion from creation, write, commit, transfer or read errors, cancellation, and superseded heals. Tier writes report backend outcomes separately: a failed S3 write can coexist with a successful disk write. Early close or canceled backfill is not a successful fill. Client responses continue normally when cache writes fail.
+
+Use resolutions to compare local/shared hits and misses, origin requests by status to measure dependency traffic, and fills/tier writes to find failed publication. An origin error percentage must use origin exchanges as its denominator; client response percentages include cache hits. Idle periods have no percentage.
+
 ## Full Configuration Example
 
 ```hcl

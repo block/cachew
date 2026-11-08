@@ -413,7 +413,7 @@ func TestHandlerMethodChaining(t *testing.T) {
 		OnError(func(_ error, _ http.ResponseWriter, _ *http.Request) {}).
 		TTL(func(_ *http.Request) time.Duration { return time.Hour })
 
-	assert.Equal(t, h, result, "methods should return the same handler instance")
+	assert.True(t, h == result, "methods should return the same handler instance")
 }
 
 func TestStreamAndCacheAbortsOnUpstreamError(t *testing.T) {

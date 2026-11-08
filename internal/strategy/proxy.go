@@ -59,7 +59,7 @@ func NewHTTPProxy(ctx context.Context, c cache.Cache, _ Mux, spools *spool.Regis
 	client := &http.Client{}
 	p := &HTTPProxy{logger: logger}
 
-	p.handler = handler.New(client, c, spools).
+	p.handler = handler.New(client, c, spools).Metrics("proxy", "other").
 		CacheKey(func(r *http.Request) string {
 			target := p.parseProxyURI(r)
 			if target == nil {

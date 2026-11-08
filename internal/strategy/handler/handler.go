@@ -22,6 +22,7 @@ import (
 	"github.com/block/cachew/internal/cache"
 	"github.com/block/cachew/internal/httputil"
 	"github.com/block/cachew/internal/logging"
+	"github.com/block/cachew/internal/metrics"
 	"github.com/block/cachew/internal/spool"
 )
 
@@ -70,6 +71,10 @@ func (p CacheKeyParts) Key() cache.Key {
 //			return modifiedRequest, nil
 //		})
 type Handler struct {
+	metrics       *metrics.ArtifactMetrics
+	strategy      string
+	registry      string
+	external      bool
 	client        *http.Client
 	scope         *httputil.BackoffScope
 	cache         cache.Cache
@@ -102,14 +107,17 @@ const checkedAtHeader = "X-Cachew-Checked-At"
 // - No request transformation is performed
 // - Standard error handling is used.
 func New(client *http.Client, c cache.Cache, spools *spool.Registry) *Handler {
+	client = metrics.ArtifactClient(client)
 	scope := httputil.NewBackoffScope(client.Transport)
 	scoped := *client
 	scoped.Transport = scope
 	return &Handler{
-		client: &scoped,
-		scope:  scope,
-		cache:  c,
-		spools: spools.NewGroup(spool.ReleaseCompleted),
+		client:   &scoped,
+		scope:    scope,
+		cache:    c,
+		spools:   spools.NewGroup(spool.ReleaseCompleted),
+		metrics:  metrics.NewArtifactMetrics(),
+		strategy: "other", registry: "other", external: true,
 		cacheKeyFunc: func(r *http.Request) CacheKeyParts {
 			return NewCacheKeyParts(r.URL.String())
 		},
@@ -121,6 +129,18 @@ func New(client *http.Client, c cache.Cache, spools *spool.Registry) *Handler {
 			return 0
 		},
 	}
+}
+
+// Metrics labels requests with a strategy and configured registry; dynamic hosts must use a bounded fallback.
+func (h *Handler) Metrics(strategy, registry string) *Handler {
+	h.strategy, h.registry = strategy, registry
+	return h
+}
+
+// InternalForward excludes delegation to another cache route from external-origin and fill metrics.
+func (h *Handler) InternalForward() *Handler {
+	h.external = false
+	return h
 }
 
 // CacheKey sets the function used to determine the cache key for a request.
@@ -214,7 +234,8 @@ func (h *Handler) ParallelFetch(chunkSize int64, concurrency int) *Handler {
 // HEAD misses are forwarded upstream without caching, so metadata probes
 // never trigger full downloads.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
+	ctx := h.metrics.WithRequest(r.Context(), h.strategy, h.registry, h.external)
+	r = r.WithContext(ctx)
 
 	logger := logging.FromContext(ctx)
 
@@ -322,6 +343,18 @@ func (h *Handler) serveCached(w http.ResponseWriter, r *http.Request, key cache.
 		return h.cacheMiss(w, r, err), nil
 	}
 	cr, headers, err := h.cache.Open(ctx, key, opts...)
+	result := "error"
+	switch {
+	case err == nil:
+		result = "hit"
+	case errors.Is(err, os.ErrNotExist):
+		result = "miss"
+	case errors.Is(err, cache.ErrPreconditionFailed):
+		result = "precondition_failed"
+	case errors.Is(err, cache.ErrNotModified), errors.Is(err, cache.ErrRangeNotSatisfiable):
+		result = "conditional"
+	}
+	metrics.RecordCacheResolution(ctx, result, cache.BackendName(h.cache))
 	if cacheEntryExists(err) && !h.fresh(r, key, headers) {
 		if cr != nil {
 			return false, errors.Wrap(cr.Close(), "close stale entry")
@@ -605,9 +638,14 @@ func (h *Handler) streamNonOKResponse(w http.ResponseWriter, resp *http.Response
 // discarded and the response is streamed in full.
 func (h *Handler) streamAndCache(w http.ResponseWriter, r *http.Request, key cache.Key, resp *http.Response) error {
 	maps.Copy(w.Header(), resp.Header)
+	result := "success"
+	if h.external {
+		defer func() { metrics.RecordCacheFill(r.Context(), result) }()
+	}
 
 	cw, err := h.cache.Create(r.Context(), key, h.cacheHeaders(resp), h.ttlFunc(r))
 	if err != nil {
+		result = "create_error"
 		_, copyErr := io.Copy(w, resp.Body)
 		return errors.Join(errors.Wrap(err, "create cache entry"), errors.Wrap(copyErr, "stream response"))
 	}
@@ -640,9 +678,20 @@ func (h *Handler) streamAndCache(w http.ResponseWriter, r *http.Request, key cac
 
 	_, copyErr := io.Copy(out, pr)
 	closeErr := pr.Close()
+	cacheErr := <-cacheErrCh
+	switch {
+	case tee.err != nil:
+		result = "write_error"
+	case r.Context().Err() != nil:
+		result = "canceled"
+	case copyErr != nil || closeErr != nil:
+		result = "transfer_error"
+	case cacheErr != nil:
+		result = "commit_error"
+	}
 	return errors.Join(
 		errors.Wrap(errors.Join(copyErr, closeErr), "stream response"),
-		errors.Wrap(<-cacheErrCh, "cache response"),
+		errors.Wrap(cacheErr, "cache response"),
 	)
 }
 

@@ -86,7 +86,7 @@ func NewHermit(ctx context.Context, config HermitConfig, _ jobscheduler.Schedule
 func (s *Hermit) String() string { return "hermit" }
 
 func (s *Hermit) createDirectHandler(c cache.Cache, spools *spool.Registry) http.Handler {
-	return handler.New(s.client, c, spools).
+	return handler.New(s.client, c, spools).Metrics("hermit", "other").
 		CacheKey(func(r *http.Request) string {
 			return s.buildOriginalURL(r)
 		}).
@@ -109,7 +109,11 @@ func (s *Hermit) createRedirectHandler(isInternalRedirect bool, c cache.Cache, s
 		cacheBackend = c
 	}
 
-	return handler.New(s.client, cacheBackend, spools).
+	h := handler.New(s.client, cacheBackend, spools).Metrics("hermit", "github.com")
+	if isInternalRedirect {
+		h.InternalForward()
+	}
+	return h.
 		CacheKey(func(r *http.Request) string {
 			return s.buildGitHubURL(r)
 		}).
