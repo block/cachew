@@ -165,7 +165,7 @@ func TestConfigureMirrorSanitizesExecutableMetadata(t *testing.T) {
 	assert.True(t, os.IsNotExist(err))
 	_, err = os.Lstat(filepath.Join(repoPath, "commondir"))
 	assert.True(t, os.IsNotExist(err))
-	cmd := exec.Command("git", "-C", repoPath, "config", "--get", "credential.helper")
+	cmd := exec.Command("git", "-C", repoPath, "config", "--local", "--get", "credential.helper")
 	assert.Error(t, cmd.Run())
 	output, err := exec.Command("git", "-C", repoPath, "config", "--get", "remote.origin.url").Output()
 	assert.NoError(t, err)
