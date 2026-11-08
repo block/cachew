@@ -51,6 +51,10 @@ func (r *Remote) Create(ctx context.Context, key Key, headers http.Header, ttl t
 	return errors.WithStack2(r.c.Create(ctx, key, headers, ttl, opts...))
 }
 
+func (r *Remote) UpdateMetadata(ctx context.Context, key Key, headers http.Header, ttl time.Duration, opts ...Option) error {
+	return errors.WithStack(r.c.UpdateMetadata(ctx, key, headers, ttl, opts...))
+}
+
 func (r *Remote) Delete(ctx context.Context, key Key) error {
 	return errors.WithStack(r.c.Delete(ctx, key))
 }

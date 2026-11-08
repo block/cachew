@@ -213,6 +213,36 @@ func (d *Disk) Create(ctx context.Context, key Key, headers http.Header, ttl tim
 	}, nil
 }
 
+func (d *Disk) UpdateMetadata(_ context.Context, key Key, headers http.Header, ttl time.Duration, opts ...Option) error {
+	if ttl > d.config.MaxTTL || ttl == 0 {
+		ttl = d.config.MaxTTL
+	}
+	lock := d.keyLock(d.namespace, key)
+	lock.Lock()
+	defer lock.Unlock()
+
+	if _, err := os.Stat(filepath.Join(d.config.Root, d.keyToPath(d.namespace, key))); err != nil {
+		return errors.Errorf("failed to stat file: %w", err)
+	}
+	now := time.Now()
+	expiresAt, err := d.db.getTTL(d.namespace, key)
+	if errors.Is(err, fs.ErrNotExist) || (err == nil && now.After(expiresAt)) {
+		return fs.ErrNotExist
+	}
+	if err != nil {
+		return errors.Errorf("failed to get TTL: %w", err)
+	}
+	stored, err := d.db.getHeaders(d.namespace, key)
+	if err != nil {
+		return errors.Errorf("failed to get headers: %w", err)
+	}
+	merged, err := updatedHeaders(stored, headers, opts)
+	if err != nil {
+		return err
+	}
+	return errors.Wrap(d.db.set(key, d.namespace, now.Add(ttl), merged), "failed to update metadata")
+}
+
 func (d *Disk) Delete(_ context.Context, key Key) error {
 	path := d.keyToPath(d.namespace, key)
 	fullPath := filepath.Join(d.config.Root, path)

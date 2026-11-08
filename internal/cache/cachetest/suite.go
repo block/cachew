@@ -109,6 +109,10 @@ func Suite(t *testing.T, newCache func(t *testing.T) cache.Cache, opts ...SuiteO
 	t.Run("Range", func(t *testing.T) {
 		testRange(t, newCache(t))
 	})
+
+	t.Run("UpdateMetadata", func(t *testing.T) {
+		testUpdateMetadata(t, newCache(t))
+	})
 }
 
 func testCreateAndOpen(t *testing.T, c cache.Cache) {
@@ -706,4 +710,52 @@ func testNamespaceDelete(t *testing.T, c cache.Cache) {
 	r, _, err := gomodCache.Open(ctx, key)
 	assert.NoError(t, err)
 	assert.NoError(t, r.Close())
+}
+
+func testUpdateMetadata(t *testing.T, c cache.Cache) {
+	defer c.Close()
+	ctx := t.Context()
+	const checked, updated = "X-Checked", "new"
+
+	key := cache.NewKey("test-update-metadata")
+	headers := http.Header{"Content-Type": {"text/plain"}, checked: {"old"}}
+	w, err := c.Create(ctx, key, headers, time.Second, cache.WithETag("update-etag"))
+	assert.NoError(t, err)
+	_, err = w.Write([]byte("unchanged body"))
+	assert.NoError(t, err)
+	assert.NoError(t, w.Close())
+
+	t.Run("MissingEntry", func(t *testing.T) {
+		err := c.UpdateMetadata(ctx, cache.NewKey("missing"), http.Header{checked: {updated}}, time.Hour)
+		assert.IsError(t, err, os.ErrNotExist)
+	})
+
+	t.Run("IfMatchMiss", func(t *testing.T) {
+		err := c.UpdateMetadata(ctx, key, http.Header{checked: {updated}}, time.Hour, cache.IfMatch(`"other"`))
+		assert.IsError(t, err, cache.ErrPreconditionFailed)
+	})
+
+	t.Run("RejectsETag", func(t *testing.T) {
+		err := c.UpdateMetadata(ctx, key, http.Header{"Etag": {`"changed"`}}, time.Hour)
+		assert.Error(t, err)
+	})
+
+	t.Run("UpdatesHeadersAndTTL", func(t *testing.T) {
+		// A zero TTL resets to the backend's maximum, which suites keep short.
+		err := c.UpdateMetadata(ctx, key, http.Header{checked: {updated}}, 0, cache.IfMatch(`"update-etag"`))
+		assert.NoError(t, err)
+
+		// Outlive the original TTL to prove the update extended it.
+		time.Sleep(2100 * time.Millisecond)
+
+		reader, got, err := c.Open(ctx, key)
+		assert.NoError(t, err)
+		defer reader.Close()
+		data, err := io.ReadAll(reader)
+		assert.NoError(t, err)
+		assert.Equal(t, "unchanged body", string(data))
+		assert.Equal(t, updated, got.Get(checked))
+		assert.Equal(t, "text/plain", got.Get("Content-Type"))
+		assert.Equal(t, `"update-etag"`, got.Get("ETag"))
+	})
 }

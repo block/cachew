@@ -290,6 +290,37 @@ func (c *Client) Create(ctx context.Context, key Key, headers http.Header, ttl t
 	return wc, nil
 }
 
+// UpdateMetadata exposes Cache.UpdateMetadata over HTTP so that revalidation
+// reaches remote tiers.
+func (c *Client) UpdateMetadata(ctx context.Context, key Key, headers http.Header, ttl time.Duration, opts ...RequestOption) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, c.objectURL(key), nil)
+	if err != nil {
+		return errors.Wrap(err, "failed to create request")
+	}
+	maps.Copy(req.Header, headers)
+	if ttl > 0 {
+		req.Header.Set("Time-To-Live", ttl.String())
+	}
+	NewRequestOptions(opts...).applyToRequest(req)
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return errors.Wrap(err, "failed to execute request")
+	}
+	defer resp.Body.Close()
+
+	switch resp.StatusCode {
+	case http.StatusNoContent:
+		return nil
+	case http.StatusNotFound:
+		return os.ErrNotExist
+	case http.StatusPreconditionFailed:
+		return ErrPreconditionFailed
+	default:
+		return errors.WithStack(&HTTPStatusError{StatusCode: resp.StatusCode})
+	}
+}
+
 // Delete removes an object from the cache server.
 func (c *Client) Delete(ctx context.Context, key Key) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.objectURL(key), nil)
