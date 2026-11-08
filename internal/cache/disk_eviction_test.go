@@ -12,51 +12,60 @@ import (
 )
 
 func TestDiskEvictionBySize(t *testing.T) {
-	dir := t.TempDir()
-	_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelDebug})
-
-	// Create cache with 1MB limit and fast eviction
-	c, err := cache.NewDisk(ctx, cache.DiskConfig{
-		Root:          dir,
-		LimitMB:       1,
-		MaxTTL:        time.Hour,
-		EvictInterval: 50 * time.Millisecond,
-	})
-	assert.NoError(t, err)
-	defer c.Close()
-
-	// Create 3 entries of ~500KB each (total 1.5MB, exceeding 1MB limit)
-	data := make([]byte, 500*1024)
-	keys := []cache.Key{
-		cache.NewKey("key1"),
-		cache.NewKey("key2"),
-		cache.NewKey("key3"),
+	tests := []struct {
+		name     string
+		readKey1 bool
+		evicted  string
+		retained []string
+	}{
+		{name: "EvictsLeastRecentlyWritten", evicted: "key1", retained: []string{"key2", "key3"}},
+		{name: "ReadRefreshesRecency", readKey1: true, evicted: "key2", retained: []string{"key1", "key3"}},
 	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelDebug})
 
-	for _, key := range keys {
-		w, err := c.Create(ctx, key, nil, time.Hour)
-		assert.NoError(t, err)
-		_, err = w.Write(data)
-		assert.NoError(t, err)
-		assert.NoError(t, w.Close())
-		time.Sleep(10 * time.Millisecond) // Ensure different access times
+			c, err := cache.NewDisk(ctx, cache.DiskConfig{
+				Root:          dir,
+				LimitMB:       1,
+				MaxTTL:        time.Hour,
+				EvictInterval: 50 * time.Millisecond,
+			})
+			assert.NoError(t, err)
+			defer c.Close()
+
+			data := make([]byte, 500*1024)
+			write := func(name string) {
+				w, err := c.Create(ctx, cache.NewKey(name), nil, time.Hour)
+				assert.NoError(t, err)
+				_, err = w.Write(data)
+				assert.NoError(t, err)
+				assert.NoError(t, w.Close())
+				time.Sleep(10 * time.Millisecond)
+			}
+
+			write("key1")
+			write("key2")
+			if tt.readKey1 {
+				r, _, err := c.Open(ctx, cache.NewKey("key1"))
+				assert.NoError(t, err)
+				assert.NoError(t, r.Close())
+				time.Sleep(10 * time.Millisecond)
+			}
+			write("key3")
+
+			time.Sleep(200 * time.Millisecond)
+
+			_, _, err = c.Open(ctx, cache.NewKey(tt.evicted))
+			assert.Error(t, err)
+			for _, name := range tt.retained {
+				r, _, err := c.Open(ctx, cache.NewKey(name))
+				assert.NoError(t, err)
+				assert.NoError(t, r.Close())
+			}
+		})
 	}
-
-	// Wait for eviction to run
-	time.Sleep(200 * time.Millisecond)
-
-	// key1 (oldest) should be evicted
-	_, _, err = c.Open(ctx, keys[0])
-	assert.Error(t, err)
-
-	// key2 and key3 should still exist
-	r2, _, err := c.Open(ctx, keys[1])
-	assert.NoError(t, err)
-	assert.NoError(t, r2.Close())
-
-	r3, _, err := c.Open(ctx, keys[2])
-	assert.NoError(t, err)
-	assert.NoError(t, r3.Close())
 }
 
 func TestDiskEvictionAcrossNamespaces(t *testing.T) {

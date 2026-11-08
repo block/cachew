@@ -92,7 +92,7 @@ func TestRestoreMirrorSnapshotSanitizesCachedCode(t *testing.T) {
 
 	_, err = os.Lstat(filepath.Join(repo.Path(), "hooks", "reference-transaction"))
 	assert.True(t, os.IsNotExist(err))
-	cmd := exec.Command("git", "-C", repo.Path(), "config", "--get", "credential.helper")
+	cmd := exec.Command("git", "-C", repo.Path(), "config", "--local", "--get", "credential.helper")
 	assert.Error(t, cmd.Run())
 	_, err = os.Lstat(proofPath)
 	assert.True(t, os.IsNotExist(err))

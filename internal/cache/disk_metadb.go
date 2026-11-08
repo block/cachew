@@ -77,29 +77,6 @@ func newDiskMetaDB(dbPath string) (*diskMetaDB, error) {
 	return metaDB, nil
 }
 
-func (s *diskMetaDB) setTTL(namespace Namespace, key Key, expiresAt time.Time) error {
-	ttlBytes, err := expiresAt.MarshalBinary()
-	if err != nil {
-		return errors.Errorf("failed to marshal TTL: %w", err)
-	}
-
-	dbKey := compositeKey(namespace, key)
-	err = s.db.Update(func(tx *bbolt.Tx) error {
-		ttlBucket := tx.Bucket(ttlBucketName)
-		return errors.WithStack(ttlBucket.Put(dbKey, ttlBytes))
-	})
-	if err != nil {
-		return errors.WithStack(err)
-	}
-
-	// Add namespace to in-memory cache
-	if namespace != "" {
-		s.namespacesCache.Store(namespace, true)
-	}
-
-	return nil
-}
-
 func (s *diskMetaDB) set(key Key, namespace Namespace, expiresAt time.Time, headers http.Header) error {
 	ttlBytes, err := expiresAt.MarshalBinary()
 	if err != nil {
