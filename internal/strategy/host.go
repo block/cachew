@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/url"
+	"strings"
 
 	"github.com/alecthomas/errors"
 
@@ -26,8 +27,15 @@ func RegisterHost(r *Registry) {
 //
 // In this example, the strategy will be mounted under "/github.com".
 type HostConfig struct {
-	Target  string            `hcl:"target,label" help:"The target URL to proxy requests to."`
-	Headers map[string]string `hcl:"headers,optional" help:"Headers to add to upstream requests."`
+	Target    string               `hcl:"target,label" help:"The target URL to proxy requests to."`
+	Headers   map[string]string    `hcl:"headers,optional" help:"Headers to add to upstream requests."`
+	Fallbacks []HostFallbackConfig `hcl:"fallback,block" help:"Ordered, trusted fallback upstreams."`
+}
+
+// HostFallbackConfig maps a primary path prefix to a trusted mirror URL.
+type HostFallbackConfig struct {
+	Target     string `hcl:"target,label" help:"Fallback base URL."`
+	PathPrefix string `hcl:"path-prefix,optional" help:"Primary path prefix to replace with the fallback URL path (defaults to /)."`
 }
 
 // The Host [Strategy] forwards all GET requests to the specified host, caching the response payloads.
@@ -53,6 +61,23 @@ func NewHost(_ context.Context, config HostConfig, cache cache.Cache, mux Mux) (
 		client:  &http.Client{},
 		prefix:  prefix,
 		headers: config.Headers,
+	}
+
+	if len(config.Fallbacks) > 0 {
+		transport := &hostFallbackTransport{client: &http.Client{Transport: http.DefaultTransport}}
+		for _, config := range config.Fallbacks {
+			target, err := url.Parse(config.Target)
+			if err != nil || target.Host == "" || (target.Scheme != "http" && target.Scheme != "https") ||
+				target.User != nil || target.RawQuery != "" || target.Fragment != "" {
+				return nil, errors.Errorf("invalid fallback URL %q: expected an HTTP(S) base URL without credentials, query or fragment", config.Target)
+			}
+			pathPrefix := strings.TrimSuffix(config.PathPrefix, "/")
+			if pathPrefix != "" && !strings.HasPrefix(pathPrefix, "/") {
+				return nil, errors.Errorf("invalid fallback path-prefix %q: must start with /", config.PathPrefix)
+			}
+			transport.fallbacks = append(transport.fallbacks, hostFallback{target: target, prefix: pathPrefix})
+		}
+		h.client.Transport = transport
 	}
 
 	hdlr := handler.New(h.client, cache).
@@ -95,4 +120,40 @@ func (d *Host) buildTargetURL(r *http.Request) *url.URL {
 	targetURL.Path = path
 	targetURL.RawQuery = r.URL.RawQuery
 	return &targetURL
+}
+
+type hostFallback struct {
+	target *url.URL
+	prefix string
+}
+
+type hostFallbackTransport struct {
+	client    *http.Client
+	fallbacks []hostFallback
+}
+
+func (t *hostFallbackTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	resp, err := t.client.Do(r)
+	for _, fallback := range t.fallbacks {
+		if r.Context().Err() != nil || (err == nil && resp.StatusCode != http.StatusTooManyRequests &&
+			(resp.StatusCode < 500 || resp.StatusCode > 599)) {
+			break
+		}
+		path := r.URL.Path
+		if fallback.prefix != "" && path != fallback.prefix && !strings.HasPrefix(path, fallback.prefix+"/") {
+			continue
+		}
+		if resp != nil {
+			_ = resp.Body.Close()
+		}
+		req := r.Clone(r.Context())
+		target := *fallback.target
+		target.Path = strings.TrimSuffix(target.Path, "/") + "/" + strings.TrimPrefix(strings.TrimPrefix(path, fallback.prefix), "/")
+		target.RawPath = ""
+		target.RawQuery = r.URL.RawQuery
+		req.URL = &target
+		req.Host = ""
+		resp, err = t.client.Do(req)
+	}
+	return resp, errors.WithStack(err)
 }

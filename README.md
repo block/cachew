@@ -95,6 +95,28 @@ host "https://ghcr.io" {
 host "https://w3.org" {}
 ```
 
+Optional `fallback` blocks select trusted mirrors in declaration order. Cachew tries
+the next mirror only after a 429, a 5xx response, or a transport error. It never
+retries a 404 against a mirror: the primary is authoritative and mirrors can lag.
+Cancellation stops retries. Failures after response streaming starts cannot retry.
+
+```hcl
+host "https://packages.example.com" {
+  fallback "https://mirror.example.com/archive" {
+    path-prefix = "/releases"
+  }
+}
+```
+
+This maps `/releases/pkg.tar.gz` to `https://mirror.example.com/archive/pkg.tar.gz`.
+`path-prefix` defaults to `/` and matches complete path segments. Unmatched paths
+do not use that fallback. Query strings are preserved.
+
+Fallbacks receive the same request headers and are trusted like the primary for
+shared cache content. Configure only mirrors that serve byte-identical content.
+Successful responses use the primary URL's cache key, regardless of which upstream
+served them. Non-200 and incomplete responses are not cached.
+
 ### HTTP Proxy
 
 Caching proxy for clients that use absolute-form HTTP requests (e.g. Android `sdkmanager --proxy_host`).
