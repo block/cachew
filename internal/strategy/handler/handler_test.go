@@ -9,6 +9,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -513,4 +514,271 @@ func mustNewMemoryCache() cache.Cache {
 		panic(err)
 	}
 	return c
+}
+
+func serve(t *testing.T, h http.Handler, method, url string, headers map[string]string) *httptest.ResponseRecorder {
+	t.Helper()
+	ctx := logging.ContextWithLogger(context.Background(), slog.Default())
+	r := httptest.NewRequest(method, url, nil).WithContext(ctx)
+	for k, v := range headers {
+		r.Header.Set(k, v)
+	}
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	return w
+}
+
+func upstreamTransform(url string) func(*http.Request) (*http.Request, error) {
+	return func(r *http.Request) (*http.Request, error) {
+		return http.NewRequestWithContext(r.Context(), http.MethodGet, url, nil)
+	}
+}
+
+func TestHeadRequests(t *testing.T) {
+	var methods []string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		methods = append(methods, r.Method)
+		w.Header().Set("X-Digest", "sha256:abc")
+		_, _ = fmt.Fprint(w, "content")
+	}))
+	defer upstream.Close()
+	c := mustNewMemoryCache()
+	defer c.Close()
+	h := handler.New(http.DefaultClient, c).Transform(upstreamTransform(upstream.URL))
+
+	w := serve(t, h, http.MethodHead, "http://example.com/a", nil)
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "sha256:abc", w.Header().Get("X-Digest"))
+	assert.Equal(t, "", w.Body.String())
+
+	w = serve(t, h, http.MethodGet, "http://example.com/a", nil)
+	assert.Equal(t, "content", w.Body.String())
+
+	w = serve(t, h, http.MethodHead, "http://example.com/a", nil)
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "sha256:abc", w.Header().Get("X-Digest"))
+	assert.Equal(t, "7", w.Header().Get("Content-Length"))
+	assert.Equal(t, "", w.Body.String())
+
+	assert.Equal(t, []string{http.MethodHead, http.MethodGet}, methods)
+}
+
+func TestRangeMissCachesFullObject(t *testing.T) {
+	const payload = "0123456789"
+	tests := []struct {
+		name         string
+		headers      map[string]string
+		expectStatus int
+		expectBody   string
+		expectRange  string
+	}{
+		{name: "Partial", headers: map[string]string{"Range": "bytes=2-5"}, expectStatus: http.StatusPartialContent,
+			expectBody: "2345", expectRange: "bytes 2-5/10"},
+		{name: "Suffix", headers: map[string]string{"Range": "bytes=-3"}, expectStatus: http.StatusPartialContent,
+			expectBody: "789", expectRange: "bytes 7-9/10"},
+		{name: "NotSatisfiable", headers: map[string]string{"Range": "bytes=20-"},
+			expectStatus: http.StatusRequestedRangeNotSatisfiable, expectRange: "bytes */10"},
+		{name: "IfRangeMismatch", headers: map[string]string{"Range": "bytes=2-5", "If-Range": `"other"`},
+			expectStatus: http.StatusOK, expectBody: payload},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var upstreamRanges []string
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				upstreamRanges = append(upstreamRanges, r.Header.Get("Range"))
+				w.Header().Set("ETag", `"upstream"`)
+				_, _ = fmt.Fprint(w, payload)
+			}))
+			defer upstream.Close()
+			c := mustNewMemoryCache()
+			defer c.Close()
+			h := handler.New(http.DefaultClient, c).Transform(upstreamTransform(upstream.URL))
+
+			w := serve(t, h, http.MethodGet, "http://example.com/obj", tt.headers)
+			assert.Equal(t, tt.expectStatus, w.Code)
+			assert.Equal(t, tt.expectBody, w.Body.String())
+			assert.Equal(t, tt.expectRange, w.Header().Get("Content-Range"))
+			assert.Equal(t, []string{""}, upstreamRanges)
+
+			w = serve(t, h, http.MethodGet, "http://example.com/obj", nil)
+			assert.Equal(t, payload, w.Body.String())
+			assert.Equal(t, 1, len(upstreamRanges))
+		})
+	}
+}
+
+func TestVary(t *testing.T) {
+	calls := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		_, _ = fmt.Fprint(w, r.Header.Get("Accept"))
+	}))
+	defer upstream.Close()
+	c := mustNewMemoryCache()
+	defer c.Close()
+	h := handler.New(http.DefaultClient, c).
+		Transform(upstreamTransform(upstream.URL)).
+		Vary(func(r *http.Request) map[string]string {
+			return map[string]string{"Accept": r.Header.Get("Accept")}
+		})
+
+	for range 2 {
+		for _, accept := range []string{"a", "b"} {
+			w := serve(t, h, http.MethodGet, "http://example.com/v", map[string]string{"Accept": accept})
+			assert.Equal(t, accept, w.Body.String())
+		}
+	}
+	assert.Equal(t, 2, calls)
+}
+
+type expectedContent struct {
+	strings.Builder
+	want string
+}
+
+func (e *expectedContent) Verify() error {
+	if e.String() != e.want {
+		return errors.Errorf("got %q, want %q", e.String(), e.want)
+	}
+	return nil
+}
+
+func TestVerify(t *testing.T) {
+	tests := []struct {
+		name        string
+		want        string
+		expectCache bool
+	}{
+		{name: "Match", want: "content", expectCache: true},
+		{name: "Mismatch", want: "other", expectCache: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = fmt.Fprint(w, "content")
+			}))
+			defer upstream.Close()
+			c := mustNewMemoryCache()
+			defer c.Close()
+			h := handler.New(http.DefaultClient, c).
+				Transform(upstreamTransform(upstream.URL)).
+				Verify(func(*http.Request) handler.Verifier { return &expectedContent{want: tt.want} })
+
+			w := serve(t, h, http.MethodGet, "http://example.com/v", nil)
+			assert.Equal(t, "content", w.Body.String())
+
+			_, err := c.Stat(context.Background(), cache.NewKey("http://example.com/v"))
+			assert.Equal(t, tt.expectCache, err == nil)
+		})
+	}
+}
+
+func TestRevalidate(t *testing.T) {
+	tests := []struct {
+		name         string
+		freshFor     time.Duration
+		headStatus   int
+		changed      bool
+		expectBody   string
+		expectHeads  int
+		expectGets   int
+		expectRetain bool
+	}{
+		{name: "Fresh", freshFor: time.Hour, headStatus: http.StatusOK, expectBody: "v1", expectGets: 1},
+		{name: "Immutable", headStatus: http.StatusOK, changed: true, expectBody: "v1", expectGets: 1},
+		{name: "Unchanged", freshFor: time.Nanosecond, headStatus: http.StatusOK, expectBody: "v1", expectHeads: 1,
+			expectGets: 1},
+		{name: "Changed", freshFor: time.Nanosecond, headStatus: http.StatusOK, changed: true, expectBody: "v2",
+			expectHeads: 1, expectGets: 2},
+		{name: "UpstreamUnavailable", freshFor: time.Nanosecond, headStatus: http.StatusServiceUnavailable,
+			changed: true, expectBody: "v1", expectHeads: 1, expectGets: 1},
+		{name: "RateLimited", freshFor: time.Nanosecond, headStatus: http.StatusTooManyRequests, changed: true,
+			expectBody: "v1", expectHeads: 1, expectGets: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			version := "v1"
+			heads, gets := 0, 0
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("X-Digest", version)
+				if r.Method == http.MethodHead {
+					heads++
+					w.WriteHeader(tt.headStatus)
+					return
+				}
+				gets++
+				_, _ = fmt.Fprint(w, version)
+			}))
+			defer upstream.Close()
+			c := mustNewMemoryCache()
+			defer c.Close()
+			h := handler.New(http.DefaultClient, c).
+				Transform(upstreamTransform(upstream.URL)).
+				Revalidate("X-Digest", func(*http.Request) time.Duration { return tt.freshFor })
+
+			w := serve(t, h, http.MethodGet, "http://example.com/tag", nil)
+			assert.Equal(t, "v1", w.Body.String())
+			if tt.changed {
+				version = "v2"
+			}
+
+			w = serve(t, h, http.MethodGet, "http://example.com/tag", nil)
+			assert.Equal(t, tt.expectBody, w.Body.String())
+			assert.Equal(t, "", w.Header().Get("X-Cachew-Checked-At"))
+			assert.Equal(t, tt.expectHeads, heads)
+			assert.Equal(t, tt.expectGets, gets)
+		})
+	}
+}
+
+func TestParallelFetch(t *testing.T) {
+	payload := strings.Repeat("0123456789abcdef", 1000)
+	tests := []struct {
+		name          string
+		etag          string
+		ignoreRange   bool
+		expectFetches int
+	}{
+		{name: "Chunked", etag: `"blob"`, expectFetches: 16},
+		{name: "NoETag", expectFetches: 2},
+		{name: "RangeIgnored", etag: `"blob"`, ignoreRange: true, expectFetches: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var redirects, fetches atomic.Int32
+			mux := http.NewServeMux()
+			mux.HandleFunc("/blob", func(w http.ResponseWriter, r *http.Request) {
+				redirects.Add(1)
+				http.Redirect(w, r, "/cdn/blob", http.StatusTemporaryRedirect)
+			})
+			mux.HandleFunc("/cdn/blob", func(w http.ResponseWriter, r *http.Request) {
+				fetches.Add(1)
+				if tt.etag != "" {
+					w.Header().Set("ETag", tt.etag)
+				}
+				if tt.ignoreRange {
+					r.Header.Del("Range")
+				}
+				http.ServeContent(w, r, "", time.Time{}, strings.NewReader(payload))
+			})
+			upstream := httptest.NewServer(mux)
+			defer upstream.Close()
+			c := mustNewMemoryCache()
+			defer c.Close()
+			h := handler.New(http.DefaultClient, c).
+				Transform(upstreamTransform(upstream.URL+"/blob")).
+				ParallelFetch(1000, 4)
+
+			w := serve(t, h, http.MethodGet, "http://example.com/blob", nil)
+			assert.Equal(t, http.StatusOK, w.Code)
+			assert.Equal(t, strconv.Itoa(len(payload)), w.Header().Get("Content-Length"))
+			assert.True(t, w.Body.String() == payload, "response body differs from upstream")
+			assert.Equal(t, int32(1), redirects.Load())
+			assert.Equal(t, int32(tt.expectFetches), fetches.Load())
+
+			w = serve(t, h, http.MethodGet, "http://example.com/blob", nil)
+			assert.True(t, w.Body.String() == payload, "cached body differs from upstream")
+			assert.Equal(t, int32(tt.expectFetches), fetches.Load())
+		})
+	}
 }
