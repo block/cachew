@@ -305,9 +305,10 @@ func (d *Disk) openLocked(key Key, fullPath string, now time.Time) (f *os.File, 
 	if err != nil {
 		return nil, nil, false, errors.Join(errors.Errorf("failed to get headers: %w", err), f.Close())
 	}
-	ttl := min(expiresAt.Sub(now), d.config.MaxTTL)
-	if err := d.db.setTTL(d.namespace, key, now.Add(ttl)); err != nil {
-		return nil, nil, false, errors.Join(errors.Errorf("failed to update expiration time: %w", err), f.Close())
+	// Size eviction orders entries by mtime, so bumping it on read makes eviction LRU. The TTL is deliberately left
+	// alone so entries still expire when their creator requested.
+	if err := os.Chtimes(fullPath, now, now); err != nil {
+		return nil, nil, false, errors.Join(errors.Errorf("failed to update access time: %w", err), f.Close())
 	}
 	return f, headers, false, nil
 }
