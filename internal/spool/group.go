@@ -92,8 +92,10 @@ func (g *Group) join(req *http.Request, key string, fill FillFunc) (*entry, bool
 		return nil, false
 	}
 	if e, ok := g.entries[key]; ok {
-		e.addReader()
-		return e, false
+		if e.addReader() {
+			return e, false
+		}
+		e.markRemoved()
 	}
 	e := &entry{
 		group:   g,
@@ -125,19 +127,21 @@ type entry struct {
 	// reuse rules read so it can outlive that request.
 	leader *http.Request
 
-	mu       sync.Mutex
-	changed  chan struct{} // closed and replaced on every state change
-	status   int
-	header   http.Header
-	shared   bool
-	lifetime time.Duration
-	source   io.ReaderAt
-	release  func() error
-	written  int64
-	done     bool
-	err      error
-	readers  int
-	removed  bool
+	mu      sync.Mutex
+	changed chan struct{} // closed and replaced on every state change
+	status  int
+	header  http.Header
+	shared  bool
+	// expires is when a shared error stops accepting readers, counted from receipt
+	// of its headers; zero for every other response.
+	expires time.Time
+	source  io.ReaderAt
+	release func() error
+	written int64
+	done    bool
+	err     error
+	readers int
+	removed bool
 }
 
 func (e *entry) notifyLocked() {
@@ -145,10 +149,16 @@ func (e *entry) notifyLocked() {
 	e.changed = make(chan struct{})
 }
 
-func (e *entry) addReader() {
+// addReader joins a request to e, refusing once a shared error has expired so the
+// caller starts a fresh fill instead.
+func (e *entry) addReader() bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	if !e.expires.IsZero() && !time.Now().Before(e.expires) {
+		return false
+	}
 	e.readers++
+	return true
 }
 
 func (e *entry) leave() {
@@ -184,8 +194,11 @@ func (e *entry) publishHeader(status int, header http.Header) {
 		e.shared = true
 	} else {
 		window := e.group.registry.config.ErrorWindow
-		e.lifetime, e.shared = httputil.ReuseLifetime(e.leader, status, header, window)
-		e.lifetime = min(e.lifetime, window)
+		lifetime, shared := httputil.ReuseLifetime(e.leader, status, header, window)
+		e.shared = shared
+		if shared {
+			e.expires = time.Now().Add(min(lifetime, window))
+		}
 	}
 	e.notifyLocked()
 }
@@ -241,7 +254,7 @@ func (e *entry) retentionLocked(fillErr error) (retain time.Duration, forever bo
 	case e.status >= 200 && e.status < 300:
 		return 0, e.group.retention == RetainCompleted
 	case e.shared:
-		return e.lifetime, false
+		return time.Until(e.expires), false
 	default:
 		return 0, false
 	}

@@ -297,6 +297,64 @@ func TestErrorReuseChecksFollowerRequest(t *testing.T) {
 	}
 }
 
+func TestErrorReuseExpiresFromReceipt(t *testing.T) {
+	tests := []struct {
+		name        string
+		errorWindow time.Duration
+		finishFirst bool
+		wantFills   int32
+	}{
+		{name: "JoinsWithinLifetime", errorWindow: time.Hour, wantFills: 1},
+		{name: "JoinsDuringFillAfterLifetime", errorWindow: 20 * time.Millisecond, wantFills: 2},
+		{name: "ArrivesAfterSlowFillOutlivedLifetime", errorWindow: 20 * time.Millisecond, finishFirst: true, wantFills: 2},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx, registry, _ := newTestRegistry(t, spool.Config{ErrorWindow: tt.errorWindow})
+			group := registry.NewGroup(spool.ReleaseCompleted)
+			t.Cleanup(group.Close)
+			release := make(chan struct{})
+			var fills atomic.Int32
+			fill := func(_ context.Context, w *spool.Writer) error {
+				first := fills.Add(1) == 1
+				w.WriteHeader(http.StatusNotFound)
+				_, err := io.WriteString(w, "missing")
+				if first {
+					<-release
+				}
+				return err
+			}
+			serve := func(recorder *httptest.ResponseRecorder, done chan<- error) {
+				req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/object", nil)
+				_, err := group.Serve(recorder, req, key, fill)
+				done <- err
+			}
+
+			firstErr := make(chan error, 1)
+			go serve(httptest.NewRecorder(), firstErr)
+			waitFor(t, func() bool { return group.Written(key) > 0 })
+			time.Sleep(50 * time.Millisecond)
+			if tt.finishFirst {
+				close(release)
+				assert.NoError(t, <-firstErr)
+			}
+			second := httptest.NewRecorder()
+			secondErr := make(chan error, 1)
+			go serve(second, secondErr)
+			waitFor(t, func() bool { return fills.Load() == 2 || group.Readers(key) == 2 })
+			if !tt.finishFirst {
+				close(release)
+				assert.NoError(t, <-firstErr)
+			}
+
+			assert.NoError(t, <-secondErr)
+			assert.Equal(t, http.StatusNotFound, second.Code)
+			assert.Equal(t, "missing", second.Body.String())
+			assert.Equal(t, tt.wantFills, fills.Load())
+		})
+	}
+}
+
 func TestUnsharedResponseIsNotServedToFollowers(t *testing.T) {
 	ctx, registry, _ := newTestRegistry(t, spool.Config{ErrorWindow: time.Hour})
 	group := registry.NewGroup(spool.ReleaseCompleted)
