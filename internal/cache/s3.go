@@ -88,6 +88,10 @@ type s3Meta struct {
 // keeps them readable.
 const s3TagMetadataKey = "Tag"
 
+// s3SlidingExpiryMetadataKey marks objects created with the default TTL. Reads extend only these;
+// an explicit TTL bounds staleness (e.g. git bundles), so it is a hard expiry.
+const s3SlidingExpiryMetadataKey = "Sliding-Expiry"
+
 // s3MaxUserMetadataSize is S3's limit on the combined size of an object's
 // user-defined metadata keys and values. PutObject fails if it is exceeded.
 const s3MaxUserMetadataSize = 2048
@@ -99,11 +103,13 @@ var s3EssentialHeaders = []string{ //nolint:gochecknoglobals
 	"Cache-Control", ETagKey, "Last-Modified",
 }
 
-// s3UserMetadata encodes the tag and headers as data object user metadata.
-// Upstreams can send arbitrarily large response headers, so when they don't
-// fit within S3's limit only the headers needed to serve the object are kept.
-func s3UserMetadata(tag string, headers http.Header) (map[string]string, error) {
+// s3UserMetadata encodes the tag, expiry mode and headers as data object user metadata.
+// Oversized upstream headers are reduced to those needed to serve the object.
+func s3UserMetadata(tag string, slidingExpiry bool, headers http.Header) (map[string]string, error) {
 	metadata := map[string]string{s3TagMetadataKey: tag}
+	if slidingExpiry {
+		metadata[s3SlidingExpiryMetadataKey] = "true"
+	}
 	if len(headers) == 0 {
 		return metadata, nil
 	}
@@ -308,23 +314,16 @@ func (s *S3) Open(ctx context.Context, key Key, opts ...Option) (io.ReadCloser, 
 
 	objectName := s.keyToPath(s.namespace, key)
 
-	// Reset expiration time to implement LRU (same as disk cache).
-	// Only refresh when remaining TTL is below 50% of max to avoid
-	// rewriting the companion metadata on every read.
-	if !meta.ExpiresAt.IsZero() {
-		now := time.Now()
-		if meta.ExpiresAt.Sub(now) < s.config.MaxTTL/2 {
-			newExpiresAt := ceilSecond(now.Add(s.config.MaxTTL))
-			// Preserve every companion header, not just the ETag, so headers
-			// recorded by UpdateMetadata survive the refresh.
-			refreshMeta := s3Meta{Headers: meta.Headers.Clone(), ExpiresAt: newExpiresAt, Tag: meta.Tag}
-			go func() {
-				bgCtx := context.WithoutCancel(ctx)
-				if err := s.writeMeta(bgCtx, s.namespace, key, refreshMeta); err != nil {
-					s.logger.WarnContext(bgCtx, "Failed to refresh S3 expiration", "key", key, "error", err)
-				}
-			}()
-		}
+	if newExpiresAt, ok := s.refreshedExpiry(hasSlidingExpiry(objInfo), meta.ExpiresAt, time.Now()); ok {
+		// Preserve every companion header, not just the ETag, so headers
+		// recorded by UpdateMetadata survive the refresh.
+		refreshMeta := s3Meta{Headers: meta.Headers.Clone(), ExpiresAt: newExpiresAt, Tag: meta.Tag}
+		go func() {
+			bgCtx := context.WithoutCancel(ctx)
+			if err := s.writeMeta(bgCtx, s.namespace, key, refreshMeta); err != nil {
+				s.logger.WarnContext(bgCtx, "Failed to refresh S3 expiration", "key", key, "error", err)
+			}
+		}()
 	}
 
 	if h, err := conditionalShortCircuit(headers, opts); err != nil {
@@ -349,6 +348,19 @@ func (s *S3) Open(ctx context.Context, key Key, opts ...Option) (io.ReadCloser, 
 	}
 
 	return reader, headers, nil
+}
+
+// refreshedExpiry returns the expiry a read at now extends an entry to, and whether a refresh is due.
+// Refreshing only below half of MaxTTL avoids rewriting the companion on every read.
+func (s *S3) refreshedExpiry(slidingExpiry bool, expiresAt, now time.Time) (time.Time, bool) {
+	if !slidingExpiry || expiresAt.IsZero() || expiresAt.Sub(now) >= s.config.MaxTTL/2 {
+		return time.Time{}, false
+	}
+	return ceilSecond(now.Add(s.config.MaxTTL)), true
+}
+
+func hasSlidingExpiry(objInfo minio.ObjectInfo) bool {
+	return objInfo.UserMetadata[s3SlidingExpiryMetadataKey] == "true"
 }
 
 func (s *S3) metaPath(namespace Namespace, key Key) string {
@@ -431,6 +443,7 @@ func (r *s3Reader) Close() error {
 }
 
 func (s *S3) Create(ctx context.Context, key Key, headers http.Header, ttl time.Duration, opts ...Option) (Writer, error) {
+	slidingExpiry := ttl == 0
 	if ttl > s.config.MaxTTL || ttl == 0 {
 		ttl = s.config.MaxTTL
 	}
@@ -448,7 +461,7 @@ func (s *S3) Create(ctx context.Context, key Key, headers http.Header, ttl time.
 		return nil, err
 	}
 
-	userMetadata, err := s3UserMetadata(tag, clonedHeaders)
+	userMetadata, err := s3UserMetadata(tag, slidingExpiry, clonedHeaders)
 	if err != nil {
 		return nil, err
 	}
