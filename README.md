@@ -125,6 +125,42 @@ Caching proxy for clients that use absolute-form HTTP requests (e.g. Android `sd
 proxy {}
 ```
 
+### OCI
+
+Read-only pull-through cache for Docker/OCI image registries, with one block per registry. Pushes are rejected.
+
+**URL patterns:** `/oci/{registry}/v2/...`, and `/v2/...` on each of `hosts`.
+
+```hcl
+oci "docker.io" {
+  upstream = "https://registry-1.docker.io"
+  hosts    = ["docker.cachew.example.com"]
+  rewrite "^([^/]+)$" { replacement = "library/$1" }
+}
+```
+
+- Blobs and digest-addressed manifests are checked against their digest and cached until evicted.
+- Tag manifests are rechecked with a `HEAD` request once they are older than `tag-ttl` (default `5m`). If the registry is unavailable or rate limiting, the cached copy is served.
+- `username` and `password` authenticate to the upstream for all clients. Clients' own credentials are never forwarded. Without them, access is anonymous.
+- `blob-chunk-size-mb` (default `32`) and `blob-concurrency` (default `4`) control parallel range requests when filling large blobs.
+- Tag lists and referrers are not cached.
+
+containerd can use the path-prefixed form, e.g. in `/etc/containerd/certs.d/docker.io/hosts.toml`:
+
+```toml
+server = "https://registry-1.docker.io"
+
+[host."https://cachew.example.com/oci/docker.io/v2"]
+  capabilities = ["pull", "resolve"]
+  override_path = true
+```
+
+Docker and Podman cannot use a path prefix, so they need a hostname from `hosts` that resolves to cachew. Docker's `registry-mirrors` setting only applies to Docker Hub. In `/etc/docker/daemon.json`:
+
+```json
+{ "registry-mirrors": ["https://docker.cachew.example.com"] }
+```
+
 ## Cache Backends
 
 Multiple backends can be configured simultaneously — they are automatically combined into a tiered cache. Cache blocks
