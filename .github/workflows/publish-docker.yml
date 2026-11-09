@@ -56,7 +56,7 @@ jobs:
             # Tag stable releases (no pre-release suffix) as latest
             type=raw,value=latest,enable=${{ !contains(github.ref, '-') }}
 
-      - uses: cashapp/activate-hermit@e49f5cb4dd64ff0b0b659d1d8df499595451155a # v1
+      - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
       - run: |
           just build linux arm64
           just build linux amd64
