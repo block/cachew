@@ -107,7 +107,6 @@ const checkedAtHeader = "X-Cachew-Checked-At"
 // - No request transformation is performed
 // - Standard error handling is used.
 func New(client *http.Client, c cache.Cache, spools *spool.Registry) *Handler {
-	client = metrics.ArtifactClient(client)
 	scope := httputil.NewBackoffScope(client.Transport)
 	scoped := *client
 	scoped.Transport = scope
@@ -312,9 +311,22 @@ const (
 	CacheError = "error"
 )
 
+// CacheSourceAttribute labels a cache hit with the backend that served it,
+// such as disk, s3 or remote, so local and shared hits can be told apart.
+const CacheSourceAttribute = "cachew.cache.source"
+
 func labelCacheResult(ctx context.Context, result string) {
 	labeler, _ := otelhttp.LabelerFromContext(ctx)
 	labeler.Add(attribute.String(CacheResultAttribute, result))
+}
+
+func (h *Handler) labelCacheHit(ctx context.Context) {
+	source, ok := metrics.CacheSource(ctx)
+	if !ok {
+		source = cache.BackendName(h.cache)
+	}
+	labeler, _ := otelhttp.LabelerFromContext(ctx)
+	labeler.Add(attribute.String(CacheResultAttribute, CacheHit), attribute.String(CacheSourceAttribute, source))
 }
 
 // coalescable reports whether a miss can share the plain response for its key.
@@ -337,24 +349,12 @@ func (h *Handler) serveCached(w http.ResponseWriter, r *http.Request, key cache.
 			return false, nil
 		}
 		if httputil.ServeCacheStat(w, clientHeaders(headers), err) {
-			labelCacheResult(ctx, CacheHit)
+			h.labelCacheHit(ctx)
 			return true, nil
 		}
 		return h.cacheMiss(w, r, err), nil
 	}
 	cr, headers, err := h.cache.Open(ctx, key, opts...)
-	result := "error"
-	switch {
-	case err == nil:
-		result = "hit"
-	case errors.Is(err, os.ErrNotExist):
-		result = "miss"
-	case errors.Is(err, cache.ErrPreconditionFailed):
-		result = "precondition_failed"
-	case errors.Is(err, cache.ErrNotModified), errors.Is(err, cache.ErrRangeNotSatisfiable):
-		result = "conditional"
-	}
-	metrics.RecordCacheResolution(ctx, result, cache.BackendName(h.cache))
 	if cacheEntryExists(err) && !h.fresh(r, key, headers) {
 		if cr != nil {
 			return false, errors.Wrap(cr.Close(), "close stale entry")
@@ -362,7 +362,7 @@ func (h *Handler) serveCached(w http.ResponseWriter, r *http.Request, key cache.
 		return false, nil
 	}
 	if handled, _, serveErr := httputil.ServeCacheHit(w, clientHeaders(headers), cr, err); handled {
-		labelCacheResult(ctx, CacheHit)
+		h.labelCacheHit(ctx)
 		logging.FromContext(ctx).DebugContext(ctx, "Cache hit")
 		return true, errors.WithStack(serveErr)
 	}
@@ -519,16 +519,30 @@ func (h *Handler) fill(ctx context.Context, w *spool.Writer, r *http.Request, ke
 
 	maps.Copy(w.Header(), resp.Header)
 	w.WriteHeader(http.StatusOK)
+	result := fillSuccess
+	if h.external {
+		defer func() { metrics.RecordCacheFill(ctx, result) }()
+	}
+	var fw *fillWriter
 	cw, err := h.cache.Create(ctx, key, h.cacheHeaders(resp), h.ttlFunc(r))
 	if err != nil {
+		result = fillCreateError
 		logging.FromContext(ctx).WarnContext(ctx, "Failed to create cache entry", "error", err)
-	} else if err := w.Store(h.verified(r, cw)); err != nil {
-		return errors.Wrap(err, "store response")
+	} else {
+		fw = h.fillWriter(r, cw)
+		if err := w.Store(fw); err != nil {
+			result = fillCreateError
+			return errors.Wrap(err, "store response")
+		}
 	}
 	if _, err := io.Copy(w, resp.Body); err != nil {
+		if fw != nil {
+			result = fw.result(ctx, fillTransferError)
+		}
 		return errors.Wrap(err, "stream response")
 	}
 	if err := w.Commit(); err != nil {
+		result = fw.result(ctx, fillCommitError)
 		logging.FromContext(ctx).WarnContext(ctx, "Failed to cache response", "error", err)
 	}
 	return nil
@@ -542,53 +556,81 @@ func (h *Handler) cacheHeaders(resp *http.Response) http.Header {
 	return headers
 }
 
-// verified commits cw only if the body verifies. A failed commit does not fail
-// the shared response, so clients still receive the bytes, as in streamAndCache.
-func (h *Handler) verified(r *http.Request, cw cache.Writer) cache.Writer {
-	if h.verifyFunc == nil {
-		return cw
+// Outcomes recorded by cachew.cache.fills.
+const (
+	fillSuccess       = "success"
+	fillCreateError   = "create_error"
+	fillWriteError    = "write_error"
+	fillTransferError = "transfer_error"
+	fillCommitError   = "commit_error"
+	fillCanceled      = "canceled"
+)
+
+// fillWriter commits cw only if the body verifies, and records whether the
+// cache write itself failed. A failed commit does not fail the shared response,
+// so clients still receive the bytes, as in streamAndCache.
+func (h *Handler) fillWriter(r *http.Request, cw cache.Writer) *fillWriter {
+	fw := &fillWriter{Writer: cw}
+	if h.verifyFunc != nil {
+		fw.verifier = h.verifyFunc(r)
 	}
-	verifier := h.verifyFunc(r)
-	if verifier == nil {
-		return cw
-	}
-	return &verifyingWriter{Writer: cw, verifier: verifier}
+	return fw
 }
 
-type verifyingWriter struct {
+type fillWriter struct {
 	cache.Writer
-	verifier Verifier
-	err      error
+	verifier  Verifier
+	verifyErr error
+	writeErr  error
 }
 
-var _ cache.PendingReader = (*verifyingWriter)(nil)
+var _ cache.PendingReader = (*fillWriter)(nil)
 
-func (v *verifyingWriter) Write(p []byte) (int, error) {
-	n, err := v.Writer.Write(p)
-	if v.err == nil {
-		_, v.err = v.verifier.Write(p[:n])
+func (f *fillWriter) Write(p []byte) (int, error) {
+	n, err := f.Writer.Write(p)
+	if err != nil && f.writeErr == nil {
+		f.writeErr = err
+	}
+	if f.verifier != nil && f.verifyErr == nil {
+		_, f.verifyErr = f.verifier.Write(p[:n])
 	}
 	return n, errors.WithStack(err)
 }
 
-func (v *verifyingWriter) Close() error {
-	err := v.err
+func (f *fillWriter) Close() error {
+	if f.verifier == nil {
+		return errors.WithStack(f.Writer.Close())
+	}
+	err := f.verifyErr
 	if err == nil {
-		err = v.verifier.Verify()
+		err = f.verifier.Verify()
 	}
 	if err != nil {
 		err = errors.Wrap(err, "verify response")
-		return errors.Join(err, v.Writer.Abort(err))
+		return errors.Join(err, f.Writer.Abort(err))
 	}
-	return errors.WithStack(v.Writer.Close())
+	return errors.WithStack(f.Writer.Close())
 }
 
-func (v *verifyingWriter) OpenPending() (cache.ReadAtCloser, error) {
-	pending, ok := v.Writer.(cache.PendingReader)
+func (f *fillWriter) OpenPending() (cache.ReadAtCloser, error) {
+	pending, ok := f.Writer.(cache.PendingReader)
 	if !ok {
 		return nil, errors.WithStack(cache.ErrPendingReadUnsupported)
 	}
 	return errors.WithStack2(pending.OpenPending())
+}
+
+// result classifies a failed fill, preferring the cache's own write failure
+// over the stream or commit failure it caused.
+func (f *fillWriter) result(ctx context.Context, otherwise string) string {
+	switch {
+	case f.writeErr != nil:
+		return fillWriteError
+	case ctx.Err() != nil:
+		return fillCanceled
+	default:
+		return otherwise
+	}
 }
 
 // fetch sends the transformed request upstream. On failure it writes an error
@@ -638,14 +680,14 @@ func (h *Handler) streamNonOKResponse(w http.ResponseWriter, resp *http.Response
 // discarded and the response is streamed in full.
 func (h *Handler) streamAndCache(w http.ResponseWriter, r *http.Request, key cache.Key, resp *http.Response) error {
 	maps.Copy(w.Header(), resp.Header)
-	result := "success"
+	result := fillSuccess
 	if h.external {
 		defer func() { metrics.RecordCacheFill(r.Context(), result) }()
 	}
 
 	cw, err := h.cache.Create(r.Context(), key, h.cacheHeaders(resp), h.ttlFunc(r))
 	if err != nil {
-		result = "create_error"
+		result = fillCreateError
 		_, copyErr := io.Copy(w, resp.Body)
 		return errors.Join(errors.Wrap(err, "create cache entry"), errors.Wrap(copyErr, "stream response"))
 	}
@@ -681,13 +723,13 @@ func (h *Handler) streamAndCache(w http.ResponseWriter, r *http.Request, key cac
 	cacheErr := <-cacheErrCh
 	switch {
 	case tee.err != nil:
-		result = "write_error"
+		result = fillWriteError
 	case r.Context().Err() != nil:
-		result = "canceled"
+		result = fillCanceled
 	case copyErr != nil || closeErr != nil:
-		result = "transfer_error"
+		result = fillTransferError
 	case cacheErr != nil:
-		result = "commit_error"
+		result = fillCommitError
 	}
 	return errors.Join(
 		errors.Wrap(errors.Join(copyErr, closeErr), "stream response"),

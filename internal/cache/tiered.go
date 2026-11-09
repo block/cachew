@@ -52,7 +52,9 @@ type authoritativeCache struct {
 
 func (c authoritativeCache) Open(ctx context.Context, key Key, opts ...Option) (io.ReadCloser, http.Header, error) {
 	r, headers, err := c.Cache.Open(ctx, key, opts...)
-	metrics.ObserveCacheSource(ctx, BackendName(c.Cache), 0)
+	if err == nil || errors.Is(err, ErrNotModified) || errors.Is(err, ErrRangeNotSatisfiable) {
+		metrics.ObserveCacheSource(ctx, BackendName(c.Cache))
+	}
 	return r, headers, errors.WithStack(err)
 }
 
@@ -309,7 +311,7 @@ func (t Tiered) Open(ctx context.Context, key Key, opts ...Option) (io.ReadClose
 	// fallback, served only if no deeper tier holds the pinned version.
 	var fallback io.ReadCloser
 	var fallbackHeaders http.Header
-	fallbackTier := -1
+	var fallbackSource Cache
 	var probeErrs []error
 	rejected := false // a tier failed If-Match; deeper tiers may hold the named version
 
@@ -332,7 +334,7 @@ func (t Tiered) Open(ctx context.Context, key Key, opts ...Option) (io.ReadClose
 			if fallback != nil {
 				discardTieredReader(ctx, key, fallback)
 			}
-			metrics.ObserveCacheSource(ctx, BackendName(c), i)
+			metrics.ObserveCacheSource(ctx, BackendName(c))
 			return nil, headers, errors.WithStack(err)
 		case err != nil:
 			// A hard error is definitive when no earlier tier produced a
@@ -354,13 +356,13 @@ func (t Tiered) Open(ctx context.Context, key Key, opts ...Option) (io.ReadClose
 				discardTieredReader(ctx, key, r)
 				continue
 			}
-			fallback, fallbackHeaders, fallbackTier = r, headers, i
+			fallback, fallbackHeaders, fallbackSource = r, headers, c
 			continue
 		}
 		if fallback != nil {
 			discardTieredReader(ctx, key, fallback)
 		}
-		metrics.ObserveCacheSource(ctx, BackendName(c), i)
+		metrics.ObserveCacheSource(ctx, BackendName(c))
 		return t.convergeTier0(ctx, key, r, headers, c, i, partial), headers, nil
 	}
 	if len(probeErrs) > 0 {
@@ -370,7 +372,7 @@ func (t Tiered) Open(ctx context.Context, key Key, opts ...Option) (io.ReadClose
 		return nil, nil, errors.Join(probeErrs...)
 	}
 	if fallback != nil {
-		metrics.ObserveCacheSource(ctx, BackendName(t.caches[fallbackTier]), fallbackTier)
+		metrics.ObserveCacheSource(ctx, BackendName(fallbackSource))
 		return fallback, fallbackHeaders, nil
 	}
 	if rejected {

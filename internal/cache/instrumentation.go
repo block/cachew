@@ -4,6 +4,8 @@ import (
 	"context"
 	"sync"
 
+	"github.com/alecthomas/errors"
+
 	"github.com/block/cachew/internal/metrics"
 )
 
@@ -52,6 +54,18 @@ type observedWriter struct {
 	tier    int
 	result  string
 	once    sync.Once
+}
+
+var _ PendingReader = (*observedWriter)(nil)
+
+// OpenPending keeps pending reads available through the wrapper, so coalesced
+// readers can follow the write instead of spooling a second copy.
+func (w *observedWriter) OpenPending() (ReadAtCloser, error) {
+	pending, ok := w.Writer.(PendingReader)
+	if !ok {
+		return nil, errors.WithStack(ErrPendingReadUnsupported)
+	}
+	return errors.WithStack2(pending.OpenPending())
 }
 
 func (w *observedWriter) Write(p []byte) (int, error) {

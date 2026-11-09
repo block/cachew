@@ -9,11 +9,13 @@ import (
 	"time"
 
 	"github.com/alecthomas/assert/v2"
+	"github.com/alecthomas/errors"
 	"go.opentelemetry.io/otel"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 
 	"github.com/block/cachew/internal/logging"
+	"github.com/block/cachew/internal/metadatadb"
 	"github.com/block/cachew/internal/metrics"
 )
 
@@ -61,4 +63,28 @@ func TestObservedBackfillEarlyClose(t *testing.T) {
 		}
 		assert.Equal(t, int64(1), count)
 	}
+}
+
+func TestObservedWriterKeepsPendingReads(t *testing.T) {
+	_, ctx := logging.Configure(t.Context(), logging.Config{})
+	ctx = metrics.NewArtifactMetrics().WithRequest(ctx, "host", "registry.example", true)
+	disk, err := NewDisk(ctx, DiskConfig{Root: t.TempDir()})
+	assert.NoError(t, err)
+	memory, err := NewMemory(ctx, MemoryConfig{MaxTTL: time.Hour})
+	assert.NoError(t, err)
+	c := MaybeNewTiered(ctx, []Cache{disk, memory}, metadatadb.New(ctx, metadatadb.NewMemoryBackend()))
+	defer c.Close()
+	w, err := c.Create(ctx, NewKey("artifact"), nil, time.Hour)
+	assert.NoError(t, err)
+	pending, ok := w.(PendingReader)
+	assert.True(t, ok)
+	r, err := pending.OpenPending()
+	assert.NoError(t, err)
+	_, err = io.WriteString(w, "artifact")
+	assert.NoError(t, err)
+	p := make([]byte, len("artifact"))
+	_, err = r.ReadAt(p, 0)
+	assert.NoError(t, err)
+	assert.Equal(t, "artifact", string(p))
+	assert.NoError(t, errors.Join(w.Close(), r.Close()))
 }

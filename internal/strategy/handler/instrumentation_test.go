@@ -14,12 +14,14 @@ import (
 
 	"github.com/alecthomas/assert/v2"
 	"github.com/alecthomas/errors"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 
 	"github.com/block/cachew/internal/cache"
+	"github.com/block/cachew/internal/httputil"
 	"github.com/block/cachew/internal/logging"
 	"github.com/block/cachew/internal/metadatadb"
 	"github.com/block/cachew/internal/metrics"
@@ -79,33 +81,32 @@ func TestArtifactCacheSourcesAndBackfill(t *testing.T) {
 	metadata := metadatadb.New(artifactContext(t), metadatadb.NewMemoryBackend())
 	c := cache.MaybeNewTiered(artifactContext(t), []cache.Cache{disk, memory}, metadata)
 	t.Cleanup(func() { assert.NoError(t, c.Close()) })
-	h := handler.New(origin.Client(), c, newTestSpools(t)).Metrics("host", "registry.example").Transform(func(r *http.Request) (*http.Request, error) {
+	h := handler.New(originClient(origin.Client().Transport), c, newTestSpools(t)).Metrics("host", "registry.example").Transform(func(r *http.Request) (*http.Request, error) {
 		return http.NewRequestWithContext(r.Context(), http.MethodGet, origin.URL+r.URL.Path, nil)
 	})
-	serve := func(headers http.Header) *httptest.ResponseRecorder {
+	serve := func(headers http.Header) (*httptest.ResponseRecorder, map[string]string) {
 		r := artifactHTTPRequest(t, "/artifact")
 		r.Header = headers
-		w := httptest.NewRecorder()
-		h.ServeHTTP(w, r)
-		return w
+		return serveLabeled(h, r)
 	}
-	first := serve(http.Header{})
+	first, labels := serve(http.Header{})
 	assert.Equal(t, http.StatusOK, first.Code)
 	assert.Equal(t, "artifact", first.Body.String())
-	second := serve(http.Header{})
+	assert.Equal(t, map[string]string{handler.CacheResultAttribute: handler.CacheMiss}, labels)
+	second, labels := serve(http.Header{})
 	assert.Equal(t, "artifact", second.Body.String())
+	assert.Equal(t, "disk", labels[handler.CacheSourceAttribute])
 	assert.NoError(t, disk.Delete(artifactContext(t), cache.NewKey("/artifact")))
-	third := serve(http.Header{})
+	third, labels := serve(http.Header{})
 	assert.Equal(t, "artifact", third.Body.String())
-	fourth := serve(http.Header{})
+	assert.Equal(t, map[string]string{handler.CacheResultAttribute: handler.CacheHit, handler.CacheSourceAttribute: "memory"}, labels)
+	fourth, labels := serve(http.Header{})
 	assert.Equal(t, "artifact", fourth.Body.String())
-	conditional := serve(http.Header{"If-None-Match": []string{fourth.Header().Get("Etag")}})
+	assert.Equal(t, "disk", labels[handler.CacheSourceAttribute])
+	conditional, labels := serve(http.Header{"If-None-Match": []string{fourth.Header().Get("ETag")}})
 	assert.Equal(t, http.StatusNotModified, conditional.Code)
+	assert.Equal(t, map[string]string{handler.CacheResultAttribute: handler.CacheHit, handler.CacheSourceAttribute: "disk"}, labels)
 	assert.Equal(t, int64(1), artifactCount(t, reader, "cachew.origin.requests", "status_code", "200"))
-	assert.Equal(t, int64(1), artifactCount(t, reader, "cachew.cache.resolutions", "result", "miss"))
-	assert.Equal(t, int64(2), artifactCount(t, reader, "cachew.cache.resolutions", "source", "disk", "result", "hit"))
-	assert.Equal(t, int64(1), artifactCount(t, reader, "cachew.cache.resolutions", "source", "memory", "tier", "1"))
-	assert.Equal(t, int64(1), artifactCount(t, reader, "cachew.cache.resolutions", "source", "disk", "result", "conditional"))
 	assert.Equal(t, int64(1), artifactCount(t, reader, "cachew.cache.fills", "purpose", "origin", "result", "success"))
 	assert.Equal(t, int64(1), artifactCount(t, reader, "cachew.cache.fills", "purpose", "backfill", "result", "success"))
 	assert.Equal(t, int64(3), artifactCount(t, reader, "cachew.cache.tier_writes", "result", "success"))
@@ -124,7 +125,7 @@ func TestArtifactRedirectsAndThrottling(t *testing.T) {
 	defer origin.Close()
 	c := cache.MaybeNewTiered(artifactContext(t), []cache.Cache{mustNewMemoryCache()}, nil)
 	defer c.Close()
-	h := handler.New(origin.Client(), c, newTestSpools(t)).Metrics("host", "registry.example").Transform(func(r *http.Request) (*http.Request, error) {
+	h := handler.New(originClient(origin.Client().Transport), c, newTestSpools(t)).Metrics("host", "registry.example").Transform(func(r *http.Request) (*http.Request, error) {
 		return http.NewRequestWithContext(r.Context(), http.MethodGet, origin.URL+"/redirect", nil)
 	})
 	for range 2 {
@@ -135,7 +136,6 @@ func TestArtifactRedirectsAndThrottling(t *testing.T) {
 	}
 	assert.Equal(t, int64(2), artifactCount(t, reader, "cachew.origin.requests", "status_code", "302"))
 	assert.Equal(t, int64(2), artifactCount(t, reader, "cachew.origin.requests", "status_code", "429"))
-	assert.Equal(t, int64(2), artifactCount(t, reader, "cachew.cache.resolutions", "result", "miss"))
 	assert.Equal(t, int64(0), artifactCount(t, reader, "cachew.cache.fills"))
 }
 
@@ -155,7 +155,7 @@ func TestArtifactTransportFailures(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			reader := artifactReader(t)
-			client := &http.Client{Transport: artifactTransportFunc(func(*http.Request) (*http.Response, error) { return nil, tt.err })}
+			client := originClient(artifactTransportFunc(func(*http.Request) (*http.Response, error) { return nil, tt.err }))
 			c := mustNewMemoryCache()
 			defer c.Close()
 			h := handler.New(client, c, newTestSpools(t)).Metrics("host", "registry.example")
@@ -210,7 +210,7 @@ func TestArtifactFillFailuresKeepClientResponse(t *testing.T) {
 			defer origin.Close()
 			c := cache.MaybeNewTiered(artifactContext(t), []cache.Cache{artifactFailCache{Cache: mustNewMemoryCache(), phase: phase}}, nil)
 			defer c.Close()
-			h := handler.New(origin.Client(), c, newTestSpools(t)).Transform(func(r *http.Request) (*http.Request, error) {
+			h := handler.New(originClient(origin.Client().Transport), c, newTestSpools(t)).Transform(func(r *http.Request) (*http.Request, error) {
 				return http.NewRequestWithContext(r.Context(), http.MethodGet, origin.URL, nil)
 			})
 			w := httptest.NewRecorder()
@@ -236,11 +236,10 @@ func TestArtifactInterruptedBodyIsNotSuccessfulFill(t *testing.T) {
 	defer origin.Close()
 	c := cache.MaybeNewTiered(artifactContext(t), []cache.Cache{mustNewMemoryCache()}, nil)
 	defer c.Close()
-	h := handler.New(origin.Client(), c, newTestSpools(t)).Transform(func(r *http.Request) (*http.Request, error) {
+	h := handler.New(originClient(origin.Client().Transport), c, newTestSpools(t)).Transform(func(r *http.Request) (*http.Request, error) {
 		return http.NewRequestWithContext(r.Context(), http.MethodGet, origin.URL, nil)
 	})
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, artifactHTTPRequest(t, "/artifact"))
+	assert.Panics(t, func() { h.ServeHTTP(httptest.NewRecorder(), artifactHTTPRequest(t, "/artifact")) })
 	assert.Equal(t, int64(1), artifactCount(t, reader, "cachew.origin.requests", "status_code", "200"))
 	assert.Equal(t, int64(1), artifactCount(t, reader, "cachew.cache.fills", "result", "transfer_error"))
 	assert.Equal(t, int64(0), artifactCount(t, reader, "cachew.cache.tier_writes", "result", "success"))
@@ -248,9 +247,9 @@ func TestArtifactInterruptedBodyIsNotSuccessfulFill(t *testing.T) {
 
 func TestArtifactInternalForwardAndCardinality(t *testing.T) {
 	reader := artifactReader(t)
-	client := &http.Client{Transport: artifactTransportFunc(func(*http.Request) (*http.Response, error) {
+	client := originClient(artifactTransportFunc(func(*http.Request) (*http.Response, error) {
 		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: io.NopCloser(strings.NewReader("artifact"))}, nil
-	})}
+	}))
 	c := cache.NoOpCache()
 	h := handler.New(client, c, newTestSpools(t)).Metrics("proxy", "other").InternalForward()
 	var wg sync.WaitGroup
@@ -264,7 +263,6 @@ func TestArtifactInternalForwardAndCardinality(t *testing.T) {
 	wg.Wait()
 	assert.Equal(t, int64(0), artifactCount(t, reader, "cachew.origin.requests"))
 	assert.Equal(t, int64(0), artifactCount(t, reader, "cachew.cache.fills"))
-	assert.Equal(t, int64(50), artifactCount(t, reader, "cachew.cache.resolutions", "registry", "other"))
 	var data metricdata.ResourceMetrics
 	assert.NoError(t, reader.Collect(artifactContext(t), &data))
 	for _, scope := range data.ScopeMetrics {
@@ -299,7 +297,6 @@ func TestArtifactBackfillFailureRemainsVisible(t *testing.T) {
 }
 
 func TestArtifactStaleTierIsNotCountedAsHit(t *testing.T) {
-	reader := artifactReader(t)
 	disk, err := cache.NewDisk(artifactContext(t), cache.DiskConfig{Root: t.TempDir()})
 	assert.NoError(t, err)
 	memory := mustNewMemoryCache()
@@ -316,12 +313,10 @@ func TestArtifactStaleTierIsNotCountedAsHit(t *testing.T) {
 	h := handler.New(http.DefaultClient, c, newTestSpools(t))
 	r := artifactHTTPRequest(t, "/artifact")
 	r.Header.Set("If-Match", `"new"`)
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, r)
+	w, labels := serveLabeled(h, r)
 	assert.Equal(t, http.StatusOK, w.Code)
 	assert.Equal(t, "new", w.Body.String())
-	assert.Equal(t, int64(1), artifactCount(t, reader, "cachew.cache.resolutions", "source", "memory", "tier", "1", "result", "hit"))
-	assert.Equal(t, int64(0), artifactCount(t, reader, "cachew.cache.resolutions", "source", "disk"))
+	assert.Equal(t, "memory", labels[handler.CacheSourceAttribute])
 }
 
 func TestArtifactS3(t *testing.T) {
@@ -337,13 +332,27 @@ func TestArtifactS3(t *testing.T) {
 	c := cache.MaybeNewTiered(artifactContext(t), []cache.Cache{disk, shared}, metadatadb.New(artifactContext(t), metadatadb.NewMemoryBackend()))
 	defer c.Close()
 	h := handler.New(http.DefaultClient, c, newTestSpools(t)).Metrics("host", "registry.example")
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, artifactHTTPRequest(t, "/artifact"))
+	w, labels := serveLabeled(h, artifactHTTPRequest(t, "/artifact"))
 	assert.Equal(t, http.StatusOK, w.Code)
 	assert.Equal(t, "artifact", w.Body.String())
-	assert.Equal(t, int64(1), artifactCount(t, reader, "cachew.cache.resolutions", "source", "s3", "tier", "1", "result", "hit"))
+	assert.Equal(t, "s3", labels[handler.CacheSourceAttribute])
 	assert.Equal(t, int64(1), artifactCount(t, reader, "cachew.cache.fills", "purpose", "backfill", "result", "success"))
 	assert.Equal(t, int64(0), artifactCount(t, reader, "cachew.origin.requests"))
+}
+
+func originClient(rt http.RoundTripper) *http.Client {
+	return &http.Client{Transport: metrics.NewOriginTransport(rt)}
+}
+
+func serveLabeled(h http.Handler, r *http.Request) (*httptest.ResponseRecorder, map[string]string) {
+	labeler := &otelhttp.Labeler{}
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r.WithContext(otelhttp.ContextWithLabeler(r.Context(), labeler)))
+	labels := map[string]string{}
+	for _, kv := range labeler.Get() {
+		labels[string(kv.Key)] = kv.Value.Emit()
+	}
+	return w, labels
 }
 
 func artifactContext(t *testing.T) context.Context {
@@ -368,15 +377,35 @@ func TestArtifactMetricsPrometheusExport(t *testing.T) {
 	defer origin.Close()
 	c := cache.MaybeNewTiered(artifactContext(t), []cache.Cache{mustNewMemoryCache()}, nil)
 	defer c.Close()
-	h := handler.New(origin.Client(), c, newTestSpools(t)).Metrics("host", "registry.example").Transform(func(r *http.Request) (*http.Request, error) {
+	h := handler.New(originClient(origin.Client().Transport), c, newTestSpools(t)).Metrics("host", "registry.example").Transform(func(r *http.Request) (*http.Request, error) {
 		return http.NewRequestWithContext(r.Context(), http.MethodGet, origin.URL, nil)
 	})
 	h.ServeHTTP(httptest.NewRecorder(), artifactHTTPRequest(t, "/artifact"))
 	w := httptest.NewRecorder()
 	exporter.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 	text := w.Body.String()
-	for _, name := range []string{"cachew_cache_resolutions_total{", "cachew_origin_requests_total{", "cachew_origin_request_duration_seconds_count{", "cachew_cache_fills_total{", "cachew_cache_tier_writes_total{"} {
+	for _, name := range []string{"cachew_origin_requests_total{", "cachew_origin_request_duration_seconds_count{", "cachew_cache_fills_total{", "cachew_cache_tier_writes_total{"} {
 		assert.True(t, strings.Contains(text, name), "missing Prometheus instrument %s", name)
 	}
 	assert.True(t, strings.Contains(text, `registry="registry.example"`))
+}
+
+func TestArtifactCooldownIsNotOriginTraffic(t *testing.T) {
+	reader := artifactReader(t)
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer origin.Close()
+	client := &http.Client{Transport: httputil.NewBackoffTransport(metrics.NewOriginTransport(origin.Client().Transport), time.Minute)}
+	c := mustNewMemoryCache()
+	defer c.Close()
+	h := handler.New(client, c, newTestSpools(t)).Metrics("host", "registry.example").Transform(func(r *http.Request) (*http.Request, error) {
+		return http.NewRequestWithContext(r.Context(), http.MethodGet, origin.URL, nil)
+	})
+	for range 3 {
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, artifactHTTPRequest(t, "/artifact"))
+		assert.Equal(t, http.StatusTooManyRequests, w.Code)
+	}
+	assert.Equal(t, int64(1), artifactCount(t, reader, "cachew.origin.requests", "status_code", "429"))
 }
