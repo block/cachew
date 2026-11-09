@@ -74,7 +74,7 @@ func NewArtifactory(ctx context.Context, config ArtifactoryConfig, cache cache.C
 		logger: logging.FromContext(ctx),
 	}
 
-	hdlr := handler.New(a.client, cache, spools).
+	hdlr := handler.New(a.client, cache, spools).Metrics("artifactory", u.Hostname()).
 		CacheKey(func(r *http.Request) string {
 			return a.buildTargetURL(r).String()
 		}).

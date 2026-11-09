@@ -457,8 +457,9 @@ func configureProcess(mutexProfileFraction int, upstreamBackoff time.Duration) {
 	runtime.SetMutexProfileFraction(mutexProfileFraction)
 
 	// Every strategy that uses http.DefaultTransport shares one set of
-	// per-origin 429 cooldowns.
-	http.DefaultTransport = httputil.NewBackoffTransport(http.DefaultTransport, upstreamBackoff) //nolint:reassign
+	// per-origin 429 cooldowns. Origin metrics sit below the cooldowns so that
+	// requests rejected during a cooldown are not counted as origin traffic.
+	http.DefaultTransport = httputil.NewBackoffTransport(metrics.NewOriginTransport(http.DefaultTransport), upstreamBackoff) //nolint:reassign
 }
 
 // loadGlobalConfig unmarshals the global config from HCL, using a two-pass

@@ -116,12 +116,12 @@ func NewOCI(ctx context.Context, config OCIConfig, c cache.Cache, mux Mux, spool
 		client:   &http.Client{Transport: transport},
 		logger:   logging.FromContext(ctx),
 	}
-	o.blobs = handler.New(o.client, c, spools).
+	o.blobs = handler.New(o.client, c, spools).Metrics("oci", upstream.Hostname()).
 		CacheKey(o.blobKey).
 		Transform(o.transform).
 		Verify(o.verifier).
 		ParallelFetch(int64(config.BlobChunkSizeMB)<<20, int(config.BlobConcurrency))
-	o.manifests = handler.New(o.client, c, spools).
+	o.manifests = handler.New(o.client, c, spools).Metrics("oci", upstream.Hostname()).
 		CacheKey(o.manifestKey).
 		Transform(o.transform).
 		Vary(o.manifestVary).

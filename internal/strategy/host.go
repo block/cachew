@@ -89,7 +89,7 @@ func NewHost(_ context.Context, config HostConfig, cache cache.Cache, mux Mux, s
 		h.client.Transport = transport
 	}
 
-	hdlr := handler.New(h.client, cache, spools).
+	hdlr := handler.New(h.client, cache, spools).Metrics("host", u.Hostname()).
 		CacheKey(func(r *http.Request) string {
 			return h.buildTargetURL(r).String()
 		}).
