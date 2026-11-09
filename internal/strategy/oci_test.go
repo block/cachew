@@ -364,6 +364,29 @@ func TestOCIManifestRevalidation(t *testing.T) {
 	}
 }
 
+func TestOCIManifestKeyScopedByRegistry(t *testing.T) {
+	manifest := []byte(`{"pinned":true}`)
+	f := newFakeRegistry(t, manifest)
+	_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelError})
+	c, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: time.Hour})
+	assert.NoError(t, err)
+	t.Cleanup(func() { _ = c.Close() })
+	mux := http.NewServeMux()
+	for _, registry := range []string{"a.example.io", "b.example.io"} {
+		_, err = strategy.NewOCI(ctx, strategy.OCIConfig{
+			Registry: registry, Upstream: f.server.URL, TagTTL: time.Hour,
+			BlobChunkSizeMB: 32, BlobConcurrency: 4,
+		}, c, mux, newTestSpools(t))
+		assert.NoError(t, err)
+	}
+
+	for _, registry := range []string{"a.example.io", "b.example.io"} {
+		w := serveOCI(t, mux, http.MethodGet, "/oci/"+registry+"/v2/library/alpine/manifests/"+digest.FromBytes(manifest).String(), nil)
+		assert.Equal(t, http.StatusOK, w.Code)
+	}
+	assert.Equal(t, 2, len(read(f, &f.requests)))
+}
+
 func TestOCIAcceptVariance(t *testing.T) {
 	f := newFakeRegistry(t)
 	mux := newOCITestMux(t, f, strategy.OCIConfig{TagTTL: time.Hour})

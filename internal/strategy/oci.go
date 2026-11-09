@@ -263,7 +263,8 @@ func (o *OCI) blobKey(r *http.Request) string {
 }
 
 func (o *OCI) manifestKey(r *http.Request) string {
-	return o.upstreamURL(r)
+	req := ociRequestFrom(r.Context())
+	return o.registry + "/" + req.repository + "/manifests/" + req.reference
 }
 
 // manifestVary keys tag manifests on Accept, which selects between an index and
