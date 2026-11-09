@@ -29,6 +29,13 @@ func BackendName(c Cache) string {
 	}
 }
 
+// observeSource reports c as the backend that answered a lookup that found the object.
+func observeSource(ctx context.Context, c Cache, err error) {
+	if err == nil || errors.Is(err, ErrNotModified) || errors.Is(err, ErrRangeNotSatisfiable) {
+		metrics.ObserveCacheSource(ctx, BackendName(c))
+	}
+}
+
 const (
 	writeSuccess     = "success"
 	writeCommitError = "commit_error"

@@ -409,3 +409,28 @@ func TestArtifactCooldownIsNotOriginTraffic(t *testing.T) {
 	}
 	assert.Equal(t, int64(1), artifactCount(t, reader, "cachew.origin.requests", "status_code", "429"))
 }
+
+func TestArtifactHeadHitSource(t *testing.T) {
+	disk, err := cache.NewDisk(artifactContext(t), cache.DiskConfig{Root: t.TempDir()})
+	assert.NoError(t, err)
+	memory := mustNewMemoryCache()
+	key := cache.NewKey("/artifact")
+	assert.NoError(t, cache.WriteFunc(artifactContext(t), memory, key, nil, time.Hour, func(w io.Writer) error { _, err := io.WriteString(w, "artifact"); return err }))
+	for _, tt := range []struct {
+		name   string
+		c      cache.Cache
+		source string
+	}{
+		{"tiered", cache.MaybeNewTiered(artifactContext(t), []cache.Cache{disk, memory}, metadatadb.New(artifactContext(t), metadatadb.NewMemoryBackend())), "memory"},
+		{"single", cache.MaybeNewTiered(artifactContext(t), []cache.Cache{memory}, nil), "memory"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			h := handler.New(http.DefaultClient, tt.c, newTestSpools(t))
+			r := artifactHTTPRequest(t, "/artifact")
+			r.Method = http.MethodHead
+			w, labels := serveLabeled(h, r)
+			assert.Equal(t, http.StatusOK, w.Code)
+			assert.Equal(t, map[string]string{handler.CacheResultAttribute: handler.CacheHit, handler.CacheSourceAttribute: tt.source}, labels)
+		})
+	}
+}

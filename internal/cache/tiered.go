@@ -52,10 +52,14 @@ type authoritativeCache struct {
 
 func (c authoritativeCache) Open(ctx context.Context, key Key, opts ...Option) (io.ReadCloser, http.Header, error) {
 	r, headers, err := c.Cache.Open(ctx, key, opts...)
-	if err == nil || errors.Is(err, ErrNotModified) || errors.Is(err, ErrRangeNotSatisfiable) {
-		metrics.ObserveCacheSource(ctx, BackendName(c.Cache))
-	}
+	observeSource(ctx, c.Cache, err)
 	return r, headers, errors.WithStack(err)
+}
+
+func (c authoritativeCache) Stat(ctx context.Context, key Key, opts ...Option) (http.Header, error) {
+	headers, err := c.Cache.Stat(ctx, key, opts...)
+	observeSource(ctx, c.Cache, err)
+	return headers, errors.WithStack(err)
 }
 
 func (c authoritativeCache) Create(ctx context.Context, key Key, headers http.Header, ttl time.Duration, opts ...Option) (Writer, error) {
@@ -246,6 +250,7 @@ func (t Tiered) Stat(ctx context.Context, key Key, opts ...Option) (http.Header,
 		}
 		// Any other outcome (success, ErrNotModified, or a hard error) is
 		// definitive for this tier; surface it with its headers.
+		observeSource(ctx, c, err)
 		return headers, errors.WithStack(err)
 	}
 	if len(probeErrs) > 0 {
