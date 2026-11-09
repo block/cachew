@@ -17,6 +17,7 @@ import (
 	"github.com/alecthomas/hcl/v2"
 
 	"github.com/block/cachew/internal/cache"
+	"github.com/block/cachew/internal/httputil"
 	"github.com/block/cachew/internal/logging"
 	"github.com/block/cachew/internal/spool"
 	"github.com/block/cachew/internal/strategy"
@@ -299,6 +300,42 @@ func TestHostFallbackOrder(t *testing.T) {
 	assert.Equal(t, 200, w.Code)
 	assert.Equal(t, "2", w.Body.String())
 	assert.Equal(t, []int{0, 1, 2}, order)
+}
+
+func TestHostBackoffPausesFallbacks(t *testing.T) {
+	defaultTransport := http.DefaultTransport
+	http.DefaultTransport = httputil.NewBackoffTransport(defaultTransport, time.Minute) //nolint:reassign
+	t.Cleanup(func() { http.DefaultTransport = defaultTransport })                      //nolint:reassign
+	_, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelError})
+	c, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: time.Hour})
+	assert.NoError(t, err)
+	defer c.Close()
+	calls := map[string]int{}
+	newServer := func(name string, status int) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			calls[name]++
+			w.WriteHeader(status)
+		}))
+	}
+	primary := newServer("primary", http.StatusTooManyRequests)
+	defer primary.Close()
+	mirror := newServer("mirror", http.StatusOK)
+	defer mirror.Close()
+	mux := http.NewServeMux()
+	_, err = strategy.NewHost(ctx, strategy.HostConfig{
+		Target:    primary.URL,
+		Fallbacks: []strategy.HostFallbackConfig{{Target: mirror.URL}},
+	}, c, mux, newTestSpools(t))
+	assert.NoError(t, err)
+	u, err := url.Parse(primary.URL)
+	assert.NoError(t, err)
+	for _, path := range []string{"/a.jar", "/b.jar"} {
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, httptest.NewRequestWithContext(ctx, http.MethodGet, "/"+u.Host+path, nil))
+		assert.Equal(t, http.StatusTooManyRequests, w.Code)
+		assert.Equal(t, "60", w.Header().Get("Retry-After"))
+	}
+	assert.Equal(t, map[string]int{"primary": 1}, calls)
 }
 
 func TestHostFallbackIncompleteResponse(t *testing.T) {

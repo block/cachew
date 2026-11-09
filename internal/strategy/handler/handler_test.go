@@ -1000,7 +1000,7 @@ func TestCacheResultLabelsServerMetrics(t *testing.T) {
 	assert.Equal(t, map[string]int64{handler.CacheHit: 1, handler.CacheMiss: 3, handler.CacheCoalesced: 1}, got)
 }
 
-func TestBackoffStillServesHits(t *testing.T) {
+func TestBackoffPausesHandler(t *testing.T) {
 	var calls atomic.Int32
 	newUpstream := func() *httptest.Server {
 		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1019,16 +1019,21 @@ func TestBackoffStillServesHits(t *testing.T) {
 	client := &http.Client{Transport: httputil.NewBackoffTransport(http.DefaultTransport, time.Minute)}
 	c := mustNewMemoryCache()
 	defer c.Close()
-	h := handler.New(client, c, newTestSpools(t)).Transform(func(r *http.Request) (*http.Request, error) {
-		return http.NewRequestWithContext(r.Context(), http.MethodGet, r.URL.Query().Get("upstream")+r.URL.Path, nil)
-	})
-	get := func(upstream, path string) *httptest.ResponseRecorder {
+	newHandler := func() *handler.Handler {
+		return handler.New(client, c, newTestSpools(t)).Transform(func(r *http.Request) (*http.Request, error) {
+			return http.NewRequestWithContext(r.Context(), http.MethodGet, r.URL.Query().Get("upstream")+r.URL.Path, nil)
+		})
+	}
+	h := newHandler()
+	get := func(h http.Handler, upstream, path string) *httptest.ResponseRecorder {
 		return serve(t, h, http.MethodGet, "http://example.com"+path+"?upstream="+upstream, nil)
 	}
 
-	for _, path := range []string{"/cached", "/limited", "/cached", "/miss"} {
-		w := get(limited.URL, path)
-		if path == "/cached" {
+	for _, req := range []struct{ upstream, path string }{
+		{limited.URL, "/cached"}, {limited.URL, "/limited"}, {limited.URL, "/cached"}, {limited.URL, "/miss"}, {other.URL, "/miss"},
+	} {
+		w := get(h, req.upstream, req.path)
+		if req.path == "/cached" {
 			assert.Equal(t, http.StatusOK, w.Code)
 			assert.Equal(t, "body", w.Body.String())
 		} else {
@@ -1038,7 +1043,7 @@ func TestBackoffStillServesHits(t *testing.T) {
 	}
 	assert.Equal(t, int32(2), calls.Load())
 
-	w := get(other.URL, "/miss")
+	w := get(newHandler(), other.URL, "/miss")
 	assert.Equal(t, http.StatusOK, w.Code)
 	assert.Equal(t, "body", w.Body.String())
 	assert.Equal(t, int32(3), calls.Load())

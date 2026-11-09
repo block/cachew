@@ -94,13 +94,17 @@ const checkedAtHeader = "X-Cachew-Checked-At"
 
 // New creates a new Handler with the given HTTP client and cache. Concurrent
 // cache misses for the same key share one upstream fetch through a spool group.
+// All upstream requests of the handler, including fallbacks, redirects and
+// parallel chunks, share one 429 cooldown.
 // By default:
 // - Cache key is derived from the request URL
 // - No request transformation is performed
 // - Standard error handling is used.
 func New(client *http.Client, c cache.Cache, spools *spool.Registry) *Handler {
+	scoped := *client
+	scoped.Transport = httputil.NewBackoffScope(client.Transport)
 	return &Handler{
-		client: client,
+		client: &scoped,
 		cache:  c,
 		spools: spools.NewGroup(spool.ReleaseCompleted),
 		cacheKeyFunc: func(r *http.Request) CacheKeyParts {
