@@ -15,6 +15,7 @@ import (
 	"github.com/block/cachew/internal/githubapp"
 	"github.com/block/cachew/internal/httputil"
 	"github.com/block/cachew/internal/logging"
+	"github.com/block/cachew/internal/metrics"
 	"github.com/block/cachew/internal/spool"
 	"github.com/block/cachew/internal/strategy/handler"
 )
@@ -172,7 +173,7 @@ func (g *GitHubReleases) downloadRelease(ctx context.Context, org, repo, release
 	logger.DebugContext(ctx, "Using GitHub API for private release")
 	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/tags/%s",
 		url.PathEscape(org), url.PathEscape(repo), escapePathSegments(release))
-	req, err := g.newGitHubRequest(ctx, apiURL, "application/vnd.github+json", org, "get_release")
+	req, err := g.newGitHubRequest(metrics.WithoutArtifactRequest(ctx), apiURL, "application/vnd.github+json", org, "get_release")
 	if err != nil {
 		return nil, httputil.Errorf(http.StatusInternalServerError, "create API request")
 	}

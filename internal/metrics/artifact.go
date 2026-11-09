@@ -61,6 +61,12 @@ func ContinueArtifactRequest(ctx, request context.Context) context.Context {
 	return ctx
 }
 
+// WithoutArtifactRequest detaches ctx from its artifact request, so auxiliary
+// lookups such as release metadata are not counted as origin traffic.
+func WithoutArtifactRequest(ctx context.Context) context.Context {
+	return context.WithValue(ctx, artifactKey{}, nil)
+}
+
 // WithCachePurpose distinguishes origin fills from background cache replication.
 func WithCachePurpose(ctx context.Context, purpose string) context.Context {
 	return context.WithValue(ctx, purposeKey{}, purpose)

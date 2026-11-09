@@ -12,11 +12,15 @@ import (
 	"time"
 
 	"github.com/alecthomas/assert/v2"
+	"go.opentelemetry.io/otel"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 
 	"github.com/block/cachew/internal/cache"
 	"github.com/block/cachew/internal/githubapp"
 	"github.com/block/cachew/internal/httputil"
 	"github.com/block/cachew/internal/logging"
+	"github.com/block/cachew/internal/metrics"
 	"github.com/block/cachew/internal/strategy"
 )
 
@@ -122,11 +126,11 @@ func setupTest(t *testing.T, config strategy.GitHubReleasesConfig) (*mockGitHubS
 	t.Cleanup(mock.close)
 
 	originalTransport := http.DefaultTransport
-	t.Cleanup(func() { http.DefaultTransport = originalTransport })      //nolint:reassign // Required for testing
-	http.DefaultTransport = httputil.NewBackoffTransport(&testTransport{ //nolint:reassign // Required for testing
+	t.Cleanup(func() { http.DefaultTransport = originalTransport })                                 //nolint:reassign // Required for testing
+	http.DefaultTransport = httputil.NewBackoffTransport(metrics.NewOriginTransport(&testTransport{ //nolint:reassign // Required for testing
 		backend:           mock.server,
 		originalTransport: originalTransport,
-	}, time.Minute)
+	}), time.Minute)
 
 	_, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelError})
 	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: time.Hour})
@@ -200,6 +204,41 @@ func TestGitHubReleasesPrivateRepo(t *testing.T) {
 	assert.Equal(t, []byte("private-binary-content"), w2.Body.Bytes())
 	assert.Equal(t, 1, mock.apiCallCount, "second request should be served from cache")
 	assert.Equal(t, 1, mock.downloadCallCount, "second request should be served from cache")
+}
+
+func TestGitHubReleasesMetadataIsNotOriginTraffic(t *testing.T) {
+	previous := otel.GetMeterProvider()
+	reader := sdkmetric.NewManualReader()
+	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	otel.SetMeterProvider(provider)
+	t.Cleanup(func() { otel.SetMeterProvider(previous); assert.NoError(t, provider.Shutdown(context.Background())) })
+	mock, mux, ctx := setupTest(t, strategy.GitHubReleasesConfig{
+		Token:       "test-token",
+		PrivateOrgs: []string{"privateorg"},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/github.com/privateorg/repo/releases/download/v2.0.0/binary.tar.gz", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req.WithContext(ctx))
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, 1, mock.apiCallCount)
+
+	var data metricdata.ResourceMetrics
+	assert.NoError(t, reader.Collect(ctx, &data))
+	var origin int64
+	for _, scope := range data.ScopeMetrics {
+		for _, m := range scope.Metrics {
+			if m.Name != "cachew.origin.requests" {
+				continue
+			}
+			sum, ok := m.Data.(metricdata.Sum[int64])
+			assert.True(t, ok)
+			for _, point := range sum.DataPoints {
+				origin += point.Value
+			}
+		}
+	}
+	assert.Equal(t, int64(1), origin)
 }
 
 func TestGitHubReleasesPrivateRepoAssetNotFound(t *testing.T) {
