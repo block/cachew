@@ -185,7 +185,9 @@ func (o *OCI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case ociManifest:
 		o.manifests.ServeHTTP(w, r)
 	case ociTagList, ociReferrers:
-		o.passThrough(w, r)
+		if err := o.passThrough(w, r); err != nil {
+			o.logger.WarnContext(r.Context(), "Failed to stream upstream response", "url", r.URL, "error", err)
+		}
 	}
 }
 
@@ -211,12 +213,11 @@ func (o *OCI) rewrite(repository string) string {
 
 // passThrough forwards uncached endpoints, whose responses change too often
 // or are too cheap to be worth caching.
-func (o *OCI) passThrough(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
+func (o *OCI) passThrough(w http.ResponseWriter, r *http.Request) error {
 	req, err := o.transform(r)
 	if err != nil {
 		httputil.ErrorResponse(w, r, http.StatusInternalServerError, "failed to create upstream request", "error", err)
-		return
+		return nil
 	}
 	req.Method = r.Method
 	if accept := r.Header.Values("Accept"); len(accept) > 0 {
@@ -225,14 +226,15 @@ func (o *OCI) passThrough(w http.ResponseWriter, r *http.Request) {
 	resp, err := o.client.Do(req)
 	if err != nil {
 		httputil.ErrorResponse(w, r, http.StatusBadGateway, "failed to fetch from upstream", "error", err)
-		return
+		return nil
 	}
 	defer resp.Body.Close()
 	maps.Copy(w.Header(), httputil.FilterHeaders(resp.Header, httputil.HopByHopHeaders...))
 	w.WriteHeader(resp.StatusCode)
 	if _, err := io.Copy(w, resp.Body); err != nil {
-		o.logger.WarnContext(ctx, "Failed to stream upstream response", "url", req.URL, "error", err)
+		return errors.Wrap(err, "stream upstream response")
 	}
+	return nil
 }
 
 // transform builds the upstream request from the parsed path, so client paths
@@ -343,11 +345,8 @@ func (k ociKind) segment() string {
 type ociRequest struct {
 	repository string
 	kind       ociKind
-	// reference is a tag or digest for manifests, a digest for blobs and
-	// referrers, and "list" for tag lists.
-	reference string
-	// digest is set when reference is a digest.
-	digest digest.Digest
+	reference  string
+	digest     digest.Digest
 }
 
 type ociRequestKey struct{}
