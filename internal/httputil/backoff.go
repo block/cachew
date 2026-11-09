@@ -83,6 +83,8 @@ func (t *BackoffTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 			t.until[cooldown] = until
 		}
 		t.mu.Unlock()
+		// The cooldown ends the 429; a downstream cache must not keep it longer.
+		resp.Header.Set("Cache-Control", "no-store")
 		if !valid {
 			resp.Header.Set("Retry-After", strconv.FormatInt(int64(math.Ceil(until.Sub(now).Seconds())), 10))
 		}

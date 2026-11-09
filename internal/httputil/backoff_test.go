@@ -42,7 +42,7 @@ func TestBackoffTransport(t *testing.T) {
 				calls := 0
 				base := roundTripFunc(func(r *http.Request) (*http.Response, error) {
 					calls++
-					return &http.Response{StatusCode: http.StatusTooManyRequests, Header: http.Header{"Retry-After": {value}},
+					return &http.Response{StatusCode: http.StatusTooManyRequests, Header: http.Header{"Retry-After": {value}, "Cache-Control": {"public, max-age=3600"}},
 						Body: io.NopCloser(strings.NewReader("origin limit")), Request: r}, nil
 				})
 				transport := httputil.NewBackoffTransport(base, 7*time.Second)
@@ -62,6 +62,7 @@ func TestBackoffTransport(t *testing.T) {
 					wantHeader = "7"
 				}
 				assert.Equal(t, wantHeader, initial.Header.Get("Retry-After"))
+				assert.Equal(t, "no-store", initial.Header.Get("Cache-Control"))
 				if tt.delay > 0 {
 					resp := get("https://EXAMPLE.com:443/another-path")
 					assert.Equal(t, http.StatusTooManyRequests, resp.StatusCode)
