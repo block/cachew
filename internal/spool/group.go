@@ -20,6 +20,10 @@ import (
 // has been written to the client, so the caller must serve the request itself.
 var ErrNotShared = errors.New("response not shared")
 
+// ErrUncommitted reports a fill that stored a cache write and returned without
+// calling Writer.Commit, which would otherwise lose the entry silently.
+var ErrUncommitted = errors.New("spool fill returned without committing its cache write")
+
 // Retention controls whether a Group keeps a successful response after its fill
 // ends.
 type Retention int
@@ -205,10 +209,8 @@ func (e *entry) advance(n int) {
 
 // finish commits or aborts the fill's cache write, publishes the outcome and
 // decides how long the group keeps the response.
-func (e *entry) finish(ctx context.Context, w *Writer, fillErr error) {
-	if cacheErr := w.closeCache(fillErr); cacheErr != nil {
-		logging.FromContext(ctx).WarnContext(ctx, "Spool cache write failed", "error", cacheErr)
-	}
+func (e *entry) finish(w *Writer, fillErr error) {
+	fillErr = w.abortUncommitted(fillErr)
 	if fillErr == nil && w.status == 0 {
 		w.WriteHeader(http.StatusOK)
 	}
@@ -308,9 +310,11 @@ type Writer struct {
 	// cache is the Store destination; nil once the write has been abandoned.
 	cache cache.Writer
 	// follow is true when readers follow the cache write instead of a spool file.
-	follow   bool
-	cacheErr error
-	file     *os.File
+	follow    bool
+	stored    bool
+	committed bool
+	cacheErr  error
+	file      *os.File
 }
 
 var _ http.ResponseWriter = (*Writer)(nil)
@@ -331,11 +335,11 @@ func (w *Writer) WriteHeader(status int) {
 // Store takes ownership of cw, committing it if the fill succeeds. It must follow
 // a 2xx WriteHeader and precede the first Write.
 func (w *Writer) Store(cw cache.Writer) error {
-	if w.status < 200 || w.status >= 300 || w.file != nil || w.cache != nil {
+	if w.status < 200 || w.status >= 300 || w.file != nil || w.stored || w.committed {
 		err := errors.Errorf("spool store requires a 2xx status and no body, got status %d", w.status)
 		return errors.Join(err, cw.Abort(err))
 	}
-	w.cache = cw
+	w.cache, w.stored = cw, true
 	pending, ok := cw.(cache.PendingReader)
 	if !ok {
 		return nil
@@ -345,7 +349,7 @@ func (w *Writer) Store(cw cache.Writer) error {
 		return nil
 	}
 	if err != nil {
-		w.cache = nil
+		w.cache, w.stored = nil, false
 		return errors.Join(errors.Wrap(err, "open pending cache object"), cw.Abort(err))
 	}
 	w.follow = true
@@ -356,6 +360,9 @@ func (w *Writer) Store(cw cache.Writer) error {
 // Write appends p to the response. A cache failure fails the response only when
 // readers follow the cache write; otherwise the cache write is abandoned.
 func (w *Writer) Write(p []byte) (int, error) {
+	if w.committed {
+		return 0, errors.New("spool write after commit")
+	}
 	if w.status == 0 {
 		w.WriteHeader(http.StatusOK)
 	}
@@ -402,15 +409,33 @@ func (w *Writer) openFile() error {
 	return nil
 }
 
-// closeCache commits the cache write if the fill succeeded and aborts it
-// otherwise, returning any cache error seen during the fill.
-func (w *Writer) closeCache(fillErr error) error {
+// Commit stores the body in the cache and returns any cache failure, including
+// an abandoned write. Call it after the last Write; it is a no-op without Store.
+func (w *Writer) Commit() error {
+	if w.committed {
+		return nil
+	}
+	w.committed = true
 	err := w.cacheErr
-	if w.cache == nil {
-		return err
+	if w.cache != nil {
+		err = errors.Join(err, w.cache.Close())
 	}
-	if fillErr != nil {
-		return errors.Join(err, w.cache.Abort(fillErr))
+	if err != nil {
+		return errors.Wrap(err, "commit cache write")
 	}
-	return errors.Join(err, w.cache.Close())
+	return nil
+}
+
+func (w *Writer) abortUncommitted(fillErr error) error {
+	if !w.stored || w.committed {
+		return fillErr
+	}
+	if fillErr == nil {
+		fillErr = errors.WithStack(ErrUncommitted)
+	}
+	err := errors.Join(fillErr, w.cacheErr)
+	if w.cache != nil {
+		err = errors.Join(err, w.cache.Abort(fillErr))
+	}
+	return err
 }

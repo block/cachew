@@ -89,6 +89,23 @@ func (r *Registry) start(e *entry, req *http.Request, fill FillFunc) {
 		defer cancel()
 		defer stop()
 		w := &Writer{entry: e, dir: r.config.Dir, header: http.Header{}}
-		e.finish(ctx, w, fill(ctx, w))
+		e.finish(w, runFill(ctx, w, fill))
 	})
+}
+
+// runFill converts http.ErrAbortHandler panics into errors. Fills reuse handler
+// code such as httputil.ReverseProxy, but run outside the server's recovery.
+func runFill(ctx context.Context, w *Writer, fill FillFunc) (err error) {
+	defer func() {
+		recovered := recover()
+		if recovered == nil {
+			return
+		}
+		abort, ok := recovered.(error)
+		if !ok || !errors.Is(abort, http.ErrAbortHandler) {
+			panic(recovered)
+		}
+		err = errors.Errorf("spool fill aborted: %w", abort)
+	}()
+	return fill(ctx, w)
 }

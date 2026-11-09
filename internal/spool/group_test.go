@@ -87,8 +87,9 @@ func TestFillOutlivesItsRequests(t *testing.T) {
 		_, _ = io.WriteString(w, "first ")
 		<-release
 		_, err = io.WriteString(w, "second")
+		assert.NoError(t, err)
 		fillDone <- ctx.Err()
-		return err
+		return w.Commit()
 	}
 
 	leaderCtx, cancelLeader := context.WithCancel(ctx)
@@ -138,8 +139,10 @@ func TestRequestsFollowPendingCacheWrite(t *testing.T) {
 		assert.NoError(t, w.Store(cw))
 		_, _ = io.WriteString(w, "first ")
 		<-release
-		_, err = io.WriteString(w, "second")
-		return err
+		if _, err := io.WriteString(w, "second"); err != nil {
+			return err
+		}
+		return w.Commit()
 	}
 
 	recorder := httptest.NewRecorder()
@@ -162,6 +165,7 @@ func TestRequestsFollowPendingCacheWrite(t *testing.T) {
 func TestCacheWriteFailureDoesNotFailResponse(t *testing.T) {
 	ctx, registry, _ := newTestRegistry(t, spool.Config{})
 	group := registry.NewGroup(spool.ReleaseCompleted)
+	commitErr := make(chan error, 1)
 	fill := func(_ context.Context, w *spool.Writer) error {
 		w.WriteHeader(http.StatusOK)
 		assert.NoError(t, w.Store(&failingCacheWriter{}))
@@ -170,6 +174,7 @@ func TestCacheWriteFailureDoesNotFailResponse(t *testing.T) {
 				return err
 			}
 		}
+		commitErr <- w.Commit()
 		return nil
 	}
 
@@ -178,6 +183,7 @@ func TestCacheWriteFailureDoesNotFailResponse(t *testing.T) {
 	_, err := group.Serve(recorder, req, key, fill)
 	assert.NoError(t, err)
 	assert.Equal(t, "chunk chunk chunk ", recorder.Body.String())
+	assert.IsError(t, <-commitErr, errCacheFull)
 }
 
 func TestSequentialRequests(t *testing.T) {
@@ -299,6 +305,31 @@ func TestFailedFills(t *testing.T) {
 			wantErr:    fillErr,
 		},
 		{
+			name: "SucceedsWithoutCommit",
+			fill: func(_ context.Context, w *spool.Writer) error {
+				w.WriteHeader(http.StatusOK)
+				if err := w.Store(&failingCacheWriter{}); err != nil {
+					return err
+				}
+				_, err := io.WriteString(w, "body")
+				return err
+			},
+			wantStatus: http.StatusOK,
+			wantBody:   "body",
+			wantErr:    spool.ErrUncommitted,
+		},
+		{
+			name: "AbortsAfterHeaders",
+			fill: func(_ context.Context, w *spool.Writer) error {
+				w.WriteHeader(http.StatusOK)
+				_, _ = io.WriteString(w, "partial")
+				panic(http.ErrAbortHandler)
+			},
+			wantStatus: http.StatusOK,
+			wantBody:   "partial",
+			wantErr:    http.ErrAbortHandler,
+		},
+		{
 			name:   "ExceedsFillTimeout",
 			config: spool.Config{FillTimeout: 10 * time.Millisecond},
 			fill: func(ctx context.Context, w *spool.Writer) error {
@@ -410,12 +441,14 @@ func waitFor(t *testing.T, condition func() bool) {
 	t.Fatal("condition not met")
 }
 
+var errCacheFull = errors.New("cache full")
+
 type failingCacheWriter struct{ writes int }
 
 func (w *failingCacheWriter) Write(p []byte) (int, error) {
 	w.writes++
 	if w.writes > 1 {
-		return 0, errors.New("cache full")
+		return 0, errCacheFull
 	}
 	return len(p), nil
 }

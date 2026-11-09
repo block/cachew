@@ -1248,6 +1248,9 @@ func (s *Strategy) fillSnapshot(ctx context.Context, sw *spool.Writer, repo *git
 		s.metrics.recordSpoolWriter(ctx, repoName, "error", time.Since(start))
 		return errors.Wrap(err, "stream snapshot")
 	}
+	if err := sw.Commit(); err != nil {
+		logger.WarnContext(ctx, "Failed to cache snapshot", "upstream", upstreamURL, "error", err)
+	}
 	s.metrics.recordSpoolWriter(ctx, repoName, "success", time.Since(start))
 	return nil
 }

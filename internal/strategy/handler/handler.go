@@ -453,8 +453,13 @@ func (h *Handler) fill(ctx context.Context, w *spool.Writer, r *http.Request, ke
 	} else if err := w.Store(h.verified(r, cw)); err != nil {
 		return errors.Wrap(err, "store response")
 	}
-	_, err = io.Copy(w, resp.Body)
-	return errors.Wrap(err, "stream response")
+	if _, err := io.Copy(w, resp.Body); err != nil {
+		return errors.Wrap(err, "stream response")
+	}
+	if err := w.Commit(); err != nil {
+		logging.FromContext(ctx).WarnContext(ctx, "Failed to cache response", "error", err)
+	}
+	return nil
 }
 
 func (h *Handler) cacheHeaders(resp *http.Response) http.Header {
