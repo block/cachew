@@ -69,5 +69,5 @@ func ColdPreparationQueueLimitForTest() int {
 
 // ClaimSnapshotForTest lets tests request a base snapshot claim.
 func (s *Strategy) ClaimSnapshotForTest(upstream string) (bool, error) {
-	return s.snapshotCoord.Claim(snapshotJobBase, upstream, 0)
+	return s.snapshotCoord.Load().Claim(snapshotJobBase, upstream, 0)
 }

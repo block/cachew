@@ -167,10 +167,10 @@ func TestColdSnapshotSkipPreservesCompletion(t *testing.T) {
 				config:               Config{SnapshotInterval: time.Hour, SnapshotMaxAge: time.Hour},
 				cache:                c,
 				cloneManager:         manager,
-				snapshotCoord:        coord,
 				metrics:              newGitMetrics(),
 				coldPreparationDelay: func() time.Duration { return 0 },
 			}
+			s.snapshotCoord.Store(coord)
 			s.snapshotJobsScheduled.Store(upstream, true)
 			assert.NoError(t, s.prepareColdSnapshot(ctx, repo))
 			assert.Equal(t, 3, c.probes)
@@ -456,7 +456,8 @@ func TestSnapshotSchedule(t *testing.T) {
 	assert.Equal(t, time.Duration(0), delay)
 	assert.Equal(t, time.Hour, interval)
 
-	coordinated := &Strategy{snapshotCoord: newTestSnapshotCoordinators(t, time.Now, 1)[0]}
+	coordinated := &Strategy{}
+	coordinated.snapshotCoord.Store(newTestSnapshotCoordinators(t, time.Now, 1)[0])
 	for range 100 {
 		delay, interval = coordinated.snapshotSchedule(time.Hour)
 		assert.True(t, delay >= 0 && delay < snapshotStartupSpread)

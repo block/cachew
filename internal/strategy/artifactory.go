@@ -162,14 +162,14 @@ func (a *Artifactory) buildTargetURL(r *http.Request) *url.URL {
 		}
 	}
 
-	a.logger.Debug("buildTargetURL", "host_based", isHostBased, "request_host", r.Host, "request_path", r.URL.Path,
+	a.logger.DebugContext(r.Context(), "buildTargetURL", "host_based", isHostBased, "request_host", r.Host, "request_path", r.URL.Path,
 		"stripped_path", path)
 
 	targetURL := *a.target
 	targetURL.Path = a.target.Path + path
 	targetURL.RawQuery = r.URL.RawQuery
 
-	a.logger.Debug("buildTargetURL result", "url", targetURL)
+	a.logger.DebugContext(r.Context(), "buildTargetURL result", "url", targetURL)
 
 	return &targetURL
 }

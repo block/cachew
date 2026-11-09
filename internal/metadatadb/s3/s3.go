@@ -21,8 +21,9 @@ import (
 const (
 	// metadataPrefix starts with "." to avoid collisions with cache
 	// namespaces, which are validated to not start with ".".
-	metadataPrefix = ".metadata"
-	rollupName     = "rollup.json"
+	metadataPrefix  = ".metadata"
+	rollupName      = "rollup.json"
+	jsonContentType = "application/json"
 
 	defaultSyncInterval = 15 * time.Second
 	// The effective age threshold is max(minAgeThreshold, 2 × sync-interval).
@@ -203,8 +204,12 @@ type namespace struct {
 	stateMu sync.RWMutex
 	state   map[string]any
 	cache   map[string]*cacheEntry
+}
 
-	// Owned exclusively by the runLoop goroutine.
+// loopState is the state of a namespace's sync loop. runLoop owns it, so tick
+// and compaction state is never shared with another goroutine.
+type loopState struct {
+	*namespace
 	rollup     *heldRollup
 	lastNewest time.Time
 	stall      int

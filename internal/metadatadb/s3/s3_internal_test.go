@@ -183,7 +183,7 @@ func TestCompaction(t *testing.T) {
 	b.jitter = func() time.Duration { return 0 }
 	ctx := t.Context()
 
-	n := b.namespace("compact")
+	n := &loopState{namespace: b.namespace("compact")}
 	for range 3 {
 		assert.NoError(t, b.Apply(ctx, "compact", metadatadb.IntAdd{Key: "n", Delta: 1}))
 	}
@@ -222,7 +222,7 @@ func TestLargeIntSurvivesRollup(t *testing.T) {
 	ctx := t.Context()
 
 	const big = int64(1<<53 + 1) // not representable as float64
-	n := b.namespace("bigint")
+	n := &loopState{namespace: b.namespace("bigint")}
 	assert.NoError(t, b.Apply(ctx, "bigint", metadatadb.IntSet{Key: "n", Value: big}))
 	assert.NoError(t, b.Apply(ctx, "bigint", metadatadb.IntMapSet{Key: "m", MapKey: "k", Value: big}))
 	time.Sleep(1200 * time.Millisecond)
@@ -254,7 +254,7 @@ func TestClockProbe(t *testing.T) {
 	b.jitter = func() time.Duration { return 0 }
 	ctx := t.Context()
 
-	n := b.namespace("probe")
+	n := &loopState{namespace: b.namespace("probe")}
 	for range 2 {
 		assert.NoError(t, b.Apply(ctx, "probe", metadatadb.IntAdd{Key: "n", Delta: 1}))
 	}
@@ -283,7 +283,7 @@ func TestLegacySeed(t *testing.T) {
 
 	legacy := []byte(`{"counter": 42, "labels": {"\"a\"": "alpha"}}`)
 	_, err := client.PutObject(ctx, bucket, ".metadata/legacy.json",
-		bytes.NewReader(legacy), int64(len(legacy)), minio.PutObjectOptions{ContentType: "application/json"})
+		bytes.NewReader(legacy), int64(len(legacy)), minio.PutObjectOptions{ContentType: jsonContentType})
 	assert.NoError(t, err)
 
 	b := newBackend(t, bucket)
@@ -460,7 +460,7 @@ func TestLeftoverCleanup(t *testing.T) {
 	for range 2 {
 		assert.NoError(t, b.Apply(ctx, "leftover", metadatadb.IntAdd{Key: "n", Delta: 1}))
 	}
-	n := b.namespace("leftover")
+	n := &loopState{namespace: b.namespace("leftover")}
 	lst, err := n.tick(b.ctx)
 	assert.NoError(t, err)
 	assert.Equal(t, 2, len(lst.entries))
@@ -476,7 +476,7 @@ func TestLeftoverCleanup(t *testing.T) {
 	body, err := json.Marshal(rollupBody{State: []byte(`{"n": 2}`), Mark: m})
 	assert.NoError(t, err)
 	_, err = client.PutObject(ctx, bucket, ".metadata/leftover/rollup.json",
-		bytes.NewReader(body), int64(len(body)), minio.PutObjectOptions{ContentType: "application/json"})
+		bytes.NewReader(body), int64(len(body)), minio.PutObjectOptions{ContentType: jsonContentType})
 	assert.NoError(t, err)
 
 	// A newer write lets the leftovers age past the threshold.

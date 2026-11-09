@@ -102,8 +102,8 @@ type Repository struct {
 type Manager struct {
 	config             Config
 	gitTuningConfig    GitTuningConfig
-	clones             map[string]*Repository
 	clonesMu           sync.RWMutex
+	clones             map[string]*Repository
 	credentialProvider CredentialProvider
 }
 
@@ -629,6 +629,7 @@ func (r *Repository) CloneClaimed(ctx context.Context) error {
 // mirrorConfigSettings returns git config key-value pairs applied to mirror
 // clones to optimise upload-pack serving performance.
 func mirrorConfigSettings(packThreads int) [][2]string {
+	//nolint:goconst // Literal values keep the git config table readable.
 	return [][2]string{
 		// Protocol
 		{"protocol.version", "2"},

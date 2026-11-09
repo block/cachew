@@ -19,7 +19,7 @@ import (
 // docs/metadatadb-s3.md. Ages are measured entirely in S3's time frame
 // (newest listed stamp minus segment stamp); the replica's clock is never
 // consulted.
-func (n *namespace) ladder(ctx context.Context, lst *listing) error {
+func (n *loopState) ladder(ctx context.Context, lst *listing) error {
 	if lst.newest.After(n.lastNewest) {
 		n.lastNewest = lst.newest
 		n.stall = 0
@@ -67,7 +67,7 @@ func (n *namespace) ladder(ctx context.Context, lst *listing) error {
 
 // compact folds the candidates into a new rollup, committed with a CAS on
 // the rollup's ETag — the election.
-func (n *namespace) compact(ctx context.Context, lst *listing, candidates []string) error {
+func (n *loopState) compact(ctx context.Context, lst *listing, candidates []string) error {
 	select {
 	case <-time.After(n.b.jitter()):
 	case <-ctx.Done():
@@ -119,7 +119,7 @@ func (n *namespace) compact(ctx context.Context, lst *listing, candidates []stri
 		return errors.Wrap(err, "marshal rollup")
 	}
 
-	opts := minio.PutObjectOptions{ContentType: "application/json"}
+	opts := minio.PutObjectOptions{ContentType: jsonContentType}
 	opts.SetMatchETag(n.rollup.etag)
 	info, err := n.b.client.PutObject(ctx, n.b.bucket, n.rollupKey(),
 		bytes.NewReader(data), int64(len(data)), opts)
@@ -159,7 +159,7 @@ func (n *namespace) probe(ctx context.Context, lst *listing) error {
 	}
 	_, err = n.b.client.PutObject(ctx, n.b.bucket, n.prefix()+key,
 		bytes.NewReader(data), int64(len(data)),
-		minio.PutObjectOptions{ContentType: "application/json"})
+		minio.PutObjectOptions{ContentType: jsonContentType})
 	return errors.Wrap(err, "put probe")
 }
 

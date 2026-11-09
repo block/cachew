@@ -266,7 +266,7 @@ func testIntMap(t *testing.T, backend metadatadb.Backend) {
 	assert.NoError(t, m.Set("repo-a", 10))
 	assert.NoError(t, m.Set("repo-b", 20))
 
-	assert.Equal(t, map[string]int64{"repo-a": 10, "repo-b": 20}, m.Entries())
+	assert.Equal(t, map[string]int64{"repo-a": 10, "repo-b": 20}, m.Entries()) //nolint:goconst // Fixture keys read best as literals.
 
 	assert.NoError(t, m.Delete("repo-a"))
 	assert.Equal(t, map[string]int64{"repo-b": 20}, m.Entries())

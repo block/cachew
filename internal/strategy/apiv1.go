@@ -85,7 +85,7 @@ func (d *APIV1) getObject(w http.ResponseWriter, r *http.Request) {
 	cr, headers, err := namespacedCache.Open(r.Context(), key, httputil.ConditionalOptions(r)...)
 	if handled, _, serveErr := httputil.ServeCacheHit(w, headers, cr, err); handled {
 		if serveErr != nil {
-			d.logger.Error("Failed to serve cache object", "error", serveErr, "key", key)
+			d.logger.ErrorContext(r.Context(), "Failed to serve cache object", "error", serveErr, "key", key)
 		}
 		return
 	}
@@ -213,7 +213,7 @@ func (d *APIV1) getStats(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(stats); err != nil {
-		d.logger.Error("Failed to encode stats response", "error", err)
+		d.logger.ErrorContext(r.Context(), "Failed to encode stats response", "error", err)
 	}
 }
 
@@ -226,7 +226,7 @@ func (d *APIV1) getNamespaces(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(namespaces); err != nil {
-		d.logger.Error("Failed to encode namespaces response", "error", err)
+		d.logger.ErrorContext(r.Context(), "Failed to encode namespaces response", "error", err)
 	}
 }
 

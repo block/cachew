@@ -326,7 +326,7 @@ func newMux(ctx context.Context, shuttingDown *atomic.Bool, cr *cache.Registry, 
 			return
 		}
 		logging.SetLevel(level)
-		logging.FromContext(r.Context()).Info("Log level changed", "level", level)
+		logging.FromContext(r.Context()).InfoContext(r.Context(), "Log level changed", "level", level)
 		_, _ = fmt.Fprintln(w, logging.GetLevel().String())
 	})
 

@@ -83,12 +83,13 @@ type Strategy struct {
 	mirrorPreparations    sync.Map // One entry per upstream URL prevents duplicate preparation jobs.
 	deferredRestoreOnce   sync.Map // keyed by upstream URL, ensures at most one deferred restore per repo
 	metrics               *gitMetrics
-	repoCounts            *RepoCounts
-	snapshotCoord         *SnapshotCoordinator
-	coldPreparationDelay  func() time.Duration
-	metadataWired         chan struct{} // closed by SetMetadataStore; gates warm-up
-	wiredOnce             sync.Once
-	ready                 atomic.Bool
+	// Set by SetMetadataStore after New returns, while goroutines may already read them.
+	repoCounts           atomic.Pointer[RepoCounts]
+	snapshotCoord        atomic.Pointer[SnapshotCoordinator]
+	coldPreparationDelay func() time.Duration
+	metadataWired        chan struct{} // closed by SetMetadataStore; gates warm-up
+	wiredOnce            sync.Once
+	ready                atomic.Bool
 }
 
 func New(
@@ -185,7 +186,7 @@ func New(
 			// and fail-open (coordination is advisory) so a slow metadata
 			// backend can't wedge readiness.
 			primeCtx, cancel := context.WithTimeout(warmCtx, time.Minute)
-			if err := s.snapshotCoord.Prime(primeCtx); err != nil {
+			if err := s.snapshotCoord.Load().Prime(primeCtx); err != nil {
 				logger.WarnContext(warmCtx, "Failed to prime snapshot coordination state", "error", err)
 			}
 			cancel()
@@ -280,12 +281,13 @@ func (s *Strategy) SetMetadataStore(store *metadatadb.Store) {
 	if store == nil {
 		return
 	}
-	s.snapshotCoord = NewSnapshotCoordinator(store.Namespace("git"))
-	s.repoCounts = NewRepoCounts(store.Namespace("git"))
+	s.snapshotCoord.Store(NewSnapshotCoordinator(store.Namespace("git")))
+	repoCounts := NewRepoCounts(store.Namespace("git"))
+	s.repoCounts.Store(repoCounts)
 	logging.FromContext(s.ctx).InfoContext(s.ctx, "Per-repo clone histogram enabled",
-		"retention_days", s.repoCounts.retentionDays)
+		"retention_days", repoCounts.retentionDays)
 	s.scheduler.SubmitPeriodicJob("repo-counts-reaper", "reap-repo-counts", defaultRepoCountsReapInterval, func(ctx context.Context) error {
-		deleted, err := s.repoCounts.Reap()
+		deleted, err := repoCounts.Reap()
 		if err != nil {
 			return err
 		}
@@ -429,7 +431,7 @@ func (s *Strategy) handleGitRequest(w http.ResponseWriter, r *http.Request, host
 	if isClone, cerr := RequestIsClone(pathValue, r); cerr != nil {
 		logger.WarnContext(ctx, "Failed to inspect upload-pack body for clone counting", "error", cerr)
 	} else if isClone {
-		if err := s.repoCounts.IncrementClone(upstreamURL); err != nil {
+		if err := s.repoCounts.Load().IncrementClone(upstreamURL); err != nil {
 			logger.WarnContext(ctx, "Failed to increment repo clone count", "error", err)
 		}
 	}

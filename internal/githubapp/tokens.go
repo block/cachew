@@ -23,7 +23,7 @@ type TokenManagerProvider func() (*TokenManager, error)
 // from one or more GitHub App configurations.
 func NewTokenManagerProvider(configs []Config, logger *slog.Logger) TokenManagerProvider {
 	return sync.OnceValues(func() (*TokenManager, error) {
-		return newTokenManager(configs, logger)
+		return newTokenManager(configs, logger, githubAPIBase, http.DefaultClient)
 	})
 }
 
@@ -60,7 +60,7 @@ type TokenManager struct {
 	fallbackOrg string
 }
 
-func newTokenManager(configs []Config, logger *slog.Logger) (*TokenManager, error) {
+func newTokenManager(configs []Config, logger *slog.Logger, apiBase string, httpClient *http.Client) (*TokenManager, error) {
 	tm := &TokenManager{orgToApp: make(map[string]*appState)}
 
 	for _, config := range configs {
@@ -83,8 +83,8 @@ func newTokenManager(configs []Config, logger *slog.Logger) (*TokenManager, erro
 			appID:              config.AppID,
 			jwtGenerator:       jwtGen,
 			cacheConfig:        cacheConfig,
-			httpClient:         NewAPIClient(http.DefaultClient),
-			apiBase:            githubAPIBase,
+			httpClient:         NewAPIClient(httpClient),
+			apiBase:            apiBase,
 			installationCache:  make(map[string]string),
 			installationOwners: make(map[string]string),
 			tokens:             make(map[string]*cachedToken),

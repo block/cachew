@@ -385,7 +385,7 @@ const snapshotClaimCleanupTimeout = 30 * time.Second
 // must probe the authoritative tier because a local tier's copy can outlive
 // a lost shared object and would otherwise mask the loss from every replica.
 func (s *Strategy) snapshotUnchanged(ctx context.Context, job string, key cache.Key, upstream, head string) bool {
-	if !s.snapshotCoord.Unchanged(job, upstream, head, s.config.SnapshotMaxAge) {
+	if !s.snapshotCoord.Load().Unchanged(job, upstream, head, s.config.SnapshotMaxAge) {
 		return false
 	}
 	_, err := cache.StatAuthoritative(ctx, s.cache, key)
@@ -452,7 +452,7 @@ func startupSpreadDelay() time.Duration {
 // metadata; without a coordinator, preserve immediate registration at the
 // exact configured interval.
 func (s *Strategy) snapshotSchedule(interval time.Duration) (delay, jittered time.Duration) {
-	if s.snapshotCoord == nil {
+	if s.snapshotCoord.Load() == nil {
 		return 0, interval
 	}
 	return startupSpreadDelay(), jitterInterval(interval)
@@ -469,7 +469,8 @@ func (s *Strategy) coordinatedSnapshotJob(job string, repo *gitclone.Repository,
 	upstream := repo.UpstreamURL()
 	return func(ctx context.Context) error {
 		logger := logging.FromContext(ctx)
-		claimID, claimed, err := s.snapshotCoord.ClaimWithTTL(job, upstream, interval, snapshotClaimTTL)
+		coord := s.snapshotCoord.Load()
+		claimID, claimed, err := coord.ClaimWithTTL(job, upstream, interval, snapshotClaimTTL)
 		if err != nil {
 			logger.WarnContext(ctx, "Snapshot coordination claim failed, generating anyway", "job", job, "upstream", upstream, "error", err)
 			claimID = ""
@@ -486,7 +487,7 @@ func (s *Strategy) coordinatedSnapshotJob(job string, repo *gitclone.Repository,
 			// completion: CompletedAt must keep tracking the last actual
 			// upload, while the skip's CheckedAt keeps peers from re-fetching
 			// an unchanged repo every interval.
-			if err := s.snapshotCoord.SkipClaim(ctx, job, upstream, claimID); err != nil {
+			if err := coord.SkipClaim(ctx, job, upstream, claimID); err != nil {
 				logger.WarnContext(ctx, "Failed to record snapshot skip", "job", job, "upstream", upstream, "error", err)
 				if releaseErr := s.failSnapshotClaim(ctx, job, upstream, claimID); releaseErr != nil {
 					logger.WarnContext(ctx, "Failed to release snapshot claim after skip error", "job", job,
@@ -495,7 +496,7 @@ func (s *Strategy) coordinatedSnapshotJob(job string, repo *gitclone.Repository,
 			}
 			return nil
 		}
-		if err := s.snapshotCoord.CompleteClaim(ctx, job, upstream, claimID, commit); err != nil {
+		if err := coord.CompleteClaim(ctx, job, upstream, claimID, commit); err != nil {
 			logger.WarnContext(ctx, "Failed to record snapshot completion", "job", job, "upstream", upstream, "error", err)
 			if releaseErr := s.failSnapshotClaim(ctx, job, upstream, claimID); releaseErr != nil {
 				logger.WarnContext(ctx, "Failed to release snapshot claim after completion error", "job", job,
@@ -512,7 +513,7 @@ func (s *Strategy) failSnapshotClaim(ctx context.Context, job, upstream, claimID
 	}
 	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), snapshotClaimCleanupTimeout)
 	defer cancel()
-	return s.snapshotCoord.Fail(cleanupCtx, job, upstream, claimID)
+	return s.snapshotCoord.Load().Fail(cleanupCtx, job, upstream, claimID)
 }
 
 // jitterInterval spreads replicas' periodic snapshot schedules apart so that
@@ -1415,7 +1416,7 @@ func (s *Strategy) prepareColdSnapshot(ctx context.Context, repo *gitclone.Repos
 	}
 
 	claimID, claimed := "", true
-	if s.config.SnapshotInterval > 0 && s.snapshotCoord != nil {
+	if coord := s.snapshotCoord.Load(); s.config.SnapshotInterval > 0 && coord != nil {
 		timer := time.NewTimer(s.coldPreparationDelay())
 		select {
 		case <-ctx.Done():
@@ -1423,7 +1424,7 @@ func (s *Strategy) prepareColdSnapshot(ctx context.Context, repo *gitclone.Repos
 			return errors.Wrap(ctx.Err(), "wait to coordinate cold snapshot preparation")
 		case <-timer.C:
 		}
-		primeErr := s.snapshotCoord.Prime(ctx)
+		primeErr := coord.Prime(ctx)
 		if primeErr != nil {
 			logging.FromContext(ctx).WarnContext(ctx, "Cold preparation coordination refresh failed, preparing anyway",
 				"upstream", upstream, "error", primeErr)
@@ -1436,7 +1437,7 @@ func (s *Strategy) prepareColdSnapshot(ctx context.Context, repo *gitclone.Repos
 		}
 		if primeErr == nil {
 			var err error
-			claimID, claimed, err = s.snapshotCoord.ClaimWithTTL(snapshotJobBase, upstream, 0,
+			claimID, claimed, err = coord.ClaimWithTTL(snapshotJobBase, upstream, 0,
 				s.coldPreparationTimeout())
 			if err != nil {
 				logging.FromContext(ctx).WarnContext(ctx, "Cold preparation coordination claim failed, preparing anyway",
@@ -1473,9 +1474,9 @@ func (s *Strategy) prepareColdSnapshot(ctx context.Context, repo *gitclone.Repos
 	if claimID != "" {
 		var err error
 		if publishedCommit == "" {
-			err = s.snapshotCoord.SkipClaim(ctx, snapshotJobBase, upstream, claimID)
+			err = s.snapshotCoord.Load().SkipClaim(ctx, snapshotJobBase, upstream, claimID)
 		} else {
-			err = s.snapshotCoord.CompleteClaim(ctx, snapshotJobBase, upstream, claimID, publishedCommit)
+			err = s.snapshotCoord.Load().CompleteClaim(ctx, snapshotJobBase, upstream, claimID, publishedCommit)
 		}
 		if err != nil {
 			logging.FromContext(ctx).WarnContext(ctx, "Failed to record cold snapshot preparation result",

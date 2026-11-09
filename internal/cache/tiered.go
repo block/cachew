@@ -527,9 +527,9 @@ type backfillReadCloser struct {
 	ctx     context.Context
 	cancel  context.CancelFunc
 	done    chan error
+	closeMu sync.Mutex
 	closed  bool
 	eof     bool
-	closeMu sync.Mutex
 }
 
 const backfillBufSize = 128 // number of chunks buffered (~32 MB at 256 KB each)

@@ -52,7 +52,7 @@ func (n *namespace) flush(ctx context.Context) error {
 // flushTick runs a tick under the Flush caller's context so an expired
 // deadline aborts it promptly instead of occupying the loop, while backend
 // Close still cancels it.
-func (n *namespace) flushTick(ctx context.Context) error {
+func (n *loopState) flushTick(ctx context.Context) error {
 	// Carry the backend logger so the tick logs like a background tick even
 	// when the Flush caller's context has none, while keeping the caller's
 	// deadline for cancellation.
@@ -74,14 +74,15 @@ const maxConsecutiveFlushes = 16
 func (n *namespace) runLoop() {
 	defer n.b.wg.Done()
 	logger := logging.FromContext(n.b.ctx)
+	loop := &loopState{namespace: n}
 	background := func() {
-		lst, err := n.tick(n.b.ctx)
+		lst, err := loop.tick(n.b.ctx)
 		if err != nil {
 			logger.WarnContext(n.b.ctx, "metadata sync tick failed", "namespace", n.name, "error", err)
 			return
 		}
 		// Ladder failures cost staleness only; conditions re-derive next tick.
-		if err := n.ladder(n.b.ctx, lst); err != nil {
+		if err := loop.ladder(n.b.ctx, lst); err != nil {
 			logger.WarnContext(n.b.ctx, "metadata compaction failed", "namespace", n.name, "error", err)
 		}
 	}
@@ -103,7 +104,7 @@ func (n *namespace) runLoop() {
 		if flushes < maxConsecutiveFlushes {
 			select {
 			case req := <-n.flushCh:
-				req.reply <- n.flushTick(req.ctx)
+				req.reply <- loop.flushTick(req.ctx)
 				flushes++
 				continue
 			default:
@@ -116,7 +117,7 @@ func (n *namespace) runLoop() {
 			flushes = 0
 			background()
 		case req := <-n.flushCh:
-			req.reply <- n.flushTick(req.ctx)
+			req.reply <- loop.flushTick(req.ctx)
 			flushes++
 		case <-n.b.ctx.Done():
 			return
@@ -126,7 +127,7 @@ func (n *namespace) runLoop() {
 
 // tick is one sync pass, aborting at the first failure; the next tick
 // self-heals.
-func (n *namespace) tick(ctx context.Context) (*listing, error) {
+func (n *loopState) tick(ctx context.Context) (*listing, error) {
 	lst, err := n.list(ctx)
 	if err != nil {
 		return nil, errors.Wrap(err, "list segments")
@@ -164,7 +165,7 @@ func (n *namespace) list(ctx context.Context) (*listing, error) {
 	return lst, nil
 }
 
-func (n *namespace) refreshRollup(ctx context.Context) error {
+func (n *loopState) refreshRollup(ctx context.Context) error {
 	opts := minio.GetObjectOptions{}
 	if n.rollup != nil {
 		if err := opts.SetMatchETagExcept(n.rollup.etag); err != nil {
@@ -192,7 +193,7 @@ func (n *namespace) refreshRollup(ctx context.Context) error {
 	return n.adoptRollup(info.ETag, data)
 }
 
-func (n *namespace) adoptRollup(etag string, data []byte) error {
+func (n *loopState) adoptRollup(etag string, data []byte) error {
 	var body rollupBody
 	if err := json.Unmarshal(data, &body); err != nil {
 		return errors.Wrap(err, "unmarshal rollup")
@@ -208,7 +209,7 @@ func (n *namespace) adoptRollup(etag string, data []byte) error {
 
 // seed creates the initial rollup — legacy state or empty, zero mark — so
 // "no rollup exists" is a once-per-namespace transient.
-func (n *namespace) seed(ctx context.Context) error {
+func (n *loopState) seed(ctx context.Context) error {
 	state, err := n.readLegacy(ctx)
 	if err != nil {
 		return errors.Wrap(err, "read legacy state")
@@ -221,7 +222,7 @@ func (n *namespace) seed(ctx context.Context) error {
 	if err != nil {
 		return errors.Wrap(err, "marshal rollup")
 	}
-	opts := minio.PutObjectOptions{ContentType: "application/json"}
+	opts := minio.PutObjectOptions{ContentType: jsonContentType}
 	opts.SetMatchETagExcept("*")
 	info, err := n.b.client.PutObject(ctx, n.b.bucket, n.rollupKey(),
 		bytes.NewReader(data), int64(len(data)), opts)
@@ -267,7 +268,7 @@ func (n *namespace) readLegacy(ctx context.Context) ([]byte, error) {
 // fetchUnseen stamps already-cached entries, then fetches unseen segments
 // above the mark into staging, which stays invisible to the writer until
 // committed at swap time.
-func (n *namespace) fetchUnseen(ctx context.Context, lst *listing) (map[string]*cacheEntry, error) {
+func (n *loopState) fetchUnseen(ctx context.Context, lst *listing) (map[string]*cacheEntry, error) {
 	var unseen []string
 	n.stateMu.Lock()
 	for key, lm := range lst.entries {
@@ -324,7 +325,7 @@ func (n *namespace) fetchSegment(ctx context.Context, key string) ([]metadatadb.
 
 // rebuild evicts, snapshots the replay input, replays it unlocked, then
 // re-applies late writer inserts, commits staging, and swaps the state in.
-func (n *namespace) rebuild(lst *listing, staged map[string]*cacheEntry) {
+func (n *loopState) rebuild(lst *listing, staged map[string]*cacheEntry) {
 	n.stateMu.Lock()
 	for key, e := range n.cache {
 		if e.listed {
@@ -368,7 +369,7 @@ func (n *namespace) rebuild(lst *listing, staged map[string]*cacheEntry) {
 
 // replay rebuilds state from the rollup plus input entries above the mark in
 // canonical order; unlisted entries always pass the filter and order last.
-func (n *namespace) replay(input map[string]*cacheEntry) map[string]any {
+func (n *loopState) replay(input map[string]*cacheEntry) map[string]any {
 	type replayEntry struct {
 		key string
 		e   *cacheEntry
