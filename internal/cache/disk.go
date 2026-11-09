@@ -530,6 +530,21 @@ func (w *diskWriter) Write(p []byte) (int, error) {
 	return n, errors.WithStack(err)
 }
 
+var _ PendingReader = (*diskWriter)(nil)
+
+// OpenPending opens a separate read handle on the temp file. The handle survives
+// the rename on commit and the unlink on abort or eviction.
+func (w *diskWriter) OpenPending() (ReadAtCloser, error) {
+	if w.closed {
+		return nil, errors.New("disk writer already closed")
+	}
+	f, err := os.Open(w.tempPath)
+	if err != nil {
+		return nil, errors.Wrap(err, "open pending disk object")
+	}
+	return f, nil
+}
+
 func (w *diskWriter) Abort(err error) error {
 	w.cancel(err)
 	return w.Close()

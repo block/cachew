@@ -2,6 +2,7 @@ package handler
 
 import (
 	"cmp"
+	"context"
 	"fmt"
 	"io"
 	"maps"
@@ -19,6 +20,7 @@ import (
 	"github.com/block/cachew/internal/cache"
 	"github.com/block/cachew/internal/httputil"
 	"github.com/block/cachew/internal/logging"
+	"github.com/block/cachew/internal/spool"
 )
 
 // CacheKeyParts holds the components used to build a cache key. Path is the
@@ -76,6 +78,7 @@ type Handler struct {
 	verifyFunc    func(*http.Request) Verifier
 	revalidation  *revalidation
 	parallel      *parallelFetch
+	spools        *spool.Group
 }
 
 type revalidation struct {
@@ -87,15 +90,17 @@ type revalidation struct {
 // the upstream. It is internal bookkeeping and never sent to clients.
 const checkedAtHeader = "X-Cachew-Checked-At"
 
-// New creates a new Handler with the given HTTP client and cache.
+// New creates a new Handler with the given HTTP client and cache. Concurrent
+// cache misses for the same key share one upstream fetch through a spool group.
 // By default:
 // - Cache key is derived from the request URL
 // - No request transformation is performed
 // - Standard error handling is used.
-func New(client *http.Client, c cache.Cache) *Handler {
+func New(client *http.Client, c cache.Cache, spools *spool.Registry) *Handler {
 	return &Handler{
 		client: client,
 		cache:  c,
+		spools: spools.NewGroup(spool.ReleaseCompleted),
 		cacheKeyFunc: func(r *http.Request) CacheKeyParts {
 			return NewCacheKeyParts(r.URL.String())
 		},
@@ -230,9 +235,40 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.forwardHead(w, r)
 		return
 	}
-	if err := h.fetchAndCache(w, r, key); err != nil {
-		logger.ErrorContext(ctx, "Failed to fetch and cache", "cache_key", parts.Path, "error", err)
+	if !coalescable(r) {
+		if err := h.fetchAndCache(w, r, key); err != nil {
+			logger.ErrorContext(ctx, "Failed to fetch and cache", "cache_key", parts.Path, "error", err)
+		}
+		return
 	}
+
+	// The fill may outlive r, so it gets its own copy.
+	fillReq := r.Clone(context.WithoutCancel(ctx))
+	_, err = h.spools.Serve(w, r, key.String(), func(ctx context.Context, sw *spool.Writer) error {
+		return h.fill(ctx, sw, fillReq.WithContext(ctx), key)
+	})
+	switch {
+	case errors.Is(err, spool.ErrNotShared):
+		if err := h.fetchAndCache(w, r, key); err != nil {
+			logger.ErrorContext(ctx, "Failed to fetch and cache", "cache_key", parts.Path, "error", err)
+		}
+	case err != nil:
+		logger.ErrorContext(ctx, "Failed to serve shared response", "cache_key", parts.Path, "error", err)
+		if ctx.Err() == nil {
+			panic(http.ErrAbortHandler)
+		}
+	}
+}
+
+// coalescable reports whether a miss can share the plain response for its key.
+// Range and conditional requests need a different response.
+func coalescable(r *http.Request) bool {
+	for _, name := range []string{"Range", "If-Range", "If-Match", "If-None-Match", "If-Modified-Since", "If-Unmodified-Since"} {
+		if r.Header.Get(name) != "" {
+			return false
+		}
+	}
+	return true
 }
 
 func (h *Handler) serveCached(w http.ResponseWriter, r *http.Request, key cache.Key) (bool, error) {
@@ -383,32 +419,11 @@ func (h *Handler) forwardHead(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) fetchAndCache(w http.ResponseWriter, r *http.Request, key cache.Key) error {
-	logging.FromContext(r.Context()).DebugContext(r.Context(), "Cache miss, fetching from upstream")
-
-	upstreamReq, err := h.upstreamRequest(r)
-	if err != nil {
-		h.errorHandler(err, w, r)
-		return nil
-	}
-	if h.parallel != nil {
-		upstreamReq.Header.Set("Range", h.parallel.firstChunkRange())
-	}
-
-	resp, err := h.client.Do(upstreamReq)
-	if err != nil {
-		h.errorHandler(httputil.Errorf(http.StatusBadGateway, "failed to fetch: %w", err), w, r)
+	resp, ok := h.fetch(w, r)
+	if !ok {
 		return nil
 	}
 	defer resp.Body.Close()
-
-	if resp.StatusCode == http.StatusPartialContent && h.parallel != nil {
-		resp, err = h.parallel.fetch(r.Context(), h.client, resp)
-		if err != nil {
-			h.errorHandler(httputil.Errorf(http.StatusBadGateway, "failed to fetch: %w", err), w, r)
-			return nil
-		}
-		defer resp.Body.Close()
-	}
 
 	if resp.StatusCode != http.StatusOK {
 		return h.streamNonOKResponse(w, resp)
@@ -417,7 +432,128 @@ func (h *Handler) fetchAndCache(w http.ResponseWriter, r *http.Request, key cach
 	return h.streamAndCache(w, r, key, resp)
 }
 
+// fill produces the shared response for a coalesced miss. It runs detached from r
+// so the fetch and cache write finish even if every client leaves.
+func (h *Handler) fill(ctx context.Context, w *spool.Writer, r *http.Request, key cache.Key) error {
+	resp, ok := h.fetch(w, r)
+	if !ok {
+		return nil
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return h.streamNonOKResponse(w, resp)
+	}
+
+	maps.Copy(w.Header(), resp.Header)
+	w.WriteHeader(http.StatusOK)
+	cw, err := h.cache.Create(ctx, key, h.cacheHeaders(resp), h.ttlFunc(r))
+	if err != nil {
+		logging.FromContext(ctx).WarnContext(ctx, "Failed to create cache entry", "error", err)
+	} else if err := w.Store(h.verified(r, cw)); err != nil {
+		return errors.Wrap(err, "store response")
+	}
+	if _, err := io.Copy(w, resp.Body); err != nil {
+		return errors.Wrap(err, "stream response")
+	}
+	if err := w.Commit(); err != nil {
+		logging.FromContext(ctx).WarnContext(ctx, "Failed to cache response", "error", err)
+	}
+	return nil
+}
+
+func (h *Handler) cacheHeaders(resp *http.Response) http.Header {
+	headers := maps.Clone(resp.Header)
+	if h.revalidation != nil {
+		headers.Set(checkedAtHeader, strconv.FormatInt(time.Now().Unix(), 10))
+	}
+	return headers
+}
+
+// verified commits cw only if the body verifies. A failed commit does not fail
+// the shared response, so clients still receive the bytes, as in streamAndCache.
+func (h *Handler) verified(r *http.Request, cw cache.Writer) cache.Writer {
+	if h.verifyFunc == nil {
+		return cw
+	}
+	verifier := h.verifyFunc(r)
+	if verifier == nil {
+		return cw
+	}
+	return &verifyingWriter{Writer: cw, verifier: verifier}
+}
+
+type verifyingWriter struct {
+	cache.Writer
+	verifier Verifier
+	err      error
+}
+
+var _ cache.PendingReader = (*verifyingWriter)(nil)
+
+func (v *verifyingWriter) Write(p []byte) (int, error) {
+	n, err := v.Writer.Write(p)
+	if v.err == nil {
+		_, v.err = v.verifier.Write(p[:n])
+	}
+	return n, errors.WithStack(err)
+}
+
+func (v *verifyingWriter) Close() error {
+	err := v.err
+	if err == nil {
+		err = v.verifier.Verify()
+	}
+	if err != nil {
+		err = errors.Wrap(err, "verify response")
+		return errors.Join(err, v.Writer.Abort(err))
+	}
+	return errors.WithStack(v.Writer.Close())
+}
+
+func (v *verifyingWriter) OpenPending() (cache.ReadAtCloser, error) {
+	pending, ok := v.Writer.(cache.PendingReader)
+	if !ok {
+		return nil, errors.WithStack(cache.ErrPendingReadUnsupported)
+	}
+	return errors.WithStack2(pending.OpenPending())
+}
+
+// fetch sends the transformed request upstream. On failure it writes an error
+// response to w and returns false.
+func (h *Handler) fetch(w http.ResponseWriter, r *http.Request) (*http.Response, bool) {
+	logging.FromContext(r.Context()).DebugContext(r.Context(), "Cache miss, fetching from upstream")
+
+	upstreamReq, err := h.upstreamRequest(r)
+	if err != nil {
+		h.errorHandler(err, w, r)
+		return nil, false
+	}
+	if h.parallel != nil {
+		upstreamReq.Header.Set("Range", h.parallel.firstChunkRange())
+	}
+
+	resp, err := h.client.Do(upstreamReq)
+	if err != nil {
+		h.errorHandler(httputil.Errorf(http.StatusBadGateway, "failed to fetch: %w", err), w, r)
+		return nil, false
+	}
+	if resp.StatusCode != http.StatusPartialContent || h.parallel == nil {
+		return resp, true
+	}
+	whole, err := h.parallel.fetch(r.Context(), h.client, resp)
+	if err != nil {
+		_ = resp.Body.Close() //nolint:errcheck // The fetch already failed.
+		h.errorHandler(httputil.Errorf(http.StatusBadGateway, "failed to fetch: %w", err), w, r)
+		return nil, false
+	}
+	return whole, true
+}
+
+// streamNonOKResponse forwards an upstream error with its headers, which carry
+// the Cache-Control directives that decide whether the spool may share it.
 func (h *Handler) streamNonOKResponse(w http.ResponseWriter, resp *http.Response) error {
+	maps.Copy(w.Header(), httputil.FilterHeaders(resp.Header, httputil.HopByHopHeaders...))
 	w.WriteHeader(resp.StatusCode)
 	if _, err := io.Copy(w, resp.Body); err != nil {
 		return errors.Wrap(err, "stream non-OK response")
@@ -431,11 +567,7 @@ func (h *Handler) streamNonOKResponse(w http.ResponseWriter, resp *http.Response
 func (h *Handler) streamAndCache(w http.ResponseWriter, r *http.Request, key cache.Key, resp *http.Response) error {
 	maps.Copy(w.Header(), resp.Header)
 
-	headers := maps.Clone(resp.Header)
-	if h.revalidation != nil {
-		headers.Set(checkedAtHeader, strconv.FormatInt(time.Now().Unix(), 10))
-	}
-	cw, err := h.cache.Create(r.Context(), key, headers, h.ttlFunc(r))
+	cw, err := h.cache.Create(r.Context(), key, h.cacheHeaders(resp), h.ttlFunc(r))
 	if err != nil {
 		_, copyErr := io.Copy(w, resp.Body)
 		return errors.Join(errors.Wrap(err, "create cache entry"), errors.Wrap(copyErr, "stream response"))

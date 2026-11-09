@@ -84,7 +84,7 @@ func newInfoRefsFixtureWithConfig(t *testing.T, config git.Config) *infoRefsFixt
 	mux := newTestMux()
 	manager := gitclone.NewManagerProvider(ctx, gitclone.Config{MirrorRoot: mirrorRoot}, nil)
 	strategy, err := git.New(ctx, config, newTestScheduler(ctx, t), nil, mux, manager,
-		func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
+		func() (*githubapp.TokenManager, error) { return nil, nil }, newTestSpools(t)) //nolint:nilnil
 	assert.NoError(t, err)
 	waitForReady(t, strategy)
 	runInfoRefsGit(t, "-C", mirrorPath, "config", "remote.origin.url", upstreamPath)

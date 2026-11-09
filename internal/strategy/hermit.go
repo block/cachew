@@ -15,12 +15,17 @@ import (
 	"github.com/block/cachew/internal/httputil"
 	"github.com/block/cachew/internal/jobscheduler"
 	"github.com/block/cachew/internal/logging"
+	"github.com/block/cachew/internal/spool"
 	"github.com/block/cachew/internal/strategy/handler"
 )
 
-func RegisterHermit(r *Registry) {
+func RegisterHermit(r *Registry, spools spool.Provider) {
 	Register(r, "hermit", "Caches Hermit package downloads.", func(ctx context.Context, config HermitConfig, c cache.Cache, mux Mux) (*Hermit, error) {
-		return NewHermit(ctx, config, nil, c, mux)
+		registry, err := spools()
+		if err != nil {
+			return nil, errors.Wrap(err, "create spool registry")
+		}
+		return NewHermit(ctx, config, nil, c, mux, registry)
 	})
 }
 
@@ -51,7 +56,7 @@ type Hermit struct {
 
 var _ Strategy = (*Hermit)(nil)
 
-func NewHermit(ctx context.Context, config HermitConfig, _ jobscheduler.Scheduler, c cache.Cache, mux Mux) (*Hermit, error) {
+func NewHermit(ctx context.Context, config HermitConfig, _ jobscheduler.Scheduler, c cache.Cache, mux Mux, spools *spool.Registry) (*Hermit, error) {
 	logger := logging.FromContext(ctx)
 
 	s := &Hermit{
@@ -62,12 +67,12 @@ func NewHermit(ctx context.Context, config HermitConfig, _ jobscheduler.Schedule
 		mux:    mux,
 	}
 
-	s.directHandler = s.createDirectHandler(c)
+	s.directHandler = s.createDirectHandler(c, spools)
 	mux.Handle("GET /hermit/{host}/{path...}", s.directHandler)
 
 	if config.GitHubBaseURL != "" {
 		isInternalRedirect := config.GitHubBaseURL == defaultGitHubBaseURL
-		s.redirectHandler = s.createRedirectHandler(isInternalRedirect, c)
+		s.redirectHandler = s.createRedirectHandler(isInternalRedirect, c, spools)
 		mux.Handle("GET /hermit/github.com/{org}/{repo}/releases/download/{path...}", s.redirectHandler)
 		logger.InfoContext(ctx, "Hermit strategy initialized", "github_base_url", config.GitHubBaseURL,
 			"internal_redirect", isInternalRedirect)
@@ -80,8 +85,8 @@ func NewHermit(ctx context.Context, config HermitConfig, _ jobscheduler.Schedule
 
 func (s *Hermit) String() string { return "hermit" }
 
-func (s *Hermit) createDirectHandler(c cache.Cache) http.Handler {
-	return handler.New(s.client, c).
+func (s *Hermit) createDirectHandler(c cache.Cache, spools *spool.Registry) http.Handler {
+	return handler.New(s.client, c, spools).
 		CacheKey(func(r *http.Request) string {
 			return s.buildOriginalURL(r)
 		}).
@@ -96,7 +101,7 @@ func (s *Hermit) createDirectHandler(c cache.Cache) http.Handler {
 		})
 }
 
-func (s *Hermit) createRedirectHandler(isInternalRedirect bool, c cache.Cache) http.Handler {
+func (s *Hermit) createRedirectHandler(isInternalRedirect bool, c cache.Cache, spools *spool.Registry) http.Handler {
 	var cacheBackend cache.Cache
 	if isInternalRedirect {
 		cacheBackend = cache.NoOpCache()
@@ -104,7 +109,7 @@ func (s *Hermit) createRedirectHandler(isInternalRedirect bool, c cache.Cache) h
 		cacheBackend = c
 	}
 
-	return handler.New(s.client, cacheBackend).
+	return handler.New(s.client, cacheBackend, spools).
 		CacheKey(func(r *http.Request) string {
 			return s.buildGitHubURL(r)
 		}).

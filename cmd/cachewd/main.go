@@ -36,6 +36,7 @@ import (
 	"github.com/block/cachew/internal/opa"
 	"github.com/block/cachew/internal/reaper"
 	"github.com/block/cachew/internal/s3client"
+	"github.com/block/cachew/internal/spool"
 	"github.com/block/cachew/internal/strategy"
 	"github.com/block/cachew/internal/strategy/git"
 	"github.com/block/cachew/internal/strategy/gomod"
@@ -54,6 +55,7 @@ type GlobalConfig struct {
 	LoggingConfig    logging.Config      `hcl:"log,block"`
 	MetricsConfig    metrics.Config      `hcl:"metrics,block"`
 	GitCloneConfig   gitclone.Config     `hcl:"git-clone,block"`
+	SpoolConfig      spool.Config        `hcl:"spool,block"`
 	S3Config         s3client.Config     `hcl:"s3,block,optional"`
 	GithubAppConfigs []githubapp.Config  `hcl:"github-app,block,optional"`
 	OPAConfig        opa.Config          `hcl:"opa,block"`
@@ -130,7 +132,11 @@ func main() {
 	schedulerCtx, cancelScheduler := context.WithCancel(context.WithoutCancel(ctx))
 	schedulerProvider := jobscheduler.NewProvider(schedulerCtx, globalConfig.SchedulerConfig)
 
-	cr, mr, sr := newRegistries(schedulerProvider, gitManagerProvider, tokenManagerProvider, s3ClientProvider)
+	spoolProvider := spool.NewProvider(ctx, globalConfig.SpoolConfig, func(err error) {
+		logger.WarnContext(ctx, "Failed to release spooled response", "error", err)
+	})
+
+	cr, mr, sr := newRegistries(schedulerProvider, gitManagerProvider, tokenManagerProvider, s3ClientProvider, spoolProvider)
 
 	// Commands
 	switch { //nolint:gocritic
@@ -183,7 +189,8 @@ func main() {
 	// performs the hard teardown after in-flight jobs drain.
 	drainSchedulerIntake(schedulerProvider)
 
-	gracefulShutdown(ctx, logger, server, &shuttingDown, globalConfig.ShutdownReadinessDelay, globalConfig.ShutdownTimeout)
+	gracefulShutdown(ctx, logger, server, &shuttingDown, spoolProvider, globalConfig.ShutdownReadinessDelay,
+		globalConfig.ShutdownTimeout)
 
 	cancelScheduler()
 	drainScheduler(ctx, logger, schedulerProvider)
@@ -196,6 +203,7 @@ func gracefulShutdown(
 	logger *slog.Logger,
 	server *http.Server,
 	shuttingDown *atomic.Bool,
+	spools spool.Provider,
 	readinessDelay time.Duration,
 	shutdownTimeout time.Duration,
 ) {
@@ -212,6 +220,10 @@ func gracefulShutdown(
 		logger.ErrorContext(shutdownCtx, "Server shutdown error", "error", err)
 	} else {
 		logger.InfoContext(shutdownCtx, "Server shut down cleanly")
+	}
+	// Spool fills feed in-flight responses, so they are only cancelled once the server has drained.
+	if registry, err := spools(); err == nil {
+		registry.Close()
 	}
 }
 
@@ -248,6 +260,7 @@ func newRegistries(
 	cloneManagerProvider gitclone.ManagerProvider,
 	tokenManagerProvider githubapp.TokenManagerProvider,
 	s3ClientProvider s3client.ClientProvider,
+	spoolProvider spool.Provider,
 ) (
 	*cache.Registry,
 	*metadatadb.Registry,
@@ -264,12 +277,12 @@ func newRegistries(
 
 	sr := strategy.NewRegistry()
 	strategy.RegisterAPIV1(sr)
-	strategy.RegisterArtifactory(sr)
-	strategy.RegisterGitHubReleases(sr, tokenManagerProvider)
-	strategy.RegisterHermit(sr)
-	strategy.RegisterHost(sr)
-	strategy.RegisterHTTPProxy(sr)
-	git.Register(sr, scheduler, cloneManagerProvider, tokenManagerProvider)
+	strategy.RegisterArtifactory(sr, spoolProvider)
+	strategy.RegisterGitHubReleases(sr, tokenManagerProvider, spoolProvider)
+	strategy.RegisterHermit(sr, spoolProvider)
+	strategy.RegisterHost(sr, spoolProvider)
+	strategy.RegisterHTTPProxy(sr, spoolProvider)
+	git.Register(sr, scheduler, cloneManagerProvider, tokenManagerProvider, spoolProvider)
 	gomod.Register(sr, cloneManagerProvider)
 
 	return cr, mr, sr

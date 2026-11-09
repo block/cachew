@@ -34,6 +34,7 @@ import (
 	"github.com/block/cachew/internal/logging"
 	"github.com/block/cachew/internal/metadatadb"
 	"github.com/block/cachew/internal/snapshot"
+	"github.com/block/cachew/internal/spool"
 	"github.com/block/cachew/internal/strategy"
 )
 
@@ -45,9 +46,13 @@ const minimumGitLFSVersion = "v3.8.1"
 //nolint:gochecknoglobals // The executable and its version are process-wide.
 var gitLFSVersionCheck = sync.OnceValue(checkGitLFSVersion)
 
-func Register(r *strategy.Registry, scheduler jobscheduler.Provider, cloneManagerProvider gitclone.ManagerProvider, tokenManagerProvider githubapp.TokenManagerProvider) {
+func Register(r *strategy.Registry, scheduler jobscheduler.Provider, cloneManagerProvider gitclone.ManagerProvider, tokenManagerProvider githubapp.TokenManagerProvider, spools spool.Provider) {
 	strategy.Register(r, "git", "Caches Git repositories, including tarball snapshots.", func(ctx context.Context, config Config, cache cache.Cache, mux strategy.Mux) (*Strategy, error) {
-		return New(ctx, config, scheduler, cache, mux, cloneManagerProvider, tokenManagerProvider)
+		registry, err := spools()
+		if err != nil {
+			return nil, errors.Wrap(err, "create spool registry")
+		}
+		return New(ctx, config, scheduler, cache, mux, cloneManagerProvider, tokenManagerProvider, registry)
 	})
 }
 
@@ -71,11 +76,12 @@ type Strategy struct {
 	proxy                 *httputil.ReverseProxy
 	ctx                   context.Context
 	scheduler             jobscheduler.Scheduler
+	spoolRegistry         *spool.Registry
 	spoolsMu              sync.Mutex
-	spools                map[string]*RepoSpools
+	spools                map[string]*spool.Group // upload-pack responses per upstream URL, kept until its clone ends
 	tokenManager          *githubapp.TokenManager
-	snapshotMu            sync.Map // keyed by upstream URL, values are *sync.Mutex
-	snapshotSpools        sync.Map // keyed by upstream URL, values are *snapshotSpoolEntry
+	snapshotMu            sync.Map     // keyed by upstream URL, values are *sync.Mutex
+	snapshotSpools        *spool.Group // keyed by upstream URL
 	bundleBuilds          sync.Map
 	snapshotJobsScheduled sync.Map // One entry per upstream URL prevents duplicate periodic jobs.
 	repackJobsScheduled   sync.Map // One entry per upstream URL prevents duplicate periodic jobs.
@@ -100,6 +106,7 @@ func New(
 	mux strategy.Mux,
 	cloneManagerProvider gitclone.ManagerProvider,
 	tokenManagerProvider githubapp.TokenManagerProvider,
+	spools *spool.Registry,
 ) (*Strategy, error) {
 	if _, err := exec.LookPath("git"); err != nil {
 		return nil, errors.New("git is required but not found in PATH")
@@ -150,16 +157,18 @@ func New(
 	m := newGitMetrics()
 
 	s := &Strategy{
-		config:        config,
-		cache:         cache,
-		cloneManager:  cloneManager,
-		httpClient:    http.DefaultClient,
-		ctx:           ctx,
-		scheduler:     scheduler.WithQueuePrefix("git"),
-		spools:        make(map[string]*RepoSpools),
-		tokenManager:  tokenManager,
-		metrics:       m,
-		metadataWired: make(chan struct{}),
+		config:         config,
+		cache:          cache,
+		cloneManager:   cloneManager,
+		httpClient:     http.DefaultClient,
+		ctx:            ctx,
+		scheduler:      scheduler.WithQueuePrefix("git"),
+		spoolRegistry:  spools,
+		spools:         make(map[string]*spool.Group),
+		snapshotSpools: spools.NewGroup(spool.ReleaseCompleted),
+		tokenManager:   tokenManager,
+		metrics:        m,
+		metadataWired:  make(chan struct{}),
 		coldPreparationDelay: func() time.Duration {
 			return rand.N(coldPreparationSpread) //nolint:gosec // The delay does not protect sensitive data.
 		},
@@ -458,8 +467,12 @@ func (s *Strategy) handleGitRequest(w http.ResponseWriter, r *http.Request, host
 		if err := s.serveWithSpool(w, r, host, pathValue, upstreamURL); requestTooLarge(err) {
 			writeRequestTooLarge(w, r)
 		} else if err != nil {
-			logger.WarnContext(ctx, "Spool failed, forwarding to upstream", "error", err)
-			s.forwardToUpstream(w, r, host, pathValue)
+			logger.WarnContext(ctx, "Spooled upload-pack response truncated", "error", err)
+			// Headers are already sent, so abort the connection rather than let the server
+			// end the chunked body cleanly and git mistake a truncated pack for a whole one.
+			if ctx.Err() == nil {
+				panic(http.ErrAbortHandler)
+			}
 		}
 	}
 }
@@ -557,45 +570,31 @@ func SpoolKeyForRequest(pathValue string, r *http.Request) (string, error) {
 	return "upload-pack-" + hex.EncodeToString(h[:8]), nil
 }
 
-func spoolDirForURL(mirrorRoot, upstreamURL string) (string, error) {
-	repoPath, err := gitclone.RepoPathFromURL(upstreamURL)
-	if err != nil {
-		return "", errors.Wrap(err, "resolve spool directory")
-	}
-	return filepath.Join(mirrorRoot, ".spools", repoPath), nil
-}
-
-func (s *Strategy) getOrCreateRepoSpools(upstreamURL string) (*RepoSpools, error) {
+func (s *Strategy) uploadPackSpools(upstreamURL string) *spool.Group {
 	s.spoolsMu.Lock()
 	defer s.spoolsMu.Unlock()
-	rp, exists := s.spools[upstreamURL]
-	if exists {
-		return rp, nil
+	group, exists := s.spools[upstreamURL]
+	if !exists {
+		group = s.spoolRegistry.NewGroup(spool.RetainCompleted)
+		s.spools[upstreamURL] = group
 	}
-	dir, err := spoolDirForURL(s.cloneManager.Config().MirrorRoot, upstreamURL)
-	if err != nil {
-		return nil, err
-	}
-	rp = NewRepoSpools(dir)
-	s.spools[upstreamURL] = rp
-	return rp, nil
+	return group
 }
 
-func (s *Strategy) cleanupSpools(upstreamURL string) error {
+// cleanupSpools drops the upload-pack responses kept while upstreamURL was
+// cloning, so later requests are served from the mirror or upstream.
+func (s *Strategy) cleanupSpools(upstreamURL string) {
 	s.spoolsMu.Lock()
-	rp, exists := s.spools[upstreamURL]
-	if exists {
-		delete(s.spools, upstreamURL)
-	}
+	group, exists := s.spools[upstreamURL]
+	delete(s.spools, upstreamURL)
 	s.spoolsMu.Unlock()
-	if rp != nil {
-		if err := rp.Close(); err != nil {
-			return errors.Wrap(err, "clean up spools")
-		}
+	if exists {
+		group.Close()
 	}
-	return nil
 }
 
+// serveWithSpool shares upload-pack responses while the mirror is cloning. An
+// error other than request-too-large means a truncated response.
 func (s *Strategy) serveWithSpool(w http.ResponseWriter, r *http.Request, host, pathValue, upstreamURL string) error {
 	ctx := r.Context()
 	logger := logging.FromContext(ctx)
@@ -608,38 +607,33 @@ func (s *Strategy) serveWithSpool(w http.ResponseWriter, r *http.Request, host, 
 		s.forwardToUpstream(w, r, host, pathValue)
 		return nil
 	}
-
-	rp, err := s.getOrCreateRepoSpools(upstreamURL)
-	if err != nil {
-		return errors.Wrap(err, "resolve spool directory")
-	}
-	spool, isWriter, err := rp.GetOrCreate(key)
-	if err != nil {
-		return errors.Wrap(err, "create spool")
+	var body []byte
+	if r.Body != nil {
+		if body, err = io.ReadAll(r.Body); err != nil {
+			return errors.Wrap(err, "read request body")
+		}
 	}
 
-	if isWriter {
+	// The fill may outlive r, so it gets its own copy of the request and body.
+	fillReq := r.Clone(context.WithoutCancel(ctx))
+	result, err := s.uploadPackSpools(upstreamURL).Serve(w, r, key, func(ctx context.Context, sw *spool.Writer) error {
+		upstreamReq := fillReq.WithContext(ctx)
+		upstreamReq.Body = io.NopCloser(bytes.NewReader(body))
 		logger.DebugContext(ctx, "Spooling upstream response", "key", key, "upstream", upstreamURL)
-		tw := NewSpoolTeeWriter(w, spool)
-		s.forwardToUpstream(tw, r, host, pathValue)
-		spool.MarkComplete()
+		s.forwardToUpstream(sw, upstreamReq, host, pathValue)
 		return nil
-	}
-
-	if spool.Failed() {
-		logger.DebugContext(ctx, "Spool failed, forwarding to upstream", "key", key)
+	})
+	if errors.Is(err, spool.ErrNotShared) {
+		logger.DebugContext(ctx, "Spooled response not shareable, forwarding to upstream", "key", key)
+		r.Body = io.NopCloser(bytes.NewReader(body))
 		s.forwardToUpstream(w, r, host, pathValue)
 		return nil
 	}
-
-	logger.DebugContext(ctx, "Serving from spool", "key", key, "upstream", upstreamURL)
-	if err := spool.ServeTo(w); err != nil {
-		if errors.Is(err, ErrSpoolFailed) {
-			logger.DebugContext(ctx, "Spool failed before response started, forwarding to upstream", "key", key)
-			s.forwardToUpstream(w, r, host, pathValue)
-			return nil
-		}
-		return errors.Wrapf(err, "spool read failed mid-stream for key %s", key)
+	if err != nil {
+		return errors.Wrapf(err, "spool read failed for key %s", key)
+	}
+	if !result.Filled {
+		logger.DebugContext(ctx, "Served from spool", "key", key, "upstream", upstreamURL)
 	}
 	return nil
 }
@@ -763,9 +757,7 @@ func (s *Strategy) startClone(ctx context.Context, repo *gitclone.Repository) (r
 		} else {
 			repo.MarkReady()
 
-			if err := s.cleanupSpools(upstream); err != nil {
-				return errors.Wrapf(err, "clean up spools for %s", upstream)
-			}
+			s.cleanupSpools(upstream)
 
 			logger.InfoContext(ctx, "Post-restore fetch completed, serving", "upstream", upstream)
 
@@ -786,9 +778,7 @@ func (s *Strategy) startClone(ctx context.Context, repo *gitclone.Repository) (r
 
 	// Clean up spools regardless of clone success or failure, so that subsequent
 	// requests either serve from the local backend or go directly to upstream.
-	if cleanupErr := s.cleanupSpools(upstream); cleanupErr != nil {
-		return errors.Wrapf(cleanupErr, "clean up spools for %s", upstream)
-	}
+	s.cleanupSpools(upstream)
 
 	if err != nil {
 		s.metrics.recordOperation(ctx, "clone", "error", time.Since(cloneStart))

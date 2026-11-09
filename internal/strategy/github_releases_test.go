@@ -127,7 +127,7 @@ func setupTest(t *testing.T, config strategy.GitHubReleasesConfig) (*mockGitHubS
 	t.Cleanup(func() { memCache.Close() })
 
 	mux := http.NewServeMux()
-	_, err = strategy.NewGitHubReleases(ctx, config, memCache, mux, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
+	_, err = strategy.NewGitHubReleases(ctx, config, memCache, mux, func() (*githubapp.TokenManager, error) { return nil, nil }, newTestSpools(t)) //nolint:nilnil
 	assert.NoError(t, err)
 
 	return mock, mux, ctx
@@ -255,7 +255,7 @@ func TestGitHubReleasesNoToken(t *testing.T) {
 	defer memCache.Close()
 
 	mux := http.NewServeMux()
-	gh, err := strategy.NewGitHubReleases(ctx, strategy.GitHubReleasesConfig{}, memCache, mux, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
+	gh, err := strategy.NewGitHubReleases(ctx, strategy.GitHubReleasesConfig{}, memCache, mux, func() (*githubapp.TokenManager, error) { return nil, nil }, newTestSpools(t)) //nolint:nilnil
 	assert.NoError(t, err)
 	assert.Equal(t, "github-releases", gh.String())
 }
@@ -269,7 +269,7 @@ func TestGitHubReleasesString(t *testing.T) {
 	mux := http.NewServeMux()
 	gh, err := strategy.NewGitHubReleases(ctx, strategy.GitHubReleasesConfig{
 		Token: "test-token",
-	}, memCache, mux, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
+	}, memCache, mux, func() (*githubapp.TokenManager, error) { return nil, nil }, newTestSpools(t)) //nolint:nilnil
 	assert.NoError(t, err)
 
 	assert.Equal(t, "github-releases", gh.String())

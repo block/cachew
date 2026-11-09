@@ -30,7 +30,7 @@ func setupHermitTest(t *testing.T) (*http.ServeMux, context.Context, cache.Cache
 	t.Cleanup(func() { memCache.Close() })
 
 	mux := http.NewServeMux()
-	_, err = strategy.NewHermit(ctx, strategy.HermitConfig{GitHubBaseURL: "http://localhost:8080"}, nil, memCache, mux)
+	_, err = strategy.NewHermit(ctx, strategy.HermitConfig{GitHubBaseURL: "http://localhost:8080"}, nil, memCache, mux, newTestSpools(t))
 	assert.NoError(t, err)
 
 	return mux, ctx, memCache
@@ -61,7 +61,7 @@ func TestHermitBinaryShortTTL(t *testing.T) {
 	_, err = strategy.NewHermit(ctx, strategy.HermitConfig{
 		GitHubBaseURL: "http://localhost:8080",
 		BinaryTTL:     100 * time.Millisecond,
-	}, nil, memCache, mux)
+	}, nil, memCache, mux, newTestSpools(t))
 	assert.NoError(t, err)
 
 	// First request: cache miss
@@ -148,7 +148,7 @@ func TestHermitGitHubRelease(t *testing.T) {
 
 	mux, ctx, memCache := setupHermitTest(t)
 
-	_, err := strategy.NewGitHubReleases(ctx, strategy.GitHubReleasesConfig{}, memCache, mux, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
+	_, err := strategy.NewGitHubReleases(ctx, strategy.GitHubReleasesConfig{}, memCache, mux, func() (*githubapp.TokenManager, error) { return nil, nil }, newTestSpools(t)) //nolint:nilnil
 	assert.NoError(t, err)
 
 	req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/hermit/github.com/alecthomas/chroma/releases/download/v2.14.0/chroma-2.14.0-linux-amd64.tar.gz", nil)

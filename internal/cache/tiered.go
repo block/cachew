@@ -699,6 +699,24 @@ type tieredWriter struct {
 }
 
 var _ Writer = (*tieredWriter)(nil)
+var _ PendingReader = (*tieredWriter)(nil)
+
+// OpenPending follows the first tier that supports it. Write only returns after
+// every tier has accepted the bytes, so any tier sees everything Write accepted.
+func (t *tieredWriter) OpenPending() (ReadAtCloser, error) {
+	for _, w := range t.writers {
+		pending, ok := w.(PendingReader)
+		if !ok {
+			continue
+		}
+		r, err := pending.OpenPending()
+		if errors.Is(err, ErrPendingReadUnsupported) {
+			continue
+		}
+		return r, errors.WithStack(err)
+	}
+	return nil, errors.WithStack(ErrPendingReadUnsupported)
+}
 
 func (t *tieredWriter) Abort(err error) error {
 	t.aborted = true

@@ -10,11 +10,18 @@ import (
 
 	"github.com/block/cachew/internal/cache"
 	"github.com/block/cachew/internal/httputil"
+	"github.com/block/cachew/internal/spool"
 	"github.com/block/cachew/internal/strategy/handler"
 )
 
-func RegisterHost(r *Registry) {
-	Register(r, "host", "A generic host-based proxying strategy.", NewHost)
+func RegisterHost(r *Registry, spools spool.Provider) {
+	Register(r, "host", "A generic host-based proxying strategy.", func(ctx context.Context, config HostConfig, c cache.Cache, mux Mux) (*Host, error) {
+		registry, err := spools()
+		if err != nil {
+			return nil, errors.Wrap(err, "create spool registry")
+		}
+		return NewHost(ctx, config, c, mux, registry)
+	})
 }
 
 // HostConfig represents the configuration for the Host strategy.
@@ -49,7 +56,7 @@ type Host struct {
 
 var _ Strategy = (*Host)(nil)
 
-func NewHost(_ context.Context, config HostConfig, cache cache.Cache, mux Mux) (*Host, error) {
+func NewHost(_ context.Context, config HostConfig, cache cache.Cache, mux Mux, spools *spool.Registry) (*Host, error) {
 	u, err := url.Parse(config.Target)
 	if err != nil {
 		return nil, errors.Errorf("invalid target URL: %w", err)
@@ -80,7 +87,7 @@ func NewHost(_ context.Context, config HostConfig, cache cache.Cache, mux Mux) (
 		h.client.Transport = transport
 	}
 
-	hdlr := handler.New(h.client, cache).
+	hdlr := handler.New(h.client, cache, spools).
 		CacheKey(func(r *http.Request) string {
 			return h.buildTargetURL(r).String()
 		}).

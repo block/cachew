@@ -167,6 +167,20 @@ s3 {
 }
 ```
 
+## Request Coalescing
+
+Concurrent requests for the same uncached object share one upstream fetch, and every client streams the response while it downloads. The fetch continues and fills the cache even if every client disconnects.
+
+Error responses are shared only when HTTP caching rules allow reuse, and for at most `error-window`.
+
+```hcl
+spool {
+  dir          = "${CACHEW_STATE}/spools"  # Response files for backends that cannot be read while writing
+  fill-timeout = "30m"                     # 0 disables the limit
+  error-window = "5s"                      # 0 shares errors only with requests already waiting
+}
+```
+
 ## Authorization (OPA)
 
 Cachew uses [Open Policy Agent](https://www.openpolicyagent.org/) for request authorization. The default policy allows all requests from localhost and restricts remote access to non-admin paths (`/api/*`, `/admin/*`).

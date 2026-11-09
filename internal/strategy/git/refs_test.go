@@ -61,7 +61,7 @@ func TestEnsureRefsHandler(t *testing.T) {
 
 	cm := gitclone.NewManagerProvider(ctx, gitclone.Config{MirrorRoot: mirrorRoot}, nil)
 	s, err := git.New(ctx, git.Config{}, newTestScheduler(ctx, t), memCache, mux, cm,
-		func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
+		func() (*githubapp.TokenManager, error) { return nil, nil }, newTestSpools(t)) //nolint:nilnil
 	assert.NoError(t, err)
 	waitForReady(t, s)
 	assert.NoError(t, exec.Command("git", "-C", mirrorPath, "remote", "set-url", "origin", upstreamPath).Run())

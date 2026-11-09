@@ -46,7 +46,7 @@ func TestSnapshotHTTPEndpoint(t *testing.T) {
 	}, nil)
 	// SnapshotInterval=0 disables periodic snapshot jobs so they don't
 	// overwrite the fake cached snapshot we insert below.
-	s, err := git.New(ctx, git.Config{}, newTestScheduler(ctx, t), memCache, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
+	s, err := git.New(ctx, git.Config{}, newTestScheduler(ctx, t), memCache, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }, newTestSpools(t)) //nolint:nilnil
 	assert.NoError(t, err)
 	// The warm-up goroutine uses context.WithoutCancel so it survives
 	// t.Context() cancellation. Wait for it before TempDir cleanup.
@@ -116,7 +116,7 @@ func TestSnapshotOnDemandGenerationViaHTTP(t *testing.T) {
 	mux := newTestMux()
 
 	cm := gitclone.NewManagerProvider(ctx, gitclone.Config{MirrorRoot: mirrorRoot}, nil)
-	_, err = git.New(ctx, git.Config{}, newTestScheduler(ctx, t), memCache, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
+	_, err = git.New(ctx, git.Config{}, newTestScheduler(ctx, t), memCache, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }, newTestSpools(t)) //nolint:nilnil
 	assert.NoError(t, err)
 
 	handler := mux.handlers["GET /git/{host}/{path...}"]
@@ -254,7 +254,7 @@ func TestSnapshotUnchangedSkipsRegeneration(t *testing.T) {
 	mux := newTestMux()
 
 	cm := gitclone.NewManagerProvider(ctx, gitclone.Config{MirrorRoot: mirrorRoot}, nil)
-	s, err := git.New(ctx, git.Config{SnapshotMaxAge: time.Hour}, newTestScheduler(ctx, t), memCache, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
+	s, err := git.New(ctx, git.Config{SnapshotMaxAge: time.Hour}, newTestScheduler(ctx, t), memCache, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }, newTestSpools(t)) //nolint:nilnil
 	assert.NoError(t, err)
 	s.SetMetadataStore(metadatadb.New(ctx, metadatadb.NewMemoryBackend()))
 
@@ -313,7 +313,7 @@ func TestSnapshotGenerationViaLocalClone(t *testing.T) {
 	mux := newTestMux()
 
 	cm := gitclone.NewManagerProvider(ctx, gitclone.Config{MirrorRoot: mirrorRoot}, nil)
-	s, err := git.New(ctx, git.Config{}, newTestScheduler(ctx, t), memCache, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
+	s, err := git.New(ctx, git.Config{}, newTestScheduler(ctx, t), memCache, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }, newTestSpools(t)) //nolint:nilnil
 	assert.NoError(t, err)
 
 	// GetOrCreate so the strategy knows about the repo.
@@ -378,7 +378,7 @@ func TestSnapshotGenerationWithFilter(t *testing.T) {
 	mux := newTestMux()
 
 	cm := gitclone.NewManagerProvider(ctx, gitclone.Config{MirrorRoot: mirrorRoot}, nil)
-	s, err := git.New(ctx, git.Config{SnapshotFilters: map[string]string{"github.com/org/repo": "blob:none"}}, newTestScheduler(ctx, t), memCache, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
+	s, err := git.New(ctx, git.Config{SnapshotFilters: map[string]string{"github.com/org/repo": "blob:none"}}, newTestScheduler(ctx, t), memCache, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }, newTestSpools(t)) //nolint:nilnil
 	assert.NoError(t, err)
 
 	manager, err := cm()
@@ -434,7 +434,7 @@ func TestSnapshotGenerationWithFilterFailsWhenMirrorIgnoresFilter(t *testing.T) 
 	mux := newTestMux()
 
 	cm := gitclone.NewManagerProvider(ctx, gitclone.Config{MirrorRoot: mirrorRoot}, nil)
-	s, err := git.New(ctx, git.Config{SnapshotFilters: map[string]string{"github.com/org/repo": "blob:none"}}, newTestScheduler(ctx, t), memCache, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
+	s, err := git.New(ctx, git.Config{SnapshotFilters: map[string]string{"github.com/org/repo": "blob:none"}}, newTestScheduler(ctx, t), memCache, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }, newTestSpools(t)) //nolint:nilnil
 	assert.NoError(t, err)
 
 	manager, err := cm()
@@ -526,7 +526,7 @@ func TestSnapshotGenerationExcludesGitGarbage(t *testing.T) {
 	mux := newTestMux()
 
 	cm := gitclone.NewManagerProvider(ctx, gitclone.Config{MirrorRoot: mirrorRoot}, nil)
-	s, err := git.New(ctx, git.Config{}, newTestScheduler(ctx, t), memCache, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
+	s, err := git.New(ctx, git.Config{}, newTestScheduler(ctx, t), memCache, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }, newTestSpools(t)) //nolint:nilnil
 	assert.NoError(t, err)
 
 	manager, err := cm()
@@ -574,7 +574,7 @@ func TestSnapshotsRefusedAfterFailedRepack(t *testing.T) {
 	assert.NoError(t, err)
 	mux := newTestMux()
 	cm := gitclone.NewManagerProvider(ctx, gitclone.Config{MirrorRoot: mirrorRoot}, nil)
-	s, err := git.New(ctx, git.Config{}, newTestScheduler(ctx, t), memCache, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
+	s, err := git.New(ctx, git.Config{}, newTestScheduler(ctx, t), memCache, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }, newTestSpools(t)) //nolint:nilnil
 	assert.NoError(t, err)
 	manager, err := cm()
 	assert.NoError(t, err)
@@ -625,7 +625,7 @@ func TestMirrorSnapshotRestoreDirectly(t *testing.T) {
 	mux := newTestMux()
 
 	cm := gitclone.NewManagerProvider(ctx, gitclone.Config{MirrorRoot: mirrorRoot}, nil)
-	s, err := git.New(ctx, git.Config{}, newTestScheduler(ctx, t), memCache, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
+	s, err := git.New(ctx, git.Config{}, newTestScheduler(ctx, t), memCache, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }, newTestSpools(t)) //nolint:nilnil
 	assert.NoError(t, err)
 
 	manager, err := cm()
@@ -702,7 +702,7 @@ func TestMirrorSnapshotWithMultipleBranches(t *testing.T) {
 	mux := newTestMux()
 
 	cm := gitclone.NewManagerProvider(ctx, gitclone.Config{MirrorRoot: mirrorRoot}, nil)
-	s, err := git.New(ctx, git.Config{}, newTestScheduler(ctx, t), memCache, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
+	s, err := git.New(ctx, git.Config{}, newTestScheduler(ctx, t), memCache, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }, newTestSpools(t)) //nolint:nilnil
 	assert.NoError(t, err)
 
 	manager, err := cm()
@@ -793,7 +793,7 @@ func TestSnapshotServesFreshSnapshotWithCommitHeader(t *testing.T) {
 	mux := newTestMux()
 
 	cm := gitclone.NewManagerProvider(ctx, gitclone.Config{MirrorRoot: mirrorRoot}, nil)
-	s, err := git.New(ctx, git.Config{}, newTestScheduler(ctx, t), memCache, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
+	s, err := git.New(ctx, git.Config{}, newTestScheduler(ctx, t), memCache, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }, newTestSpools(t)) //nolint:nilnil
 	assert.NoError(t, err)
 
 	manager, err := cm()
@@ -848,7 +848,7 @@ func TestSnapshotHeadServesMetadataWithoutBody(t *testing.T) {
 	mux := newTestMux()
 
 	cm := gitclone.NewManagerProvider(ctx, gitclone.Config{MirrorRoot: mirrorRoot}, nil)
-	s, err := git.New(ctx, git.Config{}, newTestScheduler(ctx, t), memCache, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
+	s, err := git.New(ctx, git.Config{}, newTestScheduler(ctx, t), memCache, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }, newTestSpools(t)) //nolint:nilnil
 	assert.NoError(t, err)
 
 	manager, err := cm()
@@ -922,7 +922,7 @@ func TestSnapshotGetHonorsIfNoneMatch(t *testing.T) {
 	mux := newTestMux()
 
 	cm := gitclone.NewManagerProvider(ctx, gitclone.Config{MirrorRoot: mirrorRoot}, nil)
-	s, err := git.New(ctx, git.Config{}, newTestScheduler(ctx, t), memCache, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
+	s, err := git.New(ctx, git.Config{}, newTestScheduler(ctx, t), memCache, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }, newTestSpools(t)) //nolint:nilnil
 	assert.NoError(t, err)
 
 	manager, err := cm()
@@ -979,7 +979,7 @@ func TestSnapshotServesBundleURLWhenStale(t *testing.T) {
 	mux := newTestMux()
 
 	cm := gitclone.NewManagerProvider(ctx, gitclone.Config{MirrorRoot: mirrorRoot}, nil)
-	s, err := git.New(ctx, git.Config{}, newTestScheduler(ctx, t), memCache, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
+	s, err := git.New(ctx, git.Config{}, newTestScheduler(ctx, t), memCache, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }, newTestSpools(t)) //nolint:nilnil
 	assert.NoError(t, err)
 
 	manager, err := cm()
@@ -1049,7 +1049,7 @@ func TestColdSnapshotServesWithoutCommitHeader(t *testing.T) {
 	mux := newTestMux()
 
 	cm := gitclone.NewManagerProvider(ctx, gitclone.Config{MirrorRoot: mirrorRoot}, nil)
-	_, err = git.New(ctx, git.Config{}, newTestScheduler(ctx, t), memCache, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
+	_, err = git.New(ctx, git.Config{}, newTestScheduler(ctx, t), memCache, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }, newTestSpools(t)) //nolint:nilnil
 	assert.NoError(t, err)
 
 	// Pre-populate the cache with a fake snapshot that has NO X-Cachew-Snapshot-Commit
@@ -1104,7 +1104,7 @@ func TestDeferredRestoreOnlyScheduledOnce(t *testing.T) {
 	mux := newTestMux()
 
 	cm := gitclone.NewManagerProvider(ctx, gitclone.Config{MirrorRoot: mirrorRoot}, nil)
-	_, err = git.New(ctx, git.Config{}, newTestScheduler(ctx, t), memCache, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
+	_, err = git.New(ctx, git.Config{}, newTestScheduler(ctx, t), memCache, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }, newTestSpools(t)) //nolint:nilnil
 	assert.NoError(t, err)
 
 	// Pre-populate cache with a fake snapshot.
@@ -1159,7 +1159,7 @@ func TestCacheBundleAbortsOnWriteFailure(t *testing.T) {
 
 	mux := newTestMux()
 	cm := gitclone.NewManagerProvider(ctx, gitclone.Config{MirrorRoot: mirrorRoot}, nil)
-	s, err := git.New(ctx, git.Config{}, newTestScheduler(ctx, t), failCache, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
+	s, err := git.New(ctx, git.Config{}, newTestScheduler(ctx, t), failCache, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }, newTestSpools(t)) //nolint:nilnil
 	assert.NoError(t, err)
 	waitForReady(t, s)
 
@@ -1226,7 +1226,7 @@ func TestSnapshotRemoteURLUsesUpstreamURL(t *testing.T) {
 	mux := newTestMux()
 
 	cm := gitclone.NewManagerProvider(ctx, gitclone.Config{MirrorRoot: mirrorRoot}, nil)
-	s, err := git.New(ctx, git.Config{}, newTestScheduler(ctx, t), memCache, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
+	s, err := git.New(ctx, git.Config{}, newTestScheduler(ctx, t), memCache, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }, newTestSpools(t)) //nolint:nilnil
 	assert.NoError(t, err)
 
 	manager, err := cm()
@@ -1268,7 +1268,7 @@ func TestSnapshotGetHonorsRange(t *testing.T) {
 	mux := newTestMux()
 
 	cm := gitclone.NewManagerProvider(ctx, gitclone.Config{MirrorRoot: mirrorRoot}, nil)
-	s, err := git.New(ctx, git.Config{}, newTestScheduler(ctx, t), memCache, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
+	s, err := git.New(ctx, git.Config{}, newTestScheduler(ctx, t), memCache, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }, newTestSpools(t)) //nolint:nilnil
 	assert.NoError(t, err)
 
 	manager, err := cm()
@@ -1393,7 +1393,7 @@ func newBundleTestStrategy(ctx context.Context, t *testing.T, mirrorRoot string,
 	assert.NoError(t, err)
 	mux := newTestMux()
 	cm := gitclone.NewManagerProvider(ctx, gitclone.Config{MirrorRoot: mirrorRoot, RefCheckInterval: refCheckInterval}, nil)
-	s, err := git.New(ctx, git.Config{}, newTestScheduler(ctx, t), memCache, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
+	s, err := git.New(ctx, git.Config{}, newTestScheduler(ctx, t), memCache, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }, newTestSpools(t)) //nolint:nilnil
 	assert.NoError(t, err)
 	waitForReady(t, s)
 	assert.NoError(t, exec.Command("git", "-C", mirrorPath, "remote", "set-url", "origin",
@@ -1551,4 +1551,46 @@ func TestBundleRequestUnknownBase(t *testing.T) {
 
 	invalid := requestBundle(ctx, mux, "not-a-sha")
 	assert.Equal(t, http.StatusBadRequest, invalid.Code)
+}
+
+func TestSnapshotMissDefersCachingToActivePublisher(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not found in PATH")
+	}
+
+	_, ctx := logging.Configure(context.Background(), logging.Config{})
+	mirrorRoot := filepath.Join(t.TempDir(), "mirrors")
+	upstreamURL := "https://github.com/org/repo"
+	createTestMirrorRepo(t, filepath.Join(mirrorRoot, "github.com", "org", "repo"))
+
+	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: time.Hour})
+	assert.NoError(t, err)
+	mux := newTestMux()
+	cm := gitclone.NewManagerProvider(ctx, gitclone.Config{MirrorRoot: mirrorRoot}, nil)
+	s, err := git.New(ctx, git.Config{}, newTestScheduler(ctx, t), memCache, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }, newTestSpools(t)) //nolint:nilnil
+	assert.NoError(t, err)
+	waitForReady(t, s)
+
+	serve := func() *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, "/git/github.com/org/repo/snapshot.tar.zst", nil).WithContext(ctx)
+		req.SetPathValue("host", "github.com")
+		req.SetPathValue("path", "org/repo/snapshot.tar.zst")
+		w := httptest.NewRecorder()
+		mux.handlers["GET /git/{host}/{path...}"].ServeHTTP(w, req)
+		return w
+	}
+	snapshotKey := cache.NewKey(upstreamURL + ".snapshot")
+
+	unlock := s.LockSnapshotForTest(upstreamURL)
+	w := serve()
+	unlock()
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.NotZero(t, w.Body.Len())
+	_, err = memCache.Stat(ctx, snapshotKey)
+	assert.True(t, os.IsNotExist(err), "a fill must not publish while another publisher holds the snapshot mutex")
+
+	w = serve()
+	assert.Equal(t, http.StatusOK, w.Code)
+	_, err = memCache.Stat(ctx, snapshotKey)
+	assert.NoError(t, err)
 }
