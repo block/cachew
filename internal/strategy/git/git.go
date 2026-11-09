@@ -468,6 +468,8 @@ func (s *Strategy) handleGitRequest(w http.ResponseWriter, r *http.Request, host
 			writeRequestTooLarge(w, r)
 		} else if err != nil {
 			logger.WarnContext(ctx, "Spooled upload-pack response truncated", "error", err)
+			// Headers are already sent, so abort the connection rather than let the server
+			// end the chunked body cleanly and git mistake a truncated pack for a whole one.
 			if ctx.Err() == nil {
 				panic(http.ErrAbortHandler)
 			}
