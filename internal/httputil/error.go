@@ -3,6 +3,7 @@ package httputil
 
 import (
 	"fmt"
+	"maps"
 	"net/http"
 
 	"github.com/alecthomas/errors"
@@ -26,6 +27,7 @@ type HTTPResponder interface {
 type HTTPError struct {
 	status int
 	err    error
+	header http.Header
 }
 
 func (h HTTPError) Error() string { return fmt.Sprintf("%d: %s", h.status, h.err) }
@@ -33,6 +35,7 @@ func (h HTTPError) Unwrap() error { return h.err }
 
 // WriteHTTP writes this error as an HTTP response.
 func (h HTTPError) WriteHTTP(w http.ResponseWriter, r *http.Request) {
+	maps.Copy(w.Header(), h.header)
 	ErrorResponse(w, r, h.status, h.err.Error())
 }
 
@@ -41,4 +44,17 @@ func Errorf(status int, format string, args ...any) error {
 		status: status,
 		err:    errors.Errorf(format, args...),
 	}
+}
+
+// UpstreamErrorf is [Errorf] with the status of resp. For a 429 it keeps
+// Retry-After and marks the response no-store.
+func UpstreamErrorf(resp *http.Response, format string, args ...any) error {
+	err := HTTPError{status: resp.StatusCode, err: errors.Errorf(format, args...)}
+	if resp.StatusCode == http.StatusTooManyRequests {
+		err.header = http.Header{"Cache-Control": {"no-store"}}
+		if retryAfter := resp.Header.Get("Retry-After"); retryAfter != "" {
+			err.header.Set("Retry-After", retryAfter)
+		}
+	}
+	return err
 }

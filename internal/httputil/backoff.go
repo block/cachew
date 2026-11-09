@@ -103,13 +103,19 @@ func NewBackoffScope(base http.RoundTripper) *BackoffScope {
 	return &BackoffScope{base: base}
 }
 
+// WithContext puts requests made with ctx in this scope, including requests
+// sent by other clients through a [BackoffTransport].
+func (s *BackoffScope) WithContext(ctx context.Context) context.Context {
+	return context.WithValue(ctx, backoffScopeKey{}, s)
+}
+
 // RoundTrip sends r in this scope.
 func (s *BackoffScope) RoundTrip(r *http.Request) (*http.Response, error) {
 	base := s.base
 	if base == nil {
 		base = http.DefaultTransport
 	}
-	resp, err := base.RoundTrip(r.WithContext(context.WithValue(r.Context(), backoffScopeKey{}, s)))
+	resp, err := base.RoundTrip(r.WithContext(s.WithContext(r.Context())))
 	if err != nil {
 		return nil, errors.WithStack(err)
 	}

@@ -15,6 +15,7 @@ import (
 
 	"github.com/block/cachew/internal/cache"
 	"github.com/block/cachew/internal/githubapp"
+	"github.com/block/cachew/internal/httputil"
 	"github.com/block/cachew/internal/logging"
 	"github.com/block/cachew/internal/strategy"
 )
@@ -52,6 +53,12 @@ func (m *mockGitHubServer) handleAPIRequest(w http.ResponseWriter, r *http.Reque
 	org := r.PathValue("org")
 	repo := r.PathValue("repo")
 	tag := r.PathValue("tag")
+
+	if tag == "limited" {
+		w.Header().Set("Retry-After", "30")
+		w.WriteHeader(http.StatusTooManyRequests)
+		return
+	}
 
 	if strings.Contains(r.URL.Path, "missing.tar.gz") {
 		releaseInfo := map[string]any{
@@ -115,11 +122,11 @@ func setupTest(t *testing.T, config strategy.GitHubReleasesConfig) (*mockGitHubS
 	t.Cleanup(mock.close)
 
 	originalTransport := http.DefaultTransport
-	t.Cleanup(func() { http.DefaultTransport = originalTransport }) //nolint:reassign // Required for testing
-	http.DefaultTransport = &testTransport{                         //nolint:reassign // Required for testing
+	t.Cleanup(func() { http.DefaultTransport = originalTransport })      //nolint:reassign // Required for testing
+	http.DefaultTransport = httputil.NewBackoffTransport(&testTransport{ //nolint:reassign // Required for testing
 		backend:           mock.server,
 		originalTransport: originalTransport,
-	}
+	}, time.Minute)
 
 	_, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelError})
 	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: time.Hour})
@@ -225,6 +232,22 @@ func TestGitHubReleasesPrivateRepoAPIError(t *testing.T) {
 	assert.Equal(t, http.StatusUnauthorized, w.Code)
 	assert.Equal(t, 1, mock.apiCallCount)
 	assert.Equal(t, 0, mock.downloadCallCount)
+}
+
+func TestGitHubReleasesRateLimitPausesStrategy(t *testing.T) {
+	mock, mux, ctx := setupTest(t, strategy.GitHubReleasesConfig{
+		Token:       "test-token",
+		PrivateOrgs: []string{"privateorg"},
+	})
+	for _, path := range []string{"privateorg/repo/releases/download/limited/binary.tar.gz", "publicorg/repo/releases/download/v1.0.0/binary.tar.gz"} {
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, httptest.NewRequestWithContext(ctx, http.MethodGet, "/github.com/"+path, nil))
+		assert.Equal(t, http.StatusTooManyRequests, w.Code)
+		assert.Equal(t, "no-store", w.Header().Get("Cache-Control"))
+		assert.Equal(t, "30", w.Header().Get("Retry-After"))
+	}
+	assert.Equal(t, 1, mock.apiCallCount)
+	assert.Equal(t, 0, mock.publicCallCount)
 }
 
 func TestGitHubReleasesPublicRepoNotFound(t *testing.T) {
