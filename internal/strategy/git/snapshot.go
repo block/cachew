@@ -1212,6 +1212,14 @@ func (s *Strategy) fillSnapshot(ctx context.Context, sw *spool.Writer, repo *git
 	start := time.Now()
 	upstreamURL := repo.UpstreamURL()
 
+	// Publishing from clone to commit under the snapshot mutex stops an older clone
+	// overwriting a newer snapshot. If another publisher holds it, stream uncached.
+	mu := s.snapshotMutexFor(upstreamURL)
+	publish := mu.TryLock()
+	if publish {
+		defer mu.Unlock()
+	}
+
 	snapshotDir, err := os.MkdirTemp(s.cloneManager.Config().MirrorRoot, ".snapshot-stream-*")
 	if err != nil {
 		s.failSnapshotFill(ctx, sw, repoName, start, errors.Wrap(err, "create temp snapshot dir"))
@@ -1238,7 +1246,9 @@ func (s *Strategy) fillSnapshot(ctx context.Context, sw *spool.Writer, repo *git
 	headers := snapshot.Headers(filepath.Base(repoDir), extraHeaders)
 	maps.Copy(sw.Header(), headers)
 	sw.WriteHeader(http.StatusOK)
-	if cw, err := s.cache.Create(ctx, snapshotCacheKey(upstreamURL), headers, 0); err != nil {
+	if !publish {
+		logger.InfoContext(ctx, "Snapshot generation in progress, streaming snapshot without caching it", "upstream", upstreamURL)
+	} else if cw, err := s.cache.Create(ctx, snapshotCacheKey(upstreamURL), headers, 0); err != nil {
 		logger.WarnContext(ctx, "Failed to create snapshot cache entry", "upstream", upstreamURL, "error", err)
 	} else if err := sw.Store(cw); err != nil {
 		s.metrics.recordSpoolWriter(ctx, repoName, "error", time.Since(start))

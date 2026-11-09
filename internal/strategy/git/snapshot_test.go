@@ -1552,3 +1552,45 @@ func TestBundleRequestUnknownBase(t *testing.T) {
 	invalid := requestBundle(ctx, mux, "not-a-sha")
 	assert.Equal(t, http.StatusBadRequest, invalid.Code)
 }
+
+func TestSnapshotMissDefersCachingToActivePublisher(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not found in PATH")
+	}
+
+	_, ctx := logging.Configure(context.Background(), logging.Config{})
+	mirrorRoot := filepath.Join(t.TempDir(), "mirrors")
+	upstreamURL := "https://github.com/org/repo"
+	createTestMirrorRepo(t, filepath.Join(mirrorRoot, "github.com", "org", "repo"))
+
+	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: time.Hour})
+	assert.NoError(t, err)
+	mux := newTestMux()
+	cm := gitclone.NewManagerProvider(ctx, gitclone.Config{MirrorRoot: mirrorRoot}, nil)
+	s, err := git.New(ctx, git.Config{}, newTestScheduler(ctx, t), memCache, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }, newTestSpools(t)) //nolint:nilnil
+	assert.NoError(t, err)
+	waitForReady(t, s)
+
+	serve := func() *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, "/git/github.com/org/repo/snapshot.tar.zst", nil).WithContext(ctx)
+		req.SetPathValue("host", "github.com")
+		req.SetPathValue("path", "org/repo/snapshot.tar.zst")
+		w := httptest.NewRecorder()
+		mux.handlers["GET /git/{host}/{path...}"].ServeHTTP(w, req)
+		return w
+	}
+	snapshotKey := cache.NewKey(upstreamURL + ".snapshot")
+
+	unlock := s.LockSnapshotForTest(upstreamURL)
+	w := serve()
+	unlock()
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.NotZero(t, w.Body.Len())
+	_, err = memCache.Stat(ctx, snapshotKey)
+	assert.True(t, os.IsNotExist(err), "a fill must not publish while another publisher holds the snapshot mutex")
+
+	w = serve()
+	assert.Equal(t, http.StatusOK, w.Code)
+	_, err = memCache.Stat(ctx, snapshotKey)
+	assert.NoError(t, err)
+}

@@ -55,7 +55,7 @@ func newTestScheduler(ctx context.Context, t *testing.T) jobscheduler.Provider {
 func newTestSpools(t *testing.T) *spool.Registry {
 	t.Helper()
 	_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelError})
-	spools, err := spool.New(ctx, spool.Config{Dir: t.TempDir()})
+	spools, err := spool.New(ctx, spool.Config{Dir: t.TempDir()}, func(err error) { t.Error(err) })
 	assert.NoError(t, err)
 	t.Cleanup(spools.Close)
 	return spools

@@ -71,3 +71,10 @@ func ColdPreparationQueueLimitForTest() int {
 func (s *Strategy) ClaimSnapshotForTest(upstream string) (bool, error) {
 	return s.snapshotCoord.Load().Claim(snapshotJobBase, upstream, 0)
 }
+
+// LockSnapshotForTest holds upstream's snapshot publishing mutex until the returned func runs.
+func (s *Strategy) LockSnapshotForTest(upstream string) func() {
+	mu := s.snapshotMutexFor(upstream)
+	mu.Lock()
+	return mu.Unlock
+}

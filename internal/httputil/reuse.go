@@ -2,6 +2,7 @@ package httputil
 
 import (
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -55,6 +56,23 @@ func ReuseLifetime(req *http.Request, status int, header http.Header, heuristic 
 		lifetime -= time.Duration(age) * time.Second
 	}
 	return lifetime, lifetime > 0
+}
+
+// VaryMatches reports whether a response with header, stored for a request with
+// stored headers, may answer a request with req headers (RFC 9111 §4.1).
+func VaryMatches(header, stored, req http.Header) bool {
+	for _, value := range header.Values("Vary") {
+		for field := range strings.SplitSeq(value, ",") {
+			field = strings.TrimSpace(field)
+			if field == "*" {
+				return false
+			}
+			if field != "" && !slices.Equal(stored.Values(field), req.Values(field)) {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 type cacheDirectives map[string]string

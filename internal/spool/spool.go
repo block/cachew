@@ -28,24 +28,25 @@ type Config struct {
 type Provider func() (*Registry, error)
 
 // NewProvider returns a Registry singleton provider function.
-func NewProvider(ctx context.Context, config Config) Provider {
+func NewProvider(ctx context.Context, config Config, onReleaseError func(error)) Provider {
 	return sync.OnceValues(func() (*Registry, error) {
-		return New(ctx, config)
+		return New(ctx, config, onReleaseError)
 	})
 }
 
 // Registry owns every in-flight fill in the process. Fills run detached from
 // the requests that started them, so Close is the only way to cancel them.
 type Registry struct {
-	config Config
-	ctx    context.Context
-	cancel context.CancelFunc
-	fills  sync.WaitGroup
+	config         Config
+	ctx            context.Context
+	cancel         context.CancelFunc
+	fills          sync.WaitGroup
+	onReleaseError func(error)
 }
 
-// New creates a Registry, removing spool files left behind by a previous process.
-// ctx's cancellation is ignored so shutdown does not truncate responses; use Close.
-func New(ctx context.Context, config Config) (*Registry, error) {
+// New creates a Registry and removes stale spool files; ctx's cancellation is ignored, use Close.
+// onReleaseError receives cleanup failures from any goroutine and must not call the Registry.
+func New(ctx context.Context, config Config, onReleaseError func(error)) (*Registry, error) {
 	if err := os.MkdirAll(config.Dir, 0o750); err != nil {
 		return nil, errors.Wrap(err, "create spool directory")
 	}
@@ -59,7 +60,7 @@ func New(ctx context.Context, config Config) (*Registry, error) {
 		}
 	}
 	ctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
-	return &Registry{config: config, ctx: ctx, cancel: cancel}, nil
+	return &Registry{config: config, ctx: ctx, cancel: cancel, onReleaseError: onReleaseError}, nil
 }
 
 // NewGroup returns a key space whose keys never collide with another group's.

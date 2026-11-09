@@ -68,3 +68,26 @@ func TestReuseLifetime(t *testing.T) {
 		})
 	}
 }
+
+func TestVaryMatches(t *testing.T) {
+	tests := []struct {
+		name   string
+		vary   []string
+		stored http.Header
+		req    http.Header
+		want   bool
+	}{
+		{name: "NoVary", req: http.Header{"Accept": {"a"}}, want: true},
+		{name: "SameValues", vary: []string{"Accept"}, stored: http.Header{"Accept": {"a"}}, req: http.Header{"Accept": {"a"}}, want: true},
+		{name: "DifferentValues", vary: []string{"Accept"}, stored: http.Header{"Accept": {"a"}}, req: http.Header{"Accept": {"b"}}},
+		{name: "MissingFromRequest", vary: []string{"accept"}, stored: http.Header{"Accept": {"a"}}, req: http.Header{}},
+		{name: "OnlyListedFields", vary: []string{"Accept, X-Other"}, stored: http.Header{"Accept": {"a"}, "X-Unlisted": {"1"}}, req: http.Header{"Accept": {"a"}}, want: true},
+		{name: "Star", vary: []string{"*"}, stored: http.Header{}, req: http.Header{}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			header := http.Header{"Vary": tt.vary}
+			assert.Equal(t, tt.want, httputil.VaryMatches(header, tt.stored, tt.req))
+		})
+	}
+}

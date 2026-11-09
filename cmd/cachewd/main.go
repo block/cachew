@@ -132,7 +132,9 @@ func main() {
 	schedulerCtx, cancelScheduler := context.WithCancel(context.WithoutCancel(ctx))
 	schedulerProvider := jobscheduler.NewProvider(schedulerCtx, globalConfig.SchedulerConfig)
 
-	spoolProvider := spool.NewProvider(ctx, globalConfig.SpoolConfig)
+	spoolProvider := spool.NewProvider(ctx, globalConfig.SpoolConfig, func(err error) {
+		logger.WarnContext(ctx, "Failed to release spooled response", "error", err)
+	})
 
 	cr, mr, sr := newRegistries(schedulerProvider, gitManagerProvider, tokenManagerProvider, s3ClientProvider, spoolProvider)
 

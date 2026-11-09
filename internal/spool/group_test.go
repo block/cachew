@@ -241,6 +241,62 @@ func TestSequentialRequests(t *testing.T) {
 	}
 }
 
+func TestErrorReuseChecksFollowerRequest(t *testing.T) {
+	tests := []struct {
+		name           string
+		header         http.Header
+		leaderHeader   http.Header
+		followerHeader http.Header
+		wantFills      int32
+	}{
+		{name: "AnonymousFollower", wantFills: 1},
+		{name: "AuthorizedFollower", followerHeader: http.Header{"Authorization": {"Bearer x"}}, wantFills: 2},
+		{
+			name:           "AuthorizedFollowerOfPublicResponse",
+			header:         http.Header{"Cache-Control": {"public"}},
+			followerHeader: http.Header{"Authorization": {"Bearer x"}},
+			wantFills:      1,
+		},
+		{
+			name:           "SameVariedHeader",
+			header:         http.Header{"Vary": {"Accept"}},
+			leaderHeader:   http.Header{"Accept": {"a"}},
+			followerHeader: http.Header{"Accept": {"a"}},
+			wantFills:      1,
+		},
+		{
+			name:           "DifferentVariedHeader",
+			header:         http.Header{"Vary": {"Accept"}},
+			leaderHeader:   http.Header{"Accept": {"a"}},
+			followerHeader: http.Header{"Accept": {"b"}},
+			wantFills:      2,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx, registry, _ := newTestRegistry(t, spool.Config{ErrorWindow: time.Hour})
+			group := registry.NewGroup(spool.ReleaseCompleted)
+			var fills atomic.Int32
+			fill := func(_ context.Context, w *spool.Writer) error {
+				fills.Add(1)
+				maps.Copy(w.Header(), tt.header)
+				w.WriteHeader(http.StatusNotFound)
+				return nil
+			}
+			for _, header := range []http.Header{tt.leaderHeader, tt.followerHeader} {
+				req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/object", nil)
+				maps.Copy(req.Header, header)
+				_, err := group.Serve(httptest.NewRecorder(), req, key, fill)
+				if errors.Is(err, spool.ErrNotShared) {
+					_, err = group.Serve(httptest.NewRecorder(), req, key+"-own", fill)
+				}
+				assert.NoError(t, err)
+			}
+			assert.Equal(t, tt.wantFills, fills.Load())
+		})
+	}
+}
+
 func TestUnsharedResponseIsNotServedToFollowers(t *testing.T) {
 	ctx, registry, _ := newTestRegistry(t, spool.Config{ErrorWindow: time.Hour})
 	group := registry.NewGroup(spool.ReleaseCompleted)
@@ -405,7 +461,7 @@ func TestNewRemovesStaleSpoolFiles(t *testing.T) {
 	assert.NoError(t, os.WriteFile(filepath.Join(dir, "stale"+spool.FileSuffix), nil, 0o600))
 	assert.NoError(t, os.WriteFile(filepath.Join(dir, "unrelated"), nil, 0o600))
 	_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelError})
-	registry, err := spool.New(ctx, spool.Config{Dir: dir})
+	registry, err := spool.New(ctx, spool.Config{Dir: dir}, func(err error) { t.Error(err) })
 	assert.NoError(t, err)
 	defer registry.Close()
 	files, err := os.ReadDir(dir)
@@ -414,11 +470,37 @@ func TestNewRemovesStaleSpoolFiles(t *testing.T) {
 	assert.Equal(t, "unrelated", files[0].Name())
 }
 
+func TestReleaseErrorsGoToOwner(t *testing.T) {
+	_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelError})
+	releaseErrs := make(chan error, 1)
+	registry, err := spool.New(ctx, spool.Config{Dir: t.TempDir()}, func(err error) { releaseErrs <- err })
+	assert.NoError(t, err)
+	defer registry.Close()
+	group := registry.NewGroup(spool.ReleaseCompleted)
+	fill := func(_ context.Context, w *spool.Writer) error {
+		w.WriteHeader(http.StatusOK)
+		if err := w.Store(&pendingCacheWriter{}); err != nil {
+			return err
+		}
+		if _, err := io.WriteString(w, "body"); err != nil {
+			return err
+		}
+		return w.Commit()
+	}
+
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/object", nil)
+	_, err = group.Serve(recorder, req, key, fill)
+	assert.NoError(t, err)
+	assert.Equal(t, "body", recorder.Body.String())
+	assert.IsError(t, <-releaseErrs, errReaderClose)
+}
+
 func newTestRegistry(t *testing.T, config spool.Config) (context.Context, *spool.Registry, string) {
 	t.Helper()
 	_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelError})
 	config.Dir = t.TempDir()
-	registry, err := spool.New(ctx, config)
+	registry, err := spool.New(ctx, config, func(err error) { t.Error(err) })
 	assert.NoError(t, err)
 	t.Cleanup(registry.Close)
 	return ctx, registry, config.Dir
@@ -455,3 +537,39 @@ func (w *failingCacheWriter) Write(p []byte) (int, error) {
 
 func (w *failingCacheWriter) Close() error      { return nil }
 func (w *failingCacheWriter) Abort(error) error { return nil }
+
+var errReaderClose = errors.New("reader close failed")
+
+// pendingCacheWriter supports pending reads whose reader fails to close.
+type pendingCacheWriter struct {
+	mu   sync.Mutex
+	data []byte
+}
+
+func (w *pendingCacheWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.data = append(w.data, p...)
+	return len(p), nil
+}
+
+func (w *pendingCacheWriter) Close() error      { return nil }
+func (w *pendingCacheWriter) Abort(error) error { return nil }
+
+func (w *pendingCacheWriter) OpenPending() (cache.ReadAtCloser, error) {
+	return pendingCacheReader{w}, nil
+}
+
+type pendingCacheReader struct{ w *pendingCacheWriter }
+
+func (r pendingCacheReader) ReadAt(p []byte, off int64) (int, error) {
+	r.w.mu.Lock()
+	defer r.w.mu.Unlock()
+	n := copy(p, r.w.data[off:])
+	if n < len(p) {
+		return n, io.EOF
+	}
+	return n, nil
+}
+
+func (r pendingCacheReader) Close() error { return errReaderClose }

@@ -13,7 +13,6 @@ import (
 
 	"github.com/block/cachew/internal/cache"
 	"github.com/block/cachew/internal/httputil"
-	"github.com/block/cachew/internal/logging"
 )
 
 // ErrNotShared reports that a response cannot be served from the spool. Nothing
@@ -173,7 +172,7 @@ func (e *entry) releaseIfUnusedLocked() {
 	release := e.release
 	e.release = nil
 	if err := release(); err != nil {
-		logging.FromContext(e.group.registry.ctx).WarnContext(e.group.registry.ctx, "Failed to release spool", "error", err)
+		e.group.registry.onReleaseError(errors.Wrap(err, "release spooled response"))
 	}
 }
 
@@ -266,7 +265,7 @@ func (e *entry) serve(w http.ResponseWriter, req *http.Request, filled bool) (Re
 		}
 		if !headerSent && status != 0 {
 			result.Wait = time.Since(start)
-			if !filled && !shared {
+			if !filled && !e.reusableBy(req, status, header, shared) {
 				return result, ErrNotShared
 			}
 			maps.Copy(w.Header(), header)
@@ -298,6 +297,21 @@ func (e *entry) serve(w http.ResponseWriter, req *http.Request, filled bool) (Re
 		case <-changed:
 		}
 	}
+}
+
+// reusableBy reports whether a follower may reuse the response. Errors are also
+// checked against the follower, so its credentials and varied headers count.
+func (e *entry) reusableBy(req *http.Request, status int, header http.Header, shared bool) bool {
+	if !shared {
+		return false
+	}
+	if status >= 200 && status < 300 {
+		return true
+	}
+	if _, ok := httputil.ReuseLifetime(req, status, header, e.group.registry.config.ErrorWindow); !ok {
+		return false
+	}
+	return httputil.VaryMatches(header, e.leader.Header, req.Header)
 }
 
 // Writer receives a fill's response so existing forwarding code can write into it.
