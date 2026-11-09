@@ -36,6 +36,7 @@ func NewAPIV1(ctx context.Context, _ struct{}, cache cache.Cache, mux Mux) (*API
 	mux.Handle("GET /api/v1/object/{namespace}/{key}", http.HandlerFunc(s.getObject))
 	mux.Handle("HEAD /api/v1/object/{namespace}/{key}", http.HandlerFunc(s.statObject))
 	mux.Handle("POST /api/v1/object/{namespace}/{key}", http.HandlerFunc(s.putObject))
+	mux.Handle("PATCH /api/v1/object/{namespace}/{key}", http.HandlerFunc(s.updateObjectMetadata))
 	mux.Handle("DELETE /api/v1/object/{namespace}/{key}", http.HandlerFunc(s.deleteObject))
 	mux.Handle("POST /api/v1/object/{namespace}/{key}/invalidate", http.HandlerFunc(s.invalidateObject))
 	mux.Handle("GET /api/v1/stats", http.HandlerFunc(s.getStats))
@@ -108,14 +109,10 @@ func (d *APIV1) putObject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var ttl time.Duration
-	ttlh := r.Header.Get("Time-To-Live")
-	if ttlh != "" {
-		ttl, err = time.ParseDuration(ttlh)
-		if err != nil {
-			d.httpError(w, http.StatusBadRequest, err, "Invalid Time-To-Live header format, must be in Go duration format eg. 1h")
-			return
-		}
+	ttl, err := parseTTLHeader(r)
+	if err != nil {
+		d.httpError(w, http.StatusBadRequest, err, "Invalid Time-To-Live header format, must be in Go duration format eg. 1h")
+		return
 	}
 
 	// Extract and filter headers from request
@@ -147,6 +144,50 @@ func (d *APIV1) putObject(w http.ResponseWriter, r *http.Request) {
 		d.httpError(w, http.StatusInternalServerError, err, "Failed to close cache writer")
 		return
 	}
+}
+
+func (d *APIV1) updateObjectMetadata(w http.ResponseWriter, r *http.Request) {
+	namespace, err := cache.ParseNamespace(r.PathValue("namespace"))
+	if err != nil {
+		d.httpError(w, http.StatusBadRequest, err, "Invalid namespace")
+		return
+	}
+	key, err := cache.ParseKey(r.PathValue("key"))
+	if err != nil {
+		d.httpError(w, http.StatusBadRequest, err, "Invalid key")
+		return
+	}
+	ttl, err := parseTTLHeader(r)
+	if err != nil {
+		d.httpError(w, http.StatusBadRequest, err, "Invalid Time-To-Live header format, must be in Go duration format eg. 1h")
+		return
+	}
+	headers := apiObjectHeaders(r.Header)
+	if headers.Get(cache.ETagKey) != "" {
+		http.Error(w, "ETag cannot be updated", http.StatusBadRequest)
+		return
+	}
+
+	err = d.cache.Namespace(namespace).UpdateMetadata(r.Context(), key, headers, ttl, httputil.ConditionalOptions(r)...)
+	switch {
+	case err == nil:
+		w.WriteHeader(http.StatusNoContent)
+	case errors.Is(err, os.ErrNotExist):
+		http.Error(w, "Cache object not found", http.StatusNotFound)
+	case errors.Is(err, cache.ErrPreconditionFailed):
+		http.Error(w, "Precondition failed", http.StatusPreconditionFailed)
+	default:
+		d.httpError(w, http.StatusInternalServerError, err, "Failed to update cache object metadata", "key", key)
+	}
+}
+
+func parseTTLHeader(r *http.Request) (time.Duration, error) {
+	ttlh := r.Header.Get("Time-To-Live")
+	if ttlh == "" {
+		return 0, nil
+	}
+	ttl, err := time.ParseDuration(ttlh)
+	return ttl, errors.WithStack(err)
 }
 
 func apiObjectHeaders(headers http.Header) http.Header {

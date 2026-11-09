@@ -315,11 +315,9 @@ func (s *S3) Open(ctx context.Context, key Key, opts ...Option) (io.ReadCloser, 
 		now := time.Now()
 		if meta.ExpiresAt.Sub(now) < s.config.MaxTTL/2 {
 			newExpiresAt := ceilSecond(now.Add(s.config.MaxTTL))
-			refreshHeaders := make(http.Header)
-			if etag := meta.Headers.Get(ETagKey); etag != "" {
-				refreshHeaders.Set(ETagKey, etag)
-			}
-			refreshMeta := s3Meta{Headers: refreshHeaders, ExpiresAt: newExpiresAt, Tag: meta.Tag}
+			// Preserve every companion header, not just the ETag, so headers
+			// recorded by UpdateMetadata survive the refresh.
+			refreshMeta := s3Meta{Headers: meta.Headers.Clone(), ExpiresAt: newExpiresAt, Tag: meta.Tag}
 			go func() {
 				bgCtx := context.WithoutCancel(ctx)
 				if err := s.writeMeta(bgCtx, s.namespace, key, refreshMeta); err != nil {
@@ -483,6 +481,29 @@ func (s *S3) Create(ctx context.Context, key Key, headers http.Header, ttl time.
 	go writer.upload(pr, br)
 
 	return writer, nil
+}
+
+// UpdateMetadata rewrites only the companion object: the data object's
+// user metadata is immutable without a server-side copy of the body.
+func (s *S3) UpdateMetadata(ctx context.Context, key Key, headers http.Header, ttl time.Duration, opts ...Option) error {
+	if ttl > s.config.MaxTTL || ttl == 0 {
+		ttl = s.config.MaxTTL
+	}
+	_, stored, meta, err := s.statAndHeaders(ctx, key)
+	if err != nil {
+		return err
+	}
+	if _, err := updatedHeaders(stored, headers, opts); err != nil {
+		return err
+	}
+	companion, err := updatedHeaders(meta.Headers, headers, nil)
+	if err != nil {
+		return err
+	}
+	companion.Set(ETagKey, stored.Get(ETagKey))
+	meta.Headers = companion
+	meta.ExpiresAt = ceilSecond(time.Now().Add(ttl))
+	return s.writeMeta(ctx, s.namespace, key, meta)
 }
 
 func (s *S3) Delete(ctx context.Context, key Key) error {

@@ -214,6 +214,18 @@ type Cache interface {
 	//
 	// If the context is cancelled the object MUST NOT be made available in the cache.
 	Create(ctx context.Context, key Key, headers http.Header, ttl time.Duration, opts ...Option) (Writer, error)
+	// UpdateMetadata lets callers record revalidation results and extend an
+	// entry's lifetime without paying to rewrite its body. Headers not in
+	// headers are unchanged. If "ttl" is zero, the maximum TTL MUST be used.
+	//
+	// Must return os.ErrNotExist if the entry does not exist or has expired.
+	//
+	// MUST NOT change the content ETag: tiers compare ETags to detect stale
+	// copies, so changing it would make unchanged content look replaced.
+	//
+	// An IfMatch opt prevents refreshing an entry that was replaced since the
+	// caller validated it.
+	UpdateMetadata(ctx context.Context, key Key, headers http.Header, ttl time.Duration, opts ...Option) error
 	// Delete a file from the cache.
 	//
 	// MUST be atomic.

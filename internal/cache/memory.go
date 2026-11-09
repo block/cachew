@@ -151,6 +151,26 @@ func (m *Memory) Create(ctx context.Context, key Key, headers http.Header, ttl t
 	return writer, nil
 }
 
+func (m *Memory) UpdateMetadata(_ context.Context, key Key, headers http.Header, ttl time.Duration, opts ...Option) error {
+	if ttl == 0 {
+		ttl = m.config.MaxTTL
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	entry, exists := m.entries[m.namespace][key]
+	if !exists || time.Now().After(entry.expiresAt) {
+		return os.ErrNotExist
+	}
+	merged, err := updatedHeaders(entry.headers, headers, opts)
+	if err != nil {
+		return err
+	}
+	entry.headers = merged
+	entry.expiresAt = time.Now().Add(ttl)
+	return nil
+}
+
 func (m *Memory) Delete(_ context.Context, key Key) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()

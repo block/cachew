@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"testing"
 	"time"
@@ -253,4 +254,40 @@ func TestS3LegacyUntaggedObjectIsReadable(t *testing.T) {
 	assert.NoError(t, err)
 	assert.NoError(t, r.Close())
 	assert.Equal(t, string(data), string(got))
+}
+
+func TestS3ExpiryRefreshPreservesUpdatedHeaders(t *testing.T) {
+	s := newS3(t)
+	defer s.Close()
+
+	ctx := t.Context()
+	key := NewKey("refresh-preserves-headers")
+
+	w, err := s.Create(ctx, key, nil, time.Minute)
+	assert.NoError(t, err)
+	_, err = w.Write([]byte("hello world"))
+	assert.NoError(t, err)
+	assert.NoError(t, w.Close())
+	assert.NoError(t, s.UpdateMetadata(ctx, key, http.Header{"X-Checked": {"yes"}}, time.Minute))
+
+	r, _, err := s.Open(ctx, key)
+	assert.NoError(t, err)
+	assert.NoError(t, r.Close())
+
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		meta, err := s.readMeta(ctx, s.namespace, key)
+		assert.NoError(t, err)
+		if time.Until(meta.ExpiresAt) > s.config.MaxTTL/2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("expiry was not refreshed")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	headers, err := s.Stat(ctx, key)
+	assert.NoError(t, err)
+	assert.Equal(t, "yes", headers.Get("X-Checked"))
 }

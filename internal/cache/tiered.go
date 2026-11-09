@@ -133,6 +133,41 @@ func (t Tiered) replacementETag(ctx context.Context, key Key, newETag string) (b
 	}
 }
 
+// UpdateMetadata updates every tier holding the entry. A tier without the
+// entry, or holding a different version than an IfMatch names, is skipped:
+// it will be backfilled or invalidated by later reads.
+func (t Tiered) UpdateMetadata(ctx context.Context, key Key, headers http.Header, ttl time.Duration, opts ...Option) error {
+	wg := sync.WaitGroup{}
+	errs := make([]error, len(t.caches))
+	for i, cache := range t.caches {
+		wg.Go(func() { errs[i] = cache.UpdateMetadata(ctx, key, headers, ttl, opts...) })
+	}
+	wg.Wait()
+	updated, rejected := false, false
+	var hardErrs []error
+	for _, err := range errs {
+		switch {
+		case err == nil:
+			updated = true
+		case errors.Is(err, os.ErrNotExist):
+		case errors.Is(err, ErrPreconditionFailed):
+			rejected = true
+		default:
+			hardErrs = append(hardErrs, errors.WithStack(err))
+		}
+	}
+	switch {
+	case len(hardErrs) > 0:
+		return errors.Join(hardErrs...)
+	case updated:
+		return nil
+	case rejected:
+		return errors.WithStack(ErrPreconditionFailed)
+	default:
+		return errors.WithStack(os.ErrNotExist)
+	}
+}
+
 // Delete from all underlying caches. All errors are returned.
 func (t Tiered) Delete(ctx context.Context, key Key) error {
 	wg := sync.WaitGroup{}

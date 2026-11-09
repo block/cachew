@@ -35,6 +35,10 @@ func (n *noOpCache) Create(_ context.Context, _ Key, _ http.Header, _ time.Durat
 	return &noOpWriter{}, nil
 }
 
+func (n *noOpCache) UpdateMetadata(_ context.Context, _ Key, _ http.Header, _ time.Duration, _ ...Option) error {
+	return os.ErrNotExist
+}
+
 func (n *noOpCache) Delete(_ context.Context, _ Key) error {
 	return nil
 }
