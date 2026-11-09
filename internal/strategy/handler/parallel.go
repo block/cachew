@@ -72,8 +72,11 @@ type upstreamRanges struct {
 // already received, rather than requesting the first chunk twice.
 func (u *upstreamRanges) Open(ctx context.Context, _ client.Key, opts ...client.RequestOption) (io.ReadCloser, http.Header, error) {
 	o := client.NewRequestOptions(opts...)
-	if first := u.takeFirst(); first != nil && o.Range == u.firstRange {
-		return first.Body, first.Header, nil
+	if first := u.takeFirst(); first != nil {
+		if o.Range == u.firstRange {
+			return first.Body, first.Header, nil
+		}
+		_ = first.Body.Close() //nolint:errcheck // The response is replaced by the request below.
 	}
 	req := u.request.Clone(ctx)
 	req.Header.Del("Range")

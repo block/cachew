@@ -1,6 +1,7 @@
 package handler_test
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"io"
@@ -741,11 +742,13 @@ func TestParallelFetch(t *testing.T) {
 		name          string
 		etag          string
 		ignoreRange   bool
+		concurrency   int
 		expectFetches int
 	}{
 		{name: "Chunked", etag: `"blob"`, expectFetches: 16},
 		{name: "NoETag", expectFetches: 2},
 		{name: "RangeIgnored", etag: `"blob"`, ignoreRange: true, expectFetches: 1},
+		{name: "SingleStream", etag: `"blob"`, concurrency: 1, expectFetches: 2},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -769,9 +772,11 @@ func TestParallelFetch(t *testing.T) {
 			defer upstream.Close()
 			c := mustNewMemoryCache()
 			defer c.Close()
-			h := handler.New(http.DefaultClient, c, newTestSpools(t)).
+			var open atomic.Int32
+			client := &http.Client{Transport: countingTransport{open: &open}}
+			h := handler.New(client, c, newTestSpools(t)).
 				Transform(upstreamTransform(upstream.URL+"/blob")).
-				ParallelFetch(1000, 4)
+				ParallelFetch(1000, cmp.Or(tt.concurrency, 4))
 
 			w := serve(t, h, http.MethodGet, "http://example.com/blob", nil)
 			assert.Equal(t, http.StatusOK, w.Code)
@@ -779,12 +784,37 @@ func TestParallelFetch(t *testing.T) {
 			assert.True(t, w.Body.String() == payload, "response body differs from upstream")
 			assert.Equal(t, int32(1), redirects.Load())
 			assert.Equal(t, int32(tt.expectFetches), fetches.Load())
+			assert.Equal(t, int32(0), open.Load(), "upstream response bodies left open")
 
 			w = serve(t, h, http.MethodGet, "http://example.com/blob", nil)
 			assert.True(t, w.Body.String() == payload, "cached body differs from upstream")
 			assert.Equal(t, int32(tt.expectFetches), fetches.Load())
 		})
 	}
+}
+
+// countingTransport tracks upstream response bodies that have not been closed.
+type countingTransport struct{ open *atomic.Int32 }
+
+func (t countingTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	resp, err := http.DefaultTransport.RoundTrip(r)
+	if err != nil {
+		return nil, errors.WithStack(err)
+	}
+	t.open.Add(1)
+	resp.Body = &countedBody{ReadCloser: resp.Body, open: t.open}
+	return resp, nil
+}
+
+type countedBody struct {
+	io.ReadCloser
+	open *atomic.Int32
+	once sync.Once
+}
+
+func (b *countedBody) Close() error {
+	b.once.Do(func() { b.open.Add(-1) })
+	return errors.WithStack(b.ReadCloser.Close())
 }
 
 func newTestSpools(t *testing.T) *spool.Registry {
