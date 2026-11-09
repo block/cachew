@@ -184,7 +184,7 @@ func (g *GitHubReleases) downloadRelease(ctx context.Context, org, repo, release
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, httputil.Errorf(resp.StatusCode, "GitHub API returned %d", resp.StatusCode)
+		return nil, errors.WithStack(httputil.UpstreamErrorf(resp, "GitHub API returned %d", resp.StatusCode))
 	}
 
 	var releaseInfo struct {

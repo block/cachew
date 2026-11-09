@@ -47,6 +47,7 @@ type GlobalConfig struct {
 	State                  string        `hcl:"state" default:"./state" help:"Base directory for all state (git mirrors, cache, etc.)."`
 	Bind                   string        `hcl:"bind" default:"127.0.0.1:8080" help:"Bind address for the server."`
 	URL                    string        `hcl:"url" default:"http://127.0.0.1:8080/" help:"Base URL for cachewd."`
+	UpstreamBackoff        time.Duration `hcl:"upstream-backoff,optional" default:"1m" help:"Cooldown after an upstream 429 with missing or invalid Retry-After; must be positive."`
 	ShutdownReadinessDelay time.Duration `hcl:"shutdown-readiness-delay,optional" default:"5s" help:"Delay between flipping readiness to 503 on SIGTERM and starting graceful shutdown."`
 	// ShutdownTimeout must be less than the pod's terminationGracePeriodSeconds
 	// (minus ShutdownReadinessDelay) or the kubelet will SIGKILL before Shutdown returns.
@@ -104,11 +105,7 @@ func main() {
 	// Flipped on SIGTERM so /_readiness fails before the listener closes.
 	var shuttingDown atomic.Bool
 
-	// Enable mutex contention sampling so /admin/pprof/mutex returns
-	// useful data. The pprof endpoints themselves are mounted on the
-	// main HTTP listener under /admin/pprof/* via the net/http/pprof
-	// side-effect import; OPA gates external access.
-	runtime.SetMutexProfileFraction(cli.MutexProfileFraction)
+	configureProcess(cli.MutexProfileFraction, globalConfig.UpstreamBackoff)
 
 	// Register the OpenTelemetry tracer provider. tracing.New is a
 	// no-op when OTEL_EXPORTER_OTLP_ENDPOINT is unset, so deployments
@@ -451,6 +448,19 @@ func newServer(
 	}, nil
 }
 
+// configureProcess applies process-wide runtime and HTTP transport settings.
+func configureProcess(mutexProfileFraction int, upstreamBackoff time.Duration) {
+	// Enable mutex contention sampling so /admin/pprof/mutex returns
+	// useful data. The pprof endpoints themselves are mounted on the
+	// main HTTP listener under /admin/pprof/* via the net/http/pprof
+	// side-effect import; OPA gates external access.
+	runtime.SetMutexProfileFraction(mutexProfileFraction)
+
+	// Every strategy that uses http.DefaultTransport shares one set of
+	// per-origin 429 cooldowns.
+	http.DefaultTransport = httputil.NewBackoffTransport(http.DefaultTransport, upstreamBackoff) //nolint:reassign
+}
+
 // loadGlobalConfig unmarshals the global config from HCL, using a two-pass
 // approach so that the "state" field is resolved first and then injected as
 // CACHEW_STATE for expansion in other defaults (e.g. mirror-root, disk root).
@@ -490,6 +500,9 @@ func loadGlobalConfig(ast *hcl.AST) (GlobalConfig, map[string]string, error) {
 	})
 	if err := hcl.UnmarshalAST(ast, &cfg, hcl.HydratedImplicitBlocks(true), expanding); err != nil {
 		return cfg, nil, errors.Errorf("load global config: %w", err)
+	}
+	if cfg.UpstreamBackoff <= 0 {
+		return cfg, nil, errors.New("upstream-backoff must be positive")
 	}
 
 	return cfg, envars, nil

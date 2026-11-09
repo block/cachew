@@ -999,3 +999,52 @@ func TestCacheResultLabelsServerMetrics(t *testing.T) {
 	}
 	assert.Equal(t, map[string]int64{handler.CacheHit: 1, handler.CacheMiss: 3, handler.CacheCoalesced: 1}, got)
 }
+
+func TestBackoffPausesHandler(t *testing.T) {
+	var calls atomic.Int32
+	newUpstream := func() *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			calls.Add(1)
+			if r.URL.Path == "/limited" {
+				w.WriteHeader(http.StatusTooManyRequests)
+				return
+			}
+			_, _ = io.WriteString(w, "body")
+		}))
+	}
+	limited := newUpstream()
+	defer limited.Close()
+	other := newUpstream()
+	defer other.Close()
+	client := &http.Client{Transport: httputil.NewBackoffTransport(http.DefaultTransport, time.Minute)}
+	c := mustNewMemoryCache()
+	defer c.Close()
+	newHandler := func() *handler.Handler {
+		return handler.New(client, c, newTestSpools(t)).Transform(func(r *http.Request) (*http.Request, error) {
+			return http.NewRequestWithContext(r.Context(), http.MethodGet, r.URL.Query().Get("upstream")+r.URL.Path, nil)
+		})
+	}
+	h := newHandler()
+	get := func(h http.Handler, upstream, path string) *httptest.ResponseRecorder {
+		return serve(t, h, http.MethodGet, "http://example.com"+path+"?upstream="+upstream, nil)
+	}
+
+	for _, req := range []struct{ upstream, path string }{
+		{limited.URL, "/cached"}, {limited.URL, "/limited"}, {limited.URL, "/cached"}, {limited.URL, "/miss"}, {other.URL, "/miss"},
+	} {
+		w := get(h, req.upstream, req.path)
+		if req.path == "/cached" {
+			assert.Equal(t, http.StatusOK, w.Code)
+			assert.Equal(t, "body", w.Body.String())
+		} else {
+			assert.Equal(t, http.StatusTooManyRequests, w.Code)
+			assert.Equal(t, "60", w.Header().Get("Retry-After"))
+		}
+	}
+	assert.Equal(t, int32(2), calls.Load())
+
+	w := get(newHandler(), other.URL, "/miss")
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "body", w.Body.String())
+	assert.Equal(t, int32(3), calls.Load())
+}
