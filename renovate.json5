@@ -12,11 +12,6 @@
 	"postUpdateOptions": ["gomodTidy"],
 	"packageRules": [
 		{
-			"matchPackageNames": ["golangci-lint"],
-			"matchManagers": ["hermit"],
-			"enabled": false
-		},
-		{
 			"matchPackageNames": ["github.com/gorilla/csrf"],
 			"matchManagers": ["gomod"],
 			"enabled": false

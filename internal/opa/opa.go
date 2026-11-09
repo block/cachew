@@ -61,12 +61,12 @@ func Middleware(ctx context.Context, cfg Config, next http.Handler) (http.Handle
 
 		allowed, err := evalAllow(r.Context(), prepared, input)
 		if err != nil {
-			logger.Error("OPA evaluation failed", "error", err)
+			logger.ErrorContext(r.Context(), "OPA evaluation failed", "error", err)
 			http.Error(w, "policy evaluation error", http.StatusInternalServerError)
 			return
 		}
 		if !allowed {
-			logger.Warn("OPA denied request", "method", r.Method, "path", r.URL.Path, "remote_addr", r.RemoteAddr)
+			logger.WarnContext(r.Context(), "OPA denied request", "method", r.Method, "path", r.URL.Path, "remote_addr", r.RemoteAddr)
 			// The unread body is still on the wire, so the connection can't be reused. Saying so
 			// up front also stops net/http reading up to 256KiB of the body before replying, which
 			// it does because otelhttp replaces r.Body and hides the unread length from it.

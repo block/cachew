@@ -22,7 +22,7 @@ test:
 
 # Lint code
 lint:
-    golangci-lint run
+    tsk
     actionlint
 
 # Format code

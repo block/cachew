@@ -76,7 +76,7 @@ Justfile
 lefthook.yml
 renovate.json
 .goreleaser.yaml
-.golangci.yml
+.tsk
 CODEOWNERS
 CONTRIBUTING.md
 GOVERNANCE.md

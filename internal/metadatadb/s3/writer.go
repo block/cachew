@@ -100,7 +100,7 @@ func (n *namespace) commit(reqs []*applyReq) error {
 	defer cancel()
 	_, err = n.b.client.PutObject(ctx, n.b.bucket, n.prefix()+key,
 		bytes.NewReader(data), int64(len(data)),
-		minio.PutObjectOptions{ContentType: "application/json"})
+		minio.PutObjectOptions{ContentType: jsonContentType})
 	if err != nil {
 		return errors.Wrap(err, "put segment")
 	}

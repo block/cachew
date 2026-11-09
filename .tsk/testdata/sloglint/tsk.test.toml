@@ -1,0 +1,18 @@
+[[case]]
+name = "default"
+packages = ["logs"]
+[case.config]
+no-global = "all"
+context = "scope"
+
+[[case]]
+name = "default-only"
+packages = ["defaultonly"]
+[case.config]
+no-global = "default"
+
+[[case]]
+name = "context-everywhere"
+packages = ["everywhere"]
+[case.config]
+context = "all"

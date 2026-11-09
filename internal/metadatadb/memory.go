@@ -46,7 +46,7 @@ func (m *MemoryBackend) Apply(_ context.Context, namespace string, ops ...Op) er
 func (m *MemoryBackend) Query(_ context.Context, namespace string, q ReadOp, target any) error {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return errors.Wrap(QueryStateInto(m.ns(namespace), q, target), "memory query")
+	return errors.Wrap(QueryStateInto(m.state[namespace], q, target), "memory query")
 }
 
 func (m *MemoryBackend) Flush(_ context.Context, _ string) error { return nil }

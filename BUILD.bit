@@ -29,7 +29,10 @@ test = go.test {
 }
 
 # Lint
-lint = go.lint {}
+lint = exec.test {
+  command = "tsk"
+  inputs = ["**/*.go", "go.mod", "go.sum", ".tsk"]
+}
 
 cross[arch, command] = go.exe {
   package = "./cmd/${command}"

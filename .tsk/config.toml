@@ -1,0 +1,143 @@
+# Imported from .golangci.yml by tsk config import.
+
+imports = ['github.com/alecthomas/tsk//linters']
+
+disable-all = true
+enable = ['appends', 'asasalint', 'asciicheck', 'asmdecl', 'assign', 'atomic', 'atomicalign', 'bidichk', 'blank_imports', 'bodyclose', 'bools', 'buildtag', 'canonicalheader', 'cgocall', 'composites', 'context_as_argument', 'context_keys_type', 'copylocks', 'copyloopvar', 'deepequalerrors', 'defers', 'directive', 'dot_imports', 'dupl', 'durationcheck', 'empty_block', 'errcheck', 'errname', 'error_naming', 'error_return', 'error_strings', 'errorf', 'errorlint', 'errorsas', 'exhaustive', 'exported', 'exptostd', 'fatcontext', 'forbidigo', 'framepointer', 'funcorder', 'funlen', 'gocheckcompilerdirectives', 'gochecknoglobals', 'goconst', 'godoclint', 'godot', 'gomoddirectives', 'goprintffuncname', 'hostport', 'httpmux', 'httpresponse', 'iface', 'ifaceassert', 'increment_decrement', 'indent_error_flow', 'ineffassign', 'inline', 'intrange', 'iotamixing', 'lockguard', 'loggercheck', 'loopclosure', 'lostcancel', 'makezero', 'mirror', 'nakedret', 'nilerr', 'nilfunc', 'nilness', 'nilnesserr', 'nilnil', 'noctx', 'nosprintfhostport', 'package_comments', 'perfsprint', 'predeclared', 'printf', 'promlinter', 'protogetter', 'range', 'reassign', 'receiver_naming', 'recvcheck', 'redefines_builtin_id', 'reflectvaluecompare', 'rowserrcheck', 'shadow', 'shift', 'sigchanyzer', 'slog', 'sloglint', 'sortslice', 'spancheck', 'sqlclosecheck', 'stdmethods', 'stdversion', 'stringintconv', 'structtag', 'sumtype', 'superfluous_else', 'testableexamples', 'testifylint', 'testinggoroutine', 'testpackage', 'tests', 'time_naming', 'timeformat', 'tparallel', 'unconvert', 'unexported_return', 'unmarshal', 'unparam', 'unreachable', 'unreachable_code', 'unsafeptr', 'unused', 'unused_parameter', 'unusedresult', 'unusedwrite', 'usestdlibvars', 'usetesting', 'var_declaration', 'var_naming', 'waitgroup', 'wastedassign', 'whitespace', 'wrapcheck']
+skip-tests = ['bodyclose', 'dupl', 'errcheck', 'funlen', 'goconst', 'godot', 'noctx', 'wrapcheck']
+
+# Matches golangci-lint's std-error-handling exclusion preset.
+[[exclude]]
+linters = ['errcheck']
+text = '(?i)Error return value of .((os\.)?std(out|err)\..*|.*Close|.*Flush|os\.Remove(All)?|.*print(f|ln)?|os\.(Un)?Setenv). is not checked'
+
+[[exclude]]
+linters = ['forbidigo']
+path = '_test\.go$'
+text = 'Use math/rand/v2 instead'
+
+[[exclude]]
+linters = ['godot']
+source = 'TODO'
+
+[[exclude]]
+linters = ['revive']
+text = 'should have a package comment'
+
+[[exclude]]
+linters = ['revive']
+text = 'exported \S+ \S+ should have comment( \(or a comment on this block\))? or be unexported'
+
+[[exclude]]
+linters = ['revive']
+source = '// ?(nolint|TODO)'
+text = 'package comment should be of the form ".+"'
+
+[[exclude]]
+linters = ['revive']
+source = '// ?(nolint|TODO)'
+text = 'comment on exported \S+ \S+ should be of the form ".+"'
+
+[[exclude]]
+linters = ['shadow']
+text = 'declaration of "err" shadows declaration'
+
+[[exclude]]
+linters = ['shadow']
+text = 'declaration of "logger" shadows declaration'
+
+[[exclude]]
+linters = ['revive']
+path = '(internal/httputil/|internal/metrics/)'
+text = 'avoid package names that conflict with Go standard library'
+
+[cyclop]
+max-complexity = 30
+package-average = 10.0
+
+[embeddedstructfieldcheck]
+forbid-mutex = true
+
+[errcheck]
+check-blank = true
+
+[exhaustive]
+check = ['switch', 'map']
+
+[exhaustruct]
+allow-empty-returns = true
+
+[forbidigo]
+analyze-types = true
+exclude-godoc-examples = true
+
+[[forbidigo.forbid]]
+msg = 'Use github.com/alecthomas/errors.Errorf instead'
+pattern = '^fmt\.Errorf$'
+pkg = '^fmt$'
+
+[[forbidigo.forbid]]
+msg = 'Use github.com/alecthomas/errors instead'
+pkg = '^errors$'
+
+[[forbidigo.forbid]]
+msg = 'Use math/rand/v2 instead, see https://go.dev/blog/randv2'
+pkg = '^math/rand$'
+
+[[forbidigo.forbid]]
+msg = 'Use google.golang.org/protobuf instead'
+pkg = '^github\.com/golang/protobuf'
+
+[[forbidigo.forbid]]
+msg = "Use github.com/google/uuid instead, satori's package is not maintained"
+pkg = '^github\.com/satori/go\.uuid'
+
+[[forbidigo.forbid]]
+msg = 'Use github.com/gofrs/uuid/v5 or later, it was not a go module before v5'
+pkg = '^github\.com/gofrs/uuid$'
+
+[funcorder]
+struct-method = false
+
+[funlen]
+lines = 250
+statements = 50
+
+[gocognit]
+min-complexity = 20
+
+[godoclint]
+enable = ['no-unused-link']
+
+[inamedparam]
+skip-single-param = true
+
+[nakedret]
+max-func-lines = 30
+
+[nolintlint]
+allow-no-explanation = ['funlen', 'gocognit', 'golines']
+require-explanation = true
+require-specific = true
+
+[perfsprint]
+strconcat = false
+
+[reassign]
+patterns = ['.*']
+
+[rowserrcheck]
+packages = ['github.com/jmoiron/sqlx']
+
+[sloglint]
+no-global = 'all'
+context = 'scope'
+
+[shadow]
+strict = true
+
+[usetesting]
+os-temp-dir = true
+
+[wrapcheck]
+ignore-package-globs = ['github.com/alecthomas/errors']

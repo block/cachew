@@ -78,7 +78,7 @@ func TestMiddleware(t *testing.T) {
 			}))
 
 			inner := http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
-				FromContext(r.Context()).Info("test")
+				FromContext(r.Context()).InfoContext(r.Context(), "test")
 			})
 
 			handler := Middleware(inner, tt.config)
