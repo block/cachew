@@ -18,6 +18,7 @@ import (
 
 	"github.com/block/cachew/internal/cache"
 	"github.com/block/cachew/internal/logging"
+	"github.com/block/cachew/internal/spool"
 	"github.com/block/cachew/internal/strategy"
 )
 
@@ -36,7 +37,7 @@ func TestHostCaching(t *testing.T) {
 	defer memCache.Close()
 
 	mux := http.NewServeMux()
-	_, err = strategy.NewHost(ctx, strategy.HostConfig{Target: backend.URL}, memCache, mux)
+	_, err = strategy.NewHost(ctx, strategy.HostConfig{Target: backend.URL}, memCache, mux, newTestSpools(t))
 	assert.NoError(t, err)
 
 	// Request path must include the host prefix from the target URL
@@ -73,7 +74,7 @@ func TestHostNonOKStatus(t *testing.T) {
 	defer memCache.Close()
 
 	mux := http.NewServeMux()
-	_, err = strategy.NewHost(ctx, strategy.HostConfig{Target: backend.URL}, memCache, mux)
+	_, err = strategy.NewHost(ctx, strategy.HostConfig{Target: backend.URL}, memCache, mux, newTestSpools(t))
 	assert.NoError(t, err)
 
 	// Request path must include the host prefix from the target URL
@@ -99,7 +100,7 @@ func TestHostInvalidTargetURL(t *testing.T) {
 	defer memCache.Close()
 
 	mux := http.NewServeMux()
-	_, err = strategy.NewHost(ctx, strategy.HostConfig{Target: "://invalid"}, memCache, mux)
+	_, err = strategy.NewHost(ctx, strategy.HostConfig{Target: "://invalid"}, memCache, mux, newTestSpools(t))
 	assert.Error(t, err)
 }
 
@@ -121,7 +122,7 @@ func TestHostHeaders(t *testing.T) {
 	_, err = strategy.NewHost(ctx, strategy.HostConfig{
 		Target:  backend.URL,
 		Headers: map[string]string{"Authorization": "Bearer QQ==", "X-Custom": "value"},
-	}, memCache, mux)
+	}, memCache, mux, newTestSpools(t))
 	assert.NoError(t, err)
 
 	u, _ := url.Parse(backend.URL)
@@ -143,7 +144,7 @@ func TestHostString(t *testing.T) {
 	defer memCache.Close()
 
 	mux := http.NewServeMux()
-	host, err := strategy.NewHost(ctx, strategy.HostConfig{Target: "https://example.com/prefix"}, memCache, mux)
+	host, err := strategy.NewHost(ctx, strategy.HostConfig{Target: "https://example.com/prefix"}, memCache, mux, newTestSpools(t))
 	assert.NoError(t, err)
 
 	assert.Equal(t, "host:example.com/prefix", host.String())
@@ -163,7 +164,7 @@ func TestHostRejectsPathTraversal(t *testing.T) {
 	defer memCache.Close()
 
 	mux := http.NewServeMux()
-	_, err = strategy.NewHost(ctx, strategy.HostConfig{Target: backend.URL + "/prefix"}, memCache, mux)
+	_, err = strategy.NewHost(ctx, strategy.HostConfig{Target: backend.URL + "/prefix"}, memCache, mux, newTestSpools(t))
 	assert.NoError(t, err)
 
 	u, _ := url.Parse(backend.URL)
@@ -232,7 +233,7 @@ func TestHostFallback(t *testing.T) {
 				Target:    primary.URL,
 				Headers:   map[string]string{"X-Test": "custom"},
 				Fallbacks: []strategy.HostFallbackConfig{{Target: mirror.URL + "/mirror", PathPrefix: "/packages"}},
-			}, c, mux)
+			}, c, mux, newTestSpools(t))
 			assert.NoError(t, err)
 			u, err := url.Parse(primary.URL)
 			assert.NoError(t, err)
@@ -289,7 +290,7 @@ func TestHostFallbackOrder(t *testing.T) {
 	assert.NoError(t, err)
 	var config strategy.HostConfig
 	assert.NoError(t, hcl.UnmarshalBlock(ast.Entries[0].(*hcl.Block), &config))
-	_, err = strategy.NewHost(ctx, config, c, mux)
+	_, err = strategy.NewHost(ctx, config, c, mux, newTestSpools(t))
 	assert.NoError(t, err)
 	u, err := url.Parse(urls[0])
 	assert.NoError(t, err)
@@ -325,13 +326,29 @@ func TestHostFallbackIncompleteResponse(t *testing.T) {
 			mux := http.NewServeMux()
 			_, err = strategy.NewHost(ctx, strategy.HostConfig{Target: primary.URL,
 				Fallbacks: []strategy.HostFallbackConfig{{Target: mirror.URL}},
-			}, c, mux)
+			}, c, mux, newTestSpools(t))
 			assert.NoError(t, err)
 			u, err := url.Parse(primary.URL)
 			assert.NoError(t, err)
-			mux.ServeHTTP(httptest.NewRecorder(), httptest.NewRequestWithContext(ctx, http.MethodGet, "/"+u.Host+"/a.jar", nil))
+			serve := func() {
+				mux.ServeHTTP(httptest.NewRecorder(), httptest.NewRequestWithContext(ctx, http.MethodGet, "/"+u.Host+"/a.jar", nil))
+			}
+			if cancelRequest {
+				serve()
+			} else {
+				assert.Panics(t, serve)
+			}
 			_, _, err = c.Open(context.Background(), cache.NewKey(primary.URL+"/a.jar"))
 			assert.True(t, os.IsNotExist(err))
 		})
 	}
+}
+
+func newTestSpools(t *testing.T) *spool.Registry {
+	t.Helper()
+	_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelError})
+	spools, err := spool.New(ctx, spool.Config{Dir: t.TempDir()})
+	assert.NoError(t, err)
+	t.Cleanup(spools.Close)
+	return spools
 }

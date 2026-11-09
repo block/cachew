@@ -3,7 +3,9 @@ package handler_test
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -19,6 +21,7 @@ import (
 	"github.com/block/cachew/internal/cache"
 	"github.com/block/cachew/internal/httputil"
 	"github.com/block/cachew/internal/logging"
+	"github.com/block/cachew/internal/spool"
 	"github.com/block/cachew/internal/strategy/handler"
 )
 
@@ -70,7 +73,7 @@ func TestBuilder(t *testing.T) {
 		{
 			name: "BasicFlow",
 			buildHandler: func(c cache.Cache) http.Handler {
-				return handler.New(http.DefaultClient, c).
+				return handler.New(http.DefaultClient, c, newTestSpools(t)).
 					Transform(func(r *http.Request) (*http.Request, error) {
 						return http.NewRequestWithContext(r.Context(), http.MethodGet, upstream.URL+"/simple", nil)
 					})
@@ -83,7 +86,7 @@ func TestBuilder(t *testing.T) {
 		{
 			name: "CacheHit",
 			buildHandler: func(c cache.Cache) http.Handler {
-				return handler.New(http.DefaultClient, c).
+				return handler.New(http.DefaultClient, c, newTestSpools(t)).
 					Transform(func(r *http.Request) (*http.Request, error) {
 						return http.NewRequestWithContext(r.Context(), http.MethodGet, upstream.URL+"/simple", nil)
 					})
@@ -97,7 +100,7 @@ func TestBuilder(t *testing.T) {
 		{
 			name: "CustomCacheKey",
 			buildHandler: func(c cache.Cache) http.Handler {
-				return handler.New(http.DefaultClient, c).
+				return handler.New(http.DefaultClient, c, newTestSpools(t)).
 					CacheKey(func(_ *http.Request) string {
 						return "constant-key"
 					}).
@@ -114,7 +117,7 @@ func TestBuilder(t *testing.T) {
 		{
 			name: "Transform",
 			buildHandler: func(c cache.Cache) http.Handler {
-				return handler.New(http.DefaultClient, c).
+				return handler.New(http.DefaultClient, c, newTestSpools(t)).
 					Transform(func(r *http.Request) (*http.Request, error) {
 						upstreamReq, err := http.NewRequestWithContext(r.Context(), http.MethodGet, upstream.URL+"/echo-header", nil)
 						if err != nil {
@@ -132,7 +135,7 @@ func TestBuilder(t *testing.T) {
 		{
 			name: "TransformError",
 			buildHandler: func(c cache.Cache) http.Handler {
-				return handler.New(http.DefaultClient, c).
+				return handler.New(http.DefaultClient, c, newTestSpools(t)).
 					Transform(func(_ *http.Request) (*http.Request, error) {
 						return nil, httputil.Errorf(http.StatusBadRequest, "transform failed")
 					})
@@ -145,7 +148,7 @@ func TestBuilder(t *testing.T) {
 		{
 			name: "ConditionalTransform",
 			buildHandler: func(c cache.Cache) http.Handler {
-				return handler.New(http.DefaultClient, c).
+				return handler.New(http.DefaultClient, c, newTestSpools(t)).
 					CacheKey(func(r *http.Request) string {
 						return r.URL.String() + ":" + r.Header.Get("X-Private")
 					}).
@@ -169,7 +172,7 @@ func TestBuilder(t *testing.T) {
 		{
 			name: "CustomErrorHandler",
 			buildHandler: func(c cache.Cache) http.Handler {
-				return handler.New(http.DefaultClient, c).
+				return handler.New(http.DefaultClient, c, newTestSpools(t)).
 					Transform(func(_ *http.Request) (*http.Request, error) {
 						return nil, errors.New("test error")
 					}).
@@ -186,7 +189,7 @@ func TestBuilder(t *testing.T) {
 		{
 			name: "UpstreamError",
 			buildHandler: func(c cache.Cache) http.Handler {
-				return handler.New(http.DefaultClient, c).
+				return handler.New(http.DefaultClient, c, newTestSpools(t)).
 					Transform(func(r *http.Request) (*http.Request, error) {
 						return http.NewRequestWithContext(r.Context(), http.MethodGet, upstream.URL+"/not-found", nil)
 					})
@@ -199,7 +202,7 @@ func TestBuilder(t *testing.T) {
 		{
 			name: "CacheKeyWithTransform",
 			buildHandler: func(c cache.Cache) http.Handler {
-				return handler.New(http.DefaultClient, c).
+				return handler.New(http.DefaultClient, c, newTestSpools(t)).
 					CacheKey(func(r *http.Request) string {
 						return "original:" + r.URL.Path
 					}).
@@ -216,7 +219,7 @@ func TestBuilder(t *testing.T) {
 		{
 			name: "StreamingResponse",
 			buildHandler: func(c cache.Cache) http.Handler {
-				return handler.New(http.DefaultClient, c).
+				return handler.New(http.DefaultClient, c, newTestSpools(t)).
 					Transform(func(r *http.Request) (*http.Request, error) {
 						return http.NewRequestWithContext(r.Context(), http.MethodGet, upstream.URL+"/stream", nil)
 					})
@@ -230,7 +233,7 @@ func TestBuilder(t *testing.T) {
 		{
 			name: "CustomTTL",
 			buildHandler: func(c cache.Cache) http.Handler {
-				return handler.New(http.DefaultClient, c).
+				return handler.New(http.DefaultClient, c, newTestSpools(t)).
 					TTL(func(r *http.Request) time.Duration {
 						if r.Header.Get("X-Short-Cache") == "true" {
 							return 100 * time.Millisecond
@@ -296,7 +299,7 @@ func TestHeaderForwarding(t *testing.T) {
 	ctx := logging.ContextWithLogger(context.Background(), slog.Default())
 
 	t.Run("ForwardsOriginalHeaders", func(t *testing.T) {
-		h := handler.New(http.DefaultClient, c).
+		h := handler.New(http.DefaultClient, c, newTestSpools(t)).
 			CacheKey(func(_ *http.Request) string { return "fwd-test-1" }).
 			Transform(func(r *http.Request) (*http.Request, error) {
 				return http.NewRequestWithContext(r.Context(), http.MethodGet, upstream.URL+"/test", nil)
@@ -314,7 +317,7 @@ func TestHeaderForwarding(t *testing.T) {
 	})
 
 	t.Run("StripsHopByHopHeaders", func(t *testing.T) {
-		h := handler.New(http.DefaultClient, c).
+		h := handler.New(http.DefaultClient, c, newTestSpools(t)).
 			CacheKey(func(_ *http.Request) string { return "fwd-test-2" }).
 			Transform(func(r *http.Request) (*http.Request, error) {
 				return http.NewRequestWithContext(r.Context(), http.MethodGet, upstream.URL+"/test", nil)
@@ -343,7 +346,7 @@ func TestHeaderForwarding(t *testing.T) {
 		defer varyUpstream.Close()
 
 		varyCache := mustNewMemoryCache()
-		h := handler.New(http.DefaultClient, varyCache).
+		h := handler.New(http.DefaultClient, varyCache, newTestSpools(t)).
 			Transform(func(r *http.Request) (*http.Request, error) {
 				return http.NewRequestWithContext(r.Context(), http.MethodGet, varyUpstream.URL+"/file.zip", nil)
 			})
@@ -371,7 +374,7 @@ func TestHeaderForwarding(t *testing.T) {
 	})
 
 	t.Run("TransformHeadersTakePrecedence", func(t *testing.T) {
-		h := handler.New(http.DefaultClient, c).
+		h := handler.New(http.DefaultClient, c, newTestSpools(t)).
 			CacheKey(func(_ *http.Request) string { return "fwd-test-3" }).
 			Transform(func(r *http.Request) (*http.Request, error) {
 				req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, upstream.URL+"/test", nil)
@@ -398,7 +401,7 @@ func TestHandlerMethodChaining(t *testing.T) {
 	c := mustNewMemoryCache()
 	client := &http.Client{}
 
-	h := handler.New(client, c)
+	h := handler.New(client, c, newTestSpools(t))
 	result := h.
 		CacheKey(func(_ *http.Request) string { return "key" }).
 		Transform(func(r *http.Request) (*http.Request, error) { return r, nil }).
@@ -424,7 +427,7 @@ func TestStreamAndCacheAbortsOnUpstreamError(t *testing.T) {
 	c := mustNewMemoryCache()
 	ctx := logging.ContextWithLogger(context.Background(), slog.Default())
 
-	h := handler.New(http.DefaultClient, c).
+	h := handler.New(http.DefaultClient, c, newTestSpools(t)).
 		Transform(func(r *http.Request) (*http.Request, error) {
 			return http.NewRequestWithContext(r.Context(), http.MethodGet, backend.URL+"/fail", nil)
 		})
@@ -432,7 +435,7 @@ func TestStreamAndCacheAbortsOnUpstreamError(t *testing.T) {
 	r := httptest.NewRequest(http.MethodGet, "http://example.com/test", nil)
 	r = r.WithContext(ctx)
 	w := httptest.NewRecorder()
-	h.ServeHTTP(w, r)
+	assert.Panics(t, func() { h.ServeHTTP(w, r) })
 
 	// The partial response must not be cached.
 	key := cache.NewKey("http://example.com/test")
@@ -486,7 +489,7 @@ func TestCacheWriteFailureDoesNotTruncateResponse(t *testing.T) {
 			defer mem.Close()
 			ctx := logging.ContextWithLogger(context.Background(), slog.Default())
 
-			h := handler.New(http.DefaultClient, failingWriteCache{Cache: mem, createErr: tt.createErr}).
+			h := handler.New(http.DefaultClient, failingWriteCache{Cache: mem, createErr: tt.createErr}, newTestSpools(t)).
 				Transform(func(r *http.Request) (*http.Request, error) {
 					return http.NewRequestWithContext(r.Context(), http.MethodGet, backend.URL, nil)
 				})
@@ -544,7 +547,7 @@ func TestHeadRequests(t *testing.T) {
 	defer upstream.Close()
 	c := mustNewMemoryCache()
 	defer c.Close()
-	h := handler.New(http.DefaultClient, c).Transform(upstreamTransform(upstream.URL))
+	h := handler.New(http.DefaultClient, c, newTestSpools(t)).Transform(upstreamTransform(upstream.URL))
 
 	w := serve(t, h, http.MethodHead, "http://example.com/a", nil)
 	assert.Equal(t, http.StatusOK, w.Code)
@@ -592,7 +595,7 @@ func TestRangeMissCachesFullObject(t *testing.T) {
 			defer upstream.Close()
 			c := mustNewMemoryCache()
 			defer c.Close()
-			h := handler.New(http.DefaultClient, c).Transform(upstreamTransform(upstream.URL))
+			h := handler.New(http.DefaultClient, c, newTestSpools(t)).Transform(upstreamTransform(upstream.URL))
 
 			w := serve(t, h, http.MethodGet, "http://example.com/obj", tt.headers)
 			assert.Equal(t, tt.expectStatus, w.Code)
@@ -616,7 +619,7 @@ func TestVary(t *testing.T) {
 	defer upstream.Close()
 	c := mustNewMemoryCache()
 	defer c.Close()
-	h := handler.New(http.DefaultClient, c).
+	h := handler.New(http.DefaultClient, c, newTestSpools(t)).
 		Transform(upstreamTransform(upstream.URL)).
 		Vary(func(r *http.Request) map[string]string {
 			return map[string]string{"Accept": r.Header.Get("Accept")}
@@ -660,7 +663,7 @@ func TestVerify(t *testing.T) {
 			defer upstream.Close()
 			c := mustNewMemoryCache()
 			defer c.Close()
-			h := handler.New(http.DefaultClient, c).
+			h := handler.New(http.DefaultClient, c, newTestSpools(t)).
 				Transform(upstreamTransform(upstream.URL)).
 				Verify(func(*http.Request) handler.Verifier { return &expectedContent{want: tt.want} })
 
@@ -712,7 +715,7 @@ func TestRevalidate(t *testing.T) {
 			defer upstream.Close()
 			c := mustNewMemoryCache()
 			defer c.Close()
-			h := handler.New(http.DefaultClient, c).
+			h := handler.New(http.DefaultClient, c, newTestSpools(t)).
 				Transform(upstreamTransform(upstream.URL)).
 				Revalidate("X-Digest", func(*http.Request) time.Duration { return tt.freshFor })
 
@@ -765,7 +768,7 @@ func TestParallelFetch(t *testing.T) {
 			defer upstream.Close()
 			c := mustNewMemoryCache()
 			defer c.Close()
-			h := handler.New(http.DefaultClient, c).
+			h := handler.New(http.DefaultClient, c, newTestSpools(t)).
 				Transform(upstreamTransform(upstream.URL+"/blob")).
 				ParallelFetch(1000, 4)
 
@@ -779,6 +782,104 @@ func TestParallelFetch(t *testing.T) {
 			w = serve(t, h, http.MethodGet, "http://example.com/blob", nil)
 			assert.True(t, w.Body.String() == payload, "cached body differs from upstream")
 			assert.Equal(t, int32(tt.expectFetches), fetches.Load())
+		})
+	}
+}
+
+func newTestSpools(t *testing.T) *spool.Registry {
+	t.Helper()
+	_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelError})
+	spools, err := spool.New(ctx, spool.Config{Dir: t.TempDir()})
+	assert.NoError(t, err)
+	t.Cleanup(spools.Close)
+	return spools
+}
+
+func TestConcurrentMissesShareOneUpstreamFetch(t *testing.T) {
+	var calls atomic.Int32
+	release := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		_, _ = io.WriteString(w, "first ")
+		w.(http.Flusher).Flush()
+		<-release
+		_, _ = io.WriteString(w, "second")
+	}))
+	defer upstream.Close()
+	c := mustNewMemoryCache()
+	defer c.Close()
+	h := handler.New(http.DefaultClient, c, newTestSpools(t)).
+		Transform(func(r *http.Request) (*http.Request, error) {
+			return http.NewRequestWithContext(r.Context(), http.MethodGet, upstream.URL, nil)
+		})
+	_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelError})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h.ServeHTTP(w, r.WithContext(ctx))
+	}))
+	defer server.Close()
+
+	const clients = 5
+	responses := make([]*http.Response, clients)
+	for i := range clients {
+		resp, err := http.Get(server.URL + "/object") //nolint:noctx
+		assert.NoError(t, err)
+		responses[i] = resp
+	}
+	close(release)
+	for _, resp := range responses {
+		body, err := io.ReadAll(resp.Body)
+		assert.NoError(t, err)
+		assert.NoError(t, resp.Body.Close())
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+		assert.Equal(t, "first second", string(body))
+	}
+	assert.Equal(t, int32(1), calls.Load())
+}
+
+func TestUncoalescableRequestsFetchSeparately(t *testing.T) {
+	tests := []struct {
+		name   string
+		method string
+		header http.Header
+	}{
+		{name: "Head", method: http.MethodHead},
+		{name: "Range", method: http.MethodGet, header: http.Header{"Range": {"bytes=0-1"}}},
+		{name: "IfNoneMatch", method: http.MethodGet, header: http.Header{"If-None-Match": {`"etag"`}}},
+		{name: "IfModifiedSince", method: http.MethodGet, header: http.Header{"If-Modified-Since": {"Mon, 09 Nov 2026 10:00:00 GMT"}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			arrived := make(chan struct{}, 2)
+			release := make(chan struct{})
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				arrived <- struct{}{}
+				<-release
+				_, _ = io.WriteString(w, "body")
+			}))
+			defer upstream.Close()
+			defer close(release)
+			c := mustNewMemoryCache()
+			defer c.Close()
+			h := handler.New(http.DefaultClient, c, newTestSpools(t)).
+				Transform(func(r *http.Request) (*http.Request, error) {
+					return http.NewRequestWithContext(r.Context(), r.Method, upstream.URL, nil)
+				})
+			_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelError})
+
+			for range 2 {
+				go func() {
+					r := httptest.NewRequestWithContext(ctx, tt.method, "http://example.com/object", nil)
+					maps.Copy(r.Header, tt.header)
+					h.ServeHTTP(httptest.NewRecorder(), r)
+				}()
+			}
+			for range 2 {
+				select {
+				case <-arrived:
+				case <-time.After(5 * time.Second):
+					t.Fatal("request was coalesced")
+				}
+			}
 		})
 	}
 }

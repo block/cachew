@@ -15,12 +15,17 @@ import (
 	"github.com/block/cachew/internal/githubapp"
 	"github.com/block/cachew/internal/httputil"
 	"github.com/block/cachew/internal/logging"
+	"github.com/block/cachew/internal/spool"
 	"github.com/block/cachew/internal/strategy/handler"
 )
 
-func RegisterGitHubReleases(r *Registry, tokenManagerProvider githubapp.TokenManagerProvider) {
+func RegisterGitHubReleases(r *Registry, tokenManagerProvider githubapp.TokenManagerProvider, spools spool.Provider) {
 	Register(r, "github-releases", "Caches public and authenticated GitHub releases.", func(ctx context.Context, config GitHubReleasesConfig, cache cache.Cache, mux Mux) (*GitHubReleases, error) {
-		return NewGitHubReleases(ctx, config, cache, mux, tokenManagerProvider)
+		registry, err := spools()
+		if err != nil {
+			return nil, errors.Wrap(err, "create spool registry")
+		}
+		return NewGitHubReleases(ctx, config, cache, mux, tokenManagerProvider, registry)
 	})
 }
 
@@ -38,7 +43,7 @@ type GitHubReleases struct {
 }
 
 // NewGitHubReleases creates a [Strategy] that fetches private (and public) release binaries from GitHub.
-func NewGitHubReleases(ctx context.Context, config GitHubReleasesConfig, cache cache.Cache, mux Mux, tokenManagerProvider githubapp.TokenManagerProvider) (*GitHubReleases, error) {
+func NewGitHubReleases(ctx context.Context, config GitHubReleasesConfig, cache cache.Cache, mux Mux, tokenManagerProvider githubapp.TokenManagerProvider, spools *spool.Registry) (*GitHubReleases, error) {
 	logger := logging.FromContext(ctx)
 
 	// Get GitHub App token manager if configured
@@ -60,7 +65,7 @@ func NewGitHubReleases(ctx context.Context, config GitHubReleasesConfig, cache c
 	}
 	// eg. https://github.com/alecthomas/chroma/releases/download/v2.21.1/chroma-2.21.1-darwin-amd64.tar.gz
 	// eg. https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize/v5.8.1/kustomize_v5.8.1_linux_amd64.tar.gz
-	h := handler.New(s.client, cache).
+	h := handler.New(s.client, cache, spools).
 		CacheKey(func(r *http.Request) string {
 			org := r.PathValue("org")
 			repo := r.PathValue("repo")

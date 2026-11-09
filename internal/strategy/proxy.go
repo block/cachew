@@ -7,8 +7,11 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/alecthomas/errors"
+
 	"github.com/block/cachew/internal/cache"
 	"github.com/block/cachew/internal/logging"
+	"github.com/block/cachew/internal/spool"
 	"github.com/block/cachew/internal/strategy/handler"
 )
 
@@ -20,9 +23,13 @@ import (
 //
 // The request URI is upgraded to HTTPS and the response is fetched and cached.
 // Only GET requests are intercepted; other methods are passed through.
-func RegisterHTTPProxy(r *Registry) {
+func RegisterHTTPProxy(r *Registry, spools spool.Provider) {
 	Register(r, "proxy", "Caching HTTP proxy for absolute-form proxy requests.", func(ctx context.Context, _ ProxyConfig, c cache.Cache, mux Mux) (*HTTPProxy, error) {
-		return NewHTTPProxy(ctx, c, mux)
+		registry, err := spools()
+		if err != nil {
+			return nil, errors.Wrap(err, "create spool registry")
+		}
+		return NewHTTPProxy(ctx, c, mux, registry)
 	})
 }
 
@@ -47,12 +54,12 @@ var (
 	_ Interceptor = (*HTTPProxy)(nil)
 )
 
-func NewHTTPProxy(ctx context.Context, c cache.Cache, _ Mux) (*HTTPProxy, error) {
+func NewHTTPProxy(ctx context.Context, c cache.Cache, _ Mux, spools *spool.Registry) (*HTTPProxy, error) {
 	logger := logging.FromContext(ctx)
 	client := &http.Client{}
 	p := &HTTPProxy{logger: logger}
 
-	p.handler = handler.New(client, c).
+	p.handler = handler.New(client, c, spools).
 		CacheKey(func(r *http.Request) string {
 			target := p.parseProxyURI(r)
 			if target == nil {

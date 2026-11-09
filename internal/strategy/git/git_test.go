@@ -2,6 +2,7 @@ package git_test
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -17,6 +18,7 @@ import (
 	"github.com/block/cachew/internal/jobscheduler"
 	"github.com/block/cachew/internal/logging"
 	"github.com/block/cachew/internal/metadatadb"
+	"github.com/block/cachew/internal/spool"
 	"github.com/block/cachew/internal/strategy/git"
 )
 
@@ -48,6 +50,15 @@ func newTestScheduler(ctx context.Context, t *testing.T) jobscheduler.Provider {
 	}
 	t.Cleanup(func() { sched.Wait() })
 	return func() (*jobscheduler.RootScheduler, error) { return sched, nil }
+}
+
+func newTestSpools(t *testing.T) *spool.Registry {
+	t.Helper()
+	_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelError})
+	spools, err := spool.New(ctx, spool.Config{Dir: t.TempDir()})
+	assert.NoError(t, err)
+	t.Cleanup(spools.Close)
+	return spools
 }
 
 // waitForReady blocks until the strategy reports Ready() — used by tests that
@@ -102,7 +113,7 @@ func TestNew(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			mux := newTestMux()
 			cm := gitclone.NewManagerProvider(ctx, tt.config, nil)
-			s, err := git.New(ctx, git.Config{}, newTestScheduler(ctx, t), nil, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
+			s, err := git.New(ctx, git.Config{}, newTestScheduler(ctx, t), nil, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }, newTestSpools(t)) //nolint:nilnil
 			if tt.wantError != "" {
 				assert.Error(t, err)
 				assert.Contains(t, err.Error(), tt.wantError)
@@ -208,7 +219,7 @@ func TestNewWithExistingCloneOnDisk(t *testing.T) {
 		MirrorRoot:    tmpDir,
 		FetchInterval: 15,
 	}, nil)
-	_, err = git.New(ctx, git.Config{}, newTestScheduler(ctx, t), nil, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
+	_, err = git.New(ctx, git.Config{}, newTestScheduler(ctx, t), nil, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }, newTestSpools(t)) //nolint:nilnil
 	assert.NoError(t, err)
 }
 
@@ -224,7 +235,7 @@ func TestNewIsReadyAfterWarm(t *testing.T) {
 		MirrorRoot:    tmpDir,
 		FetchInterval: 15,
 	}, nil)
-	s, err := git.New(ctx, git.Config{}, newTestScheduler(ctx, t), nil, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
+	s, err := git.New(ctx, git.Config{}, newTestScheduler(ctx, t), nil, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }, newTestSpools(t)) //nolint:nilnil
 	assert.NoError(t, err)
 
 	waitForReady(t, s)
@@ -250,7 +261,7 @@ func TestIntegrationWithMockUpstream(t *testing.T) {
 		MirrorRoot:    tmpDir,
 		FetchInterval: 15,
 	}, nil)
-	_, err := git.New(ctx, git.Config{}, newTestScheduler(ctx, t), nil, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
+	_, err := git.New(ctx, git.Config{}, newTestScheduler(ctx, t), nil, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }, newTestSpools(t)) //nolint:nilnil
 	assert.NoError(t, err)
 
 	// Verify handlers exist
@@ -279,7 +290,7 @@ func TestNewMissingGitBinary(t *testing.T) {
 		MirrorRoot:    filepath.Join(tmpDir, "clones"),
 		FetchInterval: 15,
 	}, nil)
-	_, err := git.New(ctx, git.Config{}, newTestScheduler(ctx, t), nil, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
+	_, err := git.New(ctx, git.Config{}, newTestScheduler(ctx, t), nil, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }, newTestSpools(t)) //nolint:nilnil
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "git")
 }
@@ -303,7 +314,7 @@ func TestNewMissingSnapshotBinaries(t *testing.T) {
 			MirrorRoot:    filepath.Join(tmpDir, "clones-missing-tar"),
 			FetchInterval: 15,
 		}, nil)
-		_, err := git.New(ctx, git.Config{SnapshotInterval: 1}, newTestScheduler(ctx, t), nil, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
+		_, err := git.New(ctx, git.Config{SnapshotInterval: 1}, newTestScheduler(ctx, t), nil, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }, newTestSpools(t)) //nolint:nilnil
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "tar")
 	})
@@ -319,7 +330,7 @@ func TestNewMissingSnapshotBinaries(t *testing.T) {
 			MirrorRoot:    filepath.Join(tmpDir, "clones-missing-zstd"),
 			FetchInterval: 15,
 		}, nil)
-		_, err := git.New(ctx, git.Config{SnapshotInterval: 1}, newTestScheduler(ctx, t), nil, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
+		_, err := git.New(ctx, git.Config{SnapshotInterval: 1}, newTestScheduler(ctx, t), nil, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }, newTestSpools(t)) //nolint:nilnil
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "zstd")
 	})
@@ -337,7 +348,7 @@ func TestSetMetadataStore(t *testing.T) {
 		FetchInterval: 15,
 	}, nil)
 	s, err := git.New(ctx, git.Config{}, newTestScheduler(ctx, t), nil, mux, cm,
-		func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
+		func() (*githubapp.TokenManager, error) { return nil, nil }, newTestSpools(t)) //nolint:nilnil
 	assert.NoError(t, err)
 
 	store := metadatadb.New(ctx, metadatadb.NewMemoryBackend())

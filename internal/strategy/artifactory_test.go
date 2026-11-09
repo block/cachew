@@ -63,7 +63,7 @@ func setupArtifactoryTest(t *testing.T, config strategy.ArtifactoryConfig) (*moc
 	t.Cleanup(func() { memCache.Close() })
 
 	mux := http.NewServeMux()
-	_, err = strategy.NewArtifactory(ctx, config, memCache, mux)
+	_, err = strategy.NewArtifactory(ctx, config, memCache, mux, newTestSpools(t))
 	assert.NoError(t, err)
 
 	return mock, mux, ctx
@@ -212,7 +212,7 @@ func TestArtifactoryString(t *testing.T) {
 	mux := http.NewServeMux()
 	artifactory, err := strategy.NewArtifactory(ctx, strategy.ArtifactoryConfig{
 		Target: "https://ec2.example.jfrog.io",
-	}, memCache, mux)
+	}, memCache, mux, newTestSpools(t))
 	assert.NoError(t, err)
 
 	assert.Equal(t, "artifactory:ec2.example.jfrog.io", artifactory.String())
@@ -227,7 +227,7 @@ func TestArtifactoryInvalidTargetURL(t *testing.T) {
 	mux := http.NewServeMux()
 	_, err = strategy.NewArtifactory(ctx, strategy.ArtifactoryConfig{
 		Target: "://invalid-url",
-	}, memCache, mux)
+	}, memCache, mux, newTestSpools(t))
 	assert.Error(t, err)
 }
 

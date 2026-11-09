@@ -59,6 +59,20 @@ func CreatePaths(ctx context.Context, remote cache.Cache, key cache.Key, baseDir
 		span.End()
 	}()
 
+	wc, err := remote.Create(ctx, key, Headers(archiveName, extraHeaders...), ttl)
+	if err != nil {
+		return errors.Wrap(err, "failed to create object")
+	}
+
+	if err := client.Archive(ctx, wc, baseDir, includePaths, excludePatterns, threads); err != nil {
+		return errors.Join(err, wc.Abort(err))
+	}
+	return errors.Wrap(wc.Close(), "failed to close writer")
+}
+
+// Headers returns the headers stored with a snapshot archive named archiveName.
+// Later extra headers override earlier ones.
+func Headers(archiveName string, extraHeaders ...http.Header) http.Header {
 	headers := make(http.Header)
 	headers.Set("Content-Type", "application/zstd")
 	headers.Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", archiveName+".tar.zst"))
@@ -69,16 +83,7 @@ func CreatePaths(ctx context.Context, remote cache.Cache, key cache.Key, baseDir
 			}
 		}
 	}
-
-	wc, err := remote.Create(ctx, key, headers, ttl)
-	if err != nil {
-		return errors.Wrap(err, "failed to create object")
-	}
-
-	if err := client.Archive(ctx, wc, baseDir, includePaths, excludePatterns, threads); err != nil {
-		return errors.Join(err, wc.Abort(err))
-	}
-	return errors.Wrap(wc.Close(), "failed to close writer")
+	return headers
 }
 
 // StreamTo archives a directory using tar with zstd compression and streams the

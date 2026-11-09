@@ -154,7 +154,7 @@ func newColdSnapshotStrategyWithConfig(
 	mux := newTestMux()
 	managerProvider := gitclone.NewManagerProvider(ctx, gitclone.Config{MirrorRoot: mirrorRoot}, nil)
 	strategy, err := git.New(ctx, config, scheduler, c, mux, managerProvider,
-		func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
+		func() (*githubapp.TokenManager, error) { return nil, nil }, newTestSpools(t)) //nolint:nilnil
 	assert.NoError(t, err)
 	if config.SnapshotInterval > 0 {
 		strategy.SetMetadataStore(nil)
@@ -483,7 +483,7 @@ func TestColdSnapshotPreparationCoordinatesAcrossReplicas(t *testing.T) {
 		mux := newTestMux()
 		managerProvider := gitclone.NewManagerProvider(ctx, gitclone.Config{MirrorRoot: mirrorRoot}, nil)
 		strategy, err := git.New(ctx, git.Config{SnapshotInterval: time.Hour}, newTestScheduler(ctx, t), sharedCache, mux,
-			managerProvider, func() (*githubapp.TokenManager, error) { return nil, nil }) //nolint:nilnil
+			managerProvider, func() (*githubapp.TokenManager, error) { return nil, nil }, newTestSpools(t)) //nolint:nilnil
 		assert.NoError(t, err)
 		strategy.SetColdPreparationDelay(func() time.Duration { return 0 })
 		strategy.SetMetadataStore(store)

@@ -28,6 +28,24 @@ func ParseNamespace(name string) (Namespace, error) {
 // Writer extends io.WriteCloser with abort semantics for cache writes.
 type Writer = client.CacheWriter
 
+// ReadAtCloser is an io.ReaderAt that must be closed.
+type ReadAtCloser interface {
+	io.ReaderAt
+	io.Closer
+}
+
+// PendingReader is implemented by a Writer whose bytes can be read before commit.
+// The object stays invisible to Open and Stat until Close succeeds.
+type PendingReader interface {
+	// OpenPending must precede Close or Abort; the reader sees every returned Write
+	// and outlives the commit. Returns ErrPendingReadUnsupported if unsupported.
+	OpenPending() (ReadAtCloser, error)
+}
+
+// ErrPendingReadUnsupported is returned by PendingReader.OpenPending when a
+// write cannot be followed before it is committed.
+var ErrPendingReadUnsupported = errors.New("pending reads unsupported")
+
 // ErrNotFound is returned when a cache backend is not found.
 var ErrNotFound = errors.New("cache backend not found")
 

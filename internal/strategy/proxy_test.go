@@ -32,7 +32,7 @@ func setupProxyTest(t *testing.T) (http.Handler, context.Context, cache.Cache) {
 	t.Cleanup(func() { memCache.Close() })
 
 	mux := http.NewServeMux()
-	p, err := strategy.NewHTTPProxy(ctx, memCache, mux)
+	p, err := strategy.NewHTTPProxy(ctx, memCache, mux, newTestSpools(t))
 	assert.NoError(t, err)
 
 	// Wrap the mux with the proxy interceptor, just as config.Load does.
@@ -119,7 +119,7 @@ func TestHTTPProxyDoesNotShadowSpecificRoutes(t *testing.T) {
 		_, _ = w.Write([]byte("healthy"))
 	})
 
-	p, err := strategy.NewHTTPProxy(ctx, memCache, mux)
+	p, err := strategy.NewHTTPProxy(ctx, memCache, mux, newTestSpools(t))
 	assert.NoError(t, err)
 	handler := p.Intercept(mux)
 
@@ -255,7 +255,7 @@ func TestHTTPProxyString(t *testing.T) {
 	defer memCache.Close()
 
 	mux := http.NewServeMux()
-	p, err := strategy.NewHTTPProxy(ctx, memCache, mux)
+	p, err := strategy.NewHTTPProxy(ctx, memCache, mux, newTestSpools(t))
 	assert.NoError(t, err)
 	assert.Equal(t, "proxy", p.String())
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"maps"
 	"math/rand/v2"
 	"net/http"
 	"net/url"
@@ -27,6 +28,7 @@ import (
 	"github.com/block/cachew/internal/httputil"
 	"github.com/block/cachew/internal/logging"
 	"github.com/block/cachew/internal/snapshot"
+	"github.com/block/cachew/internal/spool"
 )
 
 const lfsFetchTimeout = 25 * time.Minute
@@ -642,6 +644,9 @@ func (s *Strategy) handleSnapshotRequest(w http.ResponseWriter, r *http.Request,
 			logger.ErrorContext(ctx, "Failed to serve snapshot via spool", "upstream", upstreamURL, "error", spoolErr)
 			span.RecordError(spoolErr)
 			span.SetStatus(codes.Error, spoolErr.Error())
+			if ctx.Err() == nil {
+				panic(http.ErrAbortHandler)
+			}
 		}
 	default:
 		logger.ErrorContext(ctx, "Failed to open snapshot from cache", "upstream", upstreamURL, "error", err)
@@ -1127,57 +1132,54 @@ func createBundleFile(ctx context.Context, repo *gitclone.Repository, baseCommit
 	return f, nil
 }
 
-// serveSnapshotWithSpool handles snapshot cache misses using the spool pattern.
-// The first request for a given upstream URL becomes the writer: it clones the
-// mirror, streams tar+zstd to both the HTTP client and a spool file, then
-// triggers a background cache backfill. Concurrent requests for the same URL
-// become readers that follow the spool, avoiding redundant clone+tar work.
+// serveSnapshotWithSpool generates one snapshot per upstream URL into the cache,
+// streamed to every concurrent request. An error means a possibly truncated response.
 func (s *Strategy) serveSnapshotWithSpool(w http.ResponseWriter, r *http.Request, repo *gitclone.Repository, upstreamURL, repoName string, start time.Time) error {
 	ctx := r.Context()
 	logger := logging.FromContext(ctx)
 
-	// Use LoadOrStore with a sentinel to atomically elect a single writer.
-	// The first goroutine stores an empty snapshotSpoolEntry and becomes the
-	// writer. Concurrent goroutines see the existing entry and wait for the
-	// spool to be published via the ready channel.
-	entry := &snapshotSpoolEntry{ready: make(chan struct{})}
-	if existing, loaded := s.snapshotSpools.LoadOrStore(upstreamURL, entry); loaded {
-		winner := existing.(*snapshotSpoolEntry)
-		waitStart := time.Now()
-		<-winner.ready
-		wait := time.Since(waitStart)
-		if spool := winner.spool; spool != nil && !spool.Failed() {
-			logger.DebugContext(ctx, "Serving snapshot from spool", "upstream", upstreamURL, "wait", wait)
-			if err := spool.ServeTo(w); err != nil {
-				if errors.Is(err, ErrSpoolFailed) {
-					logger.DebugContext(ctx, "Snapshot spool failed before headers, falling back to direct stream", "upstream", upstreamURL)
-					s.metrics.recordSpoolFollowerWait(ctx, repoName, "writer_failed", wait)
-					return s.streamSnapshotDirect(w, r, repo)
-				}
-				s.metrics.recordSpoolFollowerWait(ctx, repoName, "read_error", wait)
-				return errors.Wrap(err, "snapshot spool read")
-			}
-			s.metrics.recordSpoolFollowerWait(ctx, repoName, "served", wait)
-			s.metrics.recordSnapshotServe(ctx, "spool", repoName, spool.Written(), time.Since(start))
-			if span := trace.SpanFromContext(ctx); span.SpanContext().IsValid() {
-				span.SetAttributes(attribute.String("cachew.source", "spool"), attribute.Int64("cachew.bytes", spool.Written()),
-					attribute.Float64("cachew.spool_wait_seconds", wait.Seconds()))
-			}
-			return nil
-		}
-		// Writer failed; fall through to generate independently.
-		s.metrics.recordSpoolFollowerWait(ctx, repoName, "writer_failed", wait)
+	result, err := s.snapshotSpools.Serve(w, r, upstreamURL, func(ctx context.Context, sw *spool.Writer) error {
+		return s.fillSnapshot(ctx, sw, repo, repoName)
+	})
+	if result.Filled && s.config.SnapshotInterval > 0 {
+		s.scheduleSnapshotJobs(repo)
+	}
+	if !result.Filled {
+		s.metrics.recordSpoolFollowerWait(ctx, repoName, spoolFollowerOutcome(err), result.Wait)
+	}
+	if errors.Is(err, spool.ErrNotShared) {
+		logger.DebugContext(ctx, "Snapshot spool not shareable, falling back to direct stream", "upstream", upstreamURL)
 		return s.streamSnapshotDirect(w, r, repo)
 	}
-
-	err := s.writeSnapshotSpool(w, r, repo, upstreamURL, repoName, entry)
-	if err == nil {
-		s.metrics.recordSnapshotServe(ctx, "generated", repoName, entry.spool.Written(), time.Since(start))
-		if span := trace.SpanFromContext(ctx); span.SpanContext().IsValid() {
-			span.SetAttributes(attribute.String("cachew.source", "generated"), attribute.Int64("cachew.bytes", entry.spool.Written()))
+	if err != nil {
+		return errors.Wrap(err, "snapshot spool read")
+	}
+	if result.Status != http.StatusOK {
+		return nil
+	}
+	source := "spool"
+	if result.Filled {
+		source = "generated"
+	}
+	s.metrics.recordSnapshotServe(ctx, source, repoName, result.Bytes, time.Since(start))
+	if span := trace.SpanFromContext(ctx); span.SpanContext().IsValid() {
+		span.SetAttributes(attribute.String("cachew.source", source), attribute.Int64("cachew.bytes", result.Bytes))
+		if !result.Filled {
+			span.SetAttributes(attribute.Float64("cachew.spool_wait_seconds", result.Wait.Seconds()))
 		}
 	}
-	return err
+	return nil
+}
+
+func spoolFollowerOutcome(err error) string {
+	switch {
+	case err == nil:
+		return "served"
+	case errors.Is(err, spool.ErrNotShared):
+		return "writer_failed"
+	default:
+		return "read_error"
+	}
 }
 
 // streamSnapshotDirect streams a snapshot directly to the client without
@@ -1203,100 +1205,57 @@ func (s *Strategy) streamSnapshotDirect(w http.ResponseWriter, r *http.Request, 
 	return errors.Wrap(snapshot.StreamTo(ctx, w, repoDir, snapshotExcludePatterns("./.git"), s.config.ZstdThreads), "stream snapshot to client")
 }
 
-// prepareSnapshotSpool creates the spool and clones the mirror into a temp directory,
-// publishing the spool to waiting readers via the entry's ready channel. On failure
-// it signals readers and returns an error.
-func (s *Strategy) prepareSnapshotSpool(ctx context.Context, repo *gitclone.Repository, upstreamURL string, entry *snapshotSpoolEntry) (spool *ResponseSpool, spoolDir, repoDir string, err error) {
-	mirrorRoot := s.cloneManager.Config().MirrorRoot
+// fillSnapshot clones the mirror and streams its snapshot to sw while writing
+// it to the cache, so the snapshot is generated once for both.
+func (s *Strategy) fillSnapshot(ctx context.Context, sw *spool.Writer, repo *gitclone.Repository, repoName string) error {
+	logger := logging.FromContext(ctx)
+	start := time.Now()
+	upstreamURL := repo.UpstreamURL()
 
-	spoolDir, err = snapshotSpoolDirForURL(mirrorRoot, upstreamURL)
+	snapshotDir, err := os.MkdirTemp(s.cloneManager.Config().MirrorRoot, ".snapshot-stream-*")
 	if err != nil {
-		close(entry.ready)
-		s.snapshotSpools.Delete(upstreamURL)
-		return nil, "", "", err
+		return s.failSnapshotFill(ctx, sw, repoName, start, errors.Wrap(err, "create temp snapshot dir"))
 	}
-
-	spool, err = NewResponseSpool(filepath.Join(spoolDir, "snapshot.spool"))
-	if err != nil {
-		close(entry.ready)
-		s.snapshotSpools.Delete(upstreamURL)
-		return nil, "", "", err
-	}
-	entry.spool = spool
-	close(entry.ready)
-
-	snapshotDir, err := os.MkdirTemp(mirrorRoot, ".snapshot-stream-*")
-	if err != nil {
-		err = errors.Wrap(err, "create temp snapshot dir")
-		spool.MarkError(err)
-		s.snapshotSpools.Delete(upstreamURL)
-		return nil, "", "", err
-	}
-
-	repoDir = filepath.Join(snapshotDir, "repo")
+	defer func() {
+		if err := os.RemoveAll(snapshotDir); err != nil {
+			logger.WarnContext(ctx, "Failed to clean up snapshot stream dir", "dir", snapshotDir, "error", err)
+		}
+	}()
+	repoDir := filepath.Join(snapshotDir, "repo")
 	if err := s.cloneForSnapshot(ctx, repo, repoDir, s.snapshotFilterFor(upstreamURL)); err != nil {
-		spool.MarkError(err)
-		s.snapshotSpools.Delete(upstreamURL)
-		_ = os.RemoveAll(snapshotDir)
-		return nil, "", "", err
+		return s.failSnapshotFill(ctx, sw, repoName, start, errors.Wrap(err, "clone for snapshot"))
+	}
+	commit, err := mirrorHead(ctx, repoDir)
+	if err != nil {
+		return s.failSnapshotFill(ctx, sw, repoName, start, errors.Wrap(err, "rev-parse HEAD for snapshot"))
 	}
 
-	return spool, spoolDir, repoDir, nil
+	extraHeaders := http.Header{}
+	extraHeaders.Set("X-Cachew-Snapshot-Commit", commit)
+	headers := snapshot.Headers(filepath.Base(repoDir), extraHeaders)
+	maps.Copy(sw.Header(), headers)
+	sw.WriteHeader(http.StatusOK)
+	if cw, err := s.cache.Create(ctx, snapshotCacheKey(upstreamURL), headers, 0); err != nil {
+		logger.WarnContext(ctx, "Failed to create snapshot cache entry", "upstream", upstreamURL, "error", err)
+	} else if err := sw.Store(cw); err != nil {
+		s.metrics.recordSpoolWriter(ctx, repoName, "error", time.Since(start))
+		return errors.Wrap(err, "store snapshot")
+	}
+	if err := snapshot.StreamTo(ctx, sw, repoDir, snapshotExcludePatterns("./.git"), s.config.ZstdThreads); err != nil {
+		s.metrics.recordSpoolWriter(ctx, repoName, "error", time.Since(start))
+		return errors.Wrap(err, "stream snapshot")
+	}
+	s.metrics.recordSpoolWriter(ctx, repoName, "success", time.Since(start))
+	return nil
 }
 
-// writeSnapshotSpool is the writer path for snapshot spooling. It creates a
-// spool, clones the mirror, streams the tar+zstd output through a SpoolTeeWriter,
-// and triggers a background cache backfill.
-func (s *Strategy) writeSnapshotSpool(w http.ResponseWriter, r *http.Request, repo *gitclone.Repository, upstreamURL, repoName string, entry *snapshotSpoolEntry) error {
-	ctx := r.Context()
-	logger := logging.FromContext(ctx)
-
-	writerStart := time.Now()
-	spool, spoolDir, repoDir, err := s.prepareSnapshotSpool(ctx, repo, upstreamURL, entry)
-	if err != nil {
-		s.metrics.recordSpoolWriter(ctx, repoName, "prepare_error", time.Since(writerStart))
-		return errors.Wrap(err, "prepare snapshot spool")
-	}
-	snapshotDir := filepath.Dir(repoDir)
-
-	w.Header().Set("Content-Type", "application/zstd")
-	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filepath.Base(repoDir)+".tar.zst"))
-
-	tw := NewSpoolTeeWriter(w, spool)
-	streamErr := snapshot.StreamTo(ctx, tw, repoDir, snapshotExcludePatterns("./.git"), s.config.ZstdThreads)
-	if streamErr != nil {
-		spool.MarkError(streamErr)
-		s.metrics.recordSpoolWriter(ctx, repoName, "error", time.Since(writerStart))
-	} else {
-		spool.MarkComplete()
-		s.metrics.recordSpoolWriter(ctx, repoName, "success", time.Since(writerStart))
-	}
-
-	go func() {
-		spool.WaitForReaders()
-		s.snapshotSpools.Delete(upstreamURL)
-		_ = os.RemoveAll(spoolDir)
-		_ = os.RemoveAll(snapshotDir)
-	}()
-
-	go func() {
-		mu := s.snapshotMutexFor(upstreamURL)
-		if !mu.TryLock() {
-			logger.InfoContext(ctx, "Skipping background cache upload, snapshot generation already in progress",
-				"upstream", upstreamURL)
-			return
-		}
-		mu.Unlock()
-		bgCtx := context.WithoutCancel(ctx)
-		if _, err := s.generateAndUploadSnapshot(bgCtx, repo); err != nil {
-			logger.ErrorContext(bgCtx, "Background cache upload failed", "upstream", upstreamURL, "error", err)
-		}
-	}()
-
-	if s.config.SnapshotInterval > 0 {
-		s.scheduleSnapshotJobs(repo)
-	}
-	return errors.Wrap(streamErr, "stream snapshot to client")
+// failSnapshotFill answers with a 500, which the spool never shares, so waiting
+// requests fall back to generating their own snapshot.
+func (s *Strategy) failSnapshotFill(ctx context.Context, sw *spool.Writer, repoName string, start time.Time, err error) error {
+	logging.FromContext(ctx).ErrorContext(ctx, "Failed to prepare snapshot", "error", err)
+	s.metrics.recordSpoolWriter(ctx, repoName, "prepare_error", time.Since(start))
+	http.Error(sw, "Internal server error", http.StatusInternalServerError)
+	return nil
 }
 
 // scheduleDeferredMirrorRestore schedules a one-shot background mirror restore
@@ -1490,26 +1449,9 @@ func (s *Strategy) prepareColdSnapshot(ctx context.Context, repo *gitclone.Repos
 	return nil
 }
 
-// snapshotSpoolEntry holds a spool and a ready channel used to coordinate
-// writer election. The first goroutine stores the entry via LoadOrStore and
-// becomes the writer. It closes ready once the spool is created (or on
-// failure with spool == nil) so waiting readers can proceed.
-type snapshotSpoolEntry struct {
-	spool *ResponseSpool
-	ready chan struct{}
-}
-
 type coldSnapshotEntry struct {
 	done    chan struct{}
 	serving sync.WaitGroup // tracks all in-flight snapshot serves (winner + followers)
-}
-
-func snapshotSpoolDirForURL(mirrorRoot, upstreamURL string) (string, error) {
-	repoPath, err := gitclone.RepoPathFromURL(upstreamURL)
-	if err != nil {
-		return "", errors.Wrap(err, "resolve snapshot spool directory")
-	}
-	return filepath.Join(mirrorRoot, ".snapshot-spools", repoPath), nil
 }
 
 // generateAndUploadLFSSnapshot fetches only the LFS objects needed to check out

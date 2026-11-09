@@ -13,11 +13,18 @@ import (
 	"github.com/block/cachew/internal/cache"
 	"github.com/block/cachew/internal/httputil"
 	"github.com/block/cachew/internal/logging"
+	"github.com/block/cachew/internal/spool"
 	"github.com/block/cachew/internal/strategy/handler"
 )
 
-func RegisterArtifactory(r *Registry) {
-	Register(r, "artifactory", "Caches artifacts from an Artifactory server.", NewArtifactory)
+func RegisterArtifactory(r *Registry, spools spool.Provider) {
+	Register(r, "artifactory", "Caches artifacts from an Artifactory server.", func(ctx context.Context, config ArtifactoryConfig, c cache.Cache, mux Mux) (*Artifactory, error) {
+		registry, err := spools()
+		if err != nil {
+			return nil, errors.Wrap(err, "create spool registry")
+		}
+		return NewArtifactory(ctx, config, c, mux, registry)
+	})
 }
 
 // ArtifactoryConfig represents the configuration for the Artifactory strategy.
@@ -54,7 +61,7 @@ type Artifactory struct {
 
 var _ Strategy = (*Artifactory)(nil)
 
-func NewArtifactory(ctx context.Context, config ArtifactoryConfig, cache cache.Cache, mux Mux) (*Artifactory, error) {
+func NewArtifactory(ctx context.Context, config ArtifactoryConfig, cache cache.Cache, mux Mux, spools *spool.Registry) (*Artifactory, error) {
 	u, err := url.Parse(config.Target)
 	if err != nil {
 		return nil, errors.Errorf("invalid target URL: %w", err)
@@ -67,7 +74,7 @@ func NewArtifactory(ctx context.Context, config ArtifactoryConfig, cache cache.C
 		logger: logging.FromContext(ctx),
 	}
 
-	hdlr := handler.New(a.client, cache).
+	hdlr := handler.New(a.client, cache, spools).
 		CacheKey(func(r *http.Request) string {
 			return a.buildTargetURL(r).String()
 		}).
