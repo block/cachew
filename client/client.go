@@ -65,6 +65,10 @@ type CacheWriter interface {
 	Abort(err error) error
 }
 
+// stdTransport is captured before cachewd wraps http.DefaultTransport with
+// upstream 429 cooldowns, so cache clients keep their own tuned pool.
+var stdTransport = http.DefaultTransport.(*http.Transport) //nolint:errcheck,gochecknoglobals
+
 // HeaderFunc returns headers to attach to each outgoing request.
 type HeaderFunc func() http.Header
 
@@ -77,13 +81,13 @@ type HeaderFunc func() http.Header
 // tracer provider is configured, otelhttp falls back to a no-op tracer, so
 // this is cost-free for callers that have not opted in to tracing.
 func NewHTTPClient(headerFunc HeaderFunc) *http.Client {
-	transport := http.DefaultTransport
-	if base, ok := transport.(*http.Transport); ok {
-		cloned := base.Clone()
-		cloned.MaxIdleConns = 100
-		cloned.MaxIdleConnsPerHost = 100
-		transport = cloned
+	base, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		base = stdTransport
 	}
+	transport := base.Clone()
+	transport.MaxIdleConns = 100
+	transport.MaxIdleConnsPerHost = 100
 
 	var rt http.RoundTripper = otelhttp.NewTransport(transport)
 	if headerFunc != nil {

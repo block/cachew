@@ -26,14 +26,17 @@ import (
 )
 
 func TestHTTPClientWithWrappedDefaultTransport(t *testing.T) {
-	original := http.DefaultTransport
-	t.Cleanup(func() { http.DefaultTransport = original })                                   //nolint:reassign
-	http.DefaultTransport = roundTripperFunc(func(r *http.Request) (*http.Response, error) { //nolint:reassign
+	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, "token", r.Header.Get("Authorization"))
-		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: http.NoBody, Request: r}, nil
+	}))
+	defer server.Close()
+	original := http.DefaultTransport
+	t.Cleanup(func() { http.DefaultTransport = original })                                 //nolint:reassign
+	http.DefaultTransport = roundTripperFunc(func(*http.Request) (*http.Response, error) { //nolint:reassign
+		return nil, errors.New("wrapped default transport used")
 	})
 	c := client.NewHTTPClient(func() http.Header { return http.Header{"Authorization": {"token"}} })
-	r, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://example.com", nil)
+	r, err := http.NewRequestWithContext(t.Context(), http.MethodGet, server.URL, nil)
 	assert.NoError(t, err)
 	resp, err := c.Do(r)
 	assert.NoError(t, err)
