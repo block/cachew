@@ -25,6 +25,22 @@ import (
 	"github.com/block/cachew/client"
 )
 
+func TestHTTPClientWithWrappedDefaultTransport(t *testing.T) {
+	original := http.DefaultTransport
+	t.Cleanup(func() { http.DefaultTransport = original })                                   //nolint:reassign
+	http.DefaultTransport = roundTripperFunc(func(r *http.Request) (*http.Response, error) { //nolint:reassign
+		assert.Equal(t, "token", r.Header.Get("Authorization"))
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: http.NoBody, Request: r}, nil
+	})
+	c := client.NewHTTPClient(func() http.Header { return http.Header{"Authorization": {"token"}} })
+	r, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://example.com", nil)
+	assert.NoError(t, err)
+	resp, err := c.Do(r)
+	assert.NoError(t, err)
+	assert.NoError(t, resp.Body.Close())
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+}
+
 // fakeServer is a minimal /api/v1 backend for exercising the client over HTTP.
 type fakeServer struct {
 	mu      sync.Mutex

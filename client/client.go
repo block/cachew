@@ -77,9 +77,13 @@ type HeaderFunc func() http.Header
 // tracer provider is configured, otelhttp falls back to a no-op tracer, so
 // this is cost-free for callers that have not opted in to tracing.
 func NewHTTPClient(headerFunc HeaderFunc) *http.Client {
-	transport := http.DefaultTransport.(*http.Transport).Clone() //nolint:errcheck
-	transport.MaxIdleConns = 100
-	transport.MaxIdleConnsPerHost = 100
+	transport := http.DefaultTransport
+	if base, ok := transport.(*http.Transport); ok {
+		cloned := base.Clone()
+		cloned.MaxIdleConns = 100
+		cloned.MaxIdleConnsPerHost = 100
+		transport = cloned
+	}
 
 	var rt http.RoundTripper = otelhttp.NewTransport(transport)
 	if headerFunc != nil {

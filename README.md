@@ -217,6 +217,16 @@ spool {
 }
 ```
 
+## Upstream Rate Limits
+
+After an upstream returns 429, cachewd stops sending requests to that origin (scheme, host and port) until a cooldown ends. During the cooldown, misses for that origin get 429 with `Retry-After` and `Cache-Control: no-store` without contacting it. Cache hits and other origins are unaffected. Nothing is retried automatically.
+
+The cooldown uses the upstream's `Retry-After` (seconds or HTTP date) when it is valid, and `upstream-backoff` otherwise. Cooldowns are held in memory per process.
+
+```hcl
+upstream-backoff = "1m"  # Must be positive
+```
+
 ## Authorization (OPA)
 
 Cachew uses [Open Policy Agent](https://www.openpolicyagent.org/) for request authorization. The default policy allows all requests from localhost and restricts remote access to non-admin paths (`/api/*`, `/admin/*`).
