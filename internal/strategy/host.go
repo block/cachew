@@ -2,9 +2,11 @@ package strategy
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/alecthomas/errors"
 
@@ -151,6 +153,19 @@ func (t *hostFallbackTransport) RoundTrip(r *http.Request) (*http.Response, erro
 			continue
 		}
 		if resp != nil {
+			const maxDrain = 2 << 10
+			if resp.ProtoMajor == 1 && resp.ContentLength <= maxDrain {
+				body := resp.Body
+				closed := make(chan struct{})
+				timer := time.AfterFunc(100*time.Millisecond, func() {
+					_ = body.Close()
+					close(closed)
+				})
+				_, _ = io.CopyN(io.Discard, body, maxDrain) //nolint:errcheck // A failed drain must not prevent fallback.
+				if !timer.Stop() {
+					<-closed
+				}
+			}
 			_ = resp.Body.Close()
 		}
 		req := r.Clone(r.Context())

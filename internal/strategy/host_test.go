@@ -4,12 +4,14 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -388,4 +390,68 @@ func newTestSpools(t *testing.T) *spool.Registry {
 	assert.NoError(t, err)
 	t.Cleanup(spools.Close)
 	return spools
+}
+
+func TestHostFallbackConnectionReuse(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		size        int
+		chunked     bool
+		stall       bool
+		connections int32
+	}{
+		{"small", 96, false, false, 1},
+		{"small chunked", 96, true, false, 1},
+		{"large", 4096, false, false, 2},
+		{"large chunked", 4096, true, false, 2},
+		{"stalled", 96, false, true, 2},
+		{"stalled chunked", 96, true, true, 2},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var connections atomic.Int32
+			primary := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if !tt.chunked {
+					w.Header().Set("Content-Length", strconv.Itoa(tt.size))
+				}
+				w.WriteHeader(http.StatusServiceUnavailable)
+				w.(http.Flusher).Flush()
+				if tt.stall {
+					<-r.Context().Done()
+					return
+				}
+				_, _ = io.WriteString(w, strings.Repeat("x", tt.size))
+			}))
+			primary.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+				if state == http.StateNew {
+					connections.Add(1)
+				}
+			}
+			primary.Start()
+			defer primary.Close()
+			mirror := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = io.WriteString(w, "mirror"+r.URL.Path)
+			}))
+			defer mirror.Close()
+			_, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelError})
+			c, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: time.Hour})
+			assert.NoError(t, err)
+			defer c.Close()
+			mux := http.NewServeMux()
+			_, err = strategy.NewHost(ctx, strategy.HostConfig{Target: primary.URL,
+				Fallbacks: []strategy.HostFallbackConfig{{Target: mirror.URL}},
+			}, c, mux, newTestSpools(t))
+			assert.NoError(t, err)
+			u, err := url.Parse(primary.URL)
+			assert.NoError(t, err)
+			for _, path := range []string{"/a.jar", "/b.jar"} {
+				requestCtx, cancel := context.WithTimeout(ctx, time.Second)
+				w := httptest.NewRecorder()
+				mux.ServeHTTP(w, httptest.NewRequestWithContext(requestCtx, http.MethodGet, "/"+u.Host+path, nil))
+				cancel()
+				assert.Equal(t, http.StatusOK, w.Code)
+				assert.Equal(t, "mirror"+path, w.Body.String())
+			}
+			assert.Equal(t, tt.connections, connections.Load())
+		})
+	}
 }
