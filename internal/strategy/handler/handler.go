@@ -273,7 +273,6 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // cache answered it, so a strategy's hit ratio can be read in requests and bytes.
 const CacheResultAttribute = "cachew.cache.result"
 
-// Values of CacheResultAttribute.
 const (
 	// CacheHit is a response from the cache, including a conditional 304.
 	CacheHit = "hit"
