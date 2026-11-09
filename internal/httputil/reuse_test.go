@@ -69,6 +69,29 @@ func TestReuseLifetime(t *testing.T) {
 	}
 }
 
+func TestRequestsNoCache(t *testing.T) {
+	tests := []struct {
+		name   string
+		header http.Header
+		want   bool
+	}{
+		{name: "NoDirectives"},
+		{name: "CacheControlNoCache", header: http.Header{"Cache-Control": {"max-age=0, No-Cache"}}, want: true},
+		{name: "CacheControlOtherDirective", header: http.Header{"Cache-Control": {"max-age=60"}}},
+		{name: "PragmaNoCache", header: http.Header{"Pragma": {"no-cache"}}, want: true},
+		{name: "CacheControlOverridesPragma", header: http.Header{"Cache-Control": {"max-age=60"}, "Pragma": {"no-cache"}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			header := tt.header
+			if header == nil {
+				header = http.Header{}
+			}
+			assert.Equal(t, tt.want, httputil.RequestsNoCache(&http.Request{Header: header}))
+		})
+	}
+}
+
 func TestVaryMatches(t *testing.T) {
 	tests := []struct {
 		name   string

@@ -251,6 +251,8 @@ func TestErrorReuseChecksFollowerRequest(t *testing.T) {
 	}{
 		{name: "AnonymousFollower", wantFills: 1},
 		{name: "AuthorizedFollower", followerHeader: http.Header{"Authorization": {"Bearer x"}}, wantFills: 2},
+		{name: "NoCacheFollower", followerHeader: http.Header{"Cache-Control": {"no-cache"}}, wantFills: 2},
+		{name: "PragmaNoCacheFollower", followerHeader: http.Header{"Pragma": {"no-cache"}}, wantFills: 2},
 		{
 			name:           "AuthorizedFollowerOfPublicResponse",
 			header:         http.Header{"Cache-Control": {"public"}},

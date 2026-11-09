@@ -58,6 +58,22 @@ func ReuseLifetime(req *http.Request, status int, header http.Header, heuristic 
 	return lifetime, lifetime > 0
 }
 
+// RequestsNoCache reports whether req forbids an answer from a stored response
+// without validation (RFC 9111 §5.2.1.4). Pragma counts only without Cache-Control.
+func RequestsNoCache(req *http.Request) bool {
+	if len(req.Header.Values("Cache-Control")) > 0 {
+		return cacheControl(req.Header).has("no-cache")
+	}
+	for _, value := range req.Header.Values("Pragma") {
+		for directive := range strings.SplitSeq(value, ",") {
+			if strings.EqualFold(strings.TrimSpace(directive), "no-cache") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // VaryMatches reports whether a response with header, stored for a request with
 // stored headers, may answer a request with req headers (RFC 9111 §4.1).
 func VaryMatches(header, stored, req http.Header) bool {

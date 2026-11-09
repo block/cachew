@@ -313,7 +313,7 @@ func (e *entry) serve(w http.ResponseWriter, req *http.Request, filled bool) (Re
 }
 
 // reusableBy reports whether a follower may reuse the response. Errors are also
-// checked against the follower, so its credentials and varied headers count.
+// checked against the follower, so its credentials, varied headers and no-cache count.
 func (e *entry) reusableBy(req *http.Request, status int, header http.Header, shared bool) bool {
 	if !shared {
 		return false
@@ -321,7 +321,7 @@ func (e *entry) reusableBy(req *http.Request, status int, header http.Header, sh
 	if status >= 200 && status < 300 {
 		return true
 	}
-	if _, ok := httputil.ReuseLifetime(req, status, header, e.group.registry.config.ErrorWindow); !ok {
+	if _, ok := httputil.ReuseLifetime(req, status, header, e.group.registry.config.ErrorWindow); !ok || httputil.RequestsNoCache(req) {
 		return false
 	}
 	return httputil.VaryMatches(header, e.leader.Header, req.Header)
