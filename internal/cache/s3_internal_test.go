@@ -263,7 +263,7 @@ func TestS3ExpiryRefreshPreservesUpdatedHeaders(t *testing.T) {
 	ctx := t.Context()
 	key := NewKey("refresh-preserves-headers")
 
-	w, err := s.Create(ctx, key, nil, time.Minute)
+	w, err := s.Create(ctx, key, nil, 0)
 	assert.NoError(t, err)
 	_, err = w.Write([]byte("hello world"))
 	assert.NoError(t, err)
@@ -290,4 +290,58 @@ func TestS3ExpiryRefreshPreservesUpdatedHeaders(t *testing.T) {
 	headers, err := s.Stat(ctx, key)
 	assert.NoError(t, err)
 	assert.Equal(t, "yes", headers.Get("X-Checked"))
+}
+
+func TestS3RefreshedExpiry(t *testing.T) {
+	s := &S3{config: S3Config{MaxTTL: time.Hour}}
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name          string
+		slidingExpiry bool
+		expiresAt     time.Time
+		want          time.Time
+		wantRefresh   bool
+	}{
+		{name: "SlidingDue", slidingExpiry: true, expiresAt: now.Add(10 * time.Minute), want: now.Add(time.Hour), wantRefresh: true},
+		{name: "SlidingNotDue", slidingExpiry: true, expiresAt: now.Add(45 * time.Minute)},
+		{name: "ExplicitTTLNeverExtended", expiresAt: now.Add(10 * time.Minute)},
+		{name: "NoExpiry", slidingExpiry: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, refresh := s.refreshedExpiry(tt.slidingExpiry, tt.expiresAt, now)
+			assert.Equal(t, tt.wantRefresh, refresh)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestS3CreateRecordsSlidingExpiry(t *testing.T) {
+	s := newS3(t)
+	defer s.Close()
+
+	tests := []struct {
+		name string
+		ttl  time.Duration
+		want bool
+	}{
+		{name: "DefaultTTL", ttl: 0, want: true},
+		{name: "ExplicitTTL", ttl: 10 * time.Minute, want: false},
+		{name: "ExplicitTTLAboveMax", ttl: 2 * time.Hour, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := t.Context()
+			key := NewKey(tt.name)
+			w, err := s.Create(ctx, key, nil, tt.ttl)
+			assert.NoError(t, err)
+			_, err = w.Write([]byte("payload"))
+			assert.NoError(t, err)
+			assert.NoError(t, w.Close())
+
+			objInfo, _, _, err := s.statAndHeaders(ctx, key)
+			assert.NoError(t, err)
+			assert.Equal(t, tt.want, hasSlidingExpiry(objInfo))
+		})
+	}
 }
