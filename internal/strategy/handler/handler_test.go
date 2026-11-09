@@ -11,6 +11,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -857,7 +858,6 @@ func TestUncoalescableRequestsFetchSeparately(t *testing.T) {
 				_, _ = io.WriteString(w, "body")
 			}))
 			defer upstream.Close()
-			defer close(release)
 			c := mustNewMemoryCache()
 			defer c.Close()
 			h := handler.New(http.DefaultClient, c, newTestSpools(t)).
@@ -866,12 +866,15 @@ func TestUncoalescableRequestsFetchSeparately(t *testing.T) {
 				})
 			_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelError})
 
+			var requests sync.WaitGroup
+			defer requests.Wait()
+			defer close(release)
 			for range 2 {
-				go func() {
+				requests.Go(func() {
 					r := httptest.NewRequestWithContext(ctx, tt.method, "http://example.com/object", nil)
 					maps.Copy(r.Header, tt.header)
 					h.ServeHTTP(httptest.NewRecorder(), r)
-				}()
+				})
 			}
 			for range 2 {
 				select {

@@ -1,9 +1,10 @@
-package spool
+package spool_test
 
 import (
 	"context"
 	"io"
 	"log/slog"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -18,14 +19,17 @@ import (
 
 	"github.com/block/cachew/internal/cache"
 	"github.com/block/cachew/internal/logging"
+	"github.com/block/cachew/internal/spool"
 )
 
+const key = "object"
+
 func TestConcurrentRequestsShareOneFill(t *testing.T) {
-	ctx, registry := newTestRegistry(t, Config{})
-	group := registry.NewGroup(ReleaseCompleted)
+	ctx, registry, _ := newTestRegistry(t, spool.Config{})
+	group := registry.NewGroup(spool.ReleaseCompleted)
 	release := make(chan struct{})
 	var fills atomic.Int32
-	fill := func(_ context.Context, w *Writer) error {
+	fill := func(_ context.Context, w *spool.Writer) error {
 		fills.Add(1)
 		w.Header().Set("Content-Type", "text/plain")
 		w.WriteHeader(http.StatusOK)
@@ -37,17 +41,17 @@ func TestConcurrentRequestsShareOneFill(t *testing.T) {
 
 	const readers = 5
 	recorders := make([]*httptest.ResponseRecorder, readers)
-	results := make([]Result, readers)
+	results := make([]spool.Result, readers)
 	errs := make([]error, readers)
 	var wg sync.WaitGroup
 	for i := range readers {
 		recorders[i] = httptest.NewRecorder()
 		wg.Go(func() {
 			req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/object", nil)
-			results[i], errs[i] = group.Serve(recorders[i], req, "object", fill)
+			results[i], errs[i] = group.Serve(recorders[i], req, key, fill)
 		})
 	}
-	waitForReaders(t, group, "object", readers)
+	waitForReaders(t, group, readers)
 	close(release)
 	wg.Wait()
 
@@ -67,17 +71,17 @@ func TestConcurrentRequestsShareOneFill(t *testing.T) {
 }
 
 func TestFillOutlivesItsRequests(t *testing.T) {
-	ctx, registry := newTestRegistry(t, Config{})
-	group := registry.NewGroup(ReleaseCompleted)
+	ctx, registry, _ := newTestRegistry(t, spool.Config{})
+	group := registry.NewGroup(spool.ReleaseCompleted)
 	c, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: time.Hour})
 	assert.NoError(t, err)
 	defer c.Close()
-	key := cache.NewKey("object")
+	cacheKey := cache.NewKey(key)
 	release := make(chan struct{})
 	fillDone := make(chan error, 1)
-	fill := func(ctx context.Context, w *Writer) error {
+	fill := func(ctx context.Context, w *spool.Writer) error {
 		w.WriteHeader(http.StatusOK)
-		cw, err := c.Create(ctx, key, http.Header{}, time.Hour)
+		cw, err := c.Create(ctx, cacheKey, http.Header{}, time.Hour)
 		assert.NoError(t, err)
 		assert.NoError(t, w.Store(cw))
 		_, _ = io.WriteString(w, "first ")
@@ -91,18 +95,18 @@ func TestFillOutlivesItsRequests(t *testing.T) {
 	leaderErr := make(chan error, 1)
 	go func() {
 		req := httptest.NewRequestWithContext(leaderCtx, http.MethodGet, "/object", nil)
-		_, err := group.Serve(httptest.NewRecorder(), req, "object", fill)
+		_, err := group.Serve(httptest.NewRecorder(), req, key, fill)
 		leaderErr <- err
 	}()
-	waitForReaders(t, group, "object", 1)
+	waitForReaders(t, group, 1)
 	followerCtx, cancelFollower := context.WithCancel(ctx)
 	followerErr := make(chan error, 1)
 	go func() {
 		req := httptest.NewRequestWithContext(followerCtx, http.MethodGet, "/object", nil)
-		_, err := group.Serve(httptest.NewRecorder(), req, "object", fill)
+		_, err := group.Serve(httptest.NewRecorder(), req, key, fill)
 		followerErr <- err
 	}()
-	waitForReaders(t, group, "object", 2)
+	waitForReaders(t, group, 2)
 
 	cancelLeader()
 	assert.IsError(t, <-leaderErr, context.Canceled)
@@ -110,9 +114,9 @@ func TestFillOutlivesItsRequests(t *testing.T) {
 	assert.IsError(t, <-followerErr, context.Canceled)
 	close(release)
 	assert.NoError(t, <-fillDone)
-	waitFor(t, func() bool { return entryCount(group) == 0 })
+	waitFor(t, func() bool { return group.Len() == 0 })
 
-	r, _, err := c.Open(ctx, key)
+	r, _, err := c.Open(ctx, cacheKey)
 	assert.NoError(t, err)
 	defer r.Close()
 	body, err := io.ReadAll(r)
@@ -121,15 +125,15 @@ func TestFillOutlivesItsRequests(t *testing.T) {
 }
 
 func TestRequestsFollowPendingCacheWrite(t *testing.T) {
-	ctx, registry := newTestRegistry(t, Config{})
-	group := registry.NewGroup(ReleaseCompleted)
+	ctx, registry, dir := newTestRegistry(t, spool.Config{})
+	group := registry.NewGroup(spool.ReleaseCompleted)
 	disk, err := cache.NewDisk(ctx, cache.DiskConfig{Root: t.TempDir(), MaxTTL: time.Hour})
 	assert.NoError(t, err)
 	defer disk.Close()
 	release := make(chan struct{})
-	fill := func(ctx context.Context, w *Writer) error {
+	fill := func(ctx context.Context, w *spool.Writer) error {
 		w.WriteHeader(http.StatusOK)
-		cw, err := disk.Create(ctx, cache.NewKey("object"), http.Header{}, time.Hour)
+		cw, err := disk.Create(ctx, cache.NewKey(key), http.Header{}, time.Hour)
 		assert.NoError(t, err)
 		assert.NoError(t, w.Store(cw))
 		_, _ = io.WriteString(w, "first ")
@@ -142,11 +146,11 @@ func TestRequestsFollowPendingCacheWrite(t *testing.T) {
 	served := make(chan error, 1)
 	go func() {
 		req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/object", nil)
-		_, err := group.Serve(recorder, req, "object", fill)
+		_, err := group.Serve(recorder, req, key, fill)
 		served <- err
 	}()
-	waitFor(t, func() bool { return written(group, "object") > 0 })
-	files, err := os.ReadDir(registry.config.Dir)
+	waitFor(t, func() bool { return group.Written(key) > 0 })
+	files, err := os.ReadDir(dir)
 	assert.NoError(t, err)
 	assert.Equal(t, 0, len(files))
 	close(release)
@@ -156,9 +160,9 @@ func TestRequestsFollowPendingCacheWrite(t *testing.T) {
 }
 
 func TestCacheWriteFailureDoesNotFailResponse(t *testing.T) {
-	ctx, registry := newTestRegistry(t, Config{})
-	group := registry.NewGroup(ReleaseCompleted)
-	fill := func(_ context.Context, w *Writer) error {
+	ctx, registry, _ := newTestRegistry(t, spool.Config{})
+	group := registry.NewGroup(spool.ReleaseCompleted)
+	fill := func(_ context.Context, w *spool.Writer) error {
 		w.WriteHeader(http.StatusOK)
 		assert.NoError(t, w.Store(&failingCacheWriter{}))
 		for range 3 {
@@ -171,7 +175,7 @@ func TestCacheWriteFailureDoesNotFailResponse(t *testing.T) {
 
 	recorder := httptest.NewRecorder()
 	req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/object", nil)
-	_, err := group.Serve(recorder, req, "object", fill)
+	_, err := group.Serve(recorder, req, key, fill)
 	assert.NoError(t, err)
 	assert.Equal(t, "chunk chunk chunk ", recorder.Body.String())
 }
@@ -179,14 +183,14 @@ func TestCacheWriteFailureDoesNotFailResponse(t *testing.T) {
 func TestSequentialRequests(t *testing.T) {
 	tests := []struct {
 		name        string
-		retention   Retention
+		retention   spool.Retention
 		errorWindow time.Duration
 		status      int
 		header      http.Header
 		wantFills   int32
 	}{
-		{name: "SuccessReleased", retention: ReleaseCompleted, status: http.StatusOK, wantFills: 2},
-		{name: "SuccessRetained", retention: RetainCompleted, status: http.StatusOK, wantFills: 1},
+		{name: "SuccessReleased", retention: spool.ReleaseCompleted, status: http.StatusOK, wantFills: 2},
+		{name: "SuccessRetained", retention: spool.RetainCompleted, status: http.StatusOK, wantFills: 1},
 		{name: "NotFoundWithinErrorWindow", errorWindow: time.Hour, status: http.StatusNotFound, wantFills: 1},
 		{name: "NotFoundWithoutErrorWindow", status: http.StatusNotFound, wantFills: 2},
 		{name: "ServerErrorNotReusable", errorWindow: time.Hour, status: http.StatusInternalServerError, wantFills: 2},
@@ -207,14 +211,12 @@ func TestSequentialRequests(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ctx, registry := newTestRegistry(t, Config{ErrorWindow: tt.errorWindow})
+			ctx, registry, _ := newTestRegistry(t, spool.Config{ErrorWindow: tt.errorWindow})
 			group := registry.NewGroup(tt.retention)
 			var fills atomic.Int32
-			fill := func(_ context.Context, w *Writer) error {
+			fill := func(_ context.Context, w *spool.Writer) error {
 				fills.Add(1)
-				for name, values := range tt.header {
-					w.Header()[name] = values
-				}
+				maps.Copy(w.Header(), tt.header)
 				w.WriteHeader(tt.status)
 				_, err := io.WriteString(w, "body")
 				return err
@@ -222,7 +224,7 @@ func TestSequentialRequests(t *testing.T) {
 			for range 2 {
 				recorder := httptest.NewRecorder()
 				req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/object", nil)
-				result, err := group.Serve(recorder, req, "object", fill)
+				result, err := group.Serve(recorder, req, key, fill)
 				assert.NoError(t, err)
 				assert.Equal(t, tt.status, result.Status)
 				assert.Equal(t, tt.status, recorder.Code)
@@ -234,10 +236,10 @@ func TestSequentialRequests(t *testing.T) {
 }
 
 func TestUnsharedResponseIsNotServedToFollowers(t *testing.T) {
-	ctx, registry := newTestRegistry(t, Config{ErrorWindow: time.Hour})
-	group := registry.NewGroup(ReleaseCompleted)
+	ctx, registry, _ := newTestRegistry(t, spool.Config{ErrorWindow: time.Hour})
+	group := registry.NewGroup(spool.ReleaseCompleted)
 	release := make(chan struct{})
-	fill := func(_ context.Context, w *Writer) error {
+	fill := func(_ context.Context, w *spool.Writer) error {
 		<-release
 		w.WriteHeader(http.StatusInternalServerError)
 		_, err := io.WriteString(w, "failed")
@@ -248,24 +250,24 @@ func TestUnsharedResponseIsNotServedToFollowers(t *testing.T) {
 	leaderErr := make(chan error, 1)
 	go func() {
 		req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/object", nil)
-		_, err := group.Serve(leader, req, "object", fill)
+		_, err := group.Serve(leader, req, key, fill)
 		leaderErr <- err
 	}()
-	waitForReaders(t, group, "object", 1)
+	waitForReaders(t, group, 1)
 	follower := httptest.NewRecorder()
 	followerErr := make(chan error, 1)
 	go func() {
 		req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/object", nil)
-		_, err := group.Serve(follower, req, "object", fill)
+		_, err := group.Serve(follower, req, key, fill)
 		followerErr <- err
 	}()
-	waitForReaders(t, group, "object", 2)
+	waitForReaders(t, group, 2)
 	close(release)
 
 	assert.NoError(t, <-leaderErr)
 	assert.Equal(t, http.StatusInternalServerError, leader.Code)
 	assert.Equal(t, "failed", leader.Body.String())
-	assert.IsError(t, <-followerErr, ErrNotShared)
+	assert.IsError(t, <-followerErr, spool.ErrNotShared)
 	assert.False(t, follower.Flushed)
 	assert.Equal(t, 0, follower.Body.Len())
 }
@@ -274,20 +276,20 @@ func TestFailedFills(t *testing.T) {
 	fillErr := errors.New("upstream failed")
 	tests := []struct {
 		name       string
-		config     Config
-		fill       FillFunc
+		config     spool.Config
+		fill       spool.FillFunc
 		wantStatus int
 		wantBody   string
 		wantErr    error
 	}{
 		{
 			name:    "FailsBeforeHeaders",
-			fill:    func(context.Context, *Writer) error { return fillErr },
-			wantErr: ErrNotShared,
+			fill:    func(context.Context, *spool.Writer) error { return fillErr },
+			wantErr: spool.ErrNotShared,
 		},
 		{
 			name: "FailsAfterHeaders",
-			fill: func(_ context.Context, w *Writer) error {
+			fill: func(_ context.Context, w *spool.Writer) error {
 				w.WriteHeader(http.StatusOK)
 				_, _ = io.WriteString(w, "partial")
 				return fillErr
@@ -298,8 +300,8 @@ func TestFailedFills(t *testing.T) {
 		},
 		{
 			name:   "ExceedsFillTimeout",
-			config: Config{FillTimeout: 10 * time.Millisecond},
-			fill: func(ctx context.Context, w *Writer) error {
+			config: spool.Config{FillTimeout: 10 * time.Millisecond},
+			fill: func(ctx context.Context, w *spool.Writer) error {
 				w.WriteHeader(http.StatusOK)
 				_, _ = io.WriteString(w, "partial")
 				<-ctx.Done()
@@ -312,11 +314,11 @@ func TestFailedFills(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ctx, registry := newTestRegistry(t, tt.config)
-			group := registry.NewGroup(ReleaseCompleted)
+			ctx, registry, _ := newTestRegistry(t, tt.config)
+			group := registry.NewGroup(spool.ReleaseCompleted)
 			recorder := httptest.NewRecorder()
 			req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/object", nil)
-			result, err := group.Serve(recorder, req, "object", tt.fill)
+			result, err := group.Serve(recorder, req, key, tt.fill)
 			assert.IsError(t, err, tt.wantErr)
 			assert.Equal(t, tt.wantStatus, result.Status)
 			assert.Equal(t, tt.wantBody, recorder.Body.String())
@@ -325,9 +327,9 @@ func TestFailedFills(t *testing.T) {
 }
 
 func TestRegistryCloseCancelsFills(t *testing.T) {
-	ctx, registry := newTestRegistry(t, Config{})
-	group := registry.NewGroup(ReleaseCompleted)
-	fill := func(ctx context.Context, w *Writer) error {
+	ctx, registry, _ := newTestRegistry(t, spool.Config{})
+	group := registry.NewGroup(spool.ReleaseCompleted)
+	fill := func(ctx context.Context, w *spool.Writer) error {
 		w.WriteHeader(http.StatusOK)
 		_, _ = io.WriteString(w, "partial")
 		<-ctx.Done()
@@ -337,42 +339,42 @@ func TestRegistryCloseCancelsFills(t *testing.T) {
 	served := make(chan error, 1)
 	go func() {
 		req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/object", nil)
-		_, err := group.Serve(httptest.NewRecorder(), req, "object", fill)
+		_, err := group.Serve(httptest.NewRecorder(), req, key, fill)
 		served <- err
 	}()
-	waitFor(t, func() bool { return written(group, "object") > 0 })
+	waitFor(t, func() bool { return group.Written(key) > 0 })
 	registry.Close()
 	assert.IsError(t, <-served, context.Canceled)
 }
 
 func TestGroupCloseDropsRetainedResponses(t *testing.T) {
-	ctx, registry := newTestRegistry(t, Config{})
-	group := registry.NewGroup(RetainCompleted)
-	fill := func(_ context.Context, w *Writer) error {
+	ctx, registry, dir := newTestRegistry(t, spool.Config{})
+	group := registry.NewGroup(spool.RetainCompleted)
+	fill := func(_ context.Context, w *spool.Writer) error {
 		_, err := io.WriteString(w, "body")
 		return err
 	}
 	req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/object", nil)
-	_, err := group.Serve(httptest.NewRecorder(), req, "object", fill)
+	_, err := group.Serve(httptest.NewRecorder(), req, key, fill)
 	assert.NoError(t, err)
-	files, err := os.ReadDir(registry.config.Dir)
+	files, err := os.ReadDir(dir)
 	assert.NoError(t, err)
 	assert.Equal(t, 1, len(files))
 
 	group.Close()
-	_, err = group.Serve(httptest.NewRecorder(), req, "object", fill)
-	assert.IsError(t, err, ErrNotShared)
-	files, err = os.ReadDir(registry.config.Dir)
+	_, err = group.Serve(httptest.NewRecorder(), req, key, fill)
+	assert.IsError(t, err, spool.ErrNotShared)
+	files, err = os.ReadDir(dir)
 	assert.NoError(t, err)
 	assert.Equal(t, 0, len(files))
 }
 
 func TestNewRemovesStaleSpoolFiles(t *testing.T) {
 	dir := t.TempDir()
-	assert.NoError(t, os.WriteFile(filepath.Join(dir, "stale"+fileSuffix), nil, 0o600))
+	assert.NoError(t, os.WriteFile(filepath.Join(dir, "stale"+spool.FileSuffix), nil, 0o600))
 	assert.NoError(t, os.WriteFile(filepath.Join(dir, "unrelated"), nil, 0o600))
 	_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelError})
-	registry, err := New(ctx, Config{Dir: dir})
+	registry, err := spool.New(ctx, spool.Config{Dir: dir})
 	assert.NoError(t, err)
 	defer registry.Close()
 	files, err := os.ReadDir(dir)
@@ -381,49 +383,19 @@ func TestNewRemovesStaleSpoolFiles(t *testing.T) {
 	assert.Equal(t, "unrelated", files[0].Name())
 }
 
-func newTestRegistry(t *testing.T, config Config) (context.Context, *Registry) {
+func newTestRegistry(t *testing.T, config spool.Config) (context.Context, *spool.Registry, string) {
 	t.Helper()
 	_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelError})
 	config.Dir = t.TempDir()
-	registry, err := New(ctx, config)
+	registry, err := spool.New(ctx, config)
 	assert.NoError(t, err)
 	t.Cleanup(registry.Close)
-	return ctx, registry
+	return ctx, registry, config.Dir
 }
 
-func lookup(group *Group, key string) *entry {
-	group.mu.Lock()
-	defer group.mu.Unlock()
-	return group.entries[key]
-}
-
-func entryCount(group *Group) int {
-	group.mu.Lock()
-	defer group.mu.Unlock()
-	return len(group.entries)
-}
-
-func waitForReaders(t *testing.T, group *Group, key string, readers int) {
+func waitForReaders(t *testing.T, group *spool.Group, readers int) {
 	t.Helper()
-	waitFor(t, func() bool {
-		e := lookup(group, key)
-		if e == nil {
-			return false
-		}
-		e.mu.Lock()
-		defer e.mu.Unlock()
-		return e.readers == readers
-	})
-}
-
-func written(group *Group, key string) int64 {
-	e := lookup(group, key)
-	if e == nil {
-		return 0
-	}
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	return e.written
+	waitFor(t, func() bool { return group.Readers(key) == readers })
 }
 
 func waitFor(t *testing.T, condition func() bool) {

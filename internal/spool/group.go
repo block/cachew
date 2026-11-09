@@ -397,7 +397,7 @@ func (w *Writer) openFile() error {
 	}
 	w.file = f
 	w.entry.setSource(f, func() error {
-		return errors.Join(f.Close(), os.Remove(f.Name()))
+		return errors.Join(f.Close(), os.Remove(f.Name())) //nolint:gosec // Created by CreateTemp in the spool directory.
 	})
 	return nil
 }

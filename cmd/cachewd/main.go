@@ -187,13 +187,8 @@ func main() {
 	// performs the hard teardown after in-flight jobs drain.
 	drainSchedulerIntake(schedulerProvider)
 
-	gracefulShutdown(ctx, logger, server, &shuttingDown, globalConfig.ShutdownReadinessDelay, globalConfig.ShutdownTimeout)
-
-	// Spool fills feed in-flight responses, so they are only cancelled once the
-	// server has drained.
-	if spools, err := spoolProvider(); err == nil {
-		spools.Close()
-	}
+	gracefulShutdown(ctx, logger, server, &shuttingDown, spoolProvider, globalConfig.ShutdownReadinessDelay,
+		globalConfig.ShutdownTimeout)
 
 	cancelScheduler()
 	drainScheduler(ctx, logger, schedulerProvider)
@@ -206,6 +201,7 @@ func gracefulShutdown(
 	logger *slog.Logger,
 	server *http.Server,
 	shuttingDown *atomic.Bool,
+	spools spool.Provider,
 	readinessDelay time.Duration,
 	shutdownTimeout time.Duration,
 ) {
@@ -222,6 +218,10 @@ func gracefulShutdown(
 		logger.ErrorContext(shutdownCtx, "Server shutdown error", "error", err)
 	} else {
 		logger.InfoContext(shutdownCtx, "Server shut down cleanly")
+	}
+	// Spool fills feed in-flight responses, so they are only cancelled once the server has drained.
+	if registry, err := spools(); err == nil {
+		registry.Close()
 	}
 }
 

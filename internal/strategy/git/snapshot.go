@@ -1214,7 +1214,8 @@ func (s *Strategy) fillSnapshot(ctx context.Context, sw *spool.Writer, repo *git
 
 	snapshotDir, err := os.MkdirTemp(s.cloneManager.Config().MirrorRoot, ".snapshot-stream-*")
 	if err != nil {
-		return s.failSnapshotFill(ctx, sw, repoName, start, errors.Wrap(err, "create temp snapshot dir"))
+		s.failSnapshotFill(ctx, sw, repoName, start, errors.Wrap(err, "create temp snapshot dir"))
+		return nil
 	}
 	defer func() {
 		if err := os.RemoveAll(snapshotDir); err != nil {
@@ -1223,11 +1224,13 @@ func (s *Strategy) fillSnapshot(ctx context.Context, sw *spool.Writer, repo *git
 	}()
 	repoDir := filepath.Join(snapshotDir, "repo")
 	if err := s.cloneForSnapshot(ctx, repo, repoDir, s.snapshotFilterFor(upstreamURL)); err != nil {
-		return s.failSnapshotFill(ctx, sw, repoName, start, errors.Wrap(err, "clone for snapshot"))
+		s.failSnapshotFill(ctx, sw, repoName, start, errors.Wrap(err, "clone for snapshot"))
+		return nil
 	}
 	commit, err := mirrorHead(ctx, repoDir)
 	if err != nil {
-		return s.failSnapshotFill(ctx, sw, repoName, start, errors.Wrap(err, "rev-parse HEAD for snapshot"))
+		s.failSnapshotFill(ctx, sw, repoName, start, errors.Wrap(err, "rev-parse HEAD for snapshot"))
+		return nil
 	}
 
 	extraHeaders := http.Header{}
@@ -1251,11 +1254,10 @@ func (s *Strategy) fillSnapshot(ctx context.Context, sw *spool.Writer, repo *git
 
 // failSnapshotFill answers with a 500, which the spool never shares, so waiting
 // requests fall back to generating their own snapshot.
-func (s *Strategy) failSnapshotFill(ctx context.Context, sw *spool.Writer, repoName string, start time.Time, err error) error {
+func (s *Strategy) failSnapshotFill(ctx context.Context, sw *spool.Writer, repoName string, start time.Time, err error) {
 	logging.FromContext(ctx).ErrorContext(ctx, "Failed to prepare snapshot", "error", err)
 	s.metrics.recordSpoolWriter(ctx, repoName, "prepare_error", time.Since(start))
 	http.Error(sw, "Internal server error", http.StatusInternalServerError)
-	return nil
 }
 
 // scheduleDeferredMirrorRestore schedules a one-shot background mirror restore
