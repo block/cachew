@@ -19,6 +19,9 @@ import (
 
 	"github.com/alecthomas/assert/v2"
 	"github.com/alecthomas/errors"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 
 	"github.com/block/cachew/internal/cache"
 	"github.com/block/cachew/internal/httputil"
@@ -915,4 +918,84 @@ func TestUncoalescableRequestsFetchSeparately(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCacheResultLabelsServerMetrics(t *testing.T) {
+	arrived := make(chan struct{})
+	release := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/slow" {
+			close(arrived)
+			_, _ = io.WriteString(w, "first ")
+			w.(http.Flusher).Flush()
+			<-release
+		}
+		_, _ = io.WriteString(w, "body")
+	}))
+	defer upstream.Close()
+	c := mustNewMemoryCache()
+	defer c.Close()
+	h := handler.New(http.DefaultClient, c, newTestSpools(t)).
+		Transform(func(r *http.Request) (*http.Request, error) {
+			return http.NewRequestWithContext(r.Context(), http.MethodGet, upstream.URL+r.URL.Path, nil)
+		})
+	reader := sdkmetric.NewManualReader()
+	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	t.Cleanup(func() { assert.NoError(t, provider.Shutdown(context.Background())) })
+	logger, _ := logging.Configure(t.Context(), logging.Config{Level: slog.LevelError})
+	server := httptest.NewServer(otelhttp.NewMiddleware("cachew", otelhttp.WithMeterProvider(provider))(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			h.ServeHTTP(w, r.WithContext(logging.ContextWithLogger(r.Context(), logger)))
+		})))
+	defer server.Close()
+	open := func(path string, header http.Header) *http.Response {
+		t.Helper()
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, server.URL+path, nil)
+		assert.NoError(t, err)
+		maps.Copy(req.Header, header)
+		resp, err := http.DefaultClient.Do(req)
+		assert.NoError(t, err)
+		return resp
+	}
+	drain := func(resp *http.Response) {
+		t.Helper()
+		_, err := io.ReadAll(resp.Body)
+		assert.NoError(t, err)
+		assert.NoError(t, resp.Body.Close())
+	}
+
+	drain(open("/a", nil))
+	drain(open("/a", nil))
+	drain(open("/b", http.Header{"Range": {"bytes=0-1"}}))
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		drain(open("/slow", nil))
+	}()
+	<-arrived
+	joined := open("/slow", nil)
+	first := make([]byte, len("first "))
+	_, err := io.ReadFull(joined.Body, first)
+	assert.NoError(t, err)
+	close(release)
+	drain(joined)
+	<-done
+
+	var data metricdata.ResourceMetrics
+	assert.NoError(t, reader.Collect(t.Context(), &data))
+	got := map[string]int64{}
+	for _, scope := range data.ScopeMetrics {
+		for _, m := range scope.Metrics {
+			if m.Name != "http.server.request.duration" {
+				continue
+			}
+			histogram, ok := m.Data.(metricdata.Histogram[float64])
+			assert.True(t, ok)
+			for _, point := range histogram.DataPoints {
+				result, _ := point.Attributes.Value(handler.CacheResultAttribute)
+				got[result.AsString()] += int64(point.Count)
+			}
+		}
+	}
+	assert.Equal(t, map[string]int64{handler.CacheHit: 1, handler.CacheMiss: 3, handler.CacheCoalesced: 1}, got)
 }

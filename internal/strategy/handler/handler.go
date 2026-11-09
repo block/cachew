@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"github.com/alecthomas/errors"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"go.opentelemetry.io/otel/attribute"
 
 	"github.com/block/cachew/client"
 	"github.com/block/cachew/internal/cache"
@@ -232,10 +234,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if r.Method == http.MethodHead {
+		labelCacheResult(ctx, CacheMiss)
 		h.forwardHead(w, r)
 		return
 	}
 	if !coalescable(r) {
+		labelCacheResult(ctx, CacheMiss)
 		if err := h.fetchAndCache(w, r, key); err != nil {
 			logger.ErrorContext(ctx, "Failed to fetch and cache", "cache_key", parts.Path, "error", err)
 		}
@@ -244,9 +248,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// The fill may outlive r, so it gets its own copy.
 	fillReq := r.Clone(context.WithoutCancel(ctx))
-	_, err = h.spools.Serve(w, r, key.String(), func(ctx context.Context, sw *spool.Writer) error {
+	result, err := h.spools.Serve(w, r, key.String(), func(ctx context.Context, sw *spool.Writer) error {
 		return h.fill(ctx, sw, fillReq.WithContext(ctx), key)
 	})
+	if result.Filled || errors.Is(err, spool.ErrNotShared) {
+		labelCacheResult(ctx, CacheMiss)
+	} else {
+		labelCacheResult(ctx, CacheCoalesced)
+	}
 	switch {
 	case errors.Is(err, spool.ErrNotShared):
 		if err := h.fetchAndCache(w, r, key); err != nil {
@@ -258,6 +267,26 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			panic(http.ErrAbortHandler)
 		}
 	}
+}
+
+// CacheResultAttribute labels the request's HTTP server metrics with how the
+// cache answered it, so a strategy's hit ratio can be read in requests and bytes.
+const CacheResultAttribute = "cachew.cache.result"
+
+const (
+	// CacheHit is a response from the cache, including a conditional 304.
+	CacheHit = "hit"
+	// CacheMiss is a response fetched from the upstream for this request.
+	CacheMiss = "miss"
+	// CacheCoalesced is a miss that shared another request's upstream fetch.
+	CacheCoalesced = "coalesced"
+	// CacheError is a cache lookup failure answered with an error.
+	CacheError = "error"
+)
+
+func labelCacheResult(ctx context.Context, result string) {
+	labeler, _ := otelhttp.LabelerFromContext(ctx)
+	labeler.Add(attribute.String(CacheResultAttribute, result))
 }
 
 // coalescable reports whether a miss can share the plain response for its key.
@@ -280,6 +309,7 @@ func (h *Handler) serveCached(w http.ResponseWriter, r *http.Request, key cache.
 			return false, nil
 		}
 		if httputil.ServeCacheStat(w, clientHeaders(headers), err) {
+			labelCacheResult(ctx, CacheHit)
 			return true, nil
 		}
 		return h.cacheMiss(w, r, err), nil
@@ -292,6 +322,7 @@ func (h *Handler) serveCached(w http.ResponseWriter, r *http.Request, key cache.
 		return false, nil
 	}
 	if handled, _, serveErr := httputil.ServeCacheHit(w, clientHeaders(headers), cr, err); handled {
+		labelCacheResult(ctx, CacheHit)
 		logging.FromContext(ctx).DebugContext(ctx, "Cache hit")
 		return true, errors.WithStack(serveErr)
 	}
@@ -304,6 +335,7 @@ func (h *Handler) cacheMiss(w http.ResponseWriter, r *http.Request, err error) b
 	if errors.Is(err, os.ErrNotExist) {
 		return false
 	}
+	labelCacheResult(r.Context(), CacheError)
 	h.errorHandler(httputil.Errorf(http.StatusInternalServerError, "failed to open cache: %w", err), w, r)
 	return true
 }
