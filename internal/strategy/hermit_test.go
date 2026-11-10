@@ -13,6 +13,7 @@ import (
 
 	"github.com/block/cachew/internal/cache"
 	"github.com/block/cachew/internal/githubapp"
+	"github.com/block/cachew/internal/httputil"
 	"github.com/block/cachew/internal/logging"
 	"github.com/block/cachew/internal/strategy"
 )
@@ -34,6 +35,49 @@ func setupHermitTest(t *testing.T) (*http.ServeMux, context.Context, cache.Cache
 	assert.NoError(t, err)
 
 	return mux, ctx, memCache
+}
+
+func TestHermitBackoff(t *testing.T) {
+	calls := 0
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if r.URL.Path == "/org/repo/releases/download/v1/file" {
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		_, _ = w.Write([]byte("package"))
+	}))
+	defer backend.Close()
+	original := http.DefaultTransport
+	http.DefaultTransport = httputil.NewBackoffTransport( //nolint:reassign
+		&mockTransport{backend: backend, originalTransport: original}, time.Minute)
+	t.Cleanup(func() { http.DefaultTransport = original }) //nolint:reassign
+	_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelError})
+	c, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: time.Hour})
+	assert.NoError(t, err)
+	defer c.Close()
+	mux := http.NewServeMux()
+	_, err = strategy.NewHermit(ctx, strategy.HermitConfig{GitHubBaseURL: "https://github.com"},
+		nil, c, mux, newTestSpools(t))
+	assert.NoError(t, err)
+	for _, tt := range []struct {
+		path   string
+		status int
+	}{
+		{"/hermit/github.com/cached", http.StatusOK},
+		{"/hermit/github.com/org/repo/releases/download/v1/file", http.StatusTooManyRequests},
+		{"/hermit/github.com/another", http.StatusTooManyRequests},
+		{"/hermit/example.com/another", http.StatusOK},
+		{"/hermit/github.com/cached", http.StatusOK},
+	} {
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, httptest.NewRequestWithContext(ctx, http.MethodGet, tt.path, nil))
+		assert.Equal(t, tt.status, w.Code, tt.path)
+		if tt.status == http.StatusTooManyRequests {
+			assert.Equal(t, "60", w.Header().Get("Retry-After"))
+		}
+	}
+	assert.Equal(t, 3, calls)
 }
 
 func TestHermitBinaryShortTTL(t *testing.T) {

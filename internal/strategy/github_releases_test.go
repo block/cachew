@@ -273,20 +273,24 @@ func TestGitHubReleasesPrivateRepoAPIError(t *testing.T) {
 	assert.Equal(t, 0, mock.downloadCallCount)
 }
 
-func TestGitHubReleasesRateLimitPausesStrategy(t *testing.T) {
+func TestGitHubReleasesRateLimitPausesAPI(t *testing.T) {
 	mock, mux, ctx := setupTest(t, strategy.GitHubReleasesConfig{
 		Token:       "test-token",
 		PrivateOrgs: []string{"privateorg"},
 	})
-	for _, path := range []string{"privateorg/repo/releases/download/limited/binary.tar.gz", "publicorg/repo/releases/download/v1.0.0/binary.tar.gz"} {
+	for _, path := range []string{"privateorg/repo/releases/download/limited/binary.tar.gz", "privateorg/repo/releases/download/v1.0.0/binary.tar.gz"} {
 		w := httptest.NewRecorder()
 		mux.ServeHTTP(w, httptest.NewRequestWithContext(ctx, http.MethodGet, "/github.com/"+path, nil))
 		assert.Equal(t, http.StatusTooManyRequests, w.Code)
 		assert.Equal(t, "no-store", w.Header().Get("Cache-Control"))
 		assert.Equal(t, "30", w.Header().Get("Retry-After"))
 	}
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequestWithContext(ctx, http.MethodGet,
+		"/github.com/publicorg/repo/releases/download/v1.0.0/binary.tar.gz", nil))
+	assert.Equal(t, http.StatusOK, w.Code)
 	assert.Equal(t, 1, mock.apiCallCount)
-	assert.Equal(t, 0, mock.publicCallCount)
+	assert.Equal(t, 1, mock.publicCallCount)
 }
 
 func TestGitHubReleasesPublicRepoNotFound(t *testing.T) {

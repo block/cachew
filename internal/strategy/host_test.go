@@ -304,7 +304,7 @@ func TestHostFallbackOrder(t *testing.T) {
 	assert.Equal(t, []int{0, 1, 2}, order)
 }
 
-func TestHostBackoffPausesFallbacks(t *testing.T) {
+func TestHostBackoffKeepsFallbacksAvailable(t *testing.T) {
 	defaultTransport := http.DefaultTransport
 	http.DefaultTransport = httputil.NewBackoffTransport(defaultTransport, time.Minute) //nolint:reassign
 	t.Cleanup(func() { http.DefaultTransport = defaultTransport })                      //nolint:reassign
@@ -314,9 +314,16 @@ func TestHostBackoffPausesFallbacks(t *testing.T) {
 	defer c.Close()
 	calls := map[string]int{}
 	newServer := func(name string, status int) *httptest.Server {
-		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			calls[name]++
-			w.WriteHeader(status)
+			responseStatus := status
+			if r.URL.Path == "/missing.jar" {
+				responseStatus = http.StatusNotFound
+			} else if r.URL.Path == "/limited.jar" {
+				responseStatus = http.StatusTooManyRequests
+			}
+			w.WriteHeader(responseStatus)
+			_, _ = io.WriteString(w, name+r.URL.Path)
 		}))
 	}
 	primary := newServer("primary", http.StatusTooManyRequests)
@@ -331,13 +338,28 @@ func TestHostBackoffPausesFallbacks(t *testing.T) {
 	assert.NoError(t, err)
 	u, err := url.Parse(primary.URL)
 	assert.NoError(t, err)
-	for _, path := range []string{"/a.jar", "/b.jar"} {
+	for _, tt := range []struct {
+		path   string
+		status int
+	}{
+		{"/a.jar", http.StatusOK},
+		{"/missing.jar", http.StatusNotFound},
+		{"/b.jar", http.StatusOK},
+		{"/limited.jar", http.StatusTooManyRequests},
+		{"/c.jar", http.StatusTooManyRequests},
+		{"/a.jar", http.StatusOK},
+	} {
 		w := httptest.NewRecorder()
-		mux.ServeHTTP(w, httptest.NewRequestWithContext(ctx, http.MethodGet, "/"+u.Host+path, nil))
-		assert.Equal(t, http.StatusTooManyRequests, w.Code)
-		assert.Equal(t, "60", w.Header().Get("Retry-After"))
+		mux.ServeHTTP(w, httptest.NewRequestWithContext(ctx, http.MethodGet, "/"+u.Host+tt.path, nil))
+		assert.Equal(t, tt.status, w.Code, tt.path)
+		if tt.status == http.StatusTooManyRequests {
+			assert.Equal(t, "60", w.Header().Get("Retry-After"))
+			assert.Equal(t, "no-store", w.Header().Get("Cache-Control"))
+		} else {
+			assert.Equal(t, "mirror"+tt.path, w.Body.String())
+		}
 	}
-	assert.Equal(t, map[string]int{"primary": 1}, calls)
+	assert.Equal(t, map[string]int{"primary": 1, "mirror": 4}, calls)
 }
 
 func TestHostFallbackIncompleteResponse(t *testing.T) {

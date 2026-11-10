@@ -1033,7 +1033,7 @@ func TestBackoffPausesHandler(t *testing.T) {
 		{limited.URL, "/cached"}, {limited.URL, "/limited"}, {limited.URL, "/cached"}, {limited.URL, "/miss"}, {other.URL, "/miss"},
 	} {
 		w := get(h, req.upstream, req.path)
-		if req.path == "/cached" {
+		if req.path == "/cached" || req.upstream == other.URL {
 			assert.Equal(t, http.StatusOK, w.Code)
 			assert.Equal(t, "body", w.Body.String())
 		} else {
@@ -1041,10 +1041,18 @@ func TestBackoffPausesHandler(t *testing.T) {
 			assert.Equal(t, "60", w.Header().Get("Retry-After"))
 		}
 	}
-	assert.Equal(t, int32(2), calls.Load())
+	assert.Equal(t, int32(3), calls.Load())
 
-	w := get(newHandler(), other.URL, "/miss")
+	w := get(newHandler(), limited.URL, "/independent")
 	assert.Equal(t, http.StatusOK, w.Code)
 	assert.Equal(t, "body", w.Body.String())
-	assert.Equal(t, int32(3), calls.Load())
+	assert.Equal(t, int32(4), calls.Load())
+
+	client.Transport = httputil.NewBackoffScope(client.Transport)
+	first, second := newHandler(), newHandler()
+	assert.Equal(t, http.StatusTooManyRequests, get(first, limited.URL, "/limited").Code)
+	w = get(second, limited.URL, "/shared")
+	assert.Equal(t, http.StatusTooManyRequests, w.Code)
+	assert.Equal(t, "60", w.Header().Get("Retry-After"))
+	assert.Equal(t, int32(5), calls.Load())
 }
