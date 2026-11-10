@@ -363,6 +363,61 @@ func TestHostBackoffKeepsFallbacksAvailable(t *testing.T) {
 	assert.Equal(t, map[string]int{"primary": 1, "mirror": 4}, calls)
 }
 
+func TestHostFallbackRetryAfter(t *testing.T) {
+	for _, tt := range []struct {
+		name, primary, mirror, want string
+		calls                       int
+	}{
+		{"PrimarySooner", "10", "3600", "10", 2},
+		{"MirrorSooner", "3600", "10", "10", 2},
+		{"PrimaryDate", "Wed, 21 Oct 2015 07:28:00 GMT", "3600", "0", 3},
+		{"MirrorDate", "3600", "Wed, 21 Oct 2015 07:28:00 GMT", "0", 3},
+		{"Immediate", "0", "3600", "0", 3},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			defaultTransport := http.DefaultTransport
+			http.DefaultTransport = httputil.NewBackoffTransport(defaultTransport, time.Minute) //nolint:reassign
+			t.Cleanup(func() { http.DefaultTransport = defaultTransport })                      //nolint:reassign
+			_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelError})
+			c, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: time.Hour})
+			assert.NoError(t, err)
+			defer c.Close()
+			calls := 0
+			newServer := func(retryAfter string) *httptest.Server {
+				return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					calls++
+					w.Header().Set("Retry-After", retryAfter)
+					w.WriteHeader(http.StatusTooManyRequests)
+				}))
+			}
+			primary := newServer(tt.primary)
+			defer primary.Close()
+			mirror := newServer(tt.mirror)
+			defer mirror.Close()
+			mirror.URL = strings.Replace(mirror.URL, "127.0.0.1", "localhost", 1)
+			mux := http.NewServeMux()
+			_, err = strategy.NewHost(ctx, strategy.HostConfig{
+				Target: primary.URL,
+				Fallbacks: []strategy.HostFallbackConfig{
+					{Target: "http://unused.invalid", PathPrefix: "/unmatched"},
+					{Target: mirror.URL},
+				},
+			}, c, mux, newTestSpools(t))
+			assert.NoError(t, err)
+			u, err := url.Parse(primary.URL)
+			assert.NoError(t, err)
+			for range 2 {
+				w := httptest.NewRecorder()
+				mux.ServeHTTP(w, httptest.NewRequestWithContext(ctx, http.MethodGet, "/"+u.Host+"/a.jar", nil))
+				assert.Equal(t, http.StatusTooManyRequests, w.Code)
+				assert.Equal(t, tt.want, w.Header().Get("Retry-After"))
+				assert.Equal(t, "no-store", w.Header().Get("Cache-Control"))
+			}
+			assert.Equal(t, tt.calls, calls)
+		})
+	}
+}
+
 func TestHostFallbackIncompleteResponse(t *testing.T) {
 	for _, cancelRequest := range []bool{false, true} {
 		t.Run(strconv.FormatBool(cancelRequest), func(t *testing.T) {

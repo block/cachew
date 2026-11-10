@@ -3,8 +3,10 @@ package strategy
 import (
 	"context"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -142,7 +144,18 @@ type hostFallbackTransport struct {
 }
 
 func (t *hostFallbackTransport) RoundTrip(r *http.Request) (*http.Response, error) {
-	resp, err := t.client.Do(r)
+	var retryAt time.Time
+	do := func(req *http.Request) (*http.Response, error) {
+		resp, err := t.client.Do(req)
+		if err == nil && resp.StatusCode == http.StatusTooManyRequests {
+			until, valid := httputil.RetryAfterDeadline(resp.Header.Get("Retry-After"), time.Now(), 0)
+			if valid && (retryAt.IsZero() || until.Before(retryAt)) {
+				retryAt = until
+			}
+		}
+		return resp, errors.WithStack(err)
+	}
+	resp, err := do(r)
 	for _, fallback := range t.fallbacks {
 		if r.Context().Err() != nil || (err == nil && resp.StatusCode != http.StatusTooManyRequests &&
 			(resp.StatusCode < 500 || resp.StatusCode > 599)) {
@@ -175,7 +188,10 @@ func (t *hostFallbackTransport) RoundTrip(r *http.Request) (*http.Response, erro
 		target.RawQuery = r.URL.RawQuery
 		req.URL = &target
 		req.Host = ""
-		resp, err = t.client.Do(req)
+		resp, err = do(req)
+	}
+	if err == nil && resp.StatusCode == http.StatusTooManyRequests && !retryAt.IsZero() {
+		resp.Header.Set("Retry-After", strconv.FormatInt(int64(math.Ceil(max(0, time.Until(retryAt).Seconds()))), 10))
 	}
 	return resp, errors.WithStack(err)
 }

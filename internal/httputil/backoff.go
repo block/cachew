@@ -61,7 +61,7 @@ func (t *BackoffTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	if resp.StatusCode == http.StatusTooManyRequests {
 		now = time.Now()
 		var valid bool
-		until, valid = retryAfter(resp.Header.Get("Retry-After"), now, t.delay)
+		until, valid = RetryAfterDeadline(resp.Header.Get("Retry-After"), now, t.delay)
 		t.mu.Lock()
 		if until.After(t.until[cooldown]) {
 			t.until[cooldown] = until
@@ -76,7 +76,9 @@ func (t *BackoffTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	return resp, nil
 }
 
-func retryAfter(value string, now time.Time, fallback time.Duration) (time.Time, bool) {
+// RetryAfterDeadline parses Retry-After, using fallback when the value is invalid.
+// The boolean reports whether the header was valid.
+func RetryAfterDeadline(value string, now time.Time, fallback time.Duration) (time.Time, bool) {
 	value = strings.TrimSpace(value)
 	if seconds, err := strconv.ParseUint(value, 10, 63); err == nil && seconds <= uint64(math.MaxInt64/int64(time.Second)) {
 		return now.Add(time.Duration(seconds) * time.Second), true
