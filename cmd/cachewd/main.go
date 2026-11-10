@@ -48,7 +48,7 @@ type GlobalConfig struct {
 	Bind                   string        `hcl:"bind" default:"127.0.0.1:8080" help:"Bind address for the server."`
 	URL                    string        `hcl:"url" default:"http://127.0.0.1:8080/" help:"Base URL for cachewd."`
 	UpstreamBackoff        time.Duration `hcl:"upstream-backoff,optional" default:"1m" help:"Cooldown after an upstream 429 with missing or invalid Retry-After; must be positive."`
-	UpstreamBackoffMax     time.Duration `hcl:"upstream-backoff-max,optional" default:"15m" help:"Longest cooldown after an upstream 429, whatever its Retry-After; must be at least upstream-backoff."`
+	UpstreamBackoffMax     time.Duration `hcl:"upstream-backoff-max,optional" default:"15m" help:"Longest cooldown after an upstream 429, whatever its Retry-After; raised to upstream-backoff when lower."`
 	ShutdownReadinessDelay time.Duration `hcl:"shutdown-readiness-delay,optional" default:"5s" help:"Delay between flipping readiness to 503 on SIGTERM and starting graceful shutdown."`
 	// ShutdownTimeout must be less than the pod's terminationGracePeriodSeconds
 	// (minus ShutdownReadinessDelay) or the kubelet will SIGKILL before Shutdown returns.
@@ -506,9 +506,8 @@ func loadGlobalConfig(ast *hcl.AST) (GlobalConfig, map[string]string, error) {
 	if cfg.UpstreamBackoff <= 0 {
 		return cfg, nil, errors.New("upstream-backoff must be positive")
 	}
-	if cfg.UpstreamBackoffMax < cfg.UpstreamBackoff {
-		return cfg, nil, errors.New("upstream-backoff-max must be at least upstream-backoff")
-	}
+	// Keeps configs that set only a long upstream-backoff valid.
+	cfg.UpstreamBackoffMax = max(cfg.UpstreamBackoffMax, cfg.UpstreamBackoff)
 
 	return cfg, envars, nil
 }

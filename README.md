@@ -227,7 +227,7 @@ The cooldown uses the upstream's `Retry-After` (seconds or HTTP date) when it is
 
 ```hcl
 upstream-backoff = "1m"       # Must be positive
-upstream-backoff-max = "15m"  # Must be at least upstream-backoff
+upstream-backoff-max = "15m"  # Raised to upstream-backoff when lower
 ```
 
 ## Authorization (OPA)
