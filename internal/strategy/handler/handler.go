@@ -76,7 +76,6 @@ type Handler struct {
 	registry      string
 	external      bool
 	client        *http.Client
-	scope         *httputil.BackoffScope
 	cache         cache.Cache
 	cacheKeyFunc  func(*http.Request) CacheKeyParts
 	transformFunc func(*http.Request) (*http.Request, error)
@@ -100,23 +99,13 @@ const checkedAtHeader = "X-Cachew-Checked-At"
 
 // New creates a new Handler with the given HTTP client and cache. Concurrent
 // cache misses for the same key share one upstream fetch through a spool group.
-// The client's BackoffScope is reused when present, otherwise a new scope is
-// created. Upstream requests, including transforms and parallel chunks, share
-// per-origin cooldowns within that scope; fallback origins remain independent.
 // By default:
 // - Cache key is derived from the request URL
 // - No request transformation is performed
 // - Standard error handling is used.
 func New(client *http.Client, c cache.Cache, spools *spool.Registry) *Handler {
-	scope, ok := client.Transport.(*httputil.BackoffScope)
-	if !ok {
-		scope = httputil.NewBackoffScope(client.Transport)
-	}
-	scoped := *client
-	scoped.Transport = scope
 	return &Handler{
-		client:   &scoped,
-		scope:    scope,
+		client:   client,
 		cache:    c,
 		spools:   spools.NewGroup(spool.ReleaseCompleted),
 		metrics:  metrics.NewArtifactMetrics(),
@@ -460,7 +449,7 @@ func (h *Handler) revalidate(r *http.Request, key cache.Key, headers http.Header
 // If-Range are never forwarded: whole objects are cached and ranges are cut
 // locally.
 func (h *Handler) upstreamRequest(r *http.Request) (*http.Request, error) {
-	req, err := h.transformFunc(r.WithContext(h.scope.WithContext(r.Context())))
+	req, err := h.transformFunc(r)
 	if err != nil {
 		return nil, err
 	}

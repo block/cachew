@@ -62,7 +62,7 @@ func NewHermit(ctx context.Context, config HermitConfig, _ jobscheduler.Schedule
 	s := &Hermit{
 		config: config,
 		cache:  c,
-		client: &http.Client{Transport: httputil.NewBackoffScope(http.DefaultTransport)},
+		client: http.DefaultClient,
 		logger: logger,
 		mux:    mux,
 	}

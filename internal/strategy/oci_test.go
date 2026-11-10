@@ -555,9 +555,9 @@ func TestOCIBackoff(t *testing.T) {
 			assert.Equal(t, before, read(f, &f.exchanges))
 			f.set(func(f *fakeRegistry) { f.limitedPath = "" })
 			independent := newOCITestMux(t, f, strategy.OCIConfig{})
-			assert.Equal(t, http.StatusOK, serveOCI(t, independent, http.MethodGet,
+			assert.Equal(t, http.StatusTooManyRequests, serveOCI(t, independent, http.MethodGet,
 				"/oci/example.io/v2/alpine/manifests/latest", nil).Code)
-			assert.True(t, read(f, &f.exchanges) > before)
+			assert.Equal(t, before, read(f, &f.exchanges))
 		})
 	}
 }

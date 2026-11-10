@@ -1,10 +1,8 @@
 package httputil
 
 import (
-	"context"
 	"io"
 	"math"
-	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -15,27 +13,22 @@ import (
 )
 
 // BackoffTransport shares upstream cooldowns across requests and redirect hops.
-// Cooldowns are per origin and isolated by [BackoffScope].
+// Cooldowns are keyed by outbound hostname, across strategies, schemes and ports.
 type BackoffTransport struct {
 	base  http.RoundTripper
 	delay time.Duration
 	mu    sync.Mutex
-	until map[backoffKey]time.Time
-}
-
-type backoffKey struct {
-	scope  *BackoffScope
-	origin string
+	until map[string]time.Time
 }
 
 // NewBackoffTransport uses delay when a 429 has no valid Retry-After header.
 func NewBackoffTransport(base http.RoundTripper, delay time.Duration) *BackoffTransport {
-	return &BackoffTransport{base: base, delay: delay, until: map[backoffKey]time.Time{}}
+	return &BackoffTransport{base: base, delay: delay, until: map[string]time.Time{}}
 }
 
-// RoundTrip rejects requests to a cooling origin within their scope without retrying them.
+// RoundTrip rejects requests to a cooling hostname without retrying them.
 func (t *BackoffTransport) RoundTrip(r *http.Request) (*http.Response, error) {
-	cooldown := backoffKeyFor(r)
+	cooldown := strings.ToLower(r.URL.Hostname())
 	now := time.Now()
 	t.mu.Lock()
 	for k, until := range t.until {
@@ -46,7 +39,6 @@ func (t *BackoffTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	until := t.until[cooldown]
 	t.mu.Unlock()
 	if until.After(now) {
-		t.recordCooldown(r, until)
 		if r.Body != nil {
 			_ = r.Body.Close()
 		}
@@ -70,73 +62,16 @@ func (t *BackoffTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 		now = time.Now()
 		var valid bool
 		until, valid = retryAfter(resp.Header.Get("Retry-After"), now, t.delay)
-		t.recordCooldown(r, until)
+		t.mu.Lock()
+		if until.After(t.until[cooldown]) {
+			t.until[cooldown] = until
+		}
+		t.mu.Unlock()
 		// The cooldown ends the 429; a downstream cache must not keep it longer.
 		resp.Header.Set("Cache-Control", "no-store")
 		if !valid {
 			resp.Header.Set("Retry-After", strconv.FormatInt(int64(math.Ceil(until.Sub(now).Seconds())), 10))
 		}
-	}
-	return resp, nil
-}
-
-func (t *BackoffTransport) recordCooldown(r *http.Request, until time.Time) {
-	scope := backoffKeyFor(r).scope
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	for hop := r; hop != nil; {
-		key := backoffKeyFor(hop)
-		key.scope = scope
-		if until.After(t.until[key]) {
-			t.until[key] = until
-		}
-		if hop.Response == nil {
-			break
-		}
-		hop = hop.Response.Request
-	}
-}
-
-func backoffKeyFor(r *http.Request) backoffKey {
-	port := r.URL.Port()
-	if port == "" {
-		if r.URL.Scheme == "https" {
-			port = "443"
-		} else {
-			port = "80"
-		}
-	}
-	scope, _ := r.Context().Value(backoffScopeKey{}).(*BackoffScope)
-	return backoffKey{scope: scope, origin: strings.ToLower(r.URL.Scheme + "://" + net.JoinHostPort(r.URL.Hostname(), port))}
-}
-
-type backoffScopeKey struct{}
-
-// BackoffScope isolates a strategy's per-origin cooldowns from other strategies.
-type BackoffScope struct {
-	base http.RoundTripper
-}
-
-// NewBackoffScope sends requests to base, or to http.DefaultTransport when base is nil.
-func NewBackoffScope(base http.RoundTripper) *BackoffScope {
-	return &BackoffScope{base: base}
-}
-
-// WithContext puts requests made with ctx in this scope, including requests
-// sent by other clients through a [BackoffTransport].
-func (s *BackoffScope) WithContext(ctx context.Context) context.Context {
-	return context.WithValue(ctx, backoffScopeKey{}, s)
-}
-
-// RoundTrip sends r in this scope.
-func (s *BackoffScope) RoundTrip(r *http.Request) (*http.Response, error) {
-	base := s.base
-	if base == nil {
-		base = http.DefaultTransport
-	}
-	resp, err := base.RoundTrip(r.WithContext(s.WithContext(r.Context())))
-	if err != nil {
-		return nil, errors.WithStack(err)
 	}
 	return resp, nil
 }

@@ -330,6 +330,7 @@ func TestHostBackoffKeepsFallbacksAvailable(t *testing.T) {
 	defer primary.Close()
 	mirror := newServer("mirror", http.StatusOK)
 	defer mirror.Close()
+	mirror.URL = strings.Replace(mirror.URL, "127.0.0.1", "localhost", 1)
 	mux := http.NewServeMux()
 	_, err = strategy.NewHost(ctx, strategy.HostConfig{
 		Target:    primary.URL,

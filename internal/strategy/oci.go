@@ -113,7 +113,7 @@ func NewOCI(ctx context.Context, config OCIConfig, c cache.Cache, mux Mux, spool
 		upstream: upstream,
 		rewrites: rewrites,
 		tagTTL:   config.TagTTL,
-		client:   &http.Client{Transport: httputil.NewBackoffScope(transport)},
+		client:   &http.Client{Transport: transport},
 		logger:   logging.FromContext(ctx),
 	}
 	o.blobs = handler.New(o.client, c, spools).Metrics("oci", upstream.Hostname()).

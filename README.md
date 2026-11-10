@@ -219,11 +219,11 @@ spool {
 
 ## Upstream Rate Limits
 
-After an upstream returns 429, cachewd pauses requests to that origin (scheme, host and port) within the strategy until a cooldown ends. A rate-limited redirect target also pauses the origins that redirected to it. Cache hits, other strategies, and unrelated origins remain available. OCI blob, manifest, authentication, and pass-through requests share the registry strategy's cooldowns; Hermit's direct and release handlers share its cooldowns.
+After an upstream returns 429, cachewd pauses HTTP requests to that outbound hostname across strategies, schemes, and ports until a cooldown ends. Each redirect destination is checked independently. Cache hits and other hostnames remain available. OCI blob, manifest, authentication, and pass-through requests use the same shared cooldowns.
 
-Configured fallbacks are tried on the first 429 and on subsequent cache misses while the primary is cooling. A mirror's 404 or 5xx does not freeze it; a mirror's 429 starts its own cooldown. When every applicable upstream is cooling, misses get a local 429 with `Retry-After` and `Cache-Control: no-store` without contacting upstreams. Requests outside strategy handlers, such as Git, share per-origin cooldowns without a strategy scope. Cooldowns do not schedule retries.
+Configured fallbacks are tried on the first 429 and on subsequent cache misses while the primary is cooling. A mirror on another hostname remains available until it returns its own 429; its 404 or 5xx does not start a cooldown. Requests to cooling hosts get a local 429 with `Retry-After` and `Cache-Control: no-store`. Cooldowns do not schedule retries.
 
-The cooldown uses the upstream's `Retry-After` (seconds or HTTP date) when it is valid, and `upstream-backoff` otherwise. Cooldowns are held in memory per process.
+The cooldown uses the upstream's `Retry-After` (seconds or HTTP date) when it is valid, and `upstream-backoff` otherwise. Cooldowns are held in memory per process and apply to clients that use the shared HTTP transport, not subprocess traffic. Other replicas and requests already in flight are unaffected.
 
 ```hcl
 upstream-backoff = "1m"  # Must be positive
