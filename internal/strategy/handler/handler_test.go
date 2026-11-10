@@ -1026,7 +1026,11 @@ func TestBackoffPausesHandler(t *testing.T) {
 			if scope := r.URL.Query().Get("scope"); scope != "" {
 				ctx = httputil.WithCooldownScope(ctx, scope)
 			}
-			return http.NewRequestWithContext(ctx, http.MethodGet, r.URL.Query().Get("upstream")+r.URL.Path, nil)
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, r.URL.Query().Get("upstream")+r.URL.Path, nil)
+			if err == nil && r.URL.Query().Has("scope") {
+				req.Header.Set("Authorization", "Bearer token")
+			}
+			return req, err
 		})
 	}
 	h := newHandler()

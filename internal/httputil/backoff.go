@@ -56,7 +56,8 @@ type cooldownScopeKey struct{}
 // WithCooldownScope gives requests their own cooldown on each host. Set it
 // where a request gets a credential whose rate limit is separate from the
 // host's other callers, such as a GitHub App installation token. Requests
-// without a scope share their host's cooldown.
+// without a scope, or without an Authorization header, share their host's
+// cooldown.
 func WithCooldownScope(ctx context.Context, scope string) context.Context {
 	return context.WithValue(ctx, cooldownScopeKey{}, scope)
 }
@@ -82,8 +83,12 @@ func (t *BackoffTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	}
 	cooldown := strings.ToLower(r.URL.Hostname())
 	scope, scoped := CooldownScope(r.Context())
+	// A redirect to another host drops the credential that the scope stands for.
+	scoped = scoped && r.Header.Get("Authorization") != ""
 	if scoped {
 		cooldown += "#" + scope
+	} else {
+		scope = ""
 	}
 	attrs := metric.WithAttributes(attribute.Bool("scoped", scoped))
 	now := time.Now()

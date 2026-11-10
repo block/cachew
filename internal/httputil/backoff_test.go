@@ -207,6 +207,31 @@ func TestBackoffCooldownScope(t *testing.T) {
 	})
 }
 
+func TestBackoffScopeDroppedOnCrossHostRedirect(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		cdnCalls := 0
+		base := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			if r.URL.Host == "api.example" {
+				return &http.Response{StatusCode: http.StatusFound, Header: http.Header{"Location": {"https://cdn.example/asset"}},
+					Body: http.NoBody, Request: r}, nil
+			}
+			cdnCalls++
+			return &http.Response{StatusCode: http.StatusTooManyRequests, Header: make(http.Header), Body: http.NoBody, Request: r}, nil
+		})
+		client := &http.Client{Transport: httputil.NewBackoffTransport(base, time.Minute, time.Hour, slog.New(slog.DiscardHandler))}
+		for _, scope := range []string{"installation-a", "installation-b"} {
+			req, err := http.NewRequestWithContext(httputil.WithCooldownScope(t.Context(), scope), http.MethodGet, "https://api.example/asset", nil)
+			assert.NoError(t, err)
+			req.Header.Set("Authorization", "Bearer "+scope)
+			resp, err := client.Do(req)
+			assert.NoError(t, err)
+			assert.NoError(t, resp.Body.Close())
+			assert.Equal(t, http.StatusTooManyRequests, resp.StatusCode, scope)
+		}
+		assert.Equal(t, 1, cdnCalls, "the anonymous redirect hop shares the CDN host's cooldown")
+	})
+}
+
 func TestBackoffMaxDelay(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		calls := 0
