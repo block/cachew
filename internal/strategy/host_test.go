@@ -306,8 +306,8 @@ func TestHostFallbackOrder(t *testing.T) {
 
 func TestHostBackoffKeepsFallbacksAvailable(t *testing.T) {
 	defaultTransport := http.DefaultTransport
-	http.DefaultTransport = httputil.NewBackoffTransport(defaultTransport, time.Minute) //nolint:reassign
-	t.Cleanup(func() { http.DefaultTransport = defaultTransport })                      //nolint:reassign
+	http.DefaultTransport = httputil.NewBackoffTransport(defaultTransport, time.Minute, time.Hour, slog.New(slog.DiscardHandler)) //nolint:reassign
+	t.Cleanup(func() { http.DefaultTransport = defaultTransport })                                                                //nolint:reassign
 	_, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelError})
 	c, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: time.Hour})
 	assert.NoError(t, err)
@@ -376,8 +376,8 @@ func TestHostFallbackRetryAfter(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			defaultTransport := http.DefaultTransport
-			http.DefaultTransport = httputil.NewBackoffTransport(defaultTransport, time.Minute) //nolint:reassign
-			t.Cleanup(func() { http.DefaultTransport = defaultTransport })                      //nolint:reassign
+			http.DefaultTransport = httputil.NewBackoffTransport(defaultTransport, time.Minute, time.Hour, slog.New(slog.DiscardHandler)) //nolint:reassign
+			t.Cleanup(func() { http.DefaultTransport = defaultTransport })                                                                //nolint:reassign
 			_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelError})
 			c, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: time.Hour})
 			assert.NoError(t, err)

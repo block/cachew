@@ -526,8 +526,8 @@ func TestOCIBackoff(t *testing.T) {
 			f := newFakeRegistry(t, blob)
 			f.requireToken = true
 			defaultTransport := http.DefaultTransport
-			http.DefaultTransport = httputil.NewBackoffTransport(defaultTransport, time.Minute) //nolint:reassign
-			t.Cleanup(func() { http.DefaultTransport = defaultTransport })                      //nolint:reassign
+			http.DefaultTransport = httputil.NewBackoffTransport(defaultTransport, time.Minute, time.Hour, slog.New(slog.DiscardHandler)) //nolint:reassign
+			t.Cleanup(func() { http.DefaultTransport = defaultTransport })                                                                //nolint:reassign
 			mux := newOCITestMux(t, f, strategy.OCIConfig{TagTTL: time.Hour})
 			cached := "/oci/example.io/v2/alpine/manifests/cached"
 			assert.Equal(t, http.StatusOK, serveOCI(t, mux, http.MethodGet, cached, nil).Code)

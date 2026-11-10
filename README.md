@@ -219,14 +219,15 @@ spool {
 
 ## Upstream Rate Limits
 
-After an upstream returns 429, cachewd pauses HTTP requests to that outbound hostname across strategies, schemes, and ports until a cooldown ends. Each redirect destination is checked independently. Cache hits and other hostnames remain available. OCI blob, manifest, authentication, and pass-through requests use the same shared cooldowns.
+After an upstream returns 429, cachewd pauses HTTP requests to that outbound hostname across strategies, schemes, and ports until a cooldown ends. Requests made with a GitHub App installation token, an App JWT, or the static GitHub token cool down separately, because GitHub limits each of those credentials on its own: one installation's 429 does not pause another installation, token minting, or anonymous requests. All other requests share their hostname's cooldown. A redirect to another host drops the credential, so that hop also shares the hostname's cooldown. Each redirect destination is checked independently. Cache hits and other hostnames remain available. Requests that one strategy forwards to another cachew route, such as Hermit's GitHub releases, are exempt; the target route applies the cooldown to the real upstream. OCI blob, manifest, authentication, and pass-through requests use the same shared cooldowns.
 
 Configured fallbacks are tried on the first 429 and on subsequent cache misses while the primary is cooling. A mirror on another hostname remains available until it returns its own 429; its 404 or 5xx does not start a cooldown. Requests to cooling hosts get a local 429 with `Retry-After` and `Cache-Control: no-store`. Cooldowns do not schedule retries.
 
-The cooldown uses the upstream's `Retry-After` (seconds or HTTP date) when it is valid, and `upstream-backoff` otherwise. Cooldowns are held in memory per process and apply to clients that use the shared HTTP transport, not subprocess traffic. Other replicas and requests already in flight are unaffected.
+The cooldown uses the upstream's `Retry-After` (seconds or HTTP date) when it is valid, and `upstream-backoff` otherwise, and never lasts longer than `upstream-backoff-max`. Each cooldown that starts or is extended is logged and counted in `cachew.upstream.cooldowns`; local 429s are counted in `cachew.upstream.cooldown_rejections`. Cooldowns are held in memory per process and apply to clients that use the shared HTTP transport, not subprocess traffic. Other replicas and requests already in flight are unaffected.
 
 ```hcl
-upstream-backoff = "1m"  # Must be positive
+upstream-backoff = "1m"       # Must be positive
+upstream-backoff-max = "15m"  # Raised to upstream-backoff when lower
 ```
 
 ## Authorization (OPA)

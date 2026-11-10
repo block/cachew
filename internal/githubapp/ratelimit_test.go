@@ -161,10 +161,10 @@ func TestRateLimitPollerRetainsOwnerAcrossAliases(t *testing.T) {
 	poller := NewRateLimitPoller(&TokenManager{apps: []*appState{app}}, 0)
 	for _, alias := range []string{"Example-Org", "old-name", "renamed-org"} {
 		app.rememberInstallation(alias, "123", alias)
-		token, owner, err := app.getToken(pollerContext(t), alias)
+		token, installation, err := app.getToken(pollerContext(t), alias)
 		assert.NoError(t, err)
 		assert.Equal(t, "token-111", token)
-		assert.Equal(t, "example-org", owner)
+		assert.Equal(t, Installation{ID: "123", Owner: "example-org"}, installation)
 		assert.Equal(t, map[string]string{"123": "example-org"}, app.knownInstallations())
 		assert.NoError(t, poller.poll(pollerContext(t)))
 		points := collectMetrics(t, reader)["github.ratelimit_remaining"]

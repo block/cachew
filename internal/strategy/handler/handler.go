@@ -129,7 +129,9 @@ func (h *Handler) Metrics(strategy, registry string) *Handler {
 	return h
 }
 
-// InternalForward excludes delegation to another cache route from external-origin and fill metrics.
+// InternalForward marks delegation to another cache route. Its requests are
+// excluded from external-origin and fill metrics and from upstream cooldowns,
+// which the target route applies to the real upstream.
 func (h *Handler) InternalForward() *Handler {
 	h.external = false
 	return h
@@ -453,7 +455,14 @@ func (h *Handler) upstreamRequest(r *http.Request) (*http.Request, error) {
 	if err != nil {
 		return nil, err
 	}
-	req = req.Clone(r.Context())
+	ctx := r.Context()
+	if !h.external {
+		ctx = httputil.WithoutCooldown(ctx)
+	}
+	if scope, ok := httputil.CooldownScope(req.Context()); ok {
+		ctx = httputil.WithCooldownScope(ctx, scope)
+	}
+	req = req.Clone(ctx)
 	// Forward safe headers from the original request, without overwriting headers set by transform.
 	forwardable := httputil.FilterHeaders(r.Header, slices.Concat(httputil.HopByHopHeaders, []string{"Range", "If-Range"})...)
 	for key, values := range forwardable {

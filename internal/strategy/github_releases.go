@@ -117,19 +117,21 @@ func (g *GitHubReleases) newGitHubRequest(ctx context.Context, reqURL, accept, o
 	// Try GitHub App authentication first, fall back to static token
 	owner := org
 	if g.tokenManager != nil && org != "" {
-		token, resolvedOwner, err := g.tokenManager.GetTokenForOrgWithOwner(ctx, org)
+		token, installation, err := g.tokenManager.GetTokenForOrgWithInstallation(ctx, org)
 		if err != nil {
 			logging.FromContext(ctx).WarnContext(ctx, "Failed to get GitHub App token, falling back to static token", "org", org,
 				"error", err)
 		} else if token != "" {
 			req.Header.Set("Authorization", "Bearer "+token)
-			owner = resolvedOwner
+			req = req.WithContext(githubapp.WithInstallationCooldown(req.Context(), installation.ID))
+			owner = installation.Owner
 		}
 	}
 
 	// Fall back to static token if GitHub App not used or failed
 	if req.Header.Get("Authorization") == "" && g.config.Token != "" {
 		req.Header.Set("Authorization", "Bearer "+g.config.Token)
+		req = req.WithContext(httputil.WithCooldownScope(req.Context(), "github-token"))
 	}
 
 	return githubapp.WithAPIMetrics(req, owner, operation), nil

@@ -396,7 +396,7 @@ func TestArtifactCooldownIsNotOriginTraffic(t *testing.T) {
 		w.WriteHeader(http.StatusTooManyRequests)
 	}))
 	defer origin.Close()
-	client := &http.Client{Transport: httputil.NewBackoffTransport(metrics.NewOriginTransport(origin.Client().Transport), time.Minute)}
+	client := &http.Client{Transport: httputil.NewBackoffTransport(metrics.NewOriginTransport(origin.Client().Transport), time.Minute, time.Hour, slog.New(slog.DiscardHandler))}
 	c := mustNewMemoryCache()
 	defer c.Close()
 	h := handler.New(client, c, newTestSpools(t)).Metrics("host", "registry.example").Transform(func(r *http.Request) (*http.Request, error) {

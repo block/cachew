@@ -10,6 +10,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 
+	"github.com/block/cachew/internal/httputil"
 	"github.com/block/cachew/internal/logging"
 	"github.com/block/cachew/internal/metrics"
 )
@@ -40,6 +41,12 @@ func NewAPIClient(base *http.Client) *http.Client {
 			"Number of GitHub API calls by owner and operation"),
 	}
 	return &client
+}
+
+// WithInstallationCooldown scopes upstream cooldowns to a GitHub App
+// installation, since GitHub limits each installation separately.
+func WithInstallationCooldown(ctx context.Context, installationID string) context.Context {
+	return httputil.WithCooldownScope(ctx, "github-installation:"+installationID)
 }
 
 // WithAPIMetrics attributes an API request to its credential owner and operation.

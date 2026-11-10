@@ -130,7 +130,7 @@ func setupTest(t *testing.T, config strategy.GitHubReleasesConfig) (*mockGitHubS
 	http.DefaultTransport = httputil.NewBackoffTransport(metrics.NewOriginTransport(&testTransport{ //nolint:reassign // Required for testing
 		backend:           mock.server,
 		originalTransport: originalTransport,
-	}), time.Minute)
+	}), time.Minute, time.Hour, slog.New(slog.DiscardHandler))
 
 	_, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelError})
 	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: time.Hour})
