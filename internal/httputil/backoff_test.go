@@ -72,10 +72,10 @@ func TestBackoffTransport(t *testing.T) {
 					get("https://other.example/ok")
 					get("http://example.com/ok")
 					get("https://example.com:444/ok")
-					assert.Equal(t, 4, calls)
+					assert.Equal(t, 2, calls)
 					time.Sleep(tt.delay - time.Nanosecond)
 					assert.Equal(t, "1", get("https://example.com/near-expiry").Header.Get("Retry-After"))
-					assert.Equal(t, 4, calls)
+					assert.Equal(t, 2, calls)
 					time.Sleep(time.Nanosecond)
 				}
 				before := calls
@@ -99,16 +99,16 @@ func TestBackoffRedirectDestination(t *testing.T) {
 		base := roundTripFunc(func(r *http.Request) (*http.Response, error) {
 			calls[r.URL.Host]++
 			resp := &http.Response{StatusCode: http.StatusTooManyRequests, Header: make(http.Header), Body: http.NoBody, Request: r}
-			if r.URL.Host == "redirect.example" {
+			if r.URL.Host != "limited.example" {
 				resp.StatusCode = http.StatusFound
 				resp.Header.Set("Location", "https://limited.example/file")
 			}
 			return resp, nil
 		})
 		transport := httputil.NewBackoffTransport(base, time.Minute)
-		for range 2 {
-			client := &http.Client{Transport: transport}
-			req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "https://redirect.example/file", nil)
+		client := &http.Client{Transport: transport}
+		for _, host := range []string{"redirect.example", "redirect.example", "another.example", "another.example"} {
+			req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "https://"+host+"/file", nil)
 			assert.NoError(t, err)
 			resp, err := client.Do(req)
 			assert.NoError(t, err)
@@ -116,7 +116,51 @@ func TestBackoffRedirectDestination(t *testing.T) {
 			assert.Equal(t, http.StatusTooManyRequests, resp.StatusCode)
 			assert.Equal(t, "60", resp.Header.Get("Retry-After"))
 		}
-		assert.Equal(t, 2, calls["redirect.example"])
-		assert.Equal(t, 1, calls["limited.example"])
+		assert.Equal(t, map[string]int{"redirect.example": 2, "another.example": 2, "limited.example": 1}, calls)
+		time.Sleep(time.Minute)
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "https://redirect.example/file", nil)
+		assert.NoError(t, err)
+		resp, err := client.Do(req)
+		assert.NoError(t, err)
+		assert.NoError(t, resp.Body.Close())
+		assert.Equal(t, map[string]int{"redirect.example": 3, "another.example": 2, "limited.example": 2}, calls)
+	})
+}
+
+func TestBackoffSharedClients(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		calls := map[string]int{}
+		base := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			calls[r.URL.Host]++
+			status := http.StatusOK
+			if r.URL.Path == "/limited" {
+				status = http.StatusTooManyRequests
+			}
+			return &http.Response{StatusCode: status, Header: make(http.Header), Body: http.NoBody, Request: r}, nil
+		})
+		transport := httputil.NewBackoffTransport(base, time.Minute)
+		first := &http.Client{Transport: transport}
+		second := &http.Client{Transport: transport}
+		for _, tt := range []struct {
+			client *http.Client
+			url    string
+			status int
+		}{
+			{first, "https://primary.example/limited", http.StatusTooManyRequests},
+			{first, "https://PRIMARY.example:443/other", http.StatusTooManyRequests},
+			{first, "https://mirror.example/other", http.StatusOK},
+			{second, "https://primary.example/other", http.StatusTooManyRequests},
+			{second, "http://primary.example:8080/other", http.StatusTooManyRequests},
+			{second, "https://mirror.example/limited", http.StatusTooManyRequests},
+			{first, "https://mirror.example/another", http.StatusTooManyRequests},
+		} {
+			req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, tt.url, nil)
+			assert.NoError(t, err)
+			resp, err := tt.client.Do(req)
+			assert.NoError(t, err)
+			assert.NoError(t, resp.Body.Close())
+			assert.Equal(t, tt.status, resp.StatusCode)
+		}
+		assert.Equal(t, map[string]int{"primary.example": 1, "mirror.example": 2}, calls)
 	})
 }

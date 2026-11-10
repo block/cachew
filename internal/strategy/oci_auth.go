@@ -1,6 +1,8 @@
 package strategy
 
 import (
+	"bytes"
+	"io"
 	"net/http"
 	"net/url"
 	"sync"
@@ -45,22 +47,26 @@ func newOCITransport(upstream *url.URL, username, password string, base http.Rou
 	return &ociTransport{
 		registry:     registry,
 		auth:         auth,
-		base:         base,
+		base:         ociRateLimitTransport{base: base},
 		repositories: map[string]*ociRepositoryTransport{},
 	}, nil
 }
 
 func (t *ociTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	var resp *http.Response
 	rt, err := t.forRepository(req)
-	if err != nil {
-		return nil, err
+	if err == nil {
+		// Client credentials belong to cachew, not to the upstream registry.
+		req = req.Clone(req.Context())
+		req.Header.Del("Authorization")
+		req.Header.Del("Cookie")
+		resp, err = rt.RoundTrip(req)
 	}
-	// Client credentials are for cachew, and the upstream must only see the
-	// strategy's own. RoundTrippers must not modify the request they receive.
-	req = req.Clone(req.Context())
-	req.Header.Del("Authorization")
-	req.Header.Del("Cookie")
-	return errors.WithStack2(rt.RoundTrip(req))
+	if limited, ok := errors.AsType[*ociRateLimitError](err); ok {
+		limited.response.Request = req
+		return limited.response, nil
+	}
+	return resp, errors.WithStack(err)
 }
 
 func (t *ociTransport) forRepository(req *http.Request) (http.RoundTripper, error) {
@@ -88,3 +94,33 @@ func (t *ociTransport) forRepository(req *http.Request) (http.RoundTripper, erro
 	entry.transport = rt
 	return rt, nil
 }
+
+// ociRateLimitTransport preserves 429 headers that the auth library discards
+// when turning registry ping and token responses into errors.
+type ociRateLimitTransport struct {
+	base http.RoundTripper
+}
+
+func (t ociRateLimitTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := t.base.RoundTrip(req)
+	if err != nil || resp.StatusCode != http.StatusTooManyRequests {
+		return resp, errors.WithStack(err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	if err != nil {
+		return nil, errors.Wrap(err, "read registry rate limit response")
+	}
+	limited := *resp
+	limited.Body = io.NopCloser(bytes.NewReader(body))
+	limited.ContentLength = int64(len(body))
+	limited.Header = resp.Header.Clone()
+	limited.Header.Del("Content-Length")
+	return nil, &ociRateLimitError{response: &limited}
+}
+
+type ociRateLimitError struct {
+	response *http.Response
+}
+
+func (e *ociRateLimitError) Error() string { return "registry rate limited" }

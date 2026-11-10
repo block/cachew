@@ -1,10 +1,8 @@
 package httputil
 
 import (
-	"context"
 	"io"
 	"math"
-	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -15,36 +13,22 @@ import (
 )
 
 // BackoffTransport shares upstream cooldowns across requests and redirect hops.
-// Requests in a [BackoffScope] share one cooldown; other requests share one
-// per origin.
+// Cooldowns are keyed by outbound hostname, across strategies, schemes and ports.
 type BackoffTransport struct {
 	base  http.RoundTripper
 	delay time.Duration
 	mu    sync.Mutex
-	until map[any]time.Time
+	until map[string]time.Time
 }
 
 // NewBackoffTransport uses delay when a 429 has no valid Retry-After header.
 func NewBackoffTransport(base http.RoundTripper, delay time.Duration) *BackoffTransport {
-	return &BackoffTransport{base: base, delay: delay, until: map[any]time.Time{}}
+	return &BackoffTransport{base: base, delay: delay, until: map[string]time.Time{}}
 }
 
-// RoundTrip rejects requests in a cooling scope or origin without retrying them.
+// RoundTrip rejects requests to a cooling hostname without retrying them.
 func (t *BackoffTransport) RoundTrip(r *http.Request) (*http.Response, error) {
-	var cooldown any
-	if scope, ok := r.Context().Value(backoffScopeKey{}).(*BackoffScope); ok {
-		cooldown = scope
-	} else {
-		port := r.URL.Port()
-		if port == "" {
-			if r.URL.Scheme == "https" {
-				port = "443"
-			} else {
-				port = "80"
-			}
-		}
-		cooldown = strings.ToLower(r.URL.Scheme + "://" + net.JoinHostPort(r.URL.Hostname(), port))
-	}
+	cooldown := strings.ToLower(r.URL.Hostname())
 	now := time.Now()
 	t.mu.Lock()
 	for k, until := range t.until {
@@ -77,7 +61,7 @@ func (t *BackoffTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	if resp.StatusCode == http.StatusTooManyRequests {
 		now = time.Now()
 		var valid bool
-		until, valid = retryAfter(resp.Header.Get("Retry-After"), now, t.delay)
+		until, valid = RetryAfterDeadline(resp.Header.Get("Retry-After"), now, t.delay)
 		t.mu.Lock()
 		if until.After(t.until[cooldown]) {
 			t.until[cooldown] = until
@@ -92,39 +76,9 @@ func (t *BackoffTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	return resp, nil
 }
 
-type backoffScopeKey struct{}
-
-// BackoffScope sends every request through it in one [BackoffTransport]
-// cooldown, whatever origin the request reaches.
-type BackoffScope struct {
-	base http.RoundTripper
-}
-
-// NewBackoffScope sends requests to base, or to http.DefaultTransport when base is nil.
-func NewBackoffScope(base http.RoundTripper) *BackoffScope {
-	return &BackoffScope{base: base}
-}
-
-// WithContext puts requests made with ctx in this scope, including requests
-// sent by other clients through a [BackoffTransport].
-func (s *BackoffScope) WithContext(ctx context.Context) context.Context {
-	return context.WithValue(ctx, backoffScopeKey{}, s)
-}
-
-// RoundTrip sends r in this scope.
-func (s *BackoffScope) RoundTrip(r *http.Request) (*http.Response, error) {
-	base := s.base
-	if base == nil {
-		base = http.DefaultTransport
-	}
-	resp, err := base.RoundTrip(r.WithContext(s.WithContext(r.Context())))
-	if err != nil {
-		return nil, errors.WithStack(err)
-	}
-	return resp, nil
-}
-
-func retryAfter(value string, now time.Time, fallback time.Duration) (time.Time, bool) {
+// RetryAfterDeadline parses Retry-After, using fallback when the value is invalid.
+// The boolean reports whether the header was valid.
+func RetryAfterDeadline(value string, now time.Time, fallback time.Duration) (time.Time, bool) {
 	value = strings.TrimSpace(value)
 	if seconds, err := strconv.ParseUint(value, 10, 63); err == nil && seconds <= uint64(math.MaxInt64/int64(time.Second)) {
 		return now.Add(time.Duration(seconds) * time.Second), true

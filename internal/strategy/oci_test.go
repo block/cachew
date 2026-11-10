@@ -16,6 +16,7 @@ import (
 	"github.com/opencontainers/go-digest"
 
 	"github.com/block/cachew/internal/cache"
+	"github.com/block/cachew/internal/httputil"
 	"github.com/block/cachew/internal/logging"
 	"github.com/block/cachew/internal/strategy"
 )
@@ -48,6 +49,8 @@ type fakeRegistry struct {
 	corrupt        bool
 	headStatus     int
 	requireToken   bool
+	limitedPath    string
+	exchanges      int
 	requests       []fakeRequest
 	cdnRequests    []fakeRequest
 	authorizations []string
@@ -87,6 +90,13 @@ func (f *fakeRegistry) redirectBlobs(t *testing.T) {
 func (f *fakeRegistry) serve(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.exchanges++
+	if r.URL.Path == f.limitedPath {
+		w.Header().Set("Retry-After", "120")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte("registry limit"))
+		return
+	}
 	if r.URL.Path == "/token" {
 		username, _, _ := r.BasicAuth()
 		f.tokenRequests = append(f.tokenRequests, fakeTokenRequest{Scope: r.URL.Query().Get("scope"), Username: username})
@@ -498,6 +508,56 @@ func TestOCITokenAuth(t *testing.T) {
 			}, read(f, &f.tokenRequests))
 			assert.Equal(t, []string{"Bearer upstream-token", "Bearer upstream-token", "Bearer upstream-token"},
 				read(f, &f.authorizations))
+		})
+	}
+}
+
+func TestOCIBackoff(t *testing.T) {
+	blob := []byte("blob")
+	blobPath := "/v2/library/alpine/blobs/" + digest.FromBytes(blob).String()
+	for _, tt := range []struct {
+		name, limitedPath, trigger string
+	}{
+		{"Blob", blobPath, "/v2/alpine/blobs/" + digest.FromBytes(blob).String()},
+		{"Ping", "/v2/", "/v2/other/manifests/latest"},
+		{"Token", "/token", "/v2/other/tags/list"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newFakeRegistry(t, blob)
+			f.requireToken = true
+			defaultTransport := http.DefaultTransport
+			http.DefaultTransport = httputil.NewBackoffTransport(defaultTransport, time.Minute) //nolint:reassign
+			t.Cleanup(func() { http.DefaultTransport = defaultTransport })                      //nolint:reassign
+			mux := newOCITestMux(t, f, strategy.OCIConfig{TagTTL: time.Hour})
+			cached := "/oci/example.io/v2/alpine/manifests/cached"
+			assert.Equal(t, http.StatusOK, serveOCI(t, mux, http.MethodGet, cached, nil).Code)
+			f.set(func(f *fakeRegistry) { f.limitedPath = tt.limitedPath })
+			first := serveOCI(t, mux, http.MethodGet, "/oci/example.io"+tt.trigger, nil)
+			assert.Equal(t, http.StatusTooManyRequests, first.Code)
+			assert.Equal(t, "registry limit", first.Body.String())
+			assert.Equal(t, "120", first.Header().Get("Retry-After"))
+			assert.Equal(t, "no-store", first.Header().Get("Cache-Control"))
+			before := read(f, &f.exchanges)
+			for _, path := range []string{
+				"/v2/alpine/blobs/" + digest.FromBytes(blob).String(),
+				"/v2/alpine/manifests/latest", "/v2/alpine/tags/list",
+				"/v2/alpine/referrers/" + digest.FromBytes(blob).String(),
+				"/v2/cold/manifests/latest", "/v2/cold/tags/list",
+			} {
+				for _, method := range []string{http.MethodGet, http.MethodHead} {
+					w := serveOCI(t, mux, method, "/oci/example.io"+path, nil)
+					assert.Equal(t, http.StatusTooManyRequests, w.Code, path)
+					assert.Equal(t, "120", w.Header().Get("Retry-After"))
+					assert.Equal(t, "no-store", w.Header().Get("Cache-Control"))
+				}
+			}
+			assert.Equal(t, http.StatusOK, serveOCI(t, mux, http.MethodGet, cached, nil).Code)
+			assert.Equal(t, before, read(f, &f.exchanges))
+			f.set(func(f *fakeRegistry) { f.limitedPath = "" })
+			independent := newOCITestMux(t, f, strategy.OCIConfig{})
+			assert.Equal(t, http.StatusTooManyRequests, serveOCI(t, independent, http.MethodGet,
+				"/oci/example.io/v2/alpine/manifests/latest", nil).Code)
+			assert.Equal(t, before, read(f, &f.exchanges))
 		})
 	}
 }

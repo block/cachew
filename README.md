@@ -219,9 +219,11 @@ spool {
 
 ## Upstream Rate Limits
 
-After an upstream returns 429, cachewd stops sending upstream requests for that strategy until a cooldown ends. This includes its fallbacks and redirect targets. During the cooldown, misses get 429 with `Retry-After` and `Cache-Control: no-store` without contacting any upstream. Cache hits and other strategies are unaffected. Requests made outside the strategy handlers, such as Git, pause per origin (scheme, host and port). Nothing is retried automatically.
+After an upstream returns 429, cachewd pauses HTTP requests to that outbound hostname across strategies, schemes, and ports until a cooldown ends. Each redirect destination is checked independently. Cache hits and other hostnames remain available. OCI blob, manifest, authentication, and pass-through requests use the same shared cooldowns.
 
-The cooldown uses the upstream's `Retry-After` (seconds or HTTP date) when it is valid, and `upstream-backoff` otherwise. Cooldowns are held in memory per process.
+Configured fallbacks are tried on the first 429 and on subsequent cache misses while the primary is cooling. A mirror on another hostname remains available until it returns its own 429; its 404 or 5xx does not start a cooldown. Requests to cooling hosts get a local 429 with `Retry-After` and `Cache-Control: no-store`. Cooldowns do not schedule retries.
+
+The cooldown uses the upstream's `Retry-After` (seconds or HTTP date) when it is valid, and `upstream-backoff` otherwise. Cooldowns are held in memory per process and apply to clients that use the shared HTTP transport, not subprocess traffic. Other replicas and requests already in flight are unaffected.
 
 ```hcl
 upstream-backoff = "1m"  # Must be positive
