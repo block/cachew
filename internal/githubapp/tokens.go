@@ -13,6 +13,7 @@ import (
 
 	"github.com/alecthomas/errors"
 
+	"github.com/block/cachew/internal/httputil"
 	"github.com/block/cachew/internal/logging"
 )
 
@@ -233,6 +234,7 @@ func (a *appState) fetchInstallationToken(ctx context.Context, org, installation
 
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("Authorization", "Bearer "+jwt)
+	req = req.WithContext(httputil.WithCooldownScope(req.Context(), "github-app"))
 	req.Header.Set("X-Github-Api-Version", "2022-11-28")
 
 	resp, err := a.httpClient.Do(WithAPIMetrics(req, org, "create_installation_token"))
@@ -285,6 +287,7 @@ func (a *appState) lookupInstallationID(ctx context.Context, org string) (string
 
 		req.Header.Set("Accept", "application/vnd.github+json")
 		req.Header.Set("Authorization", "Bearer "+jwt)
+		req = req.WithContext(httputil.WithCooldownScope(req.Context(), "github-app"))
 		req.Header.Set("X-Github-Api-Version", "2022-11-28")
 
 		resp, err := a.httpClient.Do(WithAPIMetrics(req, "unknown", "lookup_installation"))

@@ -123,6 +123,7 @@ func (g *GitHubReleases) newGitHubRequest(ctx context.Context, reqURL, accept, o
 				"error", err)
 		} else if token != "" {
 			req.Header.Set("Authorization", "Bearer "+token)
+			req = req.WithContext(githubapp.WithInstallationCooldown(req.Context(), resolvedOwner))
 			owner = resolvedOwner
 		}
 	}
@@ -130,6 +131,7 @@ func (g *GitHubReleases) newGitHubRequest(ctx context.Context, reqURL, accept, o
 	// Fall back to static token if GitHub App not used or failed
 	if req.Header.Get("Authorization") == "" && g.config.Token != "" {
 		req.Header.Set("Authorization", "Bearer "+g.config.Token)
+		req = req.WithContext(httputil.WithCooldownScope(req.Context(), "github-token"))
 	}
 
 	return githubapp.WithAPIMetrics(req, owner, operation), nil

@@ -50,7 +50,7 @@ func TestHermitBackoff(t *testing.T) {
 	defer backend.Close()
 	original := http.DefaultTransport
 	http.DefaultTransport = httputil.NewBackoffTransport( //nolint:reassign
-		&mockTransport{backend: backend, originalTransport: original}, time.Minute)
+		&mockTransport{backend: backend, originalTransport: original}, time.Minute, time.Hour, slog.New(slog.DiscardHandler))
 	t.Cleanup(func() { http.DefaultTransport = original }) //nolint:reassign
 	_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelError})
 	c, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: time.Hour})
@@ -78,6 +78,47 @@ func TestHermitBackoff(t *testing.T) {
 		}
 	}
 	assert.Equal(t, 3, calls)
+}
+
+func TestHermitInternalForwardSkipsCooldown(t *testing.T) {
+	httpTransportMutexHermit.Lock()
+	defer httpTransportMutexHermit.Unlock()
+
+	var paths []string
+	loopback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		if r.URL.Path == "/github.com/org/repo/releases/download/v1/limited" {
+			w.Header().Set("Retry-After", "60")
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		_, _ = w.Write([]byte("release"))
+	}))
+	defer loopback.Close()
+	original := http.DefaultTransport
+	http.DefaultTransport = httputil.NewBackoffTransport( //nolint:reassign
+		&mockTransport{backend: loopback, originalTransport: original}, time.Minute, time.Hour, slog.New(slog.DiscardHandler))
+	t.Cleanup(func() { http.DefaultTransport = original }) //nolint:reassign
+	_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelError})
+	c, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: time.Hour})
+	assert.NoError(t, err)
+	defer c.Close()
+	mux := http.NewServeMux()
+	_, err = strategy.NewHermit(ctx, strategy.HermitConfig{GitHubBaseURL: "http://127.0.0.1:8080/github.com"},
+		nil, c, mux, newTestSpools(t))
+	assert.NoError(t, err)
+	for _, tt := range []struct {
+		path   string
+		status int
+	}{
+		{"/hermit/github.com/org/repo/releases/download/v1/limited", http.StatusTooManyRequests},
+		{"/hermit/github.com/other/tool/releases/download/v2/file", http.StatusOK},
+	} {
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, httptest.NewRequestWithContext(ctx, http.MethodGet, tt.path, nil))
+		assert.Equal(t, tt.status, w.Code, tt.path)
+	}
+	assert.Equal(t, []string{"/github.com/org/repo/releases/download/v1/limited", "/github.com/other/tool/releases/download/v2/file"}, paths)
 }
 
 func TestHermitBinaryShortTTL(t *testing.T) {

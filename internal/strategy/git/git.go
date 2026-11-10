@@ -224,6 +224,7 @@ func New(
 					if err == nil && token != "" {
 						// Inject token as Basic auth with "x-access-token" username
 						req.SetBasicAuth("x-access-token", token)
+						*req = *req.WithContext(githubapp.WithInstallationCooldown(req.Context(), org))
 						logger.DebugContext(req.Context(), "Injecting GitHub App auth into upstream request", "org", org)
 					}
 				}

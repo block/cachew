@@ -107,6 +107,7 @@ func (p *RateLimitPoller) pollInstallation(ctx context.Context, app *appState, i
 		return errors.Wrap(err, "create rate-limit request")
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
+	req = req.WithContext(WithInstallationCooldown(req.Context(), owner))
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-Github-Api-Version", "2022-11-28")
 	resp, err := app.httpClient.Do(WithAPIMetrics(req, owner, "get_rate_limit"))

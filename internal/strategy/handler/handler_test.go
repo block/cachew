@@ -1017,12 +1017,16 @@ func TestBackoffPausesHandler(t *testing.T) {
 	other := newUpstream()
 	defer other.Close()
 	other.URL = strings.Replace(other.URL, "127.0.0.1", "localhost", 1)
-	client := &http.Client{Transport: httputil.NewBackoffTransport(http.DefaultTransport, time.Minute)}
+	client := &http.Client{Transport: httputil.NewBackoffTransport(http.DefaultTransport, time.Minute, time.Hour, slog.New(slog.DiscardHandler))}
 	c := mustNewMemoryCache()
 	defer c.Close()
 	newHandler := func() *handler.Handler {
 		return handler.New(client, c, newTestSpools(t)).Transform(func(r *http.Request) (*http.Request, error) {
-			return http.NewRequestWithContext(r.Context(), http.MethodGet, r.URL.Query().Get("upstream")+r.URL.Path, nil)
+			ctx := r.Context()
+			if scope := r.URL.Query().Get("scope"); scope != "" {
+				ctx = httputil.WithCooldownScope(ctx, scope)
+			}
+			return http.NewRequestWithContext(ctx, http.MethodGet, r.URL.Query().Get("upstream")+r.URL.Path, nil)
 		})
 	}
 	h := newHandler()
@@ -1048,4 +1052,8 @@ func TestBackoffPausesHandler(t *testing.T) {
 	assert.Equal(t, http.StatusTooManyRequests, w.Code)
 	assert.Equal(t, "60", w.Header().Get("Retry-After"))
 	assert.Equal(t, int32(3), calls.Load())
+
+	w = serve(t, h, http.MethodGet, "http://example.com/scoped?scope=installation&upstream="+limited.URL, nil)
+	assert.Equal(t, http.StatusOK, w.Code, "a scoped request has its own cooldown")
+	assert.Equal(t, int32(4), calls.Load())
 }
