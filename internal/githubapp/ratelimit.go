@@ -98,7 +98,7 @@ func (p *RateLimitPoller) poll(ctx context.Context) error {
 func (p *RateLimitPoller) pollInstallation(ctx context.Context, app *appState, installationID string) error {
 	ctx, cancel := context.WithTimeout(ctx, rateLimitPollTimeout)
 	defer cancel()
-	token, owner, err := app.getInstallationToken(ctx, installationID)
+	token, installation, err := app.getInstallationToken(ctx, installationID)
 	if err != nil {
 		return errors.Wrap(err, "get installation token")
 	}
@@ -107,10 +107,10 @@ func (p *RateLimitPoller) pollInstallation(ctx context.Context, app *appState, i
 		return errors.Wrap(err, "create rate-limit request")
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
-	req = req.WithContext(WithInstallationCooldown(req.Context(), owner))
+	req = req.WithContext(WithInstallationCooldown(req.Context(), installationID))
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-Github-Api-Version", "2022-11-28")
-	resp, err := app.httpClient.Do(WithAPIMetrics(req, owner, "get_rate_limit"))
+	resp, err := app.httpClient.Do(WithAPIMetrics(req, installation.Owner, "get_rate_limit"))
 	if err != nil {
 		return errors.Wrap(err, "fetch rate limit")
 	}
@@ -127,7 +127,7 @@ func (p *RateLimitPoller) pollInstallation(ctx context.Context, app *appState, i
 	for resource, values := range result.Resources {
 		attrs := metric.WithAttributes(
 			attribute.String("app", app.appID), attribute.String("installation_id", installationID),
-			attribute.String("owner", owner), attribute.String("resource", resource),
+			attribute.String("owner", installation.Owner), attribute.String("resource", resource),
 		)
 		p.remaining.Record(ctx, values.Remaining, attrs)
 		p.limit.Record(ctx, values.Limit, attrs)

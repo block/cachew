@@ -220,11 +220,11 @@ func New(
 				parts := strings.Split(strings.TrimPrefix(req.URL.Path, "/"), "/")
 				if len(parts) >= 1 && parts[0] != "" {
 					org := parts[0]
-					token, owner, err := s.tokenManager.GetTokenForOrgWithOwner(req.Context(), org)
+					token, installation, err := s.tokenManager.GetTokenForOrgWithInstallation(req.Context(), org)
 					if err == nil && token != "" {
 						// Inject token as Basic auth with "x-access-token" username
 						req.SetBasicAuth("x-access-token", token)
-						*req = *req.WithContext(githubapp.WithInstallationCooldown(req.Context(), owner))
+						*req = *req.WithContext(githubapp.WithInstallationCooldown(req.Context(), installation.ID))
 						logger.DebugContext(req.Context(), "Injecting GitHub App auth into upstream request", "org", org)
 					}
 				}

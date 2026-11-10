@@ -149,17 +149,17 @@ func TestGetTokenForOrgDynamicDiscovery(t *testing.T) {
 	ctx := logging.ContextWithLogger(t.Context(), slog.Default())
 
 	t.Run("FallbackBeforeDiscovery", func(t *testing.T) {
-		token, owner, err := tm.GetTokenForOrgWithOwner(ctx, "unknown-org")
+		token, installation, err := tm.GetTokenForOrgWithInstallation(ctx, "unknown-org")
 		assert.NoError(t, err)
 		assert.Equal(t, "ghs_squareup_token", token)
-		assert.Equal(t, "squareup", owner)
+		assert.Equal(t, githubapp.Installation{ID: "12345", Owner: "squareup"}, installation)
 	})
 
 	t.Run("DiscoverAndCacheInstallation", func(t *testing.T) {
-		token, owner, err := tm.GetTokenForOrgWithOwner(ctx, "squareup")
+		token, installation, err := tm.GetTokenForOrgWithInstallation(ctx, "squareup")
 		assert.NoError(t, err)
 		assert.Equal(t, "ghs_squareup_token", token)
-		assert.Equal(t, "squareup", owner)
+		assert.Equal(t, githubapp.Installation{ID: "12345", Owner: "squareup"}, installation)
 
 		// Second call should use cache
 		token, err = tm.GetTokenForOrg(ctx, "squareup")
@@ -168,10 +168,10 @@ func TestGetTokenForOrgDynamicDiscovery(t *testing.T) {
 	})
 
 	t.Run("DiscoverNewOrg", func(t *testing.T) {
-		token, owner, err := tm.GetTokenForOrgWithOwner(ctx, "AfterpayTouch")
+		token, installation, err := tm.GetTokenForOrgWithInstallation(ctx, "AfterpayTouch")
 		assert.NoError(t, err)
 		assert.Equal(t, "ghs_afterpay_token", token)
-		assert.Equal(t, "AfterpayTouch", owner)
+		assert.Equal(t, githubapp.Installation{ID: "67890", Owner: "AfterpayTouch"}, installation)
 	})
 
 	t.Run("FallbackForUnknownOrg", func(t *testing.T) {
@@ -230,10 +230,10 @@ func TestGetTokenForOrgRetainsInstallationOwner(t *testing.T) {
 		slog.Default(), server.URL, server.Client())
 	ctx := logging.ContextWithLogger(t.Context(), slog.Default())
 	for _, alias := range []string{"Example-Org", "example-org", "renamed-org"} {
-		token, owner, err := manager.GetTokenForOrgWithOwner(ctx, alias)
+		token, installation, err := manager.GetTokenForOrgWithInstallation(ctx, alias)
 		assert.NoError(t, err)
 		assert.Equal(t, "test-token", token)
-		assert.Equal(t, "example-org", owner)
+		assert.Equal(t, githubapp.Installation{ID: "123", Owner: "example-org"}, installation)
 	}
 	assert.Equal(t, int64(1), mints.Load())
 }

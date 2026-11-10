@@ -111,14 +111,21 @@ func newTokenManager(configs []Config, logger *slog.Logger, apiBase string, http
 // caches the result, and falls back to the fallback org's token for orgs where
 // the app is not installed.
 func (tm *TokenManager) GetTokenForOrg(ctx context.Context, org string) (string, error) {
-	token, _, err := tm.GetTokenForOrgWithOwner(ctx, org)
+	token, _, err := tm.GetTokenForOrgWithInstallation(ctx, org)
 	return token, err
 }
 
-// GetTokenForOrgWithOwner also returns the owner whose installation minted the token.
-func (tm *TokenManager) GetTokenForOrgWithOwner(ctx context.Context, org string) (string, string, error) {
+// Installation is the GitHub App installation that minted a token.
+type Installation struct {
+	// ID is unique across GitHub Apps.
+	ID    string
+	Owner string
+}
+
+// GetTokenForOrgWithInstallation also returns the installation that minted the token.
+func (tm *TokenManager) GetTokenForOrgWithInstallation(ctx context.Context, org string) (string, Installation, error) {
 	if tm == nil {
-		return "", "", errors.New("token manager not initialized")
+		return "", Installation{}, errors.New("token manager not initialized")
 	}
 
 	logger := logging.FromContext(ctx)
@@ -152,12 +159,12 @@ func (tm *TokenManager) GetTokenForOrgWithOwner(ctx context.Context, org string)
 	if tm.fallbackApp != nil {
 		logger.InfoContext(ctx, "Using fallback org token", "requested_org", org, "fallback_org", tm.fallbackOrg)
 		if _, err := tm.fallbackApp.lookupInstallationID(ctx, tm.fallbackOrg); err != nil {
-			return "", "", errors.Wrap(err, "resolve fallback installation")
+			return "", Installation{}, errors.Wrap(err, "resolve fallback installation")
 		}
 		return tm.fallbackApp.getToken(ctx, tm.fallbackOrg)
 	}
 
-	return "", "", errors.Errorf("no GitHub App installation found for org: %s", org)
+	return "", Installation{}, errors.Errorf("no GitHub App installation found for org: %s", org)
 }
 
 // GetTokenForURL extracts the org from a GitHub URL and returns an installation token.
@@ -173,23 +180,24 @@ func (tm *TokenManager) GetTokenForURL(ctx context.Context, url string) (string,
 	return tm.GetTokenForOrg(ctx, org)
 }
 
-func (a *appState) getToken(ctx context.Context, org string) (string, string, error) {
+func (a *appState) getToken(ctx context.Context, org string) (string, Installation, error) {
 	a.installationMu.RLock()
 	installationID := a.installationCache[org]
 	a.installationMu.RUnlock()
 	if installationID == "" {
-		return "", "", errors.Errorf("no installation ID for org: %s", org)
+		return "", Installation{}, errors.Errorf("no installation ID for org: %s", org)
 	}
 	return a.getInstallationToken(ctx, installationID)
 }
 
-func (a *appState) getInstallationToken(ctx context.Context, installationID string) (string, string, error) {
+func (a *appState) getInstallationToken(ctx context.Context, installationID string) (string, Installation, error) {
 	a.installationMu.RLock()
 	owner := a.installationOwners[installationID]
 	a.installationMu.RUnlock()
 	if owner == "" {
-		return "", "", errors.Errorf("no owner for installation: %s", installationID)
+		return "", Installation{}, errors.Errorf("no owner for installation: %s", installationID)
 	}
+	installation := Installation{ID: installationID, Owner: owner}
 	logger := logging.FromContext(ctx).With("org", owner, "app_id", a.appID)
 
 	a.mu.RLock()
@@ -198,14 +206,14 @@ func (a *appState) getInstallationToken(ctx context.Context, installationID stri
 
 	if exists && time.Now().Add(a.cacheConfig.RefreshBuffer).Before(cached.expiresAt) {
 		logger.DebugContext(ctx, "Using cached GitHub App token")
-		return cached.token, owner, nil
+		return cached.token, installation, nil
 	}
 
 	logger.DebugContext(ctx, "Fetching new GitHub App installation token", "installation_id", installationID)
 
 	token, expiresAt, err := a.fetchInstallationToken(ctx, owner, installationID)
 	if err != nil {
-		return "", "", errors.Wrap(err, "fetch installation token")
+		return "", Installation{}, errors.Wrap(err, "fetch installation token")
 	}
 
 	a.mu.Lock()
@@ -217,7 +225,7 @@ func (a *appState) getInstallationToken(ctx context.Context, installationID stri
 
 	logger.InfoContext(ctx, "GitHub App token refreshed", "expires_at", expiresAt)
 
-	return token, owner, nil
+	return token, installation, nil
 }
 
 func (a *appState) fetchInstallationToken(ctx context.Context, org, installationID string) (string, time.Time, error) {
@@ -234,7 +242,7 @@ func (a *appState) fetchInstallationToken(ctx context.Context, org, installation
 
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("Authorization", "Bearer "+jwt)
-	req = req.WithContext(httputil.WithCooldownScope(req.Context(), "github-app"))
+	req = req.WithContext(httputil.WithCooldownScope(req.Context(), "github-app:"+a.appID))
 	req.Header.Set("X-Github-Api-Version", "2022-11-28")
 
 	resp, err := a.httpClient.Do(WithAPIMetrics(req, org, "create_installation_token"))
@@ -287,7 +295,7 @@ func (a *appState) lookupInstallationID(ctx context.Context, org string) (string
 
 		req.Header.Set("Accept", "application/vnd.github+json")
 		req.Header.Set("Authorization", "Bearer "+jwt)
-		req = req.WithContext(httputil.WithCooldownScope(req.Context(), "github-app"))
+		req = req.WithContext(httputil.WithCooldownScope(req.Context(), "github-app:"+a.appID))
 		req.Header.Set("X-Github-Api-Version", "2022-11-28")
 
 		resp, err := a.httpClient.Do(WithAPIMetrics(req, "unknown", "lookup_installation"))

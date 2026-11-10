@@ -4,7 +4,6 @@ import (
 	"context"
 	"net/http"
 	"strconv"
-	"strings"
 
 	"github.com/alecthomas/errors"
 	"go.opentelemetry.io/otel"
@@ -44,10 +43,10 @@ func NewAPIClient(base *http.Client) *http.Client {
 	return &client
 }
 
-// WithInstallationCooldown scopes upstream cooldowns to the installation token of
-// owner, since GitHub limits each installation separately.
-func WithInstallationCooldown(ctx context.Context, owner string) context.Context {
-	return httputil.WithCooldownScope(ctx, "github-installation:"+strings.ToLower(owner))
+// WithInstallationCooldown scopes upstream cooldowns to a GitHub App
+// installation, since GitHub limits each installation separately.
+func WithInstallationCooldown(ctx context.Context, installationID string) context.Context {
+	return httputil.WithCooldownScope(ctx, "github-installation:"+installationID)
 }
 
 // WithAPIMetrics attributes an API request to its credential owner and operation.
