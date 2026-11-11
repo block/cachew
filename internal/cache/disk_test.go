@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -138,4 +139,45 @@ func TestDiskOpenRevisionAtomic(t *testing.T) {
 		close(stop)
 	}()
 	wg.Wait()
+}
+
+// fileSinkWriter records what io.Copy hands to ReadFrom, as net/http does when
+// it passes a body to the connection's sendfile path.
+type fileSinkWriter struct {
+	bytes.Buffer
+	src io.Reader
+}
+
+func (w *fileSinkWriter) ReadFrom(r io.Reader) (int64, error) {
+	w.src = r
+	return w.Buffer.ReadFrom(r)
+}
+
+// TestDiskRangeReachesSendfile verifies a ranged disk read reaches ReadFrom as
+// an *io.LimitedReader over the file, the only shape net's sendfile accepts.
+func TestDiskRangeReachesSendfile(t *testing.T) {
+	_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelError})
+	c, err := cache.NewDisk(ctx, cache.DiskConfig{Root: t.TempDir(), MaxTTL: time.Hour})
+	assert.NoError(t, err)
+	defer c.Close()
+
+	key := cache.NewKey("range-sendfile")
+	w, err := c.Create(ctx, key, nil, time.Hour)
+	assert.NoError(t, err)
+	_, err = w.Write([]byte("0123456789abcdef"))
+	assert.NoError(t, err)
+	assert.NoError(t, w.Close())
+
+	r, _, err := c.Open(ctx, key, cache.Range(4, 10))
+	assert.NoError(t, err)
+
+	var sink fileSinkWriter
+	_, err = io.Copy(&sink, r)
+	assert.NoError(t, err)
+	assert.NoError(t, r.Close())
+	assert.Equal(t, "456789", sink.String())
+	limited, ok := sink.src.(*io.LimitedReader)
+	assert.True(t, ok, "ReadFrom got %T", sink.src)
+	_, ok = limited.R.(syscall.Conn)
+	assert.True(t, ok, "LimitedReader wraps %T", limited.R)
 }

@@ -689,37 +689,6 @@ func (s *Strategy) serveSnapshotHead(ctx context.Context, w http.ResponseWriter,
 	}
 }
 
-func (s *Strategy) streamSnapshotArtifact(_ context.Context, w http.ResponseWriter, r *http.Request, reader io.ReadCloser, headers http.Header) error {
-	for key, values := range headers {
-		for _, value := range values {
-			w.Header().Add(key, value)
-		}
-	}
-	if _, err := serveReaderFast(w, r, reader); err != nil {
-		return errors.Wrap(err, "streaming artifact")
-	}
-	return nil
-}
-
-// serveReaderFast serves the content from reader using the most efficient method
-// available. When reader is an *os.File, it uses http.ServeContent which enables
-// sendfile(2) zero-copy I/O and automatic Content-Length/Range support. For other
-// reader types it falls back to io.Copy. Returns bytes served for metrics.
-func serveReaderFast(w http.ResponseWriter, r *http.Request, reader io.Reader) (int64, error) {
-	if f, ok := reader.(*os.File); ok {
-		info, err := f.Stat()
-		if err != nil {
-			return 0, errors.Wrap(err, "stat file for serving")
-		}
-		// http.ServeContent handles Content-Length, Range requests, and uses
-		// sendfile(2) for zero-copy transfer from file to socket.
-		http.ServeContent(w, r, "", time.Time{}, f)
-		return info.Size(), nil
-	}
-	n, err := io.Copy(w, reader)
-	return n, errors.Wrap(err, "copy to response")
-}
-
 func (s *Strategy) handleBundleRequest(w http.ResponseWriter, r *http.Request, host, pathValue string) { //nolint:funlen
 	start := time.Now()
 	repoPath := ExtractRepoPath(strings.TrimSuffix(pathValue, "/snapshot.bundle"))
@@ -1687,19 +1656,20 @@ func (s *Strategy) handleLFSSnapshotRequest(w http.ResponseWriter, r *http.Reque
 	upstreamURL := "https://" + host + "/" + repoPath
 	cacheKey := lfsSnapshotCacheKey(upstreamURL)
 
-	// Try cache first so we can serve even when the mirror isn't ready (cold start).
-	reader, headers, err := s.cache.Open(ctx, cacheKey)
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		logger.ErrorContext(ctx, "Failed to open LFS snapshot from cache", "upstream", upstreamURL, "error", err)
-		http.Error(w, "Internal server error", http.StatusInternalServerError)
+	// Try cache first so we can serve even when the mirror isn't ready (cold
+	// start). Range and the validators go to the cache, as for the working-tree
+	// snapshot, so an interrupted download can resume pinned to its ETag.
+	reader, headers, err := s.cache.Open(ctx, cacheKey, httputil.ConditionalOptions(r)...)
+	handled, _, serveErr := httputil.ServeCacheHit(w, headers, reader, err)
+	if serveErr != nil {
+		logger.ErrorContext(ctx, "Failed to stream LFS snapshot", "upstream", upstreamURL, "error", serveErr)
+	}
+	if handled {
 		return
 	}
-	if reader != nil {
-		defer reader.Close()
-		logger.DebugContext(ctx, "Serving cached LFS snapshot", "upstream", upstreamURL)
-		if err := s.streamSnapshotArtifact(ctx, w, r, reader, headers); err != nil {
-			logger.ErrorContext(ctx, "Failed to stream LFS snapshot", "upstream", upstreamURL, "error", err)
-		}
+	if !errors.Is(err, os.ErrNotExist) {
+		logger.ErrorContext(ctx, "Failed to open LFS snapshot from cache", "upstream", upstreamURL, "error", err)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
 

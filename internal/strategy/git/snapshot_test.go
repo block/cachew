@@ -1354,6 +1354,60 @@ func TestSnapshotGetHonorsRange(t *testing.T) {
 	assert.Equal(t, http.StatusPreconditionFailed, rangeWithStaleIfMatch.Code)
 }
 
+func TestLFSSnapshotGetHonorsRangeAndIfMatch(t *testing.T) {
+	_, ctx := logging.Configure(context.Background(), logging.Config{})
+	upstreamURL := "https://github.com/org/repo"
+	body := []byte("0123456789abcdef")
+
+	// A non-*os.File reader, so the range must be resolved by the cache.
+	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: time.Hour})
+	assert.NoError(t, err)
+	w, err := memCache.Create(ctx, cache.NewKey(upstreamURL+".lfs-snapshot"), http.Header{"Content-Type": {"application/zstd"}}, time.Hour)
+	assert.NoError(t, err)
+	_, err = w.Write(body)
+	assert.NoError(t, err)
+	assert.NoError(t, w.Close())
+
+	mux := newTestMux()
+	cm := gitclone.NewManagerProvider(ctx, gitclone.Config{MirrorRoot: t.TempDir()}, nil)
+	_, err = git.New(ctx, git.Config{}, newTestScheduler(ctx, t), memCache, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }, newTestSpools(t)) //nolint:nilnil
+	assert.NoError(t, err)
+	handler := mux.handlers["GET /git/{host}/{path...}"]
+	assert.NotZero(t, handler)
+
+	get := func(headers map[string]string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, "/git/github.com/org/repo/lfs-snapshot.tar.zst", nil)
+		req = req.WithContext(ctx)
+		req.SetPathValue("host", "github.com")
+		req.SetPathValue("path", "org/repo/lfs-snapshot.tar.zst")
+		for k, v := range headers {
+			req.Header.Set(k, v)
+		}
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		return rec
+	}
+
+	full := get(nil)
+	assert.Equal(t, http.StatusOK, full.Code)
+	assert.Equal(t, body, full.Body.Bytes())
+	assert.Equal(t, "bytes", full.Header().Get("Accept-Ranges"))
+	etag := full.Header().Get("ETag")
+	assert.NotZero(t, etag)
+
+	resumed := get(map[string]string{"Range": "bytes=10-", "If-Match": etag})
+	assert.Equal(t, http.StatusPartialContent, resumed.Code)
+	assert.Equal(t, "bytes 10-15/16", resumed.Header().Get("Content-Range"))
+	assert.Equal(t, body[10:], resumed.Body.Bytes())
+
+	regenerated := get(map[string]string{"Range": "bytes=10-", "If-Match": `"stale-etag"`})
+	assert.Equal(t, http.StatusPreconditionFailed, regenerated.Code)
+	assert.Equal(t, 0, regenerated.Body.Len())
+
+	notModified := get(map[string]string{"If-None-Match": etag})
+	assert.Equal(t, http.StatusNotModified, notModified.Code)
+}
+
 // createUpstreamAndMirror creates a working upstream repo with one commit and
 // a mirror clone of it, returning the upstream work dir so tests can add
 // commits upstream after the mirror is created.
