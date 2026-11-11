@@ -290,7 +290,8 @@ github-app {
 }
 ```
 
-Installations can also be discovered dynamically via the GitHub API.
+Each App lists its installations via `GET /app/installations` at startup and every five minutes. Orgs matching no
+installation (case-insensitively) use the `fallback-org` token without further API calls.
 
 ## CLI
 
@@ -336,7 +337,7 @@ metrics {
 Admin endpoints: `/_liveness`, `/_readiness`, `PUT /admin/log/level`, `/admin/pprof/`.
 
 GitHub App installations are checked at startup and every minute via `/rate_limit`.
-The poller includes dynamically discovered installations and the configured fallback organization.
+The poller includes every listed installation and the configured fallback organization.
 
 | Metric | Type | Labels |
 | --- | --- | --- |
@@ -346,9 +347,9 @@ The poller includes dynamically discovered installations and the configured fall
 | `github.api_calls` | Counter | `owner`, `operation` |
 
 `app` is the configured App ID. `owner` identifies the installation actually used,
-including fallback credentials. Installation discovery uses `owner=unknown` because
-it authenticates as the App before resolving an installation. API calls for release
-metadata/assets, installation discovery, token creation and quota polling are counted. Responses with less than
+including fallback credentials. Installation listing uses `owner=unknown` because
+it authenticates as the App rather than an installation. API calls for release
+metadata/assets, installation listing, token creation and quota polling are counted. Responses with less than
 10% of their API quota remaining produce a warning. Static release tokens receive
 API call counts and warnings, but are not polled for quota gauges.
 

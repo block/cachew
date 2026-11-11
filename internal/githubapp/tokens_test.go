@@ -106,26 +106,46 @@ func TestNewTokenManagerProvider(t *testing.T) {
 	})
 }
 
+func installationsJSON(t *testing.T, owners map[int]string) string {
+	t.Helper()
+	installations := []map[string]any{}
+	for id, login := range owners {
+		installations = append(installations, map[string]any{"id": id, "account": map[string]string{"login": login}})
+	}
+	body, err := json.Marshal(installations)
+	assert.NoError(t, err)
+	return string(body)
+}
+
+func rejectInstallationLookups(t *testing.T, mux *http.ServeMux) {
+	t.Helper()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+		w.WriteHeader(http.StatusNotFound)
+	})
+}
+
 func TestGetTokenForOrgDynamicDiscovery(t *testing.T) {
-	// Mock GitHub API that returns installation IDs for known orgs
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /orgs/squareup/installation", func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(map[string]any{"id": 12345}) //nolint:errcheck
-	})
-	mux.HandleFunc("GET /orgs/AfterpayTouch/installation", func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(map[string]any{"id": 67890}) //nolint:errcheck
-	})
-	mux.HandleFunc("GET /orgs/unknown-org/installation", func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusNotFound)
-	})
-	mux.HandleFunc("GET /users/unknown-org/installation", func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusNotFound)
+	rejectInstallationLookups(t, mux)
+	mux.HandleFunc("GET /app/installations", func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "100", r.URL.Query().Get("per_page"))
+		switch r.URL.Query().Get("page") {
+		case "1":
+			owners := map[int]string{12345: "block"}
+			for i := range 99 {
+				owners[i+1] = fmt.Sprintf("filler-%d", i)
+			}
+			_, _ = fmt.Fprint(w, installationsJSON(t, owners))
+		case "2":
+			_, _ = fmt.Fprint(w, installationsJSON(t, map[int]string{67890: "AfterpayTouch"}))
+		default:
+			t.Errorf("unexpected page %q", r.URL.Query().Get("page"))
+		}
 	})
 	mux.HandleFunc("POST /app/installations/12345/access_tokens", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusCreated)
-		json.NewEncoder(w).Encode(map[string]any{"token": "ghs_squareup_token", "expires_at": "2099-01-01T00:00:00Z"}) //nolint:errcheck
+		json.NewEncoder(w).Encode(map[string]any{"token": "ghs_block_token", "expires_at": "2099-01-01T00:00:00Z"}) //nolint:errcheck
 	})
 	mux.HandleFunc("POST /app/installations/67890/access_tokens", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusCreated)
@@ -142,7 +162,7 @@ func TestGetTokenForOrgDynamicDiscovery(t *testing.T) {
 		{
 			AppID:          "111",
 			PrivateKeyPath: keyPath,
-			FallbackOrg:    "squareup",
+			FallbackOrg:    "block",
 		},
 	}, logger, server.URL, server.Client())
 
@@ -151,23 +171,23 @@ func TestGetTokenForOrgDynamicDiscovery(t *testing.T) {
 	t.Run("FallbackBeforeDiscovery", func(t *testing.T) {
 		token, installation, err := tm.GetTokenForOrgWithInstallation(ctx, "unknown-org")
 		assert.NoError(t, err)
-		assert.Equal(t, "ghs_squareup_token", token)
-		assert.Equal(t, githubapp.Installation{ID: "12345", Owner: "squareup"}, installation)
+		assert.Equal(t, "ghs_block_token", token)
+		assert.Equal(t, githubapp.Installation{ID: "12345", Owner: "block"}, installation)
 	})
 
 	t.Run("DiscoverAndCacheInstallation", func(t *testing.T) {
-		token, installation, err := tm.GetTokenForOrgWithInstallation(ctx, "squareup")
+		token, installation, err := tm.GetTokenForOrgWithInstallation(ctx, "block")
 		assert.NoError(t, err)
-		assert.Equal(t, "ghs_squareup_token", token)
-		assert.Equal(t, githubapp.Installation{ID: "12345", Owner: "squareup"}, installation)
+		assert.Equal(t, "ghs_block_token", token)
+		assert.Equal(t, githubapp.Installation{ID: "12345", Owner: "block"}, installation)
 
 		// Second call should use cache
-		token, err = tm.GetTokenForOrg(ctx, "squareup")
+		token, err = tm.GetTokenForOrg(ctx, "block")
 		assert.NoError(t, err)
-		assert.Equal(t, "ghs_squareup_token", token)
+		assert.Equal(t, "ghs_block_token", token)
 	})
 
-	t.Run("DiscoverNewOrg", func(t *testing.T) {
+	t.Run("DiscoverInstallationOnLaterPage", func(t *testing.T) {
 		token, installation, err := tm.GetTokenForOrgWithInstallation(ctx, "AfterpayTouch")
 		assert.NoError(t, err)
 		assert.Equal(t, "ghs_afterpay_token", token)
@@ -177,17 +197,15 @@ func TestGetTokenForOrgDynamicDiscovery(t *testing.T) {
 	t.Run("FallbackForUnknownOrg", func(t *testing.T) {
 		token, err := tm.GetTokenForOrg(ctx, "unknown-org")
 		assert.NoError(t, err)
-		assert.Equal(t, "ghs_squareup_token", token)
+		assert.Equal(t, "ghs_block_token", token)
 	})
 }
 
 func TestGetTokenForOrgNoFallback(t *testing.T) {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /orgs/unknown-org/installation", func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusNotFound)
-	})
-	mux.HandleFunc("GET /users/unknown-org/installation", func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusNotFound)
+	rejectInstallationLookups(t, mux)
+	mux.HandleFunc("GET /app/installations", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, `[]`)
 	})
 	server := httptest.NewServer(mux)
 	defer server.Close()
@@ -209,15 +227,12 @@ func TestGetTokenForOrgNoFallback(t *testing.T) {
 	assert.Contains(t, err.Error(), "no GitHub App installation found for org")
 }
 
-func TestGetTokenForOrgRetainsInstallationOwner(t *testing.T) {
+func TestGetTokenForOrgMatchesOwnerCaseInsensitively(t *testing.T) {
 	var mints atomic.Int64
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /orgs/{org}/installation", func(w http.ResponseWriter, r *http.Request) {
-		owner := "example-org"
-		if r.PathValue("org") == "renamed-org" {
-			owner = "renamed-org"
-		}
-		assert.NoError(t, json.NewEncoder(w).Encode(map[string]any{"id": 123, "account": map[string]string{"login": owner}}))
+	rejectInstallationLookups(t, mux)
+	mux.HandleFunc("GET /app/installations", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, installationsJSON(t, map[int]string{123: "Example-Org"}))
 	})
 	mux.HandleFunc("POST /app/installations/123/access_tokens", func(w http.ResponseWriter, _ *http.Request) {
 		mints.Add(1)
@@ -229,13 +244,60 @@ func TestGetTokenForOrgRetainsInstallationOwner(t *testing.T) {
 	manager := githubapp.NewTokenManagerForTest(t, []githubapp.Config{{AppID: "111", PrivateKeyPath: generateTestKey(t)}},
 		slog.Default(), server.URL, server.Client())
 	ctx := logging.ContextWithLogger(t.Context(), slog.Default())
-	for _, alias := range []string{"Example-Org", "example-org", "renamed-org"} {
+	for _, alias := range []string{"example-org", "EXAMPLE-ORG", "Example-Org"} {
 		token, installation, err := manager.GetTokenForOrgWithInstallation(ctx, alias)
 		assert.NoError(t, err)
 		assert.Equal(t, "test-token", token)
-		assert.Equal(t, githubapp.Installation{ID: "123", Owner: "example-org"}, installation)
+		assert.Equal(t, githubapp.Installation{ID: "123", Owner: "Example-Org"}, installation)
 	}
 	assert.Equal(t, int64(1), mints.Load())
+}
+
+func TestRefreshInstallationsFindsNewInstallations(t *testing.T) {
+	var listings atomic.Int64
+	var listingStatus atomic.Int64
+	listingStatus.Store(http.StatusOK)
+	var listing atomic.Value
+	listing.Store(installationsJSON(t, map[int]string{1: "block"}))
+	mux := http.NewServeMux()
+	rejectInstallationLookups(t, mux)
+	mux.HandleFunc("GET /app/installations", func(w http.ResponseWriter, _ *http.Request) {
+		listings.Add(1)
+		w.WriteHeader(int(listingStatus.Load()))
+		_, _ = fmt.Fprint(w, listing.Load())
+	})
+	mux.HandleFunc("POST /app/installations/{id}/access_tokens", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		_, _ = fmt.Fprintf(w, `{"token":"token-%s","expires_at":"2099-01-01T00:00:00Z"}`, r.PathValue("id"))
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	manager := githubapp.NewTokenManagerForTest(t, []githubapp.Config{{
+		AppID: "111", PrivateKeyPath: generateTestKey(t), FallbackOrg: "block",
+	}}, slog.Default(), server.URL, server.Client())
+	ctx := logging.ContextWithLogger(t.Context(), slog.Default())
+
+	for range 3 {
+		token, installation, err := manager.GetTokenForOrgWithInstallation(ctx, "cashapp")
+		assert.NoError(t, err)
+		assert.Equal(t, "token-1", token)
+		assert.Equal(t, githubapp.Installation{ID: "1", Owner: "block"}, installation)
+	}
+	assert.Equal(t, int64(1), listings.Load())
+
+	listing.Store(installationsJSON(t, map[int]string{1: "block", 2: "CashApp"}))
+	assert.NoError(t, manager.RefreshInstallations(ctx))
+	token, installation, err := manager.GetTokenForOrgWithInstallation(ctx, "cashapp")
+	assert.NoError(t, err)
+	assert.Equal(t, "token-2", token)
+	assert.Equal(t, githubapp.Installation{ID: "2", Owner: "CashApp"}, installation)
+
+	listingStatus.Store(http.StatusInternalServerError)
+	assert.Error(t, manager.RefreshInstallations(ctx))
+	token, err = manager.GetTokenForOrg(ctx, "cashapp")
+	assert.NoError(t, err)
+	assert.Equal(t, "token-2", token)
+	assert.Equal(t, int64(3), listings.Load())
 }
 
 func TestGetTokenForOrgNilManager(t *testing.T) {
@@ -245,7 +307,7 @@ func TestGetTokenForOrgNilManager(t *testing.T) {
 	assert.Contains(t, err.Error(), "not initialized")
 }
 
-func TestInstallationLookupMetricsUseBoundedOwner(t *testing.T) {
+func TestMissingInstallationsMakeNoPerOrgCalls(t *testing.T) {
 	previous := otel.GetMeterProvider()
 	reader := sdkmetric.NewManualReader()
 	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
@@ -254,13 +316,18 @@ func TestInstallationLookupMetricsUseBoundedOwner(t *testing.T) {
 		otel.SetMeterProvider(previous)
 		assert.NoError(t, provider.Shutdown(context.Background()))
 	})
-	server := httptest.NewServer(http.NotFoundHandler())
+	mux := http.NewServeMux()
+	rejectInstallationLookups(t, mux)
+	mux.HandleFunc("GET /app/installations", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, `[]`)
+	})
+	server := httptest.NewServer(mux)
 	defer server.Close()
 	manager := githubapp.NewTokenManagerForTest(t, []githubapp.Config{{AppID: "111", PrivateKeyPath: generateTestKey(t)}},
 		slog.Default(), server.URL, server.Client())
 	ctx := logging.ContextWithLogger(t.Context(), slog.Default())
 	for i := range 100 {
-		_, err := manager.GetTokenForOrg(ctx, fmt.Sprintf("nonexistent-org-%d", i))
+		_, err := manager.GetTokenForOrg(ctx, fmt.Sprintf("nonexistent-org-%d", i%10))
 		assert.Error(t, err)
 	}
 	var data metricdata.ResourceMetrics
@@ -277,9 +344,9 @@ func TestInstallationLookupMetricsUseBoundedOwner(t *testing.T) {
 		}
 	}
 	assert.Equal(t, 1, len(points))
-	assert.Equal(t, int64(200), points[0].Value)
+	assert.Equal(t, int64(1), points[0].Value)
 	assert.Equal(t, attribute.NewSet(attribute.String("owner", "unknown"),
-		attribute.String("operation", "lookup_installation")), points[0].Attributes)
+		attribute.String("operation", "list_installations")), points[0].Attributes)
 }
 
 func TestGetTokenForURLNilManager(t *testing.T) {
