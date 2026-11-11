@@ -60,11 +60,10 @@ func collectMetrics(t *testing.T, reader *sdkmetric.ManualReader) map[string][]m
 func cachedTestApp(server *httptest.Server, appID, owner, installationID string) *appState {
 	app := &appState{
 		appID: appID, apiBase: server.URL, httpClient: NewAPIClient(server.Client()),
-		cacheConfig: DefaultTokenCacheConfig(), installationCache: make(map[string]string),
-		installationOwners: make(map[string]string),
-		tokens:             map[string]*cachedToken{installationID: {token: "token-" + appID, expiresAt: time.Now().Add(time.Hour)}},
+		cacheConfig: DefaultTokenCacheConfig(),
+		tokens:      map[string]*cachedToken{installationID: {token: "token-" + appID, expiresAt: time.Now().Add(time.Hour)}},
 	}
-	app.rememberInstallation(owner, installationID, owner)
+	app.setInstallations(map[string]string{installationID: owner})
 	return app
 }
 
@@ -80,10 +79,9 @@ func TestRateLimitPollerSamplesInstallations(t *testing.T) {
 		_, _ = fmt.Fprint(w, `{"resources":{"core":{"remaining":4900,"limit":5000,"used":100},"search":{"remaining":30,"limit":30,"used":0}}}`)
 	}))
 	defer server.Close()
-	app := cachedTestApp(server, "111", "squareup", "123")
-	app.rememberInstallation("alias", "123", "alias")
-	otherApp := cachedTestApp(server, "222", "block", "456")
-	manager := &TokenManager{apps: []*appState{app, otherApp}, fallbackApp: app, fallbackOrg: "squareup"}
+	app := cachedTestApp(server, "111", "block", "123")
+	otherApp := cachedTestApp(server, "222", "example-org", "456")
+	manager := &TokenManager{apps: []*appState{app, otherApp}, fallbackApp: app, fallbackOrg: "block"}
 	assert.NoError(t, NewRateLimitPoller(manager, 0).poll(pollerContext(t)))
 	assert.Equal(t, int64(2), calls.Load())
 	data := collectMetrics(t, reader)
@@ -101,11 +99,11 @@ func TestRateLimitPollerSamplesInstallations(t *testing.T) {
 			owner, _ := point.Attributes.Value("owner")
 			if appID.AsString() == "111" {
 				assert.Equal(t, "123", installation.AsString())
-				assert.Equal(t, "squareup", owner.AsString())
+				assert.Equal(t, "block", owner.AsString())
 			} else {
 				assert.Equal(t, "222", appID.AsString())
 				assert.Equal(t, "456", installation.AsString())
-				assert.Equal(t, "block", owner.AsString())
+				assert.Equal(t, "example-org", owner.AsString())
 			}
 		}
 	}
@@ -117,11 +115,11 @@ func TestRateLimitPollerFindsNewInstallations(t *testing.T) {
 		_, _ = fmt.Fprint(w, `{"resources":{"core":{"remaining":50,"limit":100,"used":50}}}`)
 	}))
 	defer server.Close()
-	app := cachedTestApp(server, "111", "squareup", "123")
+	app := cachedTestApp(server, "111", "block", "123")
 	poller := NewRateLimitPoller(&TokenManager{apps: []*appState{app}}, 0)
 	assert.NoError(t, poller.poll(pollerContext(t)))
 	assert.Equal(t, 1, len(collectMetrics(t, reader)["github.ratelimit_remaining"]))
-	app.rememberInstallation("block", "456", "block")
+	app.setInstallations(map[string]string{"123": "block", "456": "example-org"})
 	app.mu.Lock()
 	app.tokens["456"] = &cachedToken{token: "later-token", expiresAt: time.Now().Add(time.Hour)}
 	app.mu.Unlock()
@@ -139,7 +137,7 @@ func TestRateLimitPrometheusExport(t *testing.T) {
 		_, _ = fmt.Fprint(w, `{"resources":{"core":{"remaining":42,"limit":100,"used":58}}}`)
 	}))
 	defer server.Close()
-	app := cachedTestApp(server, "111", "squareup", "123")
+	app := cachedTestApp(server, "111", "block", "123")
 	assert.NoError(t, NewRateLimitPoller(&TokenManager{apps: []*appState{app}}, 0).poll(pollerContext(t)))
 	response := httptest.NewRecorder()
 	client.Handler().ServeHTTP(response, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/metrics", nil))
@@ -147,31 +145,8 @@ func TestRateLimitPrometheusExport(t *testing.T) {
 	assert.Contains(t, response.Body.String(), `github_ratelimit_remaining{`)
 	assert.Contains(t, response.Body.String(), `app="111"`)
 	assert.Contains(t, response.Body.String(), `installation_id="123"`)
-	assert.Contains(t, response.Body.String(), `owner="squareup"`)
+	assert.Contains(t, response.Body.String(), `owner="block"`)
 	assert.Contains(t, response.Body.String(), `resource="core"`)
-}
-
-func TestRateLimitPollerRetainsOwnerAcrossAliases(t *testing.T) {
-	reader := newMetricReader(t)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = fmt.Fprint(w, `{"resources":{"core":{"remaining":42,"limit":100,"used":58}}}`)
-	}))
-	defer server.Close()
-	app := cachedTestApp(server, "111", "example-org", "123")
-	poller := NewRateLimitPoller(&TokenManager{apps: []*appState{app}}, 0)
-	for _, alias := range []string{"Example-Org", "old-name", "renamed-org"} {
-		app.rememberInstallation(alias, "123", alias)
-		token, installation, err := app.getToken(pollerContext(t), alias)
-		assert.NoError(t, err)
-		assert.Equal(t, "token-111", token)
-		assert.Equal(t, Installation{ID: "123", Owner: "example-org"}, installation)
-		assert.Equal(t, map[string]string{"123": "example-org"}, app.knownInstallations())
-		assert.NoError(t, poller.poll(pollerContext(t)))
-		points := collectMetrics(t, reader)["github.ratelimit_remaining"]
-		assert.Equal(t, 1, len(points))
-		assert.Equal(t, attribute.NewSet(attribute.String("app", "111"), attribute.String("owner", "example-org"),
-			attribute.String("installation_id", "123"), attribute.String("resource", "core")), points[0].Attributes)
-	}
 }
 
 func TestRateLimitPollerErrorsDoNotEmitZeroes(t *testing.T) {
@@ -190,7 +165,7 @@ func TestRateLimitPollerErrorsDoNotEmitZeroes(t *testing.T) {
 				_, _ = fmt.Fprint(w, tc.body)
 			}))
 			defer server.Close()
-			app := cachedTestApp(server, "111", "squareup", "123")
+			app := cachedTestApp(server, "111", "block", "123")
 			poller := NewRateLimitPoller(&TokenManager{apps: []*appState{app}}, 0)
 			assert.Error(t, poller.poll(pollerContext(t)))
 			assert.Zero(t, len(collectMetrics(t, reader)["github.ratelimit_remaining"]))
@@ -209,13 +184,13 @@ func TestRateLimitPollerContinuesAfterFailure(t *testing.T) {
 	}))
 	defer server.Close()
 	manager := &TokenManager{apps: []*appState{
-		cachedTestApp(server, "111", "squareup", "123"), cachedTestApp(server, "222", "block", "456"),
+		cachedTestApp(server, "111", "block", "123"), cachedTestApp(server, "222", "example-org", "456"),
 	}}
 	assert.Error(t, NewRateLimitPoller(manager, 0).poll(pollerContext(t)))
 	points := collectMetrics(t, reader)["github.ratelimit_remaining"]
 	assert.Equal(t, 1, len(points))
 	assert.Equal(t, int64(42), points[0].Value)
-	assert.Equal(t, attribute.NewSet(attribute.String("app", "222"), attribute.String("owner", "block"),
+	assert.Equal(t, attribute.NewSet(attribute.String("app", "222"), attribute.String("owner", "example-org"),
 		attribute.String("installation_id", "456"), attribute.String("resource", "core")), points[0].Attributes)
 }
 
@@ -232,7 +207,7 @@ func TestRateLimitPollerRun(t *testing.T) {
 	defer server.Close()
 	ctx, cancel := context.WithTimeout(pollerContext(t), time.Second)
 	defer cancel()
-	poller := NewRateLimitPoller(&TokenManager{apps: []*appState{cachedTestApp(server, "111", "squareup", "123")}}, time.Millisecond)
+	poller := NewRateLimitPoller(&TokenManager{apps: []*appState{cachedTestApp(server, "111", "block", "123")}}, time.Millisecond)
 	done := make(chan struct{})
 	go func() {
 		poller.Run(ctx, func(err error) { t.Error(err) })
@@ -307,7 +282,7 @@ func TestRateLimitPollerCancelsRequest(t *testing.T) {
 	defer server.Close()
 	ctx, cancel := context.WithCancel(pollerContext(t))
 	defer cancel()
-	poller := NewRateLimitPoller(&TokenManager{apps: []*appState{cachedTestApp(server, "111", "squareup", "123")}}, 0)
+	poller := NewRateLimitPoller(&TokenManager{apps: []*appState{cachedTestApp(server, "111", "block", "123")}}, 0)
 	done := make(chan struct{})
 	go func() {
 		poller.Run(ctx, func(err error) { t.Error(err) })

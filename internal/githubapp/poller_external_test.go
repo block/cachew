@@ -18,8 +18,8 @@ import (
 func TestRateLimitPollerBootstrapsFallback(t *testing.T) {
 	polled := make(chan struct{})
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /orgs/squareup/installation", func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = fmt.Fprint(w, `{"id":123}`)
+	mux.HandleFunc("GET /app/installations", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, `[{"id":123,"account":{"login":"block"}}]`)
 	})
 	mux.HandleFunc("POST /app/installations/123/access_tokens", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusCreated)
@@ -33,7 +33,7 @@ func TestRateLimitPollerBootstrapsFallback(t *testing.T) {
 	server := httptest.NewServer(mux)
 	defer server.Close()
 	manager := githubapp.NewTokenManagerForTest(t, []githubapp.Config{{}, {
-		AppID: "111", PrivateKeyPath: generateTestKey(t), FallbackOrg: "squareup",
+		AppID: "111", PrivateKeyPath: generateTestKey(t), FallbackOrg: "block",
 	}}, slog.Default(), server.URL, server.Client())
 	ctx, cancel := context.WithCancel(logging.ContextWithLogger(t.Context(), slog.Default()))
 	defer cancel()

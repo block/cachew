@@ -38,9 +38,10 @@ type appState struct {
 	httpClient   *http.Client
 	apiBase      string
 
+	listMu             sync.Mutex // serialises installation listings
 	installationMu     sync.RWMutex
-	installationCache  map[string]string // org -> installation ID (dynamically discovered)
-	installationOwners map[string]string // installation ID -> stable owner
+	installations      map[string]string // lowercased account login -> installation ID, nil until listed
+	installationOwners map[string]string // installation ID -> account login
 
 	mu     sync.RWMutex
 	tokens map[string]*cachedToken
@@ -53,16 +54,13 @@ type cachedToken struct {
 
 // TokenManager manages GitHub App installation tokens across one or more apps.
 type TokenManager struct {
-	mu       sync.RWMutex
-	orgToApp map[string]*appState
-
-	apps        []*appState // all configured apps, for dynamic installation discovery
+	apps        []*appState
 	fallbackApp *appState
 	fallbackOrg string
 }
 
 func newTokenManager(configs []Config, logger *slog.Logger, apiBase string, httpClient *http.Client) (*TokenManager, error) {
-	tm := &TokenManager{orgToApp: make(map[string]*appState)}
+	tm := &TokenManager{}
 
 	for _, config := range configs {
 		hasAny := config.AppID != "" || config.PrivateKeyPath != ""
@@ -81,14 +79,12 @@ func newTokenManager(configs []Config, logger *slog.Logger, apiBase string, http
 		}
 
 		app := &appState{
-			appID:              config.AppID,
-			jwtGenerator:       jwtGen,
-			cacheConfig:        cacheConfig,
-			httpClient:         NewAPIClient(httpClient),
-			apiBase:            apiBase,
-			installationCache:  make(map[string]string),
-			installationOwners: make(map[string]string),
-			tokens:             make(map[string]*cachedToken),
+			appID:        config.AppID,
+			jwtGenerator: jwtGen,
+			cacheConfig:  cacheConfig,
+			httpClient:   NewAPIClient(httpClient),
+			apiBase:      apiBase,
+			tokens:       make(map[string]*cachedToken),
 		}
 		tm.apps = append(tm.apps, app)
 
@@ -107,9 +103,8 @@ func newTokenManager(configs []Config, logger *slog.Logger, apiBase string, http
 }
 
 // GetTokenForOrg returns an installation token for the given GitHub organization.
-// It dynamically discovers the installation ID via the GitHub API on first use,
-// caches the result, and falls back to the fallback org's token for orgs where
-// the app is not installed.
+// Installations are listed via the GitHub API on first use and refreshed by
+// RunInstallationRefresh. Orgs without an installation get the fallback org's token.
 func (tm *TokenManager) GetTokenForOrg(ctx context.Context, org string) (string, error) {
 	token, _, err := tm.GetTokenForOrgWithInstallation(ctx, org)
 	return token, err
@@ -129,42 +124,61 @@ func (tm *TokenManager) GetTokenForOrgWithInstallation(ctx context.Context, org 
 	}
 
 	logger := logging.FromContext(ctx)
-
-	// Check cached discovery first
-	tm.mu.RLock()
-	app, ok := tm.orgToApp[org]
-	tm.mu.RUnlock()
-	if ok {
-		return app.getToken(ctx, org)
-	}
-
-	// Discover installation via GitHub API
 	for _, app := range tm.apps {
 		installationID, err := app.lookupInstallationID(ctx, org)
 		if err != nil {
-			logger.DebugContext(ctx, "Dynamic installation lookup failed", "org", org, "app_id", app.appID, "error", err)
+			logger.DebugContext(ctx, "GitHub App installation lookup failed", "org", org, "app_id", app.appID, "error", err)
 			continue
 		}
-
-		logger.InfoContext(ctx, "Dynamically discovered GitHub App installation", "org", org, "app_id", app.appID, "installation_id", installationID)
-
-		// Cache the mapping for future requests
-		tm.mu.Lock()
-		tm.orgToApp[org] = app
-		tm.mu.Unlock()
-		return app.getToken(ctx, org)
+		return app.getInstallationToken(ctx, installationID)
 	}
 
-	// Fall back to fallback org
 	if tm.fallbackApp != nil {
 		logger.InfoContext(ctx, "Using fallback org token", "requested_org", org, "fallback_org", tm.fallbackOrg)
-		if _, err := tm.fallbackApp.lookupInstallationID(ctx, tm.fallbackOrg); err != nil {
+		installationID, err := tm.fallbackApp.lookupInstallationID(ctx, tm.fallbackOrg)
+		if err != nil {
 			return "", Installation{}, errors.Wrap(err, "resolve fallback installation")
 		}
-		return tm.fallbackApp.getToken(ctx, tm.fallbackOrg)
+		return tm.fallbackApp.getInstallationToken(ctx, installationID)
 	}
 
 	return "", Installation{}, errors.Errorf("no GitHub App installation found for org: %s", org)
+}
+
+// RefreshInstallations relists the installations of every configured app. An app
+// whose listing fails keeps its previously known installations.
+func (tm *TokenManager) RefreshInstallations(ctx context.Context) error {
+	var errs []error
+	for _, app := range tm.apps {
+		if err := app.refreshInstallations(ctx); err != nil {
+			errs = append(errs, errors.Wrapf(err, "app %s", app.appID))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+const installationRefreshInterval = 5 * time.Minute
+const installationRefreshTimeout = 30 * time.Second
+
+// RunInstallationRefresh calls RefreshInstallations now and every five minutes until
+// ctx is cancelled, so installations added later are found. It passes failures to
+// onError, which must be non-nil.
+func (tm *TokenManager) RunInstallationRefresh(ctx context.Context, onError func(error)) {
+	ticker := time.NewTicker(installationRefreshInterval)
+	defer ticker.Stop()
+	for {
+		refreshCtx, cancel := context.WithTimeout(ctx, installationRefreshTimeout)
+		err := tm.RefreshInstallations(refreshCtx)
+		cancel()
+		if err != nil && ctx.Err() == nil {
+			onError(err)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
 }
 
 // GetTokenForURL extracts the org from a GitHub URL and returns an installation token.
@@ -178,16 +192,6 @@ func (tm *TokenManager) GetTokenForURL(ctx context.Context, url string) (string,
 	}
 
 	return tm.GetTokenForOrg(ctx, org)
-}
-
-func (a *appState) getToken(ctx context.Context, org string) (string, Installation, error) {
-	a.installationMu.RLock()
-	installationID := a.installationCache[org]
-	a.installationMu.RUnlock()
-	if installationID == "" {
-		return "", Installation{}, errors.Errorf("no installation ID for org: %s", org)
-	}
-	return a.getInstallationToken(ctx, installationID)
 }
 
 func (a *appState) getInstallationToken(ctx context.Context, installationID string) (string, Installation, error) {
@@ -266,85 +270,117 @@ func (a *appState) fetchInstallationToken(ctx context.Context, org, installation
 	return result.Token, result.ExpiresAt, nil
 }
 
-// lookupInstallationID queries the GitHub API to find the installation ID for the
-// given org. It tries /orgs/{org}/installation first, then /users/{user}/installation.
-// Results are cached in installationCache.
+// lookupInstallationID returns the app's installation ID for the given org or user
+// from the listed installations, listing them first if they have never been listed.
 func (a *appState) lookupInstallationID(ctx context.Context, org string) (string, error) {
-	// Check cache first
+	if err := a.ensureInstallations(ctx); err != nil {
+		return "", err
+	}
 	a.installationMu.RLock()
-	if id, ok := a.installationCache[org]; ok {
-		a.installationMu.RUnlock()
-		return id, nil
-	}
+	id, ok := a.installations[strings.ToLower(org)]
 	a.installationMu.RUnlock()
-
-	jwt, err := a.jwtGenerator.GenerateJWT()
-	if err != nil {
-		return "", errors.Wrap(err, "generate JWT")
+	if !ok {
+		return "", errors.Errorf("no GitHub App installation found for %s", org)
 	}
-
-	// Try org endpoint first, then user endpoint
-	for _, endpoint := range []string{
-		fmt.Sprintf("%s/orgs/%s/installation", a.apiBase, org),
-		fmt.Sprintf("%s/users/%s/installation", a.apiBase, org),
-	} {
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
-		if err != nil {
-			return "", errors.Wrap(err, "create request")
-		}
-
-		req.Header.Set("Accept", "application/vnd.github+json")
-		req.Header.Set("Authorization", "Bearer "+jwt)
-		req = req.WithContext(httputil.WithCooldownScope(req.Context(), "github-app:"+a.appID))
-		req.Header.Set("X-Github-Api-Version", "2022-11-28")
-
-		resp, err := a.httpClient.Do(WithAPIMetrics(req, "unknown", "lookup_installation"))
-		if err != nil {
-			return "", errors.Wrap(err, "execute request")
-		}
-		defer resp.Body.Close()
-
-		if resp.StatusCode == http.StatusNotFound {
-			continue
-		}
-
-		if resp.StatusCode != http.StatusOK {
-			return "", errors.Errorf("GitHub API returned status %d for %s", resp.StatusCode, endpoint)
-		}
-
-		var result struct {
-			ID      int64 `json:"id"`
-			Account struct {
-				Login string `json:"login"`
-			} `json:"account"`
-		}
-		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-			return "", errors.Wrap(err, "decode response")
-		}
-
-		installationID := strconv.FormatInt(result.ID, 10)
-
-		a.rememberInstallation(org, installationID, result.Account.Login)
-
-		return installationID, nil
-	}
-
-	return "", errors.Errorf("no GitHub App installation found for %s", org)
+	return id, nil
 }
 
-func (a *appState) rememberInstallation(org, installationID, owner string) {
-	if owner == "" {
-		owner = org
+func (a *appState) ensureInstallations(ctx context.Context) error {
+	if a.listed() {
+		return nil
+	}
+	a.listMu.Lock()
+	defer a.listMu.Unlock()
+	if a.listed() {
+		return nil
+	}
+	return a.listInstallations(ctx)
+}
+
+func (a *appState) listed() bool {
+	a.installationMu.RLock()
+	defer a.installationMu.RUnlock()
+	return a.installations != nil
+}
+
+// refreshInstallations replaces the known installations with the app's current
+// installations, keeping the previous set if listing fails.
+func (a *appState) refreshInstallations(ctx context.Context) error {
+	a.listMu.Lock()
+	defer a.listMu.Unlock()
+	return a.listInstallations(ctx)
+}
+
+func (a *appState) listInstallations(ctx context.Context) error {
+	jwt, err := a.jwtGenerator.GenerateJWT()
+	if err != nil {
+		return errors.Wrap(err, "generate JWT")
+	}
+	owners := map[string]string{}
+	for page := 1; ; page++ {
+		installations, err := a.listInstallationsPage(ctx, jwt, page)
+		if err != nil {
+			return err
+		}
+		for _, installation := range installations {
+			if installation.Account.Login != "" {
+				owners[strconv.FormatInt(installation.ID, 10)] = installation.Account.Login
+			}
+		}
+		if len(installations) < installationsPerPage {
+			break
+		}
+	}
+	a.setInstallations(owners)
+	return nil
+}
+
+const installationsPerPage = 100
+
+type listedInstallation struct {
+	ID      int64 `json:"id"`
+	Account struct {
+		Login string `json:"login"`
+	} `json:"account"`
+}
+
+func (a *appState) listInstallationsPage(ctx context.Context, jwt string, page int) ([]listedInstallation, error) {
+	url := fmt.Sprintf("%s/app/installations?per_page=%d&page=%d", a.apiBase, installationsPerPage, page)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, errors.Wrap(err, "create request")
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("Authorization", "Bearer "+jwt)
+	req = req.WithContext(httputil.WithCooldownScope(req.Context(), "github-app:"+a.appID))
+	req.Header.Set("X-Github-Api-Version", "2022-11-28")
+
+	resp, err := a.httpClient.Do(WithAPIMetrics(req, "unknown", "list_installations"))
+	if err != nil {
+		return nil, errors.Wrap(err, "list installations")
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, errors.Errorf("GitHub API returned status %d for %s", resp.StatusCode, url)
+	}
+	var installations []listedInstallation
+	if err := json.NewDecoder(resp.Body).Decode(&installations); err != nil {
+		return nil, errors.Wrap(err, "decode installations")
+	}
+	return installations, nil
+}
+
+// setInstallations replaces the known installations, keyed by installation ID with
+// the account login as the owner.
+func (a *appState) setInstallations(owners map[string]string) {
+	installations := make(map[string]string, len(owners))
+	for id, owner := range owners {
+		installations[strings.ToLower(owner)] = id
 	}
 	a.installationMu.Lock()
 	defer a.installationMu.Unlock()
-	if canonical, ok := a.installationOwners[installationID]; ok {
-		owner = canonical
-	} else {
-		a.installationOwners[installationID] = owner
-	}
-	a.installationCache[org] = installationID
-	a.installationCache[owner] = installationID
+	a.installations = installations
+	a.installationOwners = owners
 }
 
 func extractOrgFromURL(url string) (string, error) {
