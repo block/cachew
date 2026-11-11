@@ -48,3 +48,11 @@ func newLimitedReadCloser(rc io.ReadCloser, length int64) io.ReadCloser {
 }
 
 func (l limitedReadCloser) Close() error { return errors.Wrap(l.closer.Close(), "close range reader") }
+
+// WriteTo hands w the underlying *io.LimitedReader rather than this wrapper.
+// net/http passes it to the connection's ReadFrom, which recognises a
+// LimitedReader over an *os.File and serves a disk range with sendfile(2).
+func (l limitedReadCloser) WriteTo(w io.Writer) (int64, error) {
+	n, err := io.Copy(w, l.Reader)
+	return n, errors.Wrap(err, "copy range")
+}
