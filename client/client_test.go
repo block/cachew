@@ -406,6 +406,28 @@ func TestArchiveExtract(t *testing.T) {
 	assert.False(t, slices.Contains(names, "y.log"))
 }
 
+func TestArchiveExtractPreservesOutOfTreeSymlinks(t *testing.T) {
+	src := t.TempDir()
+	links := map[string]string{"abs": "/usr/bin/env", "rel": "../outside"}
+	for name, target := range links {
+		assert.NoError(t, os.Symlink(target, filepath.Join(src, name)))
+	}
+
+	var buf bytes.Buffer
+	assert.NoError(t, client.Archive(t.Context(), &buf, src, []string{"."}, nil, 0))
+
+	dst := filepath.Join(t.TempDir(), "out")
+	assert.NoError(t, client.Extract(t.Context(), &buf, dst, 0))
+
+	got := map[string]string{}
+	for name := range links {
+		target, err := os.Readlink(filepath.Join(dst, name))
+		assert.NoError(t, err)
+		got[name] = target
+	}
+	assert.Equal(t, links, got)
+}
+
 func TestExtractOverReadOnlyTree(t *testing.T) {
 	src := t.TempDir()
 	assert.NoError(t, os.MkdirAll(filepath.Join(src, "pkg", "conf"), 0o755))
