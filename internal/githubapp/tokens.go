@@ -24,7 +24,7 @@ type TokenManagerProvider func() (*TokenManager, error)
 // from one or more GitHub App configurations.
 func NewTokenManagerProvider(configs []Config, logger *slog.Logger) TokenManagerProvider {
 	return sync.OnceValues(func() (*TokenManager, error) {
-		return newTokenManager(configs, logger, githubAPIBase, http.DefaultClient)
+		return newTokenManager(configs, logger, githubAPIBase, httputil.UpstreamClient())
 	})
 }
 

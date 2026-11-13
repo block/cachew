@@ -12,6 +12,7 @@ import (
 
 	"github.com/block/cachew/internal/cache"
 	"github.com/block/cachew/internal/gitclone"
+	"github.com/block/cachew/internal/httputil"
 	"github.com/block/cachew/internal/logging"
 	"github.com/block/cachew/internal/strategy"
 )
@@ -64,6 +65,7 @@ func New(ctx context.Context, config Config, cache cache.Cache, mux strategy.Mux
 	}
 
 	publicFetcher := &goproxy.GoFetcher{
+		Transport: httputil.UpstreamTransport(),
 		Env: []string{
 			"GOPROXY=" + config.Proxy,
 			"GOSUMDB=off", // Disable checksum database validation in fetcher, to prevent unneccessary double validation
@@ -81,8 +83,9 @@ func New(ctx context.Context, config Config, cache cache.Cache, mux strategy.Mux
 	}
 
 	s.goproxy = &goproxy.Goproxy{
-		Logger:  s.logger,
-		Fetcher: fetcher,
+		Logger:    s.logger,
+		Fetcher:   fetcher,
+		Transport: httputil.UpstreamTransport(),
 		Cacher: &goproxyCacher{
 			cache: cache,
 		},

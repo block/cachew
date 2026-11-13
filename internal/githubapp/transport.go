@@ -33,7 +33,7 @@ func NewAPIClient(base *http.Client) *http.Client {
 	client := *base
 	transport := client.Transport
 	if transport == nil {
-		transport = http.DefaultTransport
+		transport = httputil.UpstreamTransport()
 	}
 	client.Transport = &apiTransport{
 		base: transport,

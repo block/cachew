@@ -160,7 +160,7 @@ func New(
 		config:         config,
 		cache:          cache,
 		cloneManager:   cloneManager,
-		httpClient:     http.DefaultClient,
+		httpClient:     cachewhttputil.UpstreamClient(),
 		ctx:            ctx,
 		scheduler:      scheduler.WithQueuePrefix("git"),
 		spoolRegistry:  spools,

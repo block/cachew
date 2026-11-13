@@ -69,13 +69,13 @@ func NewHost(_ context.Context, config HostConfig, cache cache.Cache, mux Mux, s
 	h := &Host{
 		target:  u,
 		cache:   cache,
-		client:  &http.Client{},
+		client:  httputil.UpstreamClient(),
 		prefix:  prefix,
 		headers: config.Headers,
 	}
 
 	if len(config.Fallbacks) > 0 {
-		transport := &hostFallbackTransport{client: &http.Client{Transport: http.DefaultTransport}}
+		transport := &hostFallbackTransport{client: httputil.UpstreamClient()}
 		for _, config := range config.Fallbacks {
 			target, err := url.Parse(config.Target)
 			if err != nil || target.Host == "" || (target.Scheme != "http" && target.Scheme != "https") ||

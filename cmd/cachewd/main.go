@@ -460,10 +460,13 @@ func configureProcess(logger *slog.Logger, mutexProfileFraction int, upstreamBac
 	// side-effect import; OPA gates external access.
 	runtime.SetMutexProfileFraction(mutexProfileFraction)
 
-	// Every strategy that uses http.DefaultTransport shares one set of
+	// Every strategy that uses httputil.UpstreamTransport shares one set of
 	// per-hostname and per-credential 429 cooldowns. Origin metrics sit below the cooldowns so that
 	// requests rejected during a cooldown are not counted as origin traffic.
-	http.DefaultTransport = httputil.NewBackoffTransport(metrics.NewOriginTransport(http.DefaultTransport), upstreamBackoff, upstreamBackoffMax, logger) //nolint:reassign
+	// http.DefaultTransport itself stays a *http.Transport: OPA's http.send
+	// asserts that type whenever a policy sets a TLS option, and panics on a
+	// wrapper.
+	httputil.SetUpstreamTransport(httputil.NewBackoffTransport(metrics.NewOriginTransport(http.DefaultTransport), upstreamBackoff, upstreamBackoffMax, logger))
 }
 
 // loadGlobalConfig unmarshals the global config from HCL, using a two-pass

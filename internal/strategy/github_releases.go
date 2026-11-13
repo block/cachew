@@ -61,7 +61,7 @@ func NewGitHubReleases(ctx context.Context, config GitHubReleasesConfig, cache c
 	s := &GitHubReleases{
 		config:       config,
 		cache:        cache,
-		client:       githubapp.NewAPIClient(http.DefaultClient),
+		client:       githubapp.NewAPIClient(httputil.UpstreamClient()),
 		tokenManager: tokenManager,
 	}
 	// eg. https://github.com/alecthomas/chroma/releases/download/v2.21.1/chroma-2.21.1-darwin-amd64.tar.gz

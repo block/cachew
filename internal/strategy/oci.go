@@ -103,7 +103,7 @@ func NewOCI(ctx context.Context, config OCIConfig, c cache.Cache, mux Mux, spool
 	if err != nil {
 		return nil, err
 	}
-	transport, err := newOCITransport(upstream, config.Username, config.Password, http.DefaultTransport)
+	transport, err := newOCITransport(upstream, config.Username, config.Password, httputil.UpstreamTransport())
 	if err != nil {
 		return nil, err
 	}
