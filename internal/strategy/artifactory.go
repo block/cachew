@@ -70,7 +70,7 @@ func NewArtifactory(ctx context.Context, config ArtifactoryConfig, cache cache.C
 	a := &Artifactory{
 		target: u,
 		cache:  cache,
-		client: &http.Client{},
+		client: httputil.UpstreamClient(),
 		logger: logging.FromContext(ctx),
 	}
 
