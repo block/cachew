@@ -23,7 +23,7 @@ type TokenManagerProvider func() (*TokenManager, error)
 // NewTokenManagerProvider returns a provider that lazily builds a TokenManager from GitHub App configs.
 func NewTokenManagerProvider(configs []Config, logger *slog.Logger) TokenManagerProvider {
 	return sync.OnceValues(func() (*TokenManager, error) {
-		return newTokenManager(configs, logger, githubAPIBase, http.DefaultClient)
+		return newTokenManager(configs, logger, githubAPIBase, httputil.UpstreamClient())
 	})
 }
 
