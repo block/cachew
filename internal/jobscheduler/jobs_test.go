@@ -158,6 +158,51 @@ func TestJobSchedulerQueueIsolation(t *testing.T) {
 		"queue2 should never run more than 1 job concurrently")
 }
 
+func TestJobSchedulerDedupesWaitingJobs(t *testing.T) {
+	_, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelError})
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	scheduler := newTestScheduler(ctx, t, jobscheduler.Config{Concurrency: 4})
+
+	release := make(chan struct{})
+	var started, fetches, others atomic.Int32
+	submitFetch := func() {
+		scheduler.Submit("repo", "fetch", func(_ context.Context) error {
+			if started.Add(1) == 1 {
+				<-release
+			}
+			fetches.Add(1)
+			return nil
+		})
+	}
+
+	submitFetch()
+	eventually(t, time.Second, func() bool { return started.Load() == 1 }, "first fetch should start")
+
+	// The running fetch doesn't absorb new submissions, but every one after the first waiting copy is dropped.
+	for range 5 {
+		submitFetch()
+	}
+	scheduler.Submit("repo", "repack", func(_ context.Context) error {
+		others.Add(1)
+		return nil
+	})
+	assert.True(t, scheduler.TrySubmit("repo", "fetch", 1, func(_ context.Context) error {
+		t.Error("deduped TrySubmit job should not run")
+		return nil
+	}))
+	close(release)
+
+	eventually(t, time.Second, func() bool { return fetches.Load() == 2 && others.Load() == 1 },
+		"one running and one waiting fetch should run, plus the repack")
+	time.Sleep(50 * time.Millisecond)
+	assert.Equal(t, int32(2), fetches.Load())
+
+	submitFetch()
+	eventually(t, time.Second, func() bool { return fetches.Load() == 3 }, "fetch submitted after the queue drained should run")
+}
+
 func TestJobSchedulerJobOrdering(t *testing.T) {
 	_, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelError})
 	ctx, cancel := context.WithCancel(ctx)
