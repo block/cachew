@@ -46,9 +46,11 @@ type Scheduler interface {
 	WithQueuePrefix(prefix string) Scheduler
 	// Submit a job to the queue.
 	//
-	// Jobs run concurrently across queues, but never within a queue.
+	// Jobs run concurrently across queues, but never within a queue. A job is dropped when one with the same queue
+	// and id is already waiting to run.
 	Submit(queue, id string, run func(ctx context.Context) error)
-	// TrySubmit adds a job only if fewer than maxQueued jobs wait across all queues.
+	// TrySubmit adds a job only if fewer than maxQueued jobs wait across all queues. A job with the same queue and id
+	// that is already waiting counts as accepted.
 	TrySubmit(queue, id string, maxQueued int, run func(ctx context.Context) error) bool
 	// SubmitPeriodicJob submits a job to the queue that runs immediately, and then periodically after the interval.
 	//
@@ -86,7 +88,8 @@ type RootScheduler struct {
 	done                bool
 	draining            bool
 	queue               []queueJob
-	active              map[string]string // queue -> job id
+	queued              map[string]struct{} // jobKey of every waiting job
+	active              map[string]string   // queue -> job id
 	activeClones        int
 	maxCloneConcurrency int
 	// ctx is cancelled when the scheduler is torn down; periodic re-arm
@@ -132,6 +135,7 @@ func New(ctx context.Context, config Config) (*RootScheduler, error) {
 	}
 	m := newSchedulerMetrics()
 	q := &RootScheduler{
+		queued:              make(map[string]struct{}),
 		active:              make(map[string]string),
 		maxCloneConcurrency: maxClones,
 		store:               store,
@@ -190,23 +194,42 @@ func (q *RootScheduler) Submit(queue, id string, run func(ctx context.Context) e
 		q.lock.Unlock()
 		return
 	}
-	q.queue = append(q.queue, queueJob{queue: queue, id: id, run: run})
-	q.metrics.queueDepth.Record(context.Background(), int64(len(q.queue)))
+	enqueued := q.enqueueLocked(queue, id, run)
 	q.lock.Unlock()
-	q.cond.Signal()
+	if enqueued {
+		q.cond.Signal()
+	}
 }
 
 // TrySubmit limits the queue size without a wait. It rejects new jobs during shutdown.
 func (q *RootScheduler) TrySubmit(queue, id string, maxQueued int, run func(ctx context.Context) error) bool {
 	q.lock.Lock()
-	if q.done || q.draining || maxQueued <= 0 || len(q.queue) >= maxQueued {
+	if q.done || q.draining || maxQueued <= 0 {
 		q.lock.Unlock()
 		return false
 	}
-	q.queue = append(q.queue, queueJob{queue: queue, id: id, run: run})
-	q.metrics.queueDepth.Record(context.Background(), int64(len(q.queue)))
+	if _, waiting := q.queued[jobKey(queue, id)]; waiting {
+		q.lock.Unlock()
+		return true
+	}
+	if len(q.queue) >= maxQueued {
+		q.lock.Unlock()
+		return false
+	}
+	q.enqueueLocked(queue, id, run)
 	q.lock.Unlock()
 	q.cond.Signal()
+	return true
+}
+
+func (q *RootScheduler) enqueueLocked(queue, id string, run func(ctx context.Context) error) bool {
+	key := jobKey(queue, id)
+	if _, waiting := q.queued[key]; waiting {
+		return false
+	}
+	q.queued[key] = struct{}{}
+	q.queue = append(q.queue, queueJob{queue: queue, id: id, run: run})
+	q.metrics.queueDepth.Record(context.Background(), int64(len(q.queue)))
 	return true
 }
 
@@ -393,6 +416,7 @@ func (q *RootScheduler) takeNextJobLocked() (queueJob, bool) {
 			continue
 		}
 		q.queue = append(q.queue[:i], q.queue[i+1:]...)
+		delete(q.queued, jobKey(job.queue, job.id))
 		q.active[job.queue] = job.id
 		if isCloneJob(job.id) {
 			q.activeClones++
