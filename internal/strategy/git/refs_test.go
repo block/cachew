@@ -52,6 +52,8 @@ func TestEnsureRefsHandler(t *testing.T) {
 		assert.NoError(t, exec.Command("git", args...).Run())
 	}
 
+	setInfoRefsLsRemote(t, upstreamPath, false)
+
 	mirrorPath := filepath.Join(mirrorRoot, "local", "repo")
 	assert.NoError(t, exec.Command("git", "clone", "--mirror", upstreamPath, mirrorPath).Run())
 
