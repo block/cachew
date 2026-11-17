@@ -3,6 +3,7 @@ package gitclone
 import (
 	"context"
 	"io/fs"
+	"maps"
 	"net/url"
 	"os"
 	"os/exec"
@@ -91,10 +92,13 @@ type Repository struct {
 	path        string
 	upstreamURL string
 	// metaMu guards per-request/per-fetch bookkeeping so it never writes mu.
-	metaMu             sync.Mutex
-	lastFetch          time.Time
-	lastRefCheck       time.Time
-	refCheckValid      bool
+	metaMu        sync.Mutex
+	lastFetch     time.Time
+	lastRefCheck  time.Time
+	refCheckValid bool
+	// unsatisfiable records when upstream was last found unable to satisfy
+	// an EnsureRefs entry, so repeat requests skip the upstream round trip.
+	unsatisfiable      map[string]time.Time
 	fetchSem           chan struct{}
 	credentialProvider CredentialProvider
 }
@@ -856,28 +860,15 @@ func (r *Repository) EnsureRefsUpToDate(ctx context.Context) (needsFetch bool, e
 		return false, errors.Wrap(err, "get local refs")
 	}
 
-	lsCtx, cancel := context.WithTimeout(ctx, r.config.LsRemoteTimeout)
-	defer cancel()
-
-	upstreamRefs, err := r.GetUpstreamRefs(lsCtx)
+	behind, err := r.behindUpstream(ctx, localRefs, isBranch)
 	if err != nil {
-		return false, errors.Wrap(err, "get upstream refs")
+		return false, err
 	}
-
-	for ref, upstreamSHA := range upstreamRefs {
-		if strings.HasSuffix(ref, "^{}") {
-			continue
-		}
-		if !strings.HasPrefix(ref, "refs/heads/") {
-			continue
-		}
-		localSHA, exists := localRefs[ref]
-		if !exists || localSHA != upstreamSHA {
-			r.metaMu.Lock()
-			r.refCheckValid = false
-			r.metaMu.Unlock()
-			return true, nil
-		}
+	if behind {
+		r.metaMu.Lock()
+		r.refCheckValid = false
+		r.metaMu.Unlock()
+		return true, nil
 	}
 
 	r.metaMu.Lock()
@@ -887,19 +878,28 @@ func (r *Repository) EnsureRefsUpToDate(ctx context.Context) (needsFetch bool, e
 	return false, nil
 }
 
-// EnsureRefs guarantees the local mirror satisfies the caller's freshness
-// requirements. A ref entry is satisfied when the local mirror has the ref
-// at the given SHA (or any SHA, if the value is empty). A commit entry is
-// satisfied when the commit exists in the local object database, regardless
-// of which ref points at it. If anything is unsatisfied, EnsureRefs
-// synchronously fetches from upstream once and then re-checks.
-//
-// Resolved maps each requested ref to its current local SHA (empty if the
-// ref is still missing after the fetch). MissingCommits lists requested
-// commits that still are not present locally after the fetch.
-//
-// This bypasses RefCheckInterval because callers are explicitly asserting
-// they require these refs/commits to be fresh right now.
+func (r *Repository) behindUpstream(
+	ctx context.Context, localRefs map[string]string, compared func(ref string) bool,
+) (bool, error) {
+	lsCtx, cancel := context.WithTimeout(ctx, r.config.LsRemoteTimeout)
+	defer cancel()
+	upstreamRefs, err := r.GetUpstreamRefs(lsCtx)
+	if err != nil {
+		return false, errors.Wrap(err, "get upstream refs")
+	}
+	for ref, upstreamSHA := range upstreamRefs {
+		if strings.HasSuffix(ref, "^{}") || !compared(ref) {
+			continue
+		}
+		if localSHA, exists := localRefs[ref]; !exists || localSHA != upstreamSHA {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// EnsureRefs makes the mirror satisfy the caller's refs and commits, fetching
+// at most once and only when upstream has something the mirror lacks.
 func (r *Repository) EnsureRefs(
 	ctx context.Context, refs map[string]string, commits []string,
 ) (resolved map[string]string, missingCommits []string, fetched bool, err error) {
@@ -907,12 +907,14 @@ func (r *Repository) EnsureRefs(
 	if err != nil {
 		return nil, nil, false, errors.Wrap(err, "get local refs")
 	}
+	entries, missingCommits := r.unsatisfied(ctx, localRefs, refs, commits)
 
-	if refsSatisfied(localRefs, refs) {
-		missing := r.missingCommitsLocked(ctx, commits)
-		if len(missing) == 0 {
-			return resolvedRefs(localRefs, refs), nil, false, nil
-		}
+	needsFetch, err := r.ensureNeedsFetch(ctx, localRefs, refs, entries)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	if !needsFetch {
+		return resolvedRefs(localRefs, refs), missingCommits, false, nil
 	}
 
 	if err := r.FetchWithTimeout(ctx, r.config.FetchTimeout); err != nil {
@@ -929,7 +931,115 @@ func (r *Repository) EnsureRefs(
 	if err != nil {
 		return nil, nil, true, errors.Wrap(err, "get local refs after fetch")
 	}
-	return resolvedRefs(localRefs, refs), r.missingCommitsLocked(ctx, commits), true, nil
+	entries, missingCommits = r.unsatisfied(ctx, localRefs, refs, commits)
+	r.rememberUnsatisfiable(entries)
+	return resolvedRefs(localRefs, refs), missingCommits, true, nil
+}
+
+func (r *Repository) ensureNeedsFetch(
+	ctx context.Context, localRefs, refs map[string]string, entries []string,
+) (bool, error) {
+	if pending := r.notKnownUnsatisfiable(entries); len(pending) > 0 {
+		behind, err := r.behindUpstream(ctx, localRefs, func(ref string) bool { return strings.HasPrefix(ref, "refs/") })
+		if err != nil || behind {
+			return behind, err
+		}
+		r.rememberUnsatisfiable(pending)
+		return false, nil
+	}
+	branches, others := wantsCurrent(localRefs, refs)
+	if len(others) > 0 {
+		behind, err := r.behindUpstream(ctx, localRefs, func(ref string) bool { return others[ref] })
+		if err != nil || behind {
+			return behind, err
+		}
+	}
+	if !branches {
+		return false, nil
+	}
+	needsFetch, err := r.EnsureRefsUpToDate(ctx)
+	return needsFetch, errors.Wrap(err, "check upstream refs")
+}
+
+func wantsCurrent(localRefs, refs map[string]string) (branches bool, others map[string]bool) {
+	others = map[string]bool{}
+	for ref, wantSHA := range refs {
+		if _, ok := localRefs[ref]; !ok || wantSHA != "" {
+			continue
+		}
+		// HEAD follows a branch, so the cached branch check covers it.
+		if ref == "HEAD" || isBranch(ref) {
+			branches = true
+		} else {
+			others[ref] = true
+		}
+	}
+	return branches, others
+}
+
+func isBranch(ref string) bool {
+	return strings.HasPrefix(ref, "refs/heads/")
+}
+
+func (r *Repository) unsatisfied(
+	ctx context.Context, localRefs, refs map[string]string, commits []string,
+) (entries, missingCommits []string) {
+	for ref, wantSHA := range refs {
+		if !r.refSatisfied(ctx, localRefs, ref, wantSHA) {
+			entries = append(entries, "ref "+ref+" "+wantSHA)
+		}
+	}
+	missingCommits = r.missingCommitsLocked(ctx, commits)
+	for _, sha := range missingCommits {
+		entries = append(entries, "commit "+sha)
+	}
+	return entries, missingCommits
+}
+
+func (r *Repository) refSatisfied(ctx context.Context, localRefs map[string]string, ref, wantSHA string) bool {
+	localSHA, ok := localRefs[ref]
+	if !ok {
+		return false
+	}
+	if wantSHA == "" || localSHA == wantSHA {
+		return true
+	}
+	// wantSHA comes from the request; anything but hex could be read as a git option.
+	if strings.Trim(wantSHA, "0123456789abcdef") != "" {
+		return false
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	// #nosec G204 - r.path is controlled by us, localSHA comes from git and wantSHA is hex
+	cmd := exec.CommandContext(ctx, "git", "-C", r.path, "merge-base", "--is-ancestor", wantSHA, localSHA)
+	return cmd.Run() == nil
+}
+
+func (r *Repository) notKnownUnsatisfiable(entries []string) []string {
+	r.metaMu.Lock()
+	defer r.metaMu.Unlock()
+	var pending []string
+	for _, entry := range entries {
+		if checked, ok := r.unsatisfiable[entry]; !ok || time.Since(checked) >= r.config.RefCheckInterval {
+			pending = append(pending, entry)
+		}
+	}
+	return pending
+}
+
+func (r *Repository) rememberUnsatisfiable(entries []string) {
+	r.metaMu.Lock()
+	defer r.metaMu.Unlock()
+	if r.unsatisfiable == nil {
+		r.unsatisfiable = map[string]time.Time{}
+	}
+	maps.DeleteFunc(r.unsatisfiable, func(_ string, checked time.Time) bool {
+		return time.Since(checked) >= r.config.RefCheckInterval
+	})
+	now := time.Now()
+	for _, entry := range entries {
+		r.unsatisfiable[entry] = now
+	}
 }
 
 // missingCommitsLocked returns the subset of commits that are absent from
@@ -953,21 +1063,6 @@ func (r *Repository) missingCommitsLocked(ctx context.Context, commits []string)
 		}
 	}
 	return missing
-}
-
-// refsSatisfied reports whether every ref in expect is present in localRefs at
-// the expected SHA (or at any SHA when the expected SHA is empty).
-func refsSatisfied(localRefs, expect map[string]string) bool {
-	for ref, wantSHA := range expect {
-		localSHA, ok := localRefs[ref]
-		if !ok {
-			return false
-		}
-		if wantSHA != "" && localSHA != wantSHA {
-			return false
-		}
-	}
-	return true
 }
 
 func resolvedRefs(localRefs, expect map[string]string) map[string]string {

@@ -804,34 +804,51 @@ func TestRepository_HasCommit(t *testing.T) {
 	assert.False(t, repo.HasCommit(ctx, "v9.9.9"))
 }
 
-func TestRepository_EnsureRefs(t *testing.T) {
-	ctx := context.Background()
+func newEnsureRefsRepo(t *testing.T, config Config) (repo *Repository, upstreamPath, workPath, head string) {
+	t.Helper()
 	tmpDir := t.TempDir()
-	upstreamPath := createBareRepo(t, tmpDir)
-
-	clonePath := filepath.Join(tmpDir, "clone")
-	repo := &Repository{
+	upstreamPath = createBareRepo(t, tmpDir)
+	repo = &Repository{
 		state:       StateEmpty,
-		config:      testRepoConfig(),
-		path:        clonePath,
+		config:      config,
+		path:        filepath.Join(tmpDir, "clone"),
 		upstreamURL: upstreamPath,
 		fetchSem:    make(chan struct{}, 1),
 	}
 	repo.fetchSem <- struct{}{}
-	assert.NoError(t, repo.Clone(ctx))
+	assert.NoError(t, repo.Clone(context.Background()))
+
+	local, err := repo.GetLocalRefs(context.Background())
+	assert.NoError(t, err)
+	head = "refs/heads/main"
+	if _, ok := local[head]; !ok {
+		head = "refs/heads/master"
+	}
+	return repo, upstreamPath, filepath.Join(tmpDir, "work"), head
+}
+
+func pushUpstreamCommit(t *testing.T, workPath, upstreamPath, ref, content string) string {
+	t.Helper()
+	assert.NoError(t, os.WriteFile(filepath.Join(workPath, "f.txt"), []byte(content), 0o644))
+	for _, args := range [][]string{
+		{"git", "-C", workPath, "commit", "-am", content},
+		{"git", "-C", workPath, "push", upstreamPath, "HEAD:" + ref},
+	} {
+		assert.NoError(t, exec.Command(args[0], args[1:]...).Run())
+	}
+	out, err := exec.Command("git", "-C", workPath, "rev-parse", "HEAD").Output()
+	assert.NoError(t, err)
+	return strings.TrimSpace(string(out))
+}
+
+func TestRepositoryEnsureRefs(t *testing.T) {
+	ctx := context.Background()
+	repo, upstreamPath, workPath, head := newEnsureRefsRepo(t, testRepoConfig())
 
 	local, err := repo.GetLocalRefs(ctx)
 	assert.NoError(t, err)
-	mainSHA, ok := local["refs/heads/main"]
-	if !ok {
-		mainSHA = local["refs/heads/master"]
-	}
+	mainSHA := local[head]
 	assert.NotEqual(t, "", mainSHA)
-
-	head := "refs/heads/main"
-	if !ok {
-		head = "refs/heads/master"
-	}
 
 	// Mirror already satisfies the request → no fetch.
 	resolved, missing, fetched, err := repo.EnsureRefs(ctx, map[string]string{head: mainSHA}, nil)
@@ -841,18 +858,7 @@ func TestRepository_EnsureRefs(t *testing.T) {
 	assert.Equal(t, mainSHA, resolved[head])
 
 	// Add a new commit to upstream so the mirror is now behind.
-	workPath := filepath.Join(tmpDir, "work")
-	assert.NoError(t, os.WriteFile(filepath.Join(workPath, "f.txt"), []byte("y"), 0o644))
-	for _, args := range [][]string{
-		{"git", "-C", workPath, "commit", "-am", "update"},
-		{"git", "-C", workPath, "push", upstreamPath, "HEAD:" + strings.TrimPrefix(head, "refs/heads/")},
-	} {
-		assert.NoError(t, exec.Command(args[0], args[1:]...).Run())
-	}
-
-	newSHAOut, err := exec.Command("git", "-C", workPath, "rev-parse", "HEAD").Output()
-	assert.NoError(t, err)
-	newSHA := strings.TrimSpace(string(newSHAOut))
+	newSHA := pushUpstreamCommit(t, workPath, upstreamPath, head, "y")
 	assert.NotEqual(t, mainSHA, newSHA)
 
 	// Asking for the new SHA triggers a fetch and the mirror catches up.
@@ -862,7 +868,13 @@ func TestRepository_EnsureRefs(t *testing.T) {
 	assert.Equal(t, 0, len(missing))
 	assert.Equal(t, newSHA, resolved[head])
 
-	// Empty SHA means "any": already satisfied without fetching.
+	// Mirror is ahead of the pinned SHA: satisfied without fetching.
+	resolved, _, fetched, err = repo.EnsureRefs(ctx, map[string]string{head: mainSHA}, nil)
+	assert.NoError(t, err)
+	assert.False(t, fetched)
+	assert.Equal(t, newSHA, resolved[head])
+
+	// Empty SHA on an up-to-date mirror: satisfied without fetching.
 	resolved, _, fetched, err = repo.EnsureRefs(ctx, map[string]string{head: ""}, nil)
 	assert.NoError(t, err)
 	assert.False(t, fetched)
@@ -874,10 +886,10 @@ func TestRepository_EnsureRefs(t *testing.T) {
 	assert.False(t, fetched)
 	assert.Equal(t, newSHA, resolved["HEAD"])
 
-	// Missing ref: fetch runs but ref remains missing → empty resolved SHA.
+	// Ref missing upstream too: a fetch cannot help, so none runs.
 	resolved, _, fetched, err = repo.EnsureRefs(ctx, map[string]string{"refs/heads/does-not-exist": ""}, nil)
 	assert.NoError(t, err)
-	assert.True(t, fetched)
+	assert.False(t, fetched)
 	assert.Equal(t, "", resolved["refs/heads/does-not-exist"])
 
 	// Commit-only request that's already present → no fetch.
@@ -887,11 +899,11 @@ func TestRepository_EnsureRefs(t *testing.T) {
 	assert.Equal(t, 0, len(missing))
 	assert.Equal(t, 0, len(resolved))
 
-	// Commit-only request that's missing → fetch runs and commit is reported missing.
+	// Commit missing upstream too: reported missing without fetching.
 	resolved, missing, fetched, err = repo.EnsureRefs(ctx, nil,
 		[]string{"0000000000000000000000000000000000000000"})
 	assert.NoError(t, err)
-	assert.True(t, fetched)
+	assert.False(t, fetched)
 	assert.Equal(t, []string{"0000000000000000000000000000000000000000"}, missing)
 	assert.Equal(t, 0, len(resolved))
 
@@ -902,6 +914,89 @@ func TestRepository_EnsureRefs(t *testing.T) {
 	assert.False(t, fetched)
 	assert.Equal(t, 0, len(missing))
 	assert.Equal(t, newSHA, resolved[head])
+
+	// Empty SHA on a stale mirror: fetches to catch up.
+	newerSHA := pushUpstreamCommit(t, workPath, upstreamPath, head, "z")
+	resolved, _, fetched, err = repo.EnsureRefs(ctx, map[string]string{head: ""}, nil)
+	assert.NoError(t, err)
+	assert.True(t, fetched)
+	assert.Equal(t, newerSHA, resolved[head])
+
+	// An annotated tag pinned to its commit resolves to the tag object, yet is satisfied.
+	for _, args := range [][]string{
+		{"git", "-C", workPath, "tag", "-a", "v2", "-m", "v2"},
+		{"git", "-C", workPath, "push", upstreamPath, "v2"},
+	} {
+		assert.NoError(t, exec.Command(args[0], args[1:]...).Run())
+	}
+	tag := map[string]string{"refs/tags/v2": newerSHA}
+	resolved, _, fetched, err = repo.EnsureRefs(ctx, tag, nil)
+	assert.NoError(t, err)
+	assert.True(t, fetched)
+	assert.NotEqual(t, newerSHA, resolved["refs/tags/v2"])
+	_, _, fetched, err = repo.EnsureRefs(ctx, tag, nil)
+	assert.NoError(t, err)
+	assert.False(t, fetched)
+
+	// Empty SHA on a current tag: satisfied without fetching.
+	currentTag := map[string]string{"refs/tags/v2": ""}
+	_, _, fetched, err = repo.EnsureRefs(ctx, currentTag, nil)
+	assert.NoError(t, err)
+	assert.False(t, fetched)
+
+	// Empty SHA on a tag that moved upstream while no branch changed: fetches it.
+	for _, args := range [][]string{
+		{"git", "-C", workPath, "tag", "-f", "-a", "v2", mainSHA, "-m", "v2 moved"},
+		{"git", "-C", workPath, "push", "-f", upstreamPath, "v2"},
+	} {
+		assert.NoError(t, exec.Command(args[0], args[1:]...).Run())
+	}
+	out, err := exec.Command("git", "-C", workPath, "rev-parse", "v2").Output()
+	assert.NoError(t, err)
+	resolved, _, fetched, err = repo.EnsureRefs(ctx, currentTag, nil)
+	assert.NoError(t, err)
+	assert.True(t, fetched)
+	assert.Equal(t, strings.TrimSpace(string(out)), resolved["refs/tags/v2"])
+}
+
+func TestRepositoryEnsureRefsRemembersUnsatisfiable(t *testing.T) {
+	ctx := context.Background()
+	config := testRepoConfig()
+	config.RefCheckInterval = time.Hour
+	repo, upstreamPath, workPath, _ := newEnsureRefsRepo(t, config)
+
+	assert.NoError(t, os.WriteFile(filepath.Join(workPath, "f.txt"), []byte("later"), 0o644))
+	assert.NoError(t, exec.Command("git", "-C", workPath, "commit", "-am", "later").Run())
+	out, err := exec.Command("git", "-C", workPath, "rev-parse", "HEAD").Output()
+	assert.NoError(t, err)
+	laterSHA := strings.TrimSpace(string(out))
+
+	_, missing, fetched, err := repo.EnsureRefs(ctx, nil, []string{laterSHA})
+	assert.NoError(t, err)
+	assert.False(t, fetched)
+	assert.Equal(t, []string{laterSHA}, missing)
+
+	later := "refs/heads/later"
+	_, _, fetched, err = repo.EnsureRefs(ctx, map[string]string{later: ""}, nil)
+	assert.NoError(t, err)
+	assert.False(t, fetched)
+
+	assert.NoError(t, exec.Command("git", "-C", workPath, "push", upstreamPath, "HEAD:"+later).Run())
+
+	resolvedLater, _, fetched, err := repo.EnsureRefs(ctx, map[string]string{later: ""}, nil)
+	assert.NoError(t, err)
+	assert.False(t, fetched)
+	assert.Equal(t, "", resolvedLater[later])
+
+	_, missing, fetched, err = repo.EnsureRefs(ctx, nil, []string{laterSHA})
+	assert.NoError(t, err)
+	assert.False(t, fetched)
+	assert.Equal(t, []string{laterSHA}, missing)
+
+	resolved, _, fetched, err := repo.EnsureRefs(ctx, map[string]string{later: laterSHA}, nil)
+	assert.NoError(t, err)
+	assert.True(t, fetched)
+	assert.Equal(t, laterSHA, resolved[later])
 }
 
 func TestRepositoryEnsureRefsUpToDateDoesNotCacheLocalError(t *testing.T) {
