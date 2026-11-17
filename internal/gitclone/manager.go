@@ -9,7 +9,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -879,8 +878,6 @@ func (r *Repository) EnsureRefsUpToDate(ctx context.Context) (needsFetch bool, e
 	return false, nil
 }
 
-// behindUpstream reports whether upstream has a ref under prefix that the
-// mirror lacks or holds at a different SHA.
 func (r *Repository) behindUpstream(ctx context.Context, localRefs map[string]string, prefix string) (bool, error) {
 	lsCtx, cancel := context.WithTimeout(ctx, r.config.LsRemoteTimeout)
 	defer cancel()
@@ -937,8 +934,6 @@ func (r *Repository) EnsureRefs(
 	return resolvedRefs(localRefs, refs), missingCommits, true, nil
 }
 
-// ensureNeedsFetch reports whether a fetch could improve on what the mirror
-// already holds for an EnsureRefs request with the given unsatisfied entries.
 func (r *Repository) ensureNeedsFetch(
 	ctx context.Context, localRefs, refs map[string]string, entries []string,
 ) (bool, error) {
@@ -950,15 +945,22 @@ func (r *Repository) ensureNeedsFetch(
 		r.rememberUnsatisfiable(pending)
 		return false, nil
 	}
-	if !slices.Contains(slices.Collect(maps.Values(refs)), "") {
+	if !wantsCurrent(localRefs, refs) {
 		return false, nil
 	}
 	needsFetch, err := r.EnsureRefsUpToDate(ctx)
 	return needsFetch, errors.Wrap(err, "check upstream refs")
 }
 
-// unsatisfied returns a key for each requested ref or commit the mirror
-// cannot satisfy, along with the requested commits it lacks.
+func wantsCurrent(localRefs, refs map[string]string) bool {
+	for ref, wantSHA := range refs {
+		if _, ok := localRefs[ref]; ok && wantSHA == "" {
+			return true
+		}
+	}
+	return false
+}
+
 func (r *Repository) unsatisfied(
 	ctx context.Context, localRefs, refs map[string]string, commits []string,
 ) (entries, missingCommits []string) {
@@ -974,8 +976,6 @@ func (r *Repository) unsatisfied(
 	return entries, missingCommits
 }
 
-// refSatisfied reports whether the mirror has ref with wantSHA reachable from
-// it, or at any SHA when wantSHA is empty.
 func (r *Repository) refSatisfied(ctx context.Context, localRefs map[string]string, ref, wantSHA string) bool {
 	localSHA, ok := localRefs[ref]
 	if !ok {

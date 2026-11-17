@@ -957,7 +957,16 @@ func TestRepositoryEnsureRefsRemembersUnsatisfiable(t *testing.T) {
 	assert.Equal(t, []string{laterSHA}, missing)
 
 	later := "refs/heads/later"
+	_, _, fetched, err = repo.EnsureRefs(ctx, map[string]string{later: ""}, nil)
+	assert.NoError(t, err)
+	assert.False(t, fetched)
+
 	assert.NoError(t, exec.Command("git", "-C", workPath, "push", upstreamPath, "HEAD:"+later).Run())
+
+	resolvedLater, _, fetched, err := repo.EnsureRefs(ctx, map[string]string{later: ""}, nil)
+	assert.NoError(t, err)
+	assert.False(t, fetched)
+	assert.Equal(t, "", resolvedLater[later])
 
 	_, missing, fetched, err = repo.EnsureRefs(ctx, nil, []string{laterSHA})
 	assert.NoError(t, err)
