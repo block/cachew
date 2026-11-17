@@ -937,6 +937,26 @@ func TestRepositoryEnsureRefs(t *testing.T) {
 	_, _, fetched, err = repo.EnsureRefs(ctx, tag, nil)
 	assert.NoError(t, err)
 	assert.False(t, fetched)
+
+	// Empty SHA on a current tag: satisfied without fetching.
+	currentTag := map[string]string{"refs/tags/v2": ""}
+	_, _, fetched, err = repo.EnsureRefs(ctx, currentTag, nil)
+	assert.NoError(t, err)
+	assert.False(t, fetched)
+
+	// Empty SHA on a tag that moved upstream while no branch changed: fetches it.
+	for _, args := range [][]string{
+		{"git", "-C", workPath, "tag", "-f", "-a", "v2", mainSHA, "-m", "v2 moved"},
+		{"git", "-C", workPath, "push", "-f", upstreamPath, "v2"},
+	} {
+		assert.NoError(t, exec.Command(args[0], args[1:]...).Run())
+	}
+	out, err := exec.Command("git", "-C", workPath, "rev-parse", "v2").Output()
+	assert.NoError(t, err)
+	resolved, _, fetched, err = repo.EnsureRefs(ctx, currentTag, nil)
+	assert.NoError(t, err)
+	assert.True(t, fetched)
+	assert.Equal(t, strings.TrimSpace(string(out)), resolved["refs/tags/v2"])
 }
 
 func TestRepositoryEnsureRefsRemembersUnsatisfiable(t *testing.T) {

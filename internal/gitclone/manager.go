@@ -860,7 +860,7 @@ func (r *Repository) EnsureRefsUpToDate(ctx context.Context) (needsFetch bool, e
 		return false, errors.Wrap(err, "get local refs")
 	}
 
-	behind, err := r.behindUpstream(ctx, localRefs, "refs/heads/")
+	behind, err := r.behindUpstream(ctx, localRefs, isBranch)
 	if err != nil {
 		return false, err
 	}
@@ -878,7 +878,9 @@ func (r *Repository) EnsureRefsUpToDate(ctx context.Context) (needsFetch bool, e
 	return false, nil
 }
 
-func (r *Repository) behindUpstream(ctx context.Context, localRefs map[string]string, prefix string) (bool, error) {
+func (r *Repository) behindUpstream(
+	ctx context.Context, localRefs map[string]string, compared func(ref string) bool,
+) (bool, error) {
 	lsCtx, cancel := context.WithTimeout(ctx, r.config.LsRemoteTimeout)
 	defer cancel()
 	upstreamRefs, err := r.GetUpstreamRefs(lsCtx)
@@ -886,7 +888,7 @@ func (r *Repository) behindUpstream(ctx context.Context, localRefs map[string]st
 		return false, errors.Wrap(err, "get upstream refs")
 	}
 	for ref, upstreamSHA := range upstreamRefs {
-		if strings.HasSuffix(ref, "^{}") || !strings.HasPrefix(ref, prefix) {
+		if strings.HasSuffix(ref, "^{}") || !compared(ref) {
 			continue
 		}
 		if localSHA, exists := localRefs[ref]; !exists || localSHA != upstreamSHA {
@@ -938,27 +940,45 @@ func (r *Repository) ensureNeedsFetch(
 	ctx context.Context, localRefs, refs map[string]string, entries []string,
 ) (bool, error) {
 	if pending := r.notKnownUnsatisfiable(entries); len(pending) > 0 {
-		behind, err := r.behindUpstream(ctx, localRefs, "refs/")
+		behind, err := r.behindUpstream(ctx, localRefs, func(ref string) bool { return strings.HasPrefix(ref, "refs/") })
 		if err != nil || behind {
 			return behind, err
 		}
 		r.rememberUnsatisfiable(pending)
 		return false, nil
 	}
-	if !wantsCurrent(localRefs, refs) {
+	branches, others := wantsCurrent(localRefs, refs)
+	if len(others) > 0 {
+		behind, err := r.behindUpstream(ctx, localRefs, func(ref string) bool { return others[ref] })
+		if err != nil || behind {
+			return behind, err
+		}
+	}
+	if !branches {
 		return false, nil
 	}
 	needsFetch, err := r.EnsureRefsUpToDate(ctx)
 	return needsFetch, errors.Wrap(err, "check upstream refs")
 }
 
-func wantsCurrent(localRefs, refs map[string]string) bool {
+func wantsCurrent(localRefs, refs map[string]string) (branches bool, others map[string]bool) {
+	others = map[string]bool{}
 	for ref, wantSHA := range refs {
-		if _, ok := localRefs[ref]; ok && wantSHA == "" {
-			return true
+		if _, ok := localRefs[ref]; !ok || wantSHA != "" {
+			continue
+		}
+		// HEAD follows a branch, so the cached branch check covers it.
+		if ref == "HEAD" || isBranch(ref) {
+			branches = true
+		} else {
+			others[ref] = true
 		}
 	}
-	return false
+	return branches, others
+}
+
+func isBranch(ref string) bool {
+	return strings.HasPrefix(ref, "refs/heads/")
 }
 
 func (r *Repository) unsatisfied(
