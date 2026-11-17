@@ -59,9 +59,9 @@ type CacheWriter interface {
 	Abort(err error) error
 }
 
-// stdTransport is captured before cachewd wraps http.DefaultTransport with 429 cooldowns.
+// stdTransport is the process default transport.
 //
-// This lets cache clients keep their own tuned pool.
+// Capturing it lets cache clients keep their own tuned pool even if a test swaps http.DefaultTransport.
 var stdTransport = http.DefaultTransport.(*http.Transport) //nolint:errcheck,gochecknoglobals
 
 // HeaderFunc returns headers to attach to each outgoing request.

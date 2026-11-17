@@ -63,7 +63,7 @@ func NewGitHubReleases(ctx context.Context, config GitHubReleasesConfig, cache c
 	s := &GitHubReleases{
 		config:       config,
 		cache:        cache,
-		client:       githubapp.NewAPIClient(http.DefaultClient),
+		client:       githubapp.NewAPIClient(httputil.UpstreamClient()),
 		tokenManager: tokenManager,
 	}
 	// Release tags may contain slashes, e.g.
