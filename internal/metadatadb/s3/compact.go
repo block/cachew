@@ -15,10 +15,9 @@ import (
 	"github.com/block/cachew/internal/metadatadb"
 )
 
-// ladder runs the leaderless compaction/probe algorithm from
-// docs/metadatadb-s3.md. Ages are measured entirely in S3's time frame
-// (newest listed stamp minus segment stamp); the replica's clock is never
-// consulted.
+// ladder runs the leaderless compaction/probe algorithm from docs/metadatadb-s3.md.
+//
+// Ages are measured entirely in S3's time frame (newest listed stamp minus segment stamp), never the replica's clock.
 func (n *loopState) ladder(ctx context.Context, lst *listing) error {
 	if lst.newest.After(n.lastNewest) {
 		n.lastNewest = lst.newest
@@ -65,8 +64,7 @@ func (n *loopState) ladder(ctx context.Context, lst *listing) error {
 	}
 }
 
-// compact folds the candidates into a new rollup, committed with a CAS on
-// the rollup's ETag — the election.
+// compact folds the candidates into a new rollup, committed with a CAS on the rollup's ETag — the election.
 func (n *loopState) compact(ctx context.Context, lst *listing, candidates []string) error {
 	select {
 	case <-time.After(n.b.jitter()):
@@ -97,8 +95,7 @@ func (n *loopState) compact(ctx context.Context, lst *listing, candidates []stri
 	for _, key := range candidates {
 		e, ok := n.cache[key]
 		if !ok {
-			// Cannot happen (the tick fetched everything above the mark);
-			// bail rather than fold an incomplete prefix.
+			// Unreachable: the tick fetched everything above the mark. Bail rather than fold an incomplete prefix.
 			n.stateMu.RUnlock()
 			return errors.Errorf("candidate %s missing from cache", key)
 		}
@@ -134,8 +131,9 @@ func (n *loopState) compact(ctx context.Context, lst *listing, candidates []stri
 	return nil
 }
 
-// probe PUTs an empty segment to advance the aging reference clock — a raw
-// PUT outside the group-commit writer, never applied locally.
+// probe PUTs an empty segment to advance the aging reference clock.
+//
+// It is a raw PUT outside the group-commit writer and is never applied locally.
 func (n *namespace) probe(ctx context.Context, lst *listing) error {
 	select {
 	case <-time.After(n.b.jitter()):
@@ -163,9 +161,10 @@ func (n *namespace) probe(ctx context.Context, lst *listing) error {
 	return errors.Wrap(err, "put probe")
 }
 
-// remove best-effort deletes segments; failures are ignored since leftover
-// cleanup on any replica's future tick finishes the job.
-func (n *namespace) remove(ctx context.Context, keys []string) {
+// remove deletes segments on a best-effort basis.
+//
+// Failures are ignored since leftover cleanup on any replica's future tick finishes the job.
+func (n *namespace) remove(ctx context.Context, keys []string) { //nolint:privatedoc // explains why
 	objects := make(chan minio.ObjectInfo, len(keys))
 	for _, key := range keys {
 		objects <- minio.ObjectInfo{Key: n.prefix() + key}

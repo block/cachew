@@ -14,9 +14,10 @@ import (
 	"github.com/block/cachew/internal/logging"
 )
 
-// TestRangeEmptyObject verifies range handling for a zero-length object, which
-// the in-memory backend (unlike S3) can store. Any range is unsatisfiable and
-// the Content-Range reports the total size.
+// TestRangeEmptyObject verifies range handling for a zero-length object.
+//
+// Unlike S3, the in-memory backend can store one. Any range is unsatisfiable and the Content-Range reports the
+// total size.
 func TestRangeEmptyObject(t *testing.T) {
 	_, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelError})
 	c, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: time.Hour})
@@ -33,10 +34,10 @@ func TestRangeEmptyObject(t *testing.T) {
 	assert.Equal(t, "bytes */0", headers.Get("Content-Range"))
 }
 
-// TestRangeStaleContentRangeStripped verifies that a Content-Range persisted in
-// an object's stored headers (e.g. via a direct Cache.Create that bypasses the
-// APIV1 PUT filter) is dropped on a full, non-range Open, so it can't be
-// mistaken for a 206 partial response.
+// TestRangeStaleContentRangeStripped verifies a stored Content-Range is dropped on a full, non-range Open.
+//
+// Such a header can persist via a direct Cache.Create that bypasses the APIV1 PUT filter, and must not be mistaken
+// for a 206 partial response.
 func TestRangeStaleContentRangeStripped(t *testing.T) {
 	_, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelError})
 	c, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: time.Hour})
@@ -59,8 +60,9 @@ func TestRangeStaleContentRangeStripped(t *testing.T) {
 	assert.Equal(t, content, data)
 	assert.Equal(t, "", headers.Get("Content-Range"))
 
-	// Stat (HEAD) ignores Range and never runs rangeShortCircuit, so it must also
-	// drop the stale header rather than advertise partial metadata on a 200.
+	// Stat (HEAD) ignores Range and never runs rangeShortCircuit, so it must drop the stale header itself.
+	//
+	// Otherwise it would advertise partial metadata on a 200.
 	statHeaders, err := c.Stat(ctx, key)
 	assert.NoError(t, err)
 	assert.Equal(t, "", statHeaders.Get("Content-Range"))

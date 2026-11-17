@@ -82,9 +82,8 @@ type SoakResult struct {
 
 // Soak runs an extended soak test against a cache implementation.
 //
-// The test writes random objects of varying sizes, with some overwrites,
-// and verifies that the cache behaves correctly under sustained load.
-// It also performs periodic reads and deletes.
+// It writes random objects of varying sizes with some overwrites, plus periodic reads and deletes, and verifies the
+// cache behaves correctly under sustained load.
 func Soak(t *testing.T, c cache.Cache, config SoakConfig) SoakResult {
 	config.setDefaults()
 

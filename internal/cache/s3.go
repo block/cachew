@@ -26,8 +26,9 @@ import (
 	"github.com/block/cachew/internal/s3client"
 )
 
-// RegisterS3 registers the S3 cache backend. The clientProvider supplies the
-// shared minio client constructed from the global s3 config block.
+// RegisterS3 registers the S3 cache backend.
+//
+// The clientProvider supplies the shared minio client constructed from the global s3 config block.
 func RegisterS3(r *Registry, clientProvider s3client.ClientProvider) {
 	Register(
 		r,
@@ -39,9 +40,10 @@ func RegisterS3(r *Registry, clientProvider s3client.ClientProvider) {
 	)
 }
 
-// S3Config contains cache-specific S3 settings. Connection parameters
-// (endpoint, region, SSL, credentials) are provided by the global
-// s3client.Config block and shared via the s3client.ClientProvider.
+// S3Config contains cache-specific S3 settings.
+//
+// Connection parameters (endpoint, region, SSL, credentials) come from the global s3client.Config block, shared via
+// the s3client.ClientProvider.
 type S3Config struct {
 	Bucket              string        `hcl:"bucket" help:"S3 bucket name."`
 	MaxTTL              time.Duration `hcl:"max-ttl,optional" help:"Maximum time-to-live for entries in the S3 cache (defaults to 1 hour)." default:"1h"`
@@ -51,6 +53,7 @@ type S3Config struct {
 	DownloadPartSizeMB  uint          `hcl:"download-part-size-mb,optional" help:"Size of each parallel range-GET request in megabytes (defaults to 32MB)." default:"32"`
 }
 
+// S3 is a Cache that stores objects in a bucket, with mutable headers and expiry in companion .meta objects.
 type S3 struct {
 	logger         *slog.Logger
 	config         S3Config
@@ -59,51 +62,47 @@ type S3 struct {
 	companionGrace time.Duration
 }
 
-// s3CompanionGrace generously bounds the gap between a data object landing
-// and its companion write (one small PUT, normally milliseconds) so that
-// only provably orphaned objects are served without a matching companion.
+// s3CompanionGrace bounds the gap between a data object landing and its companion write.
+//
+// The companion is one small PUT, normally milliseconds, so this generous bound serves only provably orphaned objects
+// without a matching companion.
 const s3CompanionGrace = 15 * time.Minute
 
 var _ Cache = (*S3)(nil)
 
-// s3Meta stores mutable metadata in a companion object alongside the
-// data object, avoiding expensive server-side copies when updating
-// headers or refreshing expiry.
+// s3Meta stores mutable metadata in a companion object, avoiding server-side copies to update headers or expiry.
 //
-// Tag correlates the metadata with the data object it describes. The data
-// object and its companion are written in two separate, non-atomic S3
-// operations, so concurrent writers to the same key can interleave and leave
-// the metadata describing a different data object than the one actually
-// stored. Stamping both objects with the same random tag lets readers detect
-// this mismatch (see statAndHeaders) and treat it as a cache miss.
+// Data and companion are written non-atomically, so concurrent writers can interleave. Tag, stamped on both, lets
+// readers detect a mismatch (see statAndHeaders) and treat it as a cache miss.
 type s3Meta struct {
 	Headers   http.Header `json:"headers,omitempty"`
 	ExpiresAt time.Time   `json:"expires_at"`
 	Tag       string      `json:"tag,omitempty"`
 }
 
-// s3TagMetadataKey is the data object's user-metadata key holding the tag that
-// must match the companion s3Meta.Tag. Objects written before tagging was
-// introduced carry no tag on either object, so an empty-to-empty comparison
-// keeps them readable.
+// s3TagMetadataKey is the data object's user-metadata key holding the tag that must match s3Meta.Tag.
+//
+// Objects written before tagging carry no tag on either object, so an empty-to-empty comparison keeps them readable.
 const s3TagMetadataKey = "Tag"
 
-// s3SlidingExpiryMetadataKey marks objects created with the default TTL. Reads extend only these;
-// an explicit TTL bounds staleness (e.g. git bundles), so it is a hard expiry.
+// s3SlidingExpiryMetadataKey marks objects created with the default TTL, the only ones reads extend.
+//
+// An explicit TTL bounds staleness (e.g. git bundles), so it is a hard expiry.
 const s3SlidingExpiryMetadataKey = "Sliding-Expiry"
 
-// s3MaxUserMetadataSize is S3's limit on the combined size of an object's
-// user-defined metadata keys and values. PutObject fails if it is exceeded.
+// s3MaxUserMetadataSize is S3's limit on the combined size of an object's user metadata keys and values.
+//
+// PutObject fails if it is exceeded.
 const s3MaxUserMetadataSize = 2048
 
-// s3EssentialHeaders are the headers kept when the full header set doesn't fit
-// in S3 user metadata, along with any X-Cachew-* headers.
+// s3EssentialHeaders are kept, with X-Cachew-* headers, when the full header set doesn't fit in S3 user metadata.
 var s3EssentialHeaders = []string{ //nolint:gochecknoglobals
 	"Content-Type", "Content-Encoding", "Content-Disposition", "Content-Language",
 	"Cache-Control", ETagKey, "Last-Modified",
 }
 
 // s3UserMetadata encodes the tag, expiry mode and headers as data object user metadata.
+//
 // Oversized upstream headers are reduced to those needed to serve the object.
 func s3UserMetadata(tag string, slidingExpiry bool, headers http.Header) (map[string]string, error) {
 	metadata := map[string]string{s3TagMetadataKey: tag}
@@ -141,8 +140,6 @@ func s3UserMetadata(tag string, slidingExpiry bool, headers http.Header) (map[st
 	return nil, errors.Errorf("headers exceed S3 user metadata limit of %d bytes", s3MaxUserMetadataSize)
 }
 
-// newS3Tag returns a random hex tag used to correlate a data object with its
-// companion metadata object.
 func newS3Tag() (string, error) {
 	var buf [16]byte
 	if _, err := rand.Read(buf[:]); err != nil {
@@ -151,15 +148,10 @@ func newS3Tag() (string, error) {
 	return hex.EncodeToString(buf[:]), nil
 }
 
-// NewS3 creates a new S3-based cache instance.
+// NewS3 creates a new S3-based cache instance backed by S3-compatible object storage.
 //
-// The minio client is obtained from the shared clientProvider, which is
-// constructed once from the global s3 configuration block. Cache-specific
-// settings (bucket, TTL, upload tuning) come from the per-instance S3Config.
-//
-// This [Cache] implementation stores cache entries in an S3-compatible object storage service.
-// Metadata (headers and expiration time) are stored as object user metadata. The implementation
-// uses the lightweight minio-go SDK to reduce overhead compared to the AWS SDK.
+// The shared clientProvider supplies a minio-go client, lighter than the AWS SDK; config supplies bucket, TTL and
+// upload tuning. Headers and expiry live in object user metadata and a companion .meta object.
 func NewS3(ctx context.Context, config S3Config, clientProvider s3client.ClientProvider) (*S3, error) {
 	// Set defaults and validate configuration
 	if config.UploadConcurrency == 0 {
@@ -211,6 +203,7 @@ func (s *S3) String() string {
 	return fmt.Sprintf("s3:%s/%s", s.client.EndpointURL().Host, s.config.Bucket)
 }
 
+// Close is a no-op because the minio client is owned by the s3client.ClientProvider.
 func (s *S3) Close() error {
 	return nil
 }
@@ -228,8 +221,9 @@ func (s *S3) keyToPath(namespace Namespace, key Key) string {
 }
 
 // statAndHeaders retrieves object metadata, checks expiry, and returns parsed headers.
-// It reads immutable headers from the data object's user metadata, then overlays
-// mutable metadata from a companion .meta object (ETag, refreshed expiry).
+//
+// Immutable headers come from the data object's user metadata, overlaid by the companion .meta object (ETag,
+// refreshed expiry).
 func (s *S3) statAndHeaders(ctx context.Context, key Key) (minio.ObjectInfo, http.Header, s3Meta, error) {
 	objectName := s.keyToPath(s.namespace, key)
 
@@ -254,19 +248,10 @@ func (s *S3) statAndHeaders(ctx context.Context, key Key) (minio.ObjectInfo, htt
 		return minio.ObjectInfo{}, nil, s3Meta{}, err
 	}
 
-	// A companion describing a different data object than the one stored is
-	// either a commit still in flight (the data object lands first, its
-	// companion follows within the same Close) or a companion lost to a crash
-	// or clobbered by an interleaved writer. Young objects stay misses so an
-	// unfinished commit is never readable, per the Create contract. Past the
-	// grace window no commit can still be in flight, and the data object is
-	// self-describing (immutable headers travel in its user metadata) and
-	// complete (uploads are atomic and checksummed), so serve it with its own
-	// expiry rather than hiding a valid object until the next regeneration.
-	// The next expiry refresh or write reconciles the companion. Objects from
-	// older formats that carried the ETag only in the companion stay misses:
-	// serving them without a validator would break conditional requests and
-	// ranged-download consistency checks.
+	// A mismatched companion is an in-flight commit, or a companion lost to a crash or clobbered by another writer.
+	//
+	// Young objects stay misses so unfinished commits stay unreadable; older ones serve the complete, self-describing
+	// data object. Objects whose ETag lived only in the companion stay misses, as serving them lacks a validator.
 	if objInfo.UserMetadata[s3TagMetadataKey] != meta.Tag {
 		if time.Since(objInfo.LastModified) < s.companionGrace || headers.Get(ETagKey) == "" {
 			return minio.ObjectInfo{}, nil, s3Meta{}, os.ErrNotExist
@@ -292,6 +277,7 @@ func (s *S3) statAndHeaders(ctx context.Context, key Key) (minio.ObjectInfo, htt
 	return objInfo, headers, meta, nil
 }
 
+// Stat returns stored headers plus Content-Length; expired entries are deleted and reported as os.ErrNotExist.
 func (s *S3) Stat(ctx context.Context, key Key, opts ...Option) (http.Header, error) {
 	objInfo, headers, _, err := s.statAndHeaders(ctx, key)
 	if err != nil {
@@ -304,6 +290,7 @@ func (s *S3) Stat(ctx context.Context, key Key, opts ...Option) (http.Header, er
 	return headers, nil
 }
 
+// Open streams the object with parallel range GETs, extending a sliding expiry in the background when due.
 func (s *S3) Open(ctx context.Context, key Key, opts ...Option) (io.ReadCloser, http.Header, error) {
 	objInfo, headers, meta, err := s.statAndHeaders(ctx, key)
 	if err != nil {
@@ -315,8 +302,7 @@ func (s *S3) Open(ctx context.Context, key Key, opts ...Option) (io.ReadCloser, 
 	objectName := s.keyToPath(s.namespace, key)
 
 	if newExpiresAt, ok := s.refreshedExpiry(hasSlidingExpiry(objInfo), meta.ExpiresAt, time.Now()); ok {
-		// Preserve every companion header, not just the ETag, so headers
-		// recorded by UpdateMetadata survive the refresh.
+		// Keep every companion header, not just the ETag, so headers recorded by UpdateMetadata survive the refresh.
 		refreshMeta := s3Meta{Headers: meta.Headers.Clone(), ExpiresAt: newExpiresAt, Tag: meta.Tag}
 		go func() {
 			bgCtx := context.WithoutCancel(ctx)
@@ -351,8 +337,9 @@ func (s *S3) Open(ctx context.Context, key Key, opts ...Option) (io.ReadCloser, 
 }
 
 // refreshedExpiry returns the expiry a read at now extends an entry to, and whether a refresh is due.
+//
 // Refreshing only below half of MaxTTL avoids rewriting the companion on every read.
-func (s *S3) refreshedExpiry(slidingExpiry bool, expiresAt, now time.Time) (time.Time, bool) {
+func (s *S3) refreshedExpiry(slidingExpiry bool, expiresAt, now time.Time) (time.Time, bool) { //nolint:privatedoc // explains why
 	if !slidingExpiry || expiresAt.IsZero() || expiresAt.Sub(now) >= s.config.MaxTTL/2 {
 		return time.Time{}, false
 	}
@@ -367,7 +354,6 @@ func (s *S3) metaPath(namespace Namespace, key Key) string {
 	return s.keyToPath(namespace, key) + ".meta"
 }
 
-// writeMeta writes the companion metadata object for the given key.
 func (s *S3) writeMeta(ctx context.Context, namespace Namespace, key Key, meta s3Meta) error {
 	data, err := json.Marshal(meta)
 	if err != nil {
@@ -384,6 +370,7 @@ func (s *S3) writeMeta(ctx context.Context, namespace Namespace, key Key, meta s
 }
 
 // readMeta reads the companion metadata object for the given key.
+//
 // Returns a zero s3Meta if the companion does not exist (legacy objects).
 func (s *S3) readMeta(ctx context.Context, namespace Namespace, key Key) (s3Meta, error) {
 	objectName := s.metaPath(namespace, key)
@@ -408,10 +395,11 @@ func (s *S3) readMeta(ctx context.Context, namespace Namespace, key Key) (s3Meta
 	return meta, nil
 }
 
-// ceilSecond rounds a time up to the next whole second. S3's Expires header
-// uses HTTP-date format (second precision), so sub-second components would be
-// silently truncated, potentially causing premature expiry.
-func ceilSecond(t time.Time) time.Time {
+// ceilSecond rounds a time up to the next whole second.
+//
+// S3's Expires header has second precision, so a sub-second component would be truncated and
+// could cause premature expiry.
+func ceilSecond(t time.Time) time.Time { //nolint:privatedoc // explains why
 	if t.Nanosecond() == 0 {
 		return t
 	}
@@ -442,6 +430,7 @@ func (r *s3Reader) Close() error {
 	return errors.WithStack(r.obj.Close())
 }
 
+// Create streams the object to S3 in the background; ttl is capped at MaxTTL, and zero gives a sliding expiry.
 func (s *S3) Create(ctx context.Context, key Key, headers http.Header, ttl time.Duration, opts ...Option) (Writer, error) {
 	slidingExpiry := ttl == 0
 	if ttl > s.config.MaxTTL || ttl == 0 {
@@ -484,20 +473,19 @@ func (s *S3) Create(ctx context.Context, key Key, headers http.Header, ttl time.
 		errCh:     make(chan error, 1),
 	}
 
-	// Start upload in background goroutine. The buffered reader decouples the
-	// upstream pipe (zero-buffer io.Pipe from the archive process) from the
-	// upload chunking loop. Without it, when the uploader blocks on a full
-	// jobs channel or slow S3 part upload, the archive goroutine stalls
-	// because nobody is consuming the pipe. The 8 MiB buffer absorbs ongoing
-	// archive output during those brief stalls.
+	// Upload in the background through a buffer that decouples the zero-buffer archive pipe from upload chunking.
+	//
+	// Without it, a blocked uploader (full jobs channel, slow part upload) stalls the archive goroutine. The 8 MiB
+	// buffer absorbs archive output during those brief stalls.
 	br := bufio.NewReaderSize(pr, 8<<20)
 	go writer.upload(pr, br)
 
 	return writer, nil
 }
 
-// UpdateMetadata rewrites only the companion object: the data object's
-// user metadata is immutable without a server-side copy of the body.
+// UpdateMetadata rewrites only the companion object.
+//
+// The data object's user metadata is immutable without a server-side copy of the body.
 func (s *S3) UpdateMetadata(ctx context.Context, key Key, headers http.Header, ttl time.Duration, opts ...Option) error {
 	if ttl > s.config.MaxTTL || ttl == 0 {
 		ttl = s.config.MaxTTL
@@ -519,6 +507,7 @@ func (s *S3) UpdateMetadata(ctx context.Context, key Key, headers http.Header, t
 	return s.writeMeta(ctx, s.namespace, key, meta)
 }
 
+// Delete removes the data object and, best-effort, its companion metadata object.
 func (s *S3) Delete(ctx context.Context, key Key) error {
 	objectName := s.keyToPath(s.namespace, key)
 	if err := s.client.RemoveObject(ctx, s.config.Bucket, objectName, minio.RemoveObjectOptions{}); err != nil {
@@ -529,13 +518,14 @@ func (s *S3) Delete(ctx context.Context, key Key) error {
 	return nil
 }
 
+// Invalidate deletes the object; Tiered skips this on its authoritative final tier.
 func (s *S3) Invalidate(ctx context.Context, key Key) error {
 	return errors.WithStack(s.Delete(ctx, key))
 }
 
+// Stats always returns ErrStatsUnavailable, as sizing a bucket would require listing it.
 func (s *S3) Stats(_ context.Context) (Stats, error) {
-	// S3 doesn't provide efficient count/size operations without listing the entire bucket,
-	// which would be prohibitively slow and expensive.
+	// S3 can't count or size objects without listing the entire bucket, which is prohibitively slow and expensive.
 	return Stats{}, ErrStatsUnavailable
 }
 
@@ -598,12 +588,10 @@ func (w *s3Writer) Close() error {
 		return err
 	}
 
-	// The data object landed but the write is not committed until the
-	// companion is written. If the write was aborted or the companion write
-	// fails, delete the data object so the uncommitted write cannot age into
-	// the stale-companion fallback and become readable. Cleanup failures
-	// propagate to the caller: a tagged object left behind would become
-	// readable once it ages past the grace window.
+	// The write isn't committed until the companion lands, so delete the data object on abort or companion failure.
+	//
+	// Otherwise the uncommitted write could age past the grace window and become readable. Cleanup failures propagate
+	// for the same reason.
 	if w.ctx.Err() != nil {
 		return w.removeUncommitted()
 	}
@@ -615,13 +603,11 @@ func (w *s3Writer) Close() error {
 	return nil
 }
 
-// removeUncommitted deletes the data object after its upload succeeded but
-// the write failed to commit. The delete only proceeds while the stored
-// object still carries this writer's tag, so an interleaved writer's
-// committed object is preserved; the residual stat-to-delete race just costs
-// that writer a miss. Failure leaves an orphan equivalent to a crash between
-// the two puts.
-func (w *s3Writer) removeUncommitted() error {
+// removeUncommitted deletes the data object after its upload succeeded but the write failed to commit.
+//
+// It deletes only while the object still carries this writer's tag, preserving an interleaved
+// writer's commit. A failed delete leaves an orphan, as a crash between the two puts would.
+func (w *s3Writer) removeUncommitted() error { //nolint:privatedoc // explains why
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(w.ctx), 30*time.Second)
 	defer cancel()
 	objectName := w.s3.keyToPath(w.namespace, w.key)
@@ -650,8 +636,9 @@ func (w *s3Writer) upload(pr *io.PipeReader, r io.Reader) {
 
 	objectName := w.s3.keyToPath(w.namespace, w.key)
 
-	// Configure upload options. CRC64-NVME is computed as data streams through and sent as a
-	// trailing header so S3 validates integrity server-side, preventing corrupt or truncated uploads.
+	// CRC64-NVME is computed while streaming and sent as a trailing header.
+	//
+	// S3 then validates integrity server-side, rejecting corrupt or truncated uploads.
 	opts := minio.PutObjectOptions{
 		UserMetadata: w.metadata,
 		AutoChecksum: minio.ChecksumCRC64NVME,
@@ -691,6 +678,7 @@ func (s *S3) Namespace(namespace Namespace) Cache {
 }
 
 // ListNamespaces returns all unique namespaces in the S3 cache.
+//
 // Not implemented for S3 - would require listing all objects.
 func (s *S3) ListNamespaces(_ context.Context) ([]string, error) {
 	return nil, ErrStatsUnavailable

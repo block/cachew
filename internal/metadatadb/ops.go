@@ -9,16 +9,18 @@ import (
 	"github.com/alecthomas/errors"
 )
 
-// Op is a write operation applied to the metadata store. Concrete types form a
-// closed set (sum type) — backends handle each variant via exhaustive type switch.
+// Op is a write operation applied to the metadata store.
+//
+// Concrete types form a closed set (sum type) that backends handle via exhaustive type switch.
 //
 //sumtype:decl
 type Op interface {
 	op() // private marker
 }
 
-// ReadOp is a read query against the metadata store. Like Op, concrete types
-// form a closed set dispatched by the backend.
+// ReadOp is a read query against the metadata store.
+//
+// Like Op, concrete types form a closed set dispatched by the backend.
 //
 //sumtype:decl
 type ReadOp interface {
@@ -236,9 +238,9 @@ type ListLen struct{ Key string }
 
 func (ListLen) readOp() {}
 
-// QueryStateInto executes a read query against raw namespace state and
-// unmarshals the result into target, bridging the any-typed state and the
-// caller's typed pointer via a JSON round-trip.
+// QueryStateInto executes a read query against raw namespace state and unmarshals the result into target.
+//
+// A JSON round-trip bridges the any-typed state and the caller's typed pointer.
 func QueryStateInto(state map[string]any, q ReadOp, target any) error {
 	result := queryState(state, q)
 	if result == nil {
@@ -251,8 +253,7 @@ func QueryStateInto(state map[string]any, q ReadOp, target any) error {
 	return errors.Wrap(json.Unmarshal(data, target), "unmarshal result")
 }
 
-// ApplyOp applies a single write Op to raw namespace state via exhaustive
-// type switch.
+// ApplyOp applies a single write Op to raw namespace state via exhaustive type switch.
 func ApplyOp(state map[string]any, o Op) { //nolint:funlen
 	switch o := o.(type) {
 	case ScalarSet:
@@ -326,16 +327,12 @@ func ApplyOp(state map[string]any, o Op) { //nolint:funlen
 	}
 }
 
-// decodeMapKeys converts a map with JSON-encoded string keys into a map
-// whose keys are the decoded JSON values. This produces a map that
-// json.Marshal will encode correctly for the caller's target type.
 func decodeMapKeys(m map[string]any) map[string]any {
 	result := make(map[string]any, len(m))
 	for k, v := range m {
-		// k is a JSON-encoded key (e.g. "\"hello\"" for string "hello",
-		// "42" for int 42). We need to decode it so that when json.Marshal
-		// re-encodes the result map, the keys come out correctly. UseNumber
-		// keeps large integer keys exact through fmt.Sprint.
+		// k is JSON-encoded (e.g. "\"hello\"" or "42") and must be decoded so re-marshalling yields the right keys.
+		//
+		// UseNumber keeps large integer keys exact through fmt.Sprint.
 		dec := json.NewDecoder(strings.NewReader(k))
 		dec.UseNumber()
 		var decoded any
@@ -343,9 +340,7 @@ func decodeMapKeys(m map[string]any) map[string]any {
 			result[k] = v
 			continue
 		}
-		// For string-keyed maps, decoded is a string — use it directly.
-		// For numeric keys, fmt.Sprint produces "42" which json.Marshal
-		// will use as the map key string.
+		// String keys are used directly; numeric keys become e.g. "42", which json.Marshal uses as the key string.
 		result[fmt.Sprint(decoded)] = v
 	}
 	return result
@@ -356,10 +351,9 @@ func marshalKey(v any) string {
 	if err != nil {
 		panic(fmt.Sprintf("metadatadb: marshal key %T: %v", v, err))
 	}
-	// Canonicalize composite keys: a struct marshals in field order, but the
-	// same key decoded from a backend's wire format is a map, which
-	// re-marshals with sorted keys — the two encodings must agree or
-	// replayed entries land under different state keys than local ones.
+	// Canonicalize composite keys: a struct marshals in field order but its wire-decoded map form re-marshals sorted.
+	//
+	// The encodings must agree or replayed entries land under different state keys than local ones.
 	if len(data) > 0 && (data[0] == '{' || data[0] == '[') {
 		dec := json.NewDecoder(bytes.NewReader(data))
 		dec.UseNumber()

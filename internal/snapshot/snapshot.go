@@ -22,25 +22,18 @@ import (
 //nolint:gochecknoglobals // OTel tracer instances are package-scoped by convention
 var tracer = otel.Tracer("github.com/block/cachew/internal/snapshot")
 
-// Create archives a directory using tar with zstd compression, then uploads to the cache.
+// Create archives directory with tar and zstd, streaming it to the cache without temporary files.
 //
-// The archive preserves all file permissions, ownership, and symlinks.
-// The operation is fully streaming - no temporary files are created.
-// Exclude patterns use tar's --exclude syntax.
-// threads controls zstd parallelism; 0 uses all available CPU cores.
-// Any extra headers are merged into the cache metadata alongside the default
-// Content-Type and Content-Disposition headers.
+// It preserves permissions, ownership and symlinks. Excludes use tar's --exclude syntax; threads 0 uses all
+// cores. extraHeaders are merged into the metadata with the default Content-Type and Content-Disposition.
 func Create(ctx context.Context, remote cache.Cache, key cache.Key, directory string, ttl time.Duration, excludePatterns []string, threads int, extraHeaders ...http.Header) error {
 	return CreatePaths(ctx, remote, key, directory, filepath.Base(directory), []string{"."}, ttl, excludePatterns, threads, extraHeaders...)
 }
 
-// CreatePaths archives named paths within baseDir using tar with zstd compression,
-// then uploads the resulting archive to the cache.
+// CreatePaths archives includePaths within baseDir with tar and zstd, then uploads the archive to the cache.
 //
-// The archive preserves all file permissions, ownership, and symlinks.
-// Each entry in includePaths is archived relative to baseDir and must exist.
-// Exclude patterns use tar's --exclude syntax.
-// threads controls zstd parallelism; 0 uses all available CPU cores.
+// It preserves permissions, ownership and symlinks. Each path is relative to baseDir and must exist.
+// Excludes use tar's --exclude syntax; threads 0 uses all CPU cores.
 func CreatePaths(ctx context.Context, remote cache.Cache, key cache.Key, baseDir, archiveName string, includePaths []string, ttl time.Duration, excludePatterns []string, threads int, extraHeaders ...http.Header) (returnErr error) {
 	ctx, span := tracer.Start(ctx, "cachew.snapshot.create_and_upload",
 		trace.WithAttributes(
@@ -71,6 +64,7 @@ func CreatePaths(ctx context.Context, remote cache.Cache, key cache.Key, baseDir
 }
 
 // Headers returns the headers stored with a snapshot archive named archiveName.
+//
 // Later extra headers override earlier ones.
 func Headers(archiveName string, extraHeaders ...http.Header) http.Header {
 	headers := make(http.Header)
@@ -86,20 +80,17 @@ func Headers(archiveName string, extraHeaders ...http.Header) http.Header {
 	return headers
 }
 
-// StreamTo archives a directory using tar with zstd compression and streams the
-// output directly to w. Unlike Create, it does not upload to any cache backend.
-// This is used on cache miss to serve the client immediately while a background
-// job populates the cache.
+// StreamTo archives directory with tar and zstd and streams it to w, without uploading to a cache.
+//
+// It serves a client immediately on a cache miss while a background job populates the cache.
 func StreamTo(ctx context.Context, w io.Writer, directory string, excludePatterns []string, threads int) error {
 	return errors.WithStack(client.Archive(ctx, w, directory, []string{"."}, excludePatterns, threads))
 }
 
-// Restore downloads an archive from the cache and extracts it to a directory.
+// Restore streams an archive from the cache and extracts it to directory without temporary files.
 //
-// The archive is decompressed with zstd and extracted with tar, preserving
-// all file permissions, ownership, and symlinks.
-// The operation is fully streaming - no temporary files are created.
-// threads controls zstd parallelism; 0 uses all available CPU cores.
+// It decompresses with zstd and extracts with tar, preserving permissions, ownership and symlinks.
+// threads controls zstd parallelism; 0 uses all CPU cores.
 func Restore(ctx context.Context, remote cache.Cache, key cache.Key, directory string, threads int) (returnErr error) {
 	ctx, span := tracer.Start(ctx, "cachew.snapshot.restore",
 		trace.WithAttributes(
@@ -124,9 +115,9 @@ func Restore(ctx context.Context, remote cache.Cache, key cache.Key, directory s
 	return Extract(ctx, rc, directory, threads)
 }
 
-// Extract decompresses a zstd+tar stream into directory, preserving all file
-// permissions, ownership, and symlinks. threads controls zstd parallelism;
-// 0 uses all available CPU cores.
+// Extract decompresses a zstd+tar stream into directory, preserving permissions, ownership and symlinks.
+//
+// threads controls zstd parallelism; 0 uses all CPU cores.
 func Extract(ctx context.Context, r io.Reader, directory string, threads int) error {
 	return errors.WithStack(client.Extract(ctx, r, directory, threads))
 }

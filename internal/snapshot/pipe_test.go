@@ -9,22 +9,13 @@ import (
 	"github.com/alecthomas/assert/v2"
 )
 
-// TestPipeLifecycleNoDeadlock verifies the pipe pattern used by Create,
-// StreamTo, and Extract does not deadlock when the downstream process exits
-// while the upstream is still producing data.
+// TestPipeLifecycleNoDeadlock verifies the os.Pipe pattern in Create, StreamTo and Extract can't deadlock.
 //
-// Background: exec.Cmd.StdoutPipe() retains the pipe read end in the parent
-// until Wait() runs closeAfterWait. If the downstream exits early, the
-// upstream cannot receive SIGPIPE (the parent still holds the read end), so
-// it blocks on pipe write and Wait() deadlocks.
-//
-// The fix (used in Create/StreamTo/Extract): use os.Pipe() manually and close
-// both ends in the parent immediately after starting child processes. This
-// ensures that when the downstream exits, the upstream receives SIGPIPE.
+// StdoutPipe keeps the read end in the parent until Wait, so an early-exiting downstream never SIGPIPEs the
+// upstream. Closing both os.Pipe ends in the parent after starting the children lets SIGPIPE through.
 func TestPipeLifecycleNoDeadlock(t *testing.T) {
 	t.Run("StdoutPipeDeadlocks", func(t *testing.T) {
-		// Demonstrates the broken pattern: StdoutPipe holds the read end,
-		// preventing SIGPIPE delivery to the upstream.
+		// The broken pattern: StdoutPipe holds the read end, so the upstream never gets SIGPIPE.
 		upstream := exec.Command("yes")
 		downstream := exec.Command("head", "-c", "100")
 
@@ -53,8 +44,7 @@ func TestPipeLifecycleNoDeadlock(t *testing.T) {
 	})
 
 	t.Run("ManualPipeWorks", func(t *testing.T) {
-		// The fixed pattern: parent closes both pipe ends after starting
-		// children, so the upstream gets SIGPIPE when downstream exits.
+		// The fixed pattern: the parent closes both ends after starting children, so the upstream gets SIGPIPE.
 		upstream := exec.Command("yes")
 		downstream := exec.Command("head", "-c", "100")
 

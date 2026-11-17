@@ -19,8 +19,9 @@ import (
 	"github.com/block/cachew/internal/metadatadb"
 )
 
-// listing is one tick's full-prefix LIST. newest is the aging reference
-// clock; start is monotonic, compared only against cache insert times.
+// listing is one tick's full-prefix LIST.
+//
+// newest is the aging reference clock; start is monotonic, compared only against cache insert times.
 type listing struct {
 	entries map[string]time.Time
 	newest  time.Time
@@ -49,13 +50,12 @@ func (n *namespace) flush(ctx context.Context) error {
 	}
 }
 
-// flushTick runs a tick under the Flush caller's context so an expired
-// deadline aborts it promptly instead of occupying the loop, while backend
-// Close still cancels it.
-func (n *loopState) flushTick(ctx context.Context) error {
-	// Carry the backend logger so the tick logs like a background tick even
-	// when the Flush caller's context has none, while keeping the caller's
-	// deadline for cancellation.
+// flushTick runs a tick under the Flush caller's context.
+//
+// An expired deadline then aborts it promptly instead of occupying the loop, while backend Close
+// still cancels it.
+func (n *loopState) flushTick(ctx context.Context) error { //nolint:privatedoc // explains why
+	// Use the backend logger, since the Flush caller's context may have none, but keep the caller's deadline.
 	ctx = logging.ContextWithLogger(ctx, logging.FromContext(n.b.ctx))
 	tickCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -65,12 +65,10 @@ func (n *loopState) flushTick(ctx context.Context) error {
 	return err
 }
 
-// maxConsecutiveFlushes bounds the Flush priority so sustained Flush traffic
-// cannot starve the background ladder forever.
+// maxConsecutiveFlushes bounds Flush priority so sustained Flush traffic cannot starve the background ladder forever.
 const maxConsecutiveFlushes = 16
 
-// runLoop serializes all ticks for the namespace; only background ticks run
-// the compaction/probe ladder, so a Flush never sleeps a jitter delay.
+// runLoop serializes the namespace's ticks; only background ticks run the ladder, so Flush never sleeps on jitter.
 func (n *namespace) runLoop() {
 	defer n.b.wg.Done()
 	logger := logging.FromContext(n.b.ctx)
@@ -87,11 +85,10 @@ func (n *namespace) runLoop() {
 		}
 	}
 
-	// Immediate first tick so a restarted replica converges without waiting
-	// a full interval. A Flush-created namespace skips this: its own tick is
-	// the initial convergence and runs under the caller's deadline, so this
-	// background tick under n.b.ctx cannot wedge the loop past an abandoned
-	// Flush.
+	// An immediate first tick lets a restarted replica converge without waiting a full interval.
+	//
+	// A Flush-created namespace skips it: its own tick, under the caller's deadline, is the initial convergence, so a
+	// background tick under n.b.ctx cannot wedge the loop past an abandoned Flush.
 	if n.runInitialTick {
 		background()
 	}
@@ -125,15 +122,13 @@ func (n *namespace) runLoop() {
 	}
 }
 
-// tick is one sync pass, aborting at the first failure; the next tick
-// self-heals.
-func (n *loopState) tick(ctx context.Context) (*listing, error) {
+// tick is one sync pass, aborting at the first failure; the next tick self-heals.
+func (n *loopState) tick(ctx context.Context) (*listing, error) { //nolint:privatedoc // documents a non-obvious contract
 	lst, err := n.list(ctx)
 	if err != nil {
 		return nil, errors.Wrap(err, "list segments")
 	}
-	// LIST must precede the rollup GET: the rollup is then at least as new
-	// as the listing, so a rebuild can never have a coverage hole.
+	// LIST before the rollup GET makes the rollup at least as new as the listing, so a rebuild has no coverage hole.
 	if err := n.refreshRollup(ctx); err != nil {
 		return nil, errors.Wrap(err, "refresh rollup")
 	}
@@ -157,8 +152,7 @@ func (n *namespace) list(ctx context.Context) (*listing, error) {
 			lst.newest = obj.LastModified
 		}
 	}
-	// minio-go closes the channel without error on mid-listing cancellation;
-	// a truncated listing must never count as successful.
+	// minio-go closes the channel without error on mid-listing cancellation; a truncated listing must never succeed.
 	if err := ctx.Err(); err != nil {
 		return nil, errors.WithStack(err)
 	}
@@ -198,8 +192,9 @@ func (n *loopState) adoptRollup(etag string, data []byte) error {
 	if err := json.Unmarshal(data, &body); err != nil {
 		return errors.Wrap(err, "unmarshal rollup")
 	}
-	// Validate the inner state now so replay can rely on it: a tampered
-	// rollup aborts the tick rather than silently serving empty state.
+	// Validate the inner state now so replay can rely on it.
+	//
+	// A tampered rollup aborts the tick rather than silently serving empty state.
 	if _, err := unmarshalState(body.State); err != nil {
 		return errors.Wrap(err, "unmarshal rollup state")
 	}
@@ -207,8 +202,7 @@ func (n *loopState) adoptRollup(etag string, data []byte) error {
 	return nil
 }
 
-// seed creates the initial rollup — legacy state or empty, zero mark — so
-// "no rollup exists" is a once-per-namespace transient.
+// seed creates the initial rollup (legacy state or empty, zero mark) so a missing rollup happens once per namespace.
 func (n *loopState) seed(ctx context.Context) error {
 	state, err := n.readLegacy(ctx)
 	if err != nil {
@@ -238,9 +232,9 @@ func (n *loopState) seed(ctx context.Context) error {
 	return errors.Wrap(n.refreshRollup(ctx), "adopt winning seed")
 }
 
-// readLegacy fetches the pre-journal state object, returning (nil, nil) when
-// absent or corrupt. Only a complete read counts as corrupt: a truncated body
-// is a read error that aborts the tick, so a mid-body connection reset cannot
+// readLegacy fetches the pre-journal state object, returning (nil, nil) when absent or corrupt.
+//
+// Only a complete read counts as corrupt; a truncated body aborts the tick, so a mid-body connection reset cannot
 // shadow intact legacy state.
 func (n *namespace) readLegacy(ctx context.Context) ([]byte, error) {
 	obj, err := n.b.client.GetObject(ctx, n.b.bucket, n.legacyKey(), minio.GetObjectOptions{})
@@ -255,8 +249,7 @@ func (n *namespace) readLegacy(ctx context.Context) ([]byte, error) {
 	if err != nil {
 		return nil, errors.Wrap(err, "read legacy")
 	}
-	// Must parse as namespace state: a valid JSON scalar or array would
-	// seed a rollup that every replay and compaction chokes on forever.
+	// Require namespace state: a JSON scalar or array would seed a rollup that replay and compaction choke on forever.
 	if _, err := unmarshalState(data); len(data) == 0 || err != nil {
 		logging.FromContext(ctx).ErrorContext(ctx, "legacy metadata state is corrupt; treating as absent",
 			"namespace", n.name, "key", n.legacyKey(), "size", len(data))
@@ -265,16 +258,15 @@ func (n *namespace) readLegacy(ctx context.Context) ([]byte, error) {
 	return data, nil
 }
 
-// fetchUnseen stamps already-cached entries, then fetches unseen segments
-// above the mark into staging, which stays invisible to the writer until
-// committed at swap time.
+// fetchUnseen stamps already-cached entries, then fetches unseen segments above the mark into staging.
+//
+// Staging stays invisible to the writer until committed at swap time.
 func (n *loopState) fetchUnseen(ctx context.Context, lst *listing) (map[string]*cacheEntry, error) {
 	var unseen []string
 	n.stateMu.Lock()
 	for key, lm := range lst.entries {
 		if e, ok := n.cache[key]; ok {
-			// Stamp adoption supplies a cached entry's canonical position —
-			// including entries at or below the mark, whose eviction needs it.
+			// Adopt the canonical stamp even at or below the mark, since eviction needs the entry's position.
 			if !e.listed {
 				e.listed = true
 				e.lm = lm
@@ -323,8 +315,7 @@ func (n *namespace) fetchSegment(ctx context.Context, key string) ([]metadatadb.
 	return unmarshalSegment(data)
 }
 
-// rebuild evicts, snapshots the replay input, replays it unlocked, then
-// re-applies late writer inserts, commits staging, and swaps the state in.
+// rebuild evicts, snapshots replay input, replays unlocked, re-applies late inserts, commits staging, and swaps state.
 func (n *loopState) rebuild(lst *listing, staged map[string]*cacheEntry) {
 	n.stateMu.Lock()
 	for key, e := range n.cache {
@@ -334,8 +325,7 @@ func (n *loopState) rebuild(lst *listing, staged map[string]*cacheEntry) {
 			}
 			continue
 		}
-		// An unlisted entry absent from a LIST that started after its insert
-		// was necessarily folded: its ops are in the rollup this tick holds.
+		// An unlisted entry absent from a LIST started after its insert was folded: its ops are in this tick's rollup.
 		if _, listed := lst.entries[key]; !listed && e.insertedAt.Before(lst.start) {
 			delete(n.cache, key)
 		}
@@ -348,8 +338,7 @@ func (n *loopState) rebuild(lst *listing, staged map[string]*cacheEntry) {
 	state := n.replay(input)
 
 	n.stateMu.Lock()
-	// Late inserts replay in key order == write order; map iteration order
-	// would reorder same-key ops.
+	// Late inserts replay in key order, which is write order; map iteration order would reorder same-key ops.
 	var late []string
 	for key := range n.cache {
 		if _, ok := input[key]; !ok {
@@ -367,8 +356,9 @@ func (n *loopState) rebuild(lst *listing, staged map[string]*cacheEntry) {
 	n.stateMu.Unlock()
 }
 
-// replay rebuilds state from the rollup plus input entries above the mark in
-// canonical order; unlisted entries always pass the filter and order last.
+// replay rebuilds state from the rollup plus input entries above the mark in canonical order.
+//
+// Unlisted entries always pass the filter and order last.
 func (n *loopState) replay(input map[string]*cacheEntry) map[string]any {
 	type replayEntry struct {
 		key string

@@ -3,7 +3,7 @@
 imports = ['github.com/alecthomas/tsk//linters']
 
 disable-all = true
-enable = ['appends', 'asasalint', 'asciicheck', 'asmdecl', 'assign', 'atomic', 'atomicalign', 'bidichk', 'blank_imports', 'bodyclose', 'bools', 'buildtag', 'canonicalheader', 'cgocall', 'composites', 'context_as_argument', 'context_keys_type', 'copylocks', 'copyloopvar', 'deepequalerrors', 'defers', 'directive', 'dot_imports', 'dupl', 'durationcheck', 'empty_block', 'errcheck', 'errname', 'error_naming', 'error_return', 'error_strings', 'errorf', 'errorlint', 'errorsas', 'exhaustive', 'exported', 'exptostd', 'fatcontext', 'forbidigo', 'framepointer', 'funcorder', 'funlen', 'gocheckcompilerdirectives', 'gochecknoglobals', 'goconst', 'godoclint', 'godot', 'gomoddirectives', 'goprintffuncname', 'hostport', 'httpmux', 'httpresponse', 'iface', 'ifaceassert', 'increment_decrement', 'indent_error_flow', 'ineffassign', 'inline', 'intrange', 'iotamixing', 'lockguard', 'loggercheck', 'loopclosure', 'lostcancel', 'makezero', 'mirror', 'nakedret', 'nilerr', 'nilfunc', 'nilness', 'nilnesserr', 'nilnil', 'noctx', 'nosprintfhostport', 'package_comments', 'perfsprint', 'predeclared', 'printf', 'promlinter', 'protogetter', 'range', 'reassign', 'receiver_naming', 'recvcheck', 'redefines_builtin_id', 'reflectvaluecompare', 'rowserrcheck', 'shadow', 'shift', 'sigchanyzer', 'slog', 'sortslice', 'spancheck', 'sqlclosecheck', 'stdmethods', 'stdversion', 'stringintconv', 'structtag', 'sumtype', 'superfluous_else', 'testableexamples', 'testifylint', 'testinggoroutine', 'testpackage', 'tests', 'time_naming', 'timeformat', 'tparallel', 'unconvert', 'unexported_return', 'unmarshal', 'unparam', 'unreachable', 'unreachable_code', 'unsafeptr', 'unused', 'unused_parameter', 'unusedresult', 'unusedwrite', 'usestdlibvars', 'usetesting', 'var_declaration', 'var_naming', 'waitgroup', 'wastedassign', 'whitespace', 'wrapcheck']
+enable = ['appends', 'asasalint', 'asciicheck', 'asmdecl', 'assign', 'atomic', 'atomicalign', 'bidichk', 'blank_imports', 'bodyclose', 'bools', 'buildtag', 'canonicalheader', 'cgocall', 'commentshape', 'composites', 'context_as_argument', 'context_keys_type', 'copylocks', 'copyloopvar', 'deepequalerrors', 'defers', 'directive', 'dot_imports', 'dupl', 'durationcheck', 'empty_block', 'errcheck', 'errname', 'error_naming', 'error_return', 'error_strings', 'errorf', 'errorlint', 'errorsas', 'exhaustive', 'exported', 'exptostd', 'fatcontext', 'forbidigo', 'framepointer', 'funcorder', 'funlen', 'gocheckcompilerdirectives', 'gochecknoglobals', 'goconst', 'godoclint', 'godot', 'gomoddirectives', 'goprintffuncname', 'hostport', 'httpmux', 'httpresponse', 'iface', 'ifaceassert', 'increment_decrement', 'indent_error_flow', 'ineffassign', 'inline', 'intrange', 'iotamixing', 'lockguard', 'loggercheck', 'loopclosure', 'lostcancel', 'makezero', 'mirror', 'nakedret', 'nilerr', 'nilfunc', 'nilness', 'nilnesserr', 'nilnil', 'noctx', 'nosprintfhostport', 'package_comments', 'perfsprint', 'predeclared', 'printf', 'privatedoc', 'promlinter', 'protogetter', 'range', 'reassign', 'receiver_naming', 'recvcheck', 'redefines_builtin_id', 'reflectvaluecompare', 'rowserrcheck', 'shadow', 'shift', 'sigchanyzer', 'slog', 'sortslice', 'spancheck', 'sqlclosecheck', 'stdmethods', 'stdversion', 'stringintconv', 'structtag', 'sumtype', 'superfluous_else', 'testableexamples', 'testifylint', 'testinggoroutine', 'testpackage', 'tests', 'time_naming', 'timeformat', 'tparallel', 'unconvert', 'unexported_return', 'unmarshal', 'unparam', 'unreachable', 'unreachable_code', 'unsafeptr', 'unused', 'unused_parameter', 'unusedresult', 'unusedwrite', 'usestdlibvars', 'usetesting', 'var_declaration', 'var_naming', 'waitgroup', 'wastedassign', 'whitespace', 'wrapcheck']
 skip-tests = ['bodyclose', 'dupl', 'errcheck', 'funlen', 'goconst', 'godot', 'noctx', 'wrapcheck']
 
 # Matches golangci-lint's std-error-handling exclusion preset.
@@ -23,10 +23,6 @@ source = 'TODO'
 [[exclude]]
 linters = ['revive']
 text = 'should have a package comment'
-
-[[exclude]]
-linters = ['revive']
-text = 'exported \S+ \S+ should have comment( \(or a comment on this block\))? or be unexported'
 
 [[exclude]]
 linters = ['revive']
@@ -50,6 +46,10 @@ text = 'declaration of "logger" shadows declaration'
 linters = ['revive']
 path = '(internal/httputil/|internal/metrics/)'
 text = 'avoid package names that conflict with Go standard library'
+
+[commentshape]
+body-lines = 2
+title-lines = 1
 
 [cyclop]
 max-complexity = 30
@@ -122,6 +122,9 @@ require-specific = true
 
 [perfsprint]
 strconcat = false
+
+[privatedoc]
+min-lines = 20
 
 [reassign]
 patterns = ['.*']

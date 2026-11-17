@@ -29,7 +29,8 @@ func WithoutInvalidate() SuiteOption {
 }
 
 // Suite runs a comprehensive test suite against a cache.Cache implementation.
-// All cache implementations should pass this test suite to ensure consistent semantics.
+//
+// All cache implementations should pass it to ensure consistent semantics.
 func Suite(t *testing.T, newCache func(t *testing.T) cache.Cache, opts ...SuiteOption) {
 	var config suiteConfig
 	for _, opt := range opts {
@@ -542,8 +543,9 @@ func testETag(t *testing.T, c cache.Cache) {
 	assert.Equal(t, openHeaders.Get("ETag"), statHeaders.Get("ETag"))
 }
 
-// testConditional verifies that Open and Stat honour If-Match / If-None-Match
-// preconditions against the stored ETag, returning the unified sentinel errors.
+// testConditional verifies Open and Stat honour If-Match / If-None-Match against the stored ETag.
+//
+// Failures must use the unified sentinel errors.
 func testConditional(t *testing.T, c cache.Cache) {
 	defer c.Close()
 	ctx := t.Context()
@@ -596,9 +598,10 @@ func testConditional(t *testing.T, c cache.Cache) {
 	})
 }
 
-// testRange verifies that Open honours a single byte range, sets Content-Range
-// and a range-sized Content-Length, returns ErrRangeNotSatisfiable for an
-// out-of-bounds range, and that Stat ignores Range.
+// testRange verifies Open honours a single byte range.
+//
+// It checks Content-Range, a range-sized Content-Length, ErrRangeNotSatisfiable for an out-of-bounds range, and that
+// Stat ignores Range.
 func testRange(t *testing.T, c cache.Cache) {
 	defer c.Close()
 	ctx := t.Context()

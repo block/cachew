@@ -11,6 +11,7 @@ import (
 	"github.com/lmittmann/tint"
 )
 
+// Config configures log output format, level, field remapping, and request header propagation.
 type Config struct {
 	JSON    bool              `hcl:"json,optional" help:"Enable JSON logging."`
 	Level   slog.Level        `hcl:"level" help:"Set the logging level." default:"info"`
@@ -18,8 +19,7 @@ type Config struct {
 	Headers map[string]string `hcl:"headers,optional" help:"Propagate these inbound request headers to the given log attribute."`
 }
 
-// Middleware returns an HTTP middleware that logs incoming requests and attaches
-// any configured headers as log attributes.
+// Middleware returns an HTTP middleware that logs requests with any configured headers as attributes.
 func Middleware(next http.Handler, config Config) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
@@ -86,6 +86,7 @@ func Configure(ctx context.Context, config Config) (*slog.Logger, context.Contex
 	return logger, context.WithValue(ctx, logKey{}, logger)
 }
 
+// FromContext returns the logger stored in ctx, panicking if there is none.
 func FromContext(ctx context.Context) *slog.Logger {
 	logger, ok := ctx.Value(logKey{}).(*slog.Logger)
 	if !ok {

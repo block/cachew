@@ -215,9 +215,7 @@ func TestRequestIsClone(t *testing.T) {
 	}
 }
 
-// TestRequestIsCloneBoundsBodyRead guards against a regression where the
-// entire body was buffered before the inspect cap was applied, allowing a
-// large or hostile body to OOM the proxy.
+// TestRequestIsCloneBoundsBodyRead guards against buffering the whole body before the inspect cap, which could OOM.
 func TestRequestIsCloneBoundsBodyRead(t *testing.T) {
 	prefix := []byte("0067want abc123 multi_ack_detailed no-done side-band-64k thin-pack ofs-delta agent=git/2.40\n0009done\n0000")
 	tail := bytes.Repeat([]byte("x"), 4*1024*1024) // 4MiB after the prefix
@@ -249,9 +247,9 @@ func (c *countingReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// TestRequestIsCloneFetchWithManyWants guards against a regression where a
-// fetch with a long list of "want" lines preceding any "have" line gets
-// classified as a clone because the inspect window cuts off before the haves.
+// TestRequestIsCloneFetchWithManyWants guards against misclassifying a fetch with many wants as a clone.
+//
+// The regression was an inspect window that cut off before the first "have" line.
 func TestRequestIsCloneFetchWithManyWants(t *testing.T) {
 	var b strings.Builder
 	b.WriteString("0014command=fetch\n")

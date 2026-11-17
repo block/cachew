@@ -21,8 +21,6 @@ import (
 	"github.com/block/cachew/client"
 )
 
-// Compile-time assertion that the concrete Client satisfies the narrow
-// interface ParallelGet drives.
 var _ client.RangeReader = (*client.Client)(nil)
 
 func patternBytes(n int) []byte {
@@ -33,16 +31,13 @@ func patternBytes(n int) []byte {
 	return data
 }
 
-// collect runs ParallelGet into an in-memory WriterAt and returns the
-// reassembled bytes.
 func collect(c client.RangeReader, key client.Key, chunkSize int64, concurrency int) ([]byte, error) {
 	dst := &bufferAt{}
 	err := client.ParallelGet(context.Background(), c, key, dst, chunkSize, concurrency)
 	return dst.buf, err
 }
 
-// rangeFlipReader serves correct byte ranges but reports a different ETag for
-// any chunk past the first, simulating an object rewritten mid-download.
+// rangeFlipReader reports a different ETag for chunks past the first, simulating a mid-download rewrite.
 type rangeFlipReader struct {
 	data      []byte
 	firstETag string
@@ -77,9 +72,7 @@ func TestParallelGetETagMismatch(t *testing.T) {
 	assert.Contains(t, err.Error(), "object changed during read")
 }
 
-// ifMatchFlipReader honours If-Match against firstETag on the discovery request
-// but reports restETag (and a 412) for any pinned chunk, modelling a server that
-// enforces If-Match on an object rewritten mid-download.
+// ifMatchFlipReader fails pinned chunks with a 412, modelling If-Match enforcement on a mid-download rewrite.
 type ifMatchFlipReader struct {
 	data      []byte
 	firstETag string
@@ -118,8 +111,7 @@ func TestParallelGetPreconditionFailedOnRewrite(t *testing.T) {
 	assert.Contains(t, err.Error(), "object changed during read")
 }
 
-// noETagReader serves byte ranges but never sets an ETag, modelling a legacy
-// entry or a RangeReader implementation that omits it.
+// noETagReader serves byte ranges without an ETag, modelling a legacy entry or a RangeReader that omits it.
 type noETagReader struct {
 	data []byte
 }
@@ -155,9 +147,7 @@ func TestParallelGetNoETagSingleChunk(t *testing.T) {
 	assert.Equal(t, data, got)
 }
 
-// changingSizeReader serves a multi-chunk body with no ETag on the ranged
-// discovery request, then a differently sized body on the subsequent full
-// (non-range) read, modelling an object rewritten between the two requests.
+// changingSizeReader serves an ETag-less ranged body, then a different full body, modelling a rewrite between them.
 type changingSizeReader struct {
 	discovery []byte
 	rewritten []byte
@@ -195,9 +185,7 @@ type openRecord struct {
 	IfMatch string
 }
 
-// recordingReader serves byte ranges and records the Range and If-Match options
-// of every Open call (both "" for a full, non-ranged read), so tests can assert
-// how the object was fetched and how chunks were pinned.
+// recordingReader serves byte ranges and records each Open's Range and If-Match, both empty for a full read.
 type recordingReader struct {
 	data []byte
 	etag string
@@ -285,10 +273,9 @@ func TestParallelGetPinsChunksWithIfMatch(t *testing.T) {
 	assert.Equal(t, expected, c.opens)
 }
 
-// faultyReader serves ranges like recordingReader but injects one fault per
-// queued entry for opens starting at an offset: an HTTP status, or a body cut
-// after the given number of bytes with the given error (io.EOF for a clean
-// early end).
+// faultyReader is a recordingReader that injects one queued fault per open at a given start offset.
+//
+// A fault is an HTTP status, or a body cut after some bytes with an error (io.EOF for a clean early end).
 type faultyReader struct {
 	recordingReader
 
@@ -451,8 +438,7 @@ func TestParallelGetRejectsMidflightRangeIgnore(t *testing.T) {
 	assert.Contains(t, err.Error(), "server ignored range")
 }
 
-// bufferAt is an in-memory io.WriterAt that extends like a file, zero-filling
-// gaps, so tests can assert reassembly without touching disk.
+// bufferAt is an in-memory io.WriterAt that extends like a file, zero-filling gaps.
 type bufferAt struct {
 	mu  sync.Mutex
 	buf []byte
@@ -468,9 +454,7 @@ func (b *bufferAt) WriteAt(p []byte, off int64) (int, error) {
 	return len(p), nil
 }
 
-// fullBodyOnChunkReader honours the discovery range (start 0) with a proper 206
-// but ignores the range on any later chunk, returning the entire object with the
-// same ETag — modelling a backend that degrades to full responses mid-download.
+// fullBodyOnChunkReader ranges the discovery chunk but returns the whole object, with Content-Range, for later ones.
 type fullBodyOnChunkReader struct {
 	data []byte
 	etag string
@@ -493,9 +477,7 @@ func (r *fullBodyOnChunkReader) Open(_ context.Context, _ client.Key, opts ...cl
 	return io.NopCloser(bytes.NewReader(r.data)), headers, nil
 }
 
-// midflightRangeIgnoreReader ranges the discovery chunk but answers subsequent
-// chunk requests with the full body and no Content-Range, modelling a replica
-// that stops honouring ranges mid-download.
+// midflightRangeIgnoreReader ranges the discovery chunk but answers later ones with the full body and no range.
 type midflightRangeIgnoreReader struct {
 	data []byte
 	etag string
@@ -515,8 +497,7 @@ func (r *midflightRangeIgnoreReader) Open(_ context.Context, _ client.Key, opts 
 	return io.NopCloser(bytes.NewReader(r.data)), headers, nil
 }
 
-// ignoreRangeReader returns the whole object with no Content-Range regardless of
-// the requested range, modelling a backend that doesn't honour ranges.
+// ignoreRangeReader always returns the whole object with no Content-Range.
 type ignoreRangeReader struct{ data []byte }
 
 func (r *ignoreRangeReader) Open(_ context.Context, _ client.Key, _ ...client.RequestOption) (io.ReadCloser, http.Header, error) {
@@ -525,9 +506,7 @@ func (r *ignoreRangeReader) Open(_ context.Context, _ client.Key, _ ...client.Re
 	return io.NopCloser(bytes.NewReader(r.data)), headers, nil
 }
 
-// reorderReader serves correct byte ranges but delays earlier offsets longer
-// than later ones, so within the in-flight window chunks complete out of order
-// and the writer must buffer and reorder them.
+// reorderReader delays earlier offsets longer than later ones so chunks complete out of order.
 type reorderReader struct {
 	data      []byte
 	etag      string
@@ -543,8 +522,6 @@ func (r *reorderReader) Open(_ context.Context, _ client.Key, opts ...client.Req
 		headers.Set("Content-Range", fmt.Sprintf("bytes */%d", size))
 		return nil, headers, client.ErrRangeNotSatisfiable
 	}
-	// Earlier chunks within a window sleep longer, so higher offsets finish
-	// first and the writer is forced to reorder.
 	if outcome == client.RangePartial {
 		chunks := (size - start) / r.chunkSize
 		time.Sleep(time.Duration(chunks) * time.Millisecond)
@@ -557,8 +534,7 @@ func (r *reorderReader) Open(_ context.Context, _ client.Key, opts ...client.Req
 	return io.NopCloser(bytes.NewReader(r.data[start : start+length])), headers, nil
 }
 
-// failingChunkReader serves ranges normally but errors when the requested range
-// starts at failAtStart, modelling a mid-download fetch failure.
+// failingChunkReader errors when a requested range starts at failAtStart, modelling a mid-download failure.
 type failingChunkReader struct {
 	data        []byte
 	etag        string

@@ -18,8 +18,8 @@ import (
 )
 
 // BackoffTransport shares upstream cooldowns across requests and redirect hops.
-// Cooldowns are keyed by outbound hostname, across strategies, schemes and
-// ports, and by the scope set with [WithCooldownScope].
+//
+// Cooldowns are keyed by outbound hostname, across strategies, schemes and ports, and by [WithCooldownScope].
 type BackoffTransport struct {
 	base       http.RoundTripper
 	delay      time.Duration
@@ -31,9 +31,9 @@ type BackoffTransport struct {
 	until      map[string]time.Time
 }
 
-// NewBackoffTransport uses delay when a 429 has no valid Retry-After header,
-// never cools down for longer than maxDelay, and reports cooldowns to logger,
-// because outbound requests do not always carry a logger in their context.
+// NewBackoffTransport cools down for delay on a 429 without a valid Retry-After, and never longer than maxDelay.
+//
+// logger is passed explicitly because outbound requests do not always carry one in their context.
 func NewBackoffTransport(base http.RoundTripper, delay, maxDelay time.Duration, logger *slog.Logger) *BackoffTransport {
 	meter := otel.Meter("cachew.upstream")
 	cooldowns, err := meter.Int64Counter("cachew.upstream.cooldowns", metric.WithUnit("{cooldown}"),
@@ -53,11 +53,10 @@ func NewBackoffTransport(base http.RoundTripper, delay, maxDelay time.Duration, 
 type noCooldownKey struct{}
 type cooldownScopeKey struct{}
 
-// WithCooldownScope gives requests their own cooldown on each host. Set it
-// where a request gets a credential whose rate limit is separate from the
-// host's other callers, such as a GitHub App installation token. Requests
-// without a scope, or without an Authorization header, share their host's
-// cooldown.
+// WithCooldownScope gives requests their own cooldown on each host.
+//
+// Use it for credentials rate limited apart from the host's other callers, such as GitHub App tokens.
+// Requests without a scope or an Authorization header share their host's cooldown.
 func WithCooldownScope(ctx context.Context, scope string) context.Context {
 	return context.WithValue(ctx, cooldownScopeKey{}, scope)
 }
@@ -68,9 +67,9 @@ func CooldownScope(ctx context.Context) (string, bool) {
 	return scope, ok
 }
 
-// WithoutCooldown exempts requests that cachew forwards to one of its own
-// routes. That route applies cooldowns to the real upstream, and a 429 from it
-// must not cool down every other route behind the same address.
+// WithoutCooldown exempts requests that cachew forwards to one of its own routes.
+//
+// That route applies the upstream's cooldowns; its 429 must not cool down every route at the same address.
 func WithoutCooldown(ctx context.Context) context.Context {
 	return context.WithValue(ctx, noCooldownKey{}, true)
 }
@@ -153,8 +152,7 @@ func (t *BackoffTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	return resp, nil
 }
 
-// RetryAfterDeadline parses Retry-After, using fallback when the value is invalid.
-// The boolean reports whether the header was valid.
+// RetryAfterDeadline parses Retry-After, using fallback and returning false when the value is invalid.
 func RetryAfterDeadline(value string, now time.Time, fallback time.Duration) (time.Time, bool) {
 	value = strings.TrimSpace(value)
 	if seconds, err := strconv.ParseUint(value, 10, 63); err == nil && seconds <= uint64(math.MaxInt64/int64(time.Second)) {

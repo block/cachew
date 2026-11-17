@@ -9,14 +9,11 @@ import (
 	"github.com/alecthomas/errors"
 )
 
-// rangeShortCircuit resolves Range/If-Range opts against an object of the given
-// size and the stored ETag in headers. On a satisfiable single range it sets
-// Content-Range, rewrites Content-Length to the range length, and returns the
-// [start, start+length) window with ok=true. When no range applies it returns
-// ok=false (serve the full object); conditionalShortCircuit has already stripped
-// any stale Content-Range by this point. An unsatisfiable range sets
-// Content-Range: bytes */size and returns ErrRangeNotSatisfiable.
-func rangeShortCircuit(headers http.Header, size int64, opts []Option) (start, length int64, ok bool, err error) {
+// rangeShortCircuit resolves Range and If-Range opts against the object's size and stored ETag.
+//
+// A satisfiable single range sets Content-Range and Content-Length and returns ok=true; ok=false
+// means serve the full object. An unsatisfiable range returns ErrRangeNotSatisfiable.
+func rangeShortCircuit(headers http.Header, size int64, opts []Option) (start, length int64, ok bool, err error) { //nolint:privatedoc // documents a non-obvious contract
 	s, l, outcome := NewRequestOptions(opts...).ResolveRange(size, headers.Get(ETagKey))
 	switch outcome {
 	case RangePartial:
@@ -26,8 +23,9 @@ func rangeShortCircuit(headers http.Header, size int64, opts []Option) (start, l
 
 	case RangeNotSatisfiable:
 		headers.Set("Content-Range", fmt.Sprintf("bytes */%d", size))
-		// The 416 response carries no body; drop the full-size Content-Length
-		// the backend set so clients don't wait for bytes that never arrive.
+		// The 416 response carries no body.
+		//
+		// Drop the full-size Content-Length the backend set so clients don't wait for bytes that never arrive.
 		headers.Del("Content-Length")
 		return 0, 0, false, ErrRangeNotSatisfiable
 
@@ -36,8 +34,7 @@ func rangeShortCircuit(headers http.Header, size int64, opts []Option) (start, l
 	return 0, size, false, nil
 }
 
-// limitedReadCloser serves the first length bytes of a reader while delegating
-// Close to the underlying closer.
+// limitedReadCloser serves the first length bytes of a reader while delegating Close to the underlying closer.
 type limitedReadCloser struct {
 	io.Reader
 	closer io.Closer
@@ -50,8 +47,9 @@ func newLimitedReadCloser(rc io.ReadCloser, length int64) io.ReadCloser {
 func (l limitedReadCloser) Close() error { return errors.Wrap(l.closer.Close(), "close range reader") }
 
 // WriteTo hands w the underlying *io.LimitedReader rather than this wrapper.
-// net/http passes it to the connection's ReadFrom, which recognises a
-// LimitedReader over an *os.File and serves a disk range with sendfile(2).
+//
+// net/http passes it to the connection's ReadFrom, which recognises a LimitedReader over an *os.File and serves a
+// disk range with sendfile(2).
 func (l limitedReadCloser) WriteTo(w io.Writer) (int64, error) {
 	n, err := io.Copy(w, l.Reader)
 	return n, errors.Wrap(err, "copy range")

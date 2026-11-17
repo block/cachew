@@ -22,16 +22,14 @@ const (
 	defaultRepoCountsReapInterval  = 24 * time.Hour
 )
 
-// RepoCounts tracks per-repository clone counts in a daily-bucketed IntMap.
-// All methods are nil-safe.
+// RepoCounts tracks per-repository clone counts in a daily-bucketed IntMap; all methods are nil-safe.
 type RepoCounts struct {
 	counts        *metadatadb.IntMap[string]
 	now           func() time.Time
 	retentionDays int
 }
 
-// NewRepoCounts returns nil if ns is nil so callers don't need a separate
-// "no metadata configured" code path.
+// NewRepoCounts returns nil if ns is nil, so callers need no separate "no metadata" path.
 func NewRepoCounts(ns *metadatadb.Namespace) *RepoCounts {
 	if ns == nil {
 		return nil
@@ -51,12 +49,10 @@ func (r *RepoCounts) IncrementClone(upstreamURL string) error {
 	return errors.Wrap(r.counts.Add(repoCountsKey(upstreamURL, r.now()), 1), "increment repo count")
 }
 
-// uploadPackBodyInspectLimit bounds CPU spend on hostile bodies; real bodies
-// are well under this, including multi-ref fetches against monorepos.
+// uploadPackBodyInspectLimit bounds CPU spend on hostile bodies; real ones, even monorepo fetches, are well under it.
 const uploadPackBodyInspectLimit = 64 * 1024
 
-// lsRefsLookahead caps the prefix scanned for v2 command=ls-refs. The command
-// is in the first pkt-line, so this is generous.
+// lsRefsLookahead caps the prefix scanned for v2 command=ls-refs, which is always in the first pkt-line.
 const lsRefsLookahead = 256
 
 //nolint:gochecknoglobals // hoisted to avoid per-request []byte allocation
@@ -67,9 +63,8 @@ var (
 
 // RequestIsClone reports whether r is an initial clone of a Git repo.
 //
-// Detection: POST /git-upload-pack whose pkt-line body contains no "have <oid>"
-// line. v2 command=ls-refs (discovery) is also rejected. The body is buffered
-// and replayed via io.NopCloser.
+// A clone is a POST /git-upload-pack with no "have <oid>" line that is not v2 command=ls-refs. The inspected body
+// prefix is replayed so the caller can still read the whole body.
 func RequestIsClone(pathValue string, r *http.Request) (bool, error) {
 	if r.Method != http.MethodPost || !strings.HasSuffix(pathValue, "/git-upload-pack") {
 		return false, nil
@@ -110,8 +105,7 @@ func inspectUploadPackBody(r *http.Request) ([]byte, error) {
 		return nil, errors.Wrap(err, "read upload-pack body")
 	}
 	prefix = prefix[:n]
-	// Replay: prefix + the rest of the body, untouched. ContentLength stays
-	// correct since we haven't dropped any bytes.
+	// Replay the prefix ahead of the untouched rest, so ContentLength stays correct.
 	original := r.Body
 	r.Body = struct {
 		io.Reader
@@ -143,9 +137,9 @@ type RepoCount struct {
 	Count int64  `json:"count"`
 }
 
-// TopRepos aggregates buckets over the last windowDays days (UTC) and returns
-// rows sorted by count descending then repo name ascending. windowDays <= 0
-// means no window; limit <= 0 means no truncation.
+// TopRepos sums buckets over the last windowDays days (UTC), sorted by count descending then repo name.
+//
+// windowDays <= 0 means no window; limit <= 0 means no truncation.
 func (r *RepoCounts) TopRepos(windowDays, limit int) []RepoCount {
 	if r == nil {
 		return nil
@@ -182,8 +176,7 @@ func (r *RepoCounts) TopRepos(windowDays, limit int) []RepoCount {
 	return out
 }
 
-// Reap deletes buckets older than the retention window and any malformed keys,
-// returning the number of entries deleted.
+// Reap deletes buckets older than the retention window and malformed keys, returning how many it deleted.
 func (r *RepoCounts) Reap() (int, error) {
 	if r == nil {
 		return 0, nil

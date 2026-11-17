@@ -50,8 +50,9 @@ type GlobalConfig struct {
 	UpstreamBackoff        time.Duration `hcl:"upstream-backoff,optional" default:"1m" help:"Cooldown after an upstream 429 with missing or invalid Retry-After; must be positive."`
 	UpstreamBackoffMax     time.Duration `hcl:"upstream-backoff-max,optional" default:"15m" help:"Longest cooldown after an upstream 429, whatever its Retry-After; raised to upstream-backoff when lower."`
 	ShutdownReadinessDelay time.Duration `hcl:"shutdown-readiness-delay,optional" default:"5s" help:"Delay between flipping readiness to 503 on SIGTERM and starting graceful shutdown."`
-	// ShutdownTimeout must be less than the pod's terminationGracePeriodSeconds
-	// (minus ShutdownReadinessDelay) or the kubelet will SIGKILL before Shutdown returns.
+	// ShutdownTimeout must be less than terminationGracePeriodSeconds minus ShutdownReadinessDelay.
+	//
+	// Otherwise the kubelet sends SIGKILL before Shutdown returns.
 	ShutdownTimeout  time.Duration       `hcl:"shutdown-timeout,optional" default:"150s" help:"Maximum time to wait for in-flight requests to drain on graceful shutdown."`
 	SchedulerConfig  jobscheduler.Config `hcl:"scheduler,block"`
 	LoggingConfig    logging.Config      `hcl:"log,block"`
@@ -78,10 +79,9 @@ type CLI struct {
 
 	Config *os.File `hcl:"-" help:"Configuration file path." required:"" default:"cachew.hcl"`
 
-	// MutexProfileFraction sets the runtime mutex contention sample rate
-	// (1/N events captured) so /debug/pprof/mutex returns useful data.
-	// Set to 0 to disable mutex profiling. The /admin/pprof/* endpoints
-	// are always mounted via net/http/pprof; this only controls sampling.
+	// MutexProfileFraction sets the mutex contention sample rate (1/N events) for /debug/pprof/mutex.
+	//
+	// 0 disables sampling. The /admin/pprof/* endpoints are always mounted; this only controls sampling.
 	MutexProfileFraction int `help:"Mutex contention profile sample rate (1/N events). 0 disables mutex profiling." env:"MUTEX_PROFILE_FRACTION" default:"100"`
 }
 
@@ -108,9 +108,7 @@ func main() {
 
 	configureProcess(logger, cli.MutexProfileFraction, globalConfig.UpstreamBackoff, globalConfig.UpstreamBackoffMax)
 
-	// Register the OpenTelemetry tracer provider. tracing.New is a
-	// no-op when OTEL_EXPORTER_OTLP_ENDPOINT is unset, so deployments
-	// without an OTLP collector wired up are safe.
+	// tracing.New is a no-op when OTEL_EXPORTER_OTLP_ENDPOINT is unset, so it is safe without a collector.
 	stopTracing, err := tracing.New(ctx, tracing.Config{Enabled: true})
 	fatalIfError(ctx, logger, err, "Failed to start tracer")
 	defer stopTracing()
@@ -124,9 +122,9 @@ func main() {
 	})
 	s3ClientProvider := s3client.NewClientProvider(ctx, globalConfig.S3Config)
 
-	// The scheduler gets its own context so workers keep running during
-	// graceful shutdown while in-flight HTTP handlers drain. We cancel it
-	// explicitly after server.Shutdown completes.
+	// The scheduler has its own context so workers keep running while HTTP handlers drain on shutdown.
+	//
+	// It is cancelled explicitly after server.Shutdown completes.
 	schedulerCtx, cancelScheduler := context.WithCancel(context.WithoutCancel(ctx))
 	schedulerProvider := jobscheduler.NewProvider(schedulerCtx, globalConfig.SchedulerConfig)
 
@@ -183,8 +181,7 @@ func main() {
 		stopSignals()
 	}
 
-	// Stop scheduling new work once shutdown begins; cancelScheduler below
-	// performs the hard teardown after in-flight jobs drain.
+	// Stop new work at shutdown; cancelScheduler below tears down after in-flight jobs drain.
 	drainSchedulerIntake(schedulerProvider)
 
 	gracefulShutdown(ctx, logger, server, &shuttingDown, spoolProvider, globalConfig.ShutdownReadinessDelay,
@@ -194,8 +191,9 @@ func main() {
 	drainScheduler(ctx, logger, schedulerProvider)
 }
 
-// gracefulShutdown fails readiness, waits readinessDelay for load balancers
-// to drain, then runs http.Server.Shutdown bounded by shutdownTimeout.
+// gracefulShutdown fails readiness and waits readinessDelay for load balancers to drain.
+//
+// It then runs http.Server.Shutdown bounded by shutdownTimeout.
 func gracefulShutdown(
 	ctx context.Context,
 	logger *slog.Logger,
@@ -308,9 +306,7 @@ func newMux(ctx context.Context, shuttingDown *atomic.Bool, cr *cache.Registry, 
 		_, _ = w.Write([]byte("OK")) //nolint:errcheck
 	})
 
-	// readiers is populated by config.Load below. The /_readiness handler
-	// reads it through this closure so the slice is in scope before the
-	// HTTP server starts accepting connections.
+	// readiers is filled by config.Load below; the /_readiness closure captures it before the server starts.
 	var readiers []strategy.Readier
 	mux.HandleFunc("GET /_readiness", func(w http.ResponseWriter, _ *http.Request) {
 		if shuttingDown.Load() {
@@ -356,7 +352,6 @@ func newMux(ctx context.Context, shuttingDown *atomic.Bool, cr *cache.Registry, 
 	return handler, nil
 }
 
-// runOPATests executes the configured OPA policy tests at startup, exiting if any fail.
 func runOPATests(ctx context.Context, logger *slog.Logger, cfg opa.Config) {
 	passed, err := opa.RunTests(ctx, cfg)
 	fatalIfError(ctx, logger, err, "OPA tests failed")
@@ -373,8 +368,6 @@ func fatalIfError(ctx context.Context, logger *slog.Logger, err error, msg strin
 	os.Exit(1)
 }
 
-// extractPathPrefix extracts the strategy name, path prefix from a request path.
-// Examples: /git/... -> "git", /gomod/... -> "gomod", /api/v1/... -> "api".
 func extractPathPrefix(path string) string {
 	if path == "" || path == "/" {
 		return ""
@@ -434,8 +427,7 @@ func newServer(
 	handler = logging.Middleware(handler, logConfig)
 
 	logger := logging.FromContext(ctx)
-	// Strip cancellation so SIGTERM doesn't abort in-flight handlers via
-	// r.Context(); Server.Shutdown is what waits for them to finish.
+	// Strip cancellation so SIGTERM doesn't abort in-flight handlers; Server.Shutdown waits for them.
 	baseCtx := context.WithoutCancel(ctx)
 	return &http.Server{
 		Addr:              bind,
@@ -452,23 +444,21 @@ func newServer(
 	}, nil
 }
 
-// configureProcess applies process-wide runtime and HTTP transport settings.
 func configureProcess(logger *slog.Logger, mutexProfileFraction int, upstreamBackoff, upstreamBackoffMax time.Duration) {
-	// Enable mutex contention sampling so /admin/pprof/mutex returns
-	// useful data. The pprof endpoints themselves are mounted on the
-	// main HTTP listener under /admin/pprof/* via the net/http/pprof
-	// side-effect import; OPA gates external access.
+	// Enable mutex sampling for /admin/pprof/mutex.
+	//
+	// The pprof endpoints are mounted on the main listener via net/http/pprof; OPA gates external access.
 	runtime.SetMutexProfileFraction(mutexProfileFraction)
 
-	// Every strategy that uses http.DefaultTransport shares one set of
-	// per-hostname and per-credential 429 cooldowns. Origin metrics sit below the cooldowns so that
-	// requests rejected during a cooldown are not counted as origin traffic.
+	// All strategies using http.DefaultTransport share per-host and per-credential 429 cooldowns.
+	//
+	// Origin metrics sit below the cooldowns so requests rejected during a cooldown are not counted.
 	http.DefaultTransport = httputil.NewBackoffTransport(metrics.NewOriginTransport(http.DefaultTransport), upstreamBackoff, upstreamBackoffMax, logger) //nolint:reassign
 }
 
-// loadGlobalConfig unmarshals the global config from HCL, using a two-pass
-// approach so that the "state" field is resolved first and then injected as
-// CACHEW_STATE for expansion in other defaults (e.g. mirror-root, disk root).
+// loadGlobalConfig unmarshals the global config from HCL in two passes.
+//
+// The first resolves "state", which is injected as CACHEW_STATE to expand other defaults such as mirror-root.
 func loadGlobalConfig(ast *hcl.AST) (GlobalConfig, map[string]string, error) {
 	var cfg GlobalConfig
 	schema, err := hcl.Schema(&cfg)

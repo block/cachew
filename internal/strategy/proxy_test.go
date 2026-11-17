@@ -16,14 +16,13 @@ import (
 	"github.com/block/cachew/internal/strategy"
 )
 
-// httpTransportMutexProxy prevents concurrent modification of http.DefaultTransport
-// across proxy tests, mirroring the same pattern used in hermit_test.go.
+// httpTransportMutexProxy serialises proxy tests because they modify the global http.DefaultTransport.
 var httpTransportMutexProxy sync.Mutex //nolint:gochecknoglobals
 
-// setupProxyTest creates an HTTPProxy and returns the handler that results from
-// wrapping a fresh ServeMux via proxy.Intercept. This mirrors how config.Load
-// wires up interceptor strategies in production.
-func setupProxyTest(t *testing.T) (http.Handler, context.Context, cache.Cache) {
+// setupProxyTest creates an HTTPProxy and returns the handler from wrapping a fresh ServeMux via proxy.Intercept.
+//
+// This mirrors how config.Load wires up interceptor strategies in production.
+func setupProxyTest(t *testing.T) (http.Handler, context.Context, cache.Cache) { //nolint:privatedoc // explains why
 	t.Helper()
 
 	_, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelError})
@@ -39,8 +38,7 @@ func setupProxyTest(t *testing.T) (http.Handler, context.Context, cache.Cache) {
 	return p.Intercept(mux), ctx, memCache
 }
 
-// TestHTTPProxyCaching verifies that a second identical proxy request is served
-// from cache without hitting the upstream server.
+// TestHTTPProxyCaching verifies that a second identical proxy request is served from cache.
 func TestHTTPProxyCaching(t *testing.T) {
 	httpTransportMutexProxy.Lock()
 	defer httpTransportMutexProxy.Unlock()
@@ -78,9 +76,7 @@ func TestHTTPProxyCaching(t *testing.T) {
 	assert.Equal(t, 1, callCount, "second request should be served from cache")
 }
 
-// TestHTTPProxyNonAbsoluteRequest verifies that requests without an absolute
-// http:// URI (i.e. normal relative-path requests to cachew itself) are passed
-// through to the next handler (returning 404 from the empty mux in tests).
+// TestHTTPProxyNonAbsoluteRequest verifies that relative-path requests to cachew pass through to the next handler.
 func TestHTTPProxyNonAbsoluteRequest(t *testing.T) {
 	handler, ctx, _ := setupProxyTest(t)
 
@@ -91,8 +87,7 @@ func TestHTTPProxyNonAbsoluteRequest(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, w.Code)
 }
 
-// TestHTTPProxyNonGETNotIntercepted verifies that absolute-form requests with
-// methods other than GET are passed through to the next handler, not cached.
+// TestHTTPProxyNonGETNotIntercepted verifies that non-GET absolute-form requests pass through uncached.
 func TestHTTPProxyNonGETNotIntercepted(t *testing.T) {
 	handler, ctx, _ := setupProxyTest(t)
 
@@ -105,8 +100,7 @@ func TestHTTPProxyNonGETNotIntercepted(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, w.Code)
 }
 
-// TestHTTPProxyDoesNotShadowSpecificRoutes verifies that more-specific mux
-// routes still win for relative-path requests even when the proxy intercepts.
+// TestHTTPProxyDoesNotShadowSpecificRoutes verifies that more-specific mux routes still win for relative paths.
 func TestHTTPProxyDoesNotShadowSpecificRoutes(t *testing.T) {
 	_, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelError})
 	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: time.Hour})
@@ -132,8 +126,7 @@ func TestHTTPProxyDoesNotShadowSpecificRoutes(t *testing.T) {
 	assert.Equal(t, "healthy", w.Body.String())
 }
 
-// TestHTTPProxyNonOKStatus verifies that non-200 responses from the upstream
-// are proxied back to the client but are NOT stored in the cache.
+// TestHTTPProxyNonOKStatus verifies that non-200 upstream responses are proxied back but not cached.
 func TestHTTPProxyNonOKStatus(t *testing.T) {
 	httpTransportMutexProxy.Lock()
 	defer httpTransportMutexProxy.Unlock()
@@ -163,8 +156,7 @@ func TestHTTPProxyNonOKStatus(t *testing.T) {
 	assert.Error(t, err, "non-OK responses should not be cached")
 }
 
-// TestHTTPProxyHTTPSUpgrade verifies that incoming http:// proxy requests are
-// fetched from upstream over HTTPS (not HTTP).
+// TestHTTPProxyHTTPSUpgrade verifies that http:// proxy requests are fetched from upstream over HTTPS.
 func TestHTTPProxyHTTPSUpgrade(t *testing.T) {
 	httpTransportMutexProxy.Lock()
 	defer httpTransportMutexProxy.Unlock()
@@ -201,8 +193,7 @@ func TestHTTPProxyHTTPSUpgrade(t *testing.T) {
 	assert.Error(t, err, "cache key should use HTTPS, not HTTP")
 }
 
-// TestHTTPProxyDifferentURLs verifies that requests to distinct URLs are cached
-// independently — each unique URL results in exactly one upstream call.
+// TestHTTPProxyDifferentURLs verifies that each distinct URL is cached independently with one upstream call.
 func TestHTTPProxyDifferentURLs(t *testing.T) {
 	httpTransportMutexProxy.Lock()
 	defer httpTransportMutexProxy.Unlock()
@@ -260,8 +251,7 @@ func TestHTTPProxyString(t *testing.T) {
 	assert.Equal(t, "proxy", p.String())
 }
 
-// TestHTTPProxyQueryStringInCacheKey verifies that query parameters are included
-// in the cache key so requests for different query strings are cached separately.
+// TestHTTPProxyQueryStringInCacheKey verifies that query strings are part of the cache key.
 func TestHTTPProxyQueryStringInCacheKey(t *testing.T) {
 	httpTransportMutexProxy.Lock()
 	defer httpTransportMutexProxy.Unlock()

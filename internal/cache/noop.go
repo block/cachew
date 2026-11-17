@@ -8,14 +8,12 @@ import (
 	"time"
 )
 
-// noOpCache is a cache implementation that doesn't cache anything.
-// It always returns cache misses and discards writes.
-// Useful for pass-through handlers that shouldn't cache.
+// noOpCache always misses and discards writes, for pass-through handlers that shouldn't cache.
 type noOpCache struct{}
 
 // NoOpCache returns a cache that doesn't cache anything.
-// All Open() calls return os.ErrNotExist (cache miss).
-// All Create() calls return a writer that discards data.
+//
+// Open returns os.ErrNotExist (cache miss) and Create returns a writer that discards data.
 func NoOpCache() Cache {
 	return &noOpCache{}
 }

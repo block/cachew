@@ -13,40 +13,32 @@ import (
 // ETagKey is the HTTP header key used to store the ETag.
 const ETagKey = "ETag"
 
-// ErrNotModified is returned when an If-None-Match precondition is satisfied,
-// indicating the resource has not changed since the supplied ETag. Over HTTP
-// this corresponds to 304 Not Modified.
+// ErrNotModified is returned when an If-None-Match precondition matches the stored ETag (HTTP 304 Not Modified).
 var ErrNotModified = errors.New("not modified")
 
-// ErrPreconditionFailed is returned when an If-Match precondition is not met.
-// Over HTTP this corresponds to 412 Precondition Failed.
+// ErrPreconditionFailed is returned when an If-Match precondition is not met (HTTP 412 Precondition Failed).
 var ErrPreconditionFailed = errors.New("precondition failed")
 
-// ErrRangeNotSatisfiable is returned when a Range precondition cannot be
-// satisfied against the stored object. Over HTTP this corresponds to 416 Range
-// Not Satisfiable.
+// ErrRangeNotSatisfiable is returned when a Range lies outside the stored object (HTTP 416 Range Not Satisfiable).
 var ErrRangeNotSatisfiable = errors.New("range not satisfiable")
 
-// RequestOptions holds conditional-request parameters. It is the single
-// representation shared by the client wire protocol, the cache backends, and
-// the server handlers.
+// RequestOptions holds conditional-request parameters.
+//
+// It is the single representation shared by the client wire protocol, the cache backends, and the server handlers.
 type RequestOptions struct {
-	// IfMatch is the If-Match precondition. Evaluation fails with
-	// ErrPreconditionFailed if the stored ETag does not match.
+	// IfMatch is the If-Match precondition; a non-matching stored ETag fails with ErrPreconditionFailed.
 	IfMatch string
-	// IfNoneMatch is the If-None-Match precondition. Evaluation reports
-	// ErrNotModified when the stored ETag matches.
+	// IfNoneMatch is the If-None-Match precondition; a matching stored ETag reports ErrNotModified.
 	IfNoneMatch string
-	// Range is a raw HTTP Range header value (e.g. "bytes=0-499"). Only a
-	// single byte range is supported; multi-range or invalid specifiers are
-	// ignored and the full representation is served.
+	// Range is a raw HTTP Range header value (e.g. "bytes=0-499").
+	//
+	// Only a single byte range is supported; multi-range or invalid specifiers serve the full representation.
 	Range string
-	// IfRange gates Range on the stored ETag: the range is only applied when
-	// IfRange matches the stored ETag, otherwise the full representation is
-	// served. Only the entity-tag form is supported.
+	// IfRange applies Range only when it matches the stored ETag, otherwise the full representation is served.
+	//
+	// Only the entity-tag form is supported.
 	IfRange string
-	// ETag is the raw ETag value to store on Create. It is formatted as a
-	// strong HTTP ETag when carried over HTTP or stored in cache metadata.
+	// ETag is the raw ETag to store on Create, formatted as a strong HTTP ETag over HTTP and in cache metadata.
 	ETag string
 	// ETagSet reports whether ETag was explicitly configured.
 	ETagSet bool
@@ -65,27 +57,26 @@ func IfNoneMatch(etag string) RequestOption {
 	return func(o *RequestOptions) { o.IfNoneMatch = etag }
 }
 
-// Range requests a single half-open byte range [start, end) from Open. A
-// negative end means "to the end of the object" (its Content-Length). For
-// example Range(0, 500) requests the first 500 bytes and Range(0, -1) the whole
-// object. Open returns the matching bytes with a Content-Range header, or
-// ErrRangeNotSatisfiable if the range lies outside the object.
+// Range requests a single half-open byte range [start, end) from Open; a negative end reads to the end.
+//
+// For example Range(0, 500) requests the first 500 bytes. Open returns the bytes with a Content-Range header,
+// or ErrRangeNotSatisfiable if the range lies outside the object.
 func Range(start, end int64) RequestOption {
 	spec := formatByteRange(start, end)
 	return func(o *RequestOptions) { o.Range = spec }
 }
 
-// formatByteRange renders a half-open [start, end) range as an HTTP byte-range
-// specifier. A negative end yields an open-ended range to the end of the object.
-func formatByteRange(start, end int64) string {
+// formatByteRange renders a half-open [start, end) range as an HTTP byte-range specifier.
+//
+// A negative end yields an open-ended range to the end of the object.
+func formatByteRange(start, end int64) string { //nolint:privatedoc // documents a non-obvious contract
 	if end < 0 {
 		return fmt.Sprintf("bytes=%d-", start)
 	}
 	return fmt.Sprintf("bytes=%d-%d", start, end-1)
 }
 
-// IfRange sets the If-Range precondition: the Range is only honoured when etag
-// matches the stored ETag, otherwise the full representation is served.
+// IfRange sets the If-Range precondition, so Range applies only when etag matches the stored ETag.
 func IfRange(etag string) RequestOption {
 	return func(o *RequestOptions) { o.IfRange = etag }
 }
@@ -107,9 +98,9 @@ func NewRequestOptions(opts ...RequestOption) RequestOptions {
 	return o
 }
 
-// Check evaluates the preconditions against the stored ETag. It returns
-// ErrNotModified for a satisfied If-None-Match, ErrPreconditionFailed for a
-// failed If-Match, or nil when all preconditions pass.
+// Check evaluates the preconditions against the stored ETag.
+//
+// It returns ErrNotModified for a satisfied If-None-Match, ErrPreconditionFailed for a failed If-Match, or nil.
 func (o RequestOptions) Check(etag string) error {
 	if o.IfMatch != "" && (etag == "" || !etagListMatches(o.IfMatch, etag)) {
 		return ErrPreconditionFailed
@@ -120,7 +111,6 @@ func (o RequestOptions) Check(etag string) error {
 	return nil
 }
 
-// applyToRequest sets the conditional headers on an outgoing request.
 func (o RequestOptions) applyToRequest(req *http.Request) {
 	if o.IfMatch != "" {
 		req.Header.Set("If-Match", o.IfMatch)
@@ -140,8 +130,7 @@ func (o RequestOptions) applyToRequest(req *http.Request) {
 type RangeOutcome int
 
 const (
-	// RangeFull indicates the full representation should be served (no Range,
-	// an unmatched If-Range, or an unsupported/invalid specifier).
+	// RangeFull serves the full representation: no Range, an unmatched If-Range, or an invalid specifier.
 	RangeFull RangeOutcome = iota
 	// RangePartial indicates a single satisfiable byte range.
 	RangePartial
@@ -149,16 +138,14 @@ const (
 	RangeNotSatisfiable
 )
 
-// IfRangeMisses reports whether a requested Range is dropped because the
-// If-Range validator does not match etag, in which case the full
-// representation is served in place of the range.
+// IfRangeMisses reports whether Range is dropped for the full representation because If-Range does not match etag.
 func (o RequestOptions) IfRangeMisses(etag string) bool {
 	return o.Range != "" && o.IfRange != "" && o.IfRange != etag
 }
 
-// ResolveRange evaluates the Range/If-Range options against an object of the
-// given size and ETag. On RangePartial it returns the [start, start+length)
-// window to serve.
+// ResolveRange evaluates Range and If-Range against an object of the given size and ETag.
+//
+// On RangePartial it returns the [start, start+length) window to serve.
 func (o RequestOptions) ResolveRange(size int64, etag string) (start, length int64, outcome RangeOutcome) {
 	if o.Range == "" || o.IfRangeMisses(etag) {
 		return 0, size, RangeFull
@@ -167,8 +154,8 @@ func (o RequestOptions) ResolveRange(size int64, etag string) (start, length int
 }
 
 // resolveByteRange parses a single HTTP byte-range specifier against size.
-// Multi-range and syntactically invalid specifiers yield RangeFull so the
-// caller serves the full representation.
+//
+// Multi-range and invalid specifiers yield RangeFull so the caller serves the full representation.
 func resolveByteRange(spec string, size int64) (start, length int64, outcome RangeOutcome) {
 	const prefix = "bytes="
 	if !strings.HasPrefix(spec, prefix) {
@@ -221,10 +208,11 @@ func resolveByteRange(spec string, size int64) (start, length int64, outcome Ran
 	return start, end - start + 1, RangePartial
 }
 
-// etagListMatches reports whether etag matches an If-Match / If-None-Match
-// header value, which may be a comma-separated list of ETags or the "*"
-// wildcard. Stored ETags are always strong, so weak comparison is not required.
-func etagListMatches(headerValue, etag string) bool {
+// etagListMatches reports whether etag matches an If-Match or If-None-Match header value.
+//
+// The value may be a comma-separated list or "*". Stored ETags are always strong, so weak
+// comparison is not required.
+func etagListMatches(headerValue, etag string) bool { //nolint:privatedoc // explains why
 	for candidate := range strings.SplitSeq(headerValue, ",") {
 		candidate = strings.TrimSpace(candidate)
 		if candidate == "*" || candidate == etag {

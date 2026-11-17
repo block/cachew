@@ -15,14 +15,10 @@ import (
 	"github.com/block/cachew/internal/strategy/handler"
 )
 
-// RegisterHTTPProxy registers a caching HTTP proxy strategy. It intercepts
-// absolute-form proxy requests (e.g. from sdkmanager with --proxy_host /
-// --proxy_port) where the client sends:
+// RegisterHTTPProxy registers a caching HTTP proxy strategy for absolute-form requests like GET http://host/path.
 //
-//	GET http://dl.google.com/some/path HTTP/1.1
-//
-// The request URI is upgraded to HTTPS and the response is fetched and cached.
-// Only GET requests are intercepted; other methods are passed through.
+// Used by e.g. sdkmanager with --proxy_host/--proxy_port. The URI is upgraded to HTTPS, and the response fetched
+// and cached. Only GET requests are intercepted; other methods are passed through.
 func RegisterHTTPProxy(r *Registry, spools spool.Provider) {
 	Register(r, "proxy", "Caching HTTP proxy for absolute-form proxy requests.", func(ctx context.Context, _ ProxyConfig, c cache.Cache, mux Mux) (*HTTPProxy, error) {
 		registry, err := spools()
@@ -33,17 +29,13 @@ func RegisterHTTPProxy(r *Registry, spools spool.Provider) {
 	})
 }
 
-// ProxyConfig holds configuration for the HTTP proxy strategy.
-// Currently no options are required.
+// ProxyConfig holds configuration for the HTTP proxy strategy, which currently has no options.
 type ProxyConfig struct{}
 
-// HTTPProxy is a caching HTTP proxy strategy that handles standard HTTP proxy
-// requests in absolute form (GET http://host/path HTTP/1.1).
+// HTTPProxy is a caching HTTP proxy strategy for absolute-form requests (GET http://host/path HTTP/1.1).
 //
-// It implements the Interceptor interface rather than registering on the mux
-// directly, so that absolute-form request detection happens before ServeMux
-// route matching. This prevents overlap with more-specific routes such as
-// /api/v1/ or /admin/ when the proxied upstream path happens to match them.
+// It is an Interceptor rather than a mux route so detection happens before ServeMux matching, stopping
+// more-specific routes such as /api/v1/ or /admin/ capturing proxied upstream paths that match them.
 type HTTPProxy struct {
 	logger  *slog.Logger
 	handler http.Handler
@@ -54,6 +46,7 @@ var (
 	_ Interceptor = (*HTTPProxy)(nil)
 )
 
+// NewHTTPProxy creates an HTTPProxy; it registers no routes because it intercepts requests instead.
 func NewHTTPProxy(ctx context.Context, c cache.Cache, _ Mux, spools *spool.Registry) (*HTTPProxy, error) {
 	logger := logging.FromContext(ctx)
 	client := &http.Client{}
@@ -92,14 +85,12 @@ func NewHTTPProxy(ctx context.Context, c cache.Cache, _ Mux, spools *spool.Regis
 
 func (p *HTTPProxy) String() string { return "proxy" }
 
-// Intercept returns an http.Handler that intercepts absolute-form GET proxy
-// requests before they reach the ServeMux, delegating all other requests to
-// next. This ensures that a proxied path like /api/v1/... is not accidentally
-// routed to cachew's own API handler.
+// Intercept handles absolute-form GET proxy requests before the ServeMux and delegates all others to next.
+//
+// This stops a proxied path like /api/v1/... being routed to cachew's own API handler.
 func (p *HTTPProxy) Intercept(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Only intercept absolute-form GET requests. Non-GET requests
-		// (HEAD, POST, …) are not cached and are passed through.
+		// Non-GET requests (HEAD, POST, …) are not cached and are passed through.
 		if r.Method == http.MethodGet && strings.HasPrefix(r.RequestURI, "http://") {
 			p.handler.ServeHTTP(w, r)
 			return
@@ -108,8 +99,6 @@ func (p *HTTPProxy) Intercept(next http.Handler) http.Handler {
 	})
 }
 
-// parseProxyURI returns the HTTPS upstream URL for an absolute-form proxy
-// request, or nil if the request is not a proxy request.
 func (p *HTTPProxy) parseProxyURI(r *http.Request) *url.URL {
 	if !strings.HasPrefix(r.RequestURI, "http://") {
 		return nil

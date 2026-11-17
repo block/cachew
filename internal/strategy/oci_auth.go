@@ -14,6 +14,7 @@ import (
 )
 
 // ociTransport authenticates upstream requests with the strategy's own credentials.
+//
 // Registries issue tokens per repository scope, so it keeps one transport per repository.
 type ociTransport struct {
 	registry name.Registry
@@ -24,8 +25,7 @@ type ociTransport struct {
 	repositories map[string]*ociRepositoryTransport
 }
 
-// ociRepositoryTransport is created lazily so that a slow token exchange for
-// one repository does not block requests for others.
+// ociRepositoryTransport is created lazily so a slow token exchange for one repository does not block others.
 type ociRepositoryTransport struct {
 	mu        sync.Mutex
 	transport http.RoundTripper
@@ -85,8 +85,7 @@ func (t *ociTransport) forRepository(req *http.Request) (http.RoundTripper, erro
 		return entry.transport, nil
 	}
 	scope := t.registry.Repo(repository).Scope(transport.PullScope)
-	// Failures are not kept, so a transient ping or token failure is retried
-	// by the next request.
+	// Failures are not kept, so the next request retries a transient ping or token failure.
 	rt, err := transport.NewWithContext(req.Context(), t.registry, t.auth, t.base, []string{scope})
 	if err != nil {
 		return nil, errors.Wrapf(err, "authenticate to %s for %s", t.registry, repository)
@@ -95,8 +94,7 @@ func (t *ociTransport) forRepository(req *http.Request) (http.RoundTripper, erro
 	return rt, nil
 }
 
-// ociRateLimitTransport preserves 429 headers that the auth library discards
-// when turning registry ping and token responses into errors.
+// ociRateLimitTransport keeps 429 headers the auth library drops when turning ping and token responses into errors.
 type ociRateLimitTransport struct {
 	base http.RoundTripper
 }

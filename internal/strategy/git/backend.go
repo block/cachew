@@ -18,11 +18,10 @@ import (
 	"github.com/block/cachew/internal/logging"
 )
 
-// bufferedResponseWriter buffers the response up to a threshold before writing
-// to the underlying writer. Once the threshold is exceeded, the buffer is flushed
-// and subsequent writes go directly through. If the threshold is never exceeded,
-// the caller must call commit() explicitly, or the response is discarded (allowing
-// a clean fallback to a different handler).
+// bufferedResponseWriter buffers a response until it exceeds a threshold, then streams it through.
+//
+// If the threshold is never exceeded, the caller must call commit() or the response is discarded,
+// which allows a clean fallback to a different handler.
 type bufferedResponseWriter struct {
 	w         http.ResponseWriter
 	headers   http.Header
@@ -66,7 +65,6 @@ func (b *bufferedResponseWriter) Write(p []byte) (int, error) {
 	return n, nil
 }
 
-// commit flushes the buffered response to the underlying writer.
 func (b *bufferedResponseWriter) commit() {
 	if b.committed {
 		return
@@ -81,11 +79,10 @@ func (b *bufferedResponseWriter) commit() {
 	_, _ = io.Copy(b.w, &b.buf) //nolint:errcheck
 }
 
-// serveFromBackend serves the request using git http-backend against the local
-// mirror. It returns true if the request should be retried against upstream —
-// specifically when git upload-pack rejects the request with "not our ref",
-// indicating the local mirror is missing an object the client wants (typically
-// due to a concurrent force-push fetch orphaning a previously-advertised commit).
+// serveFromBackend serves the request using git http-backend against the local mirror.
+//
+// It returns true when upload-pack rejects the request with "not our ref" and it should be retried upstream.
+// This typically happens when a concurrent force-push fetch orphans a previously advertised commit.
 func (s *Strategy) serveFromBackend(w http.ResponseWriter, r *http.Request, repo *gitclone.Repository) bool {
 	ctx := r.Context()
 	logger := logging.FromContext(ctx)
@@ -122,17 +119,14 @@ func (s *Strategy) serveFromBackend(w http.ResponseWriter, r *http.Request, repo
 	logger.DebugContext(r.Context(), "Serving with git http-backend", "original_path", r.URL.Path,
 		"backend_path", backendPath, "clone_path", repo.Path())
 
-	// No read lock needed: git http-backend (upload-pack) handles concurrent
-	// access safely via git's own file-level locking. Holding a read lock here
-	// blocks fetches for the entire duration of a clone stream (minutes for
-	// large repos), which combined with RWMutex writer-priority semantics
-	// causes all subsequent requests to hang.
+	// No read lock: git http-backend handles concurrent access via git's own file-level locking.
+	//
+	// A read lock would block fetches for the whole clone stream (minutes for large repos), and
+	// RWMutex writer priority would then hang all subsequent requests.
 
-	// Buffer up to 1 MB before committing to the client. "not our ref" errors
-	// are always tiny (<1 KB), so if the response stays small we can detect and
-	// suppress the error before any bytes reach the client, allowing a clean
-	// fallback to upstream. Large successful pack responses exceed the threshold
-	// and are streamed through normally.
+	// Buffer up to 1 MB so a "not our ref" error (always <1 KB) can be suppressed before reaching the client.
+	//
+	// This allows a clean fallback to upstream. Large successful pack responses stream through normally.
 	const fallbackThreshold = 1 << 20 // 1 MB
 	bw := newBufferedResponseWriter(w, fallbackThreshold)
 
@@ -156,8 +150,7 @@ func (s *Strategy) serveFromBackend(w http.ResponseWriter, r *http.Request, repo
 	r2 := r.Clone(r.Context())
 	r2.URL.Path = backendPath
 
-	// Go's cgi.Handler rejects chunked request bodies with a 400.
-	// Buffer the body so we can set ContentLength and clear TransferEncoding.
+	// Go's cgi.Handler rejects chunked request bodies with a 400, so buffer the body to set ContentLength.
 	if r2.ContentLength < 0 {
 		body, err := io.ReadAll(r2.Body)
 		if err != nil {
@@ -183,9 +176,6 @@ func (s *Strategy) serveFromBackend(w http.ResponseWriter, r *http.Request, repo
 	return false
 }
 
-// checkRefsStale checks whether the local mirror's refs are behind upstream.
-// Returns true if a fetch is needed. The caller decides whether to fetch
-// synchronously or fall back to upstream.
 func (s *Strategy) checkRefsStale(ctx context.Context, repo *gitclone.Repository) (bool, error) {
 	needsFetch, err := repo.EnsureRefsUpToDate(ctx)
 	if err != nil {

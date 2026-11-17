@@ -29,7 +29,6 @@ func BackendName(c Cache) string {
 	}
 }
 
-// observeSource reports c as the backend that answered a lookup that found the object.
 func observeSource(ctx context.Context, c Cache, err error) {
 	if err == nil || errors.Is(err, ErrNotModified) || errors.Is(err, ErrRangeNotSatisfiable) {
 		metrics.ObserveCacheSource(ctx, BackendName(c))
@@ -65,8 +64,9 @@ type observedWriter struct {
 
 var _ PendingReader = (*observedWriter)(nil)
 
-// OpenPending keeps pending reads available through the wrapper, so coalesced
-// readers can follow the write instead of spooling a second copy.
+// OpenPending keeps pending reads available through the wrapper.
+//
+// Coalesced readers can then follow the write instead of spooling a second copy.
 func (w *observedWriter) OpenPending() (ReadAtCloser, error) {
 	pending, ok := w.Writer.(PendingReader)
 	if !ok {

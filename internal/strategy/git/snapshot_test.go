@@ -44,16 +44,13 @@ func TestSnapshotHTTPEndpoint(t *testing.T) {
 	cm := gitclone.NewManagerProvider(ctx, gitclone.Config{
 		MirrorRoot: mirrorRoot,
 	}, nil)
-	// SnapshotInterval=0 disables periodic snapshot jobs so they don't
-	// overwrite the fake cached snapshot we insert below.
+	// SnapshotInterval=0 stops periodic jobs overwriting the fake cached snapshot inserted below.
 	s, err := git.New(ctx, git.Config{}, newTestScheduler(ctx, t), memCache, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }, newTestSpools(t)) //nolint:nilnil
 	assert.NoError(t, err)
-	// The warm-up goroutine uses context.WithoutCancel so it survives
-	// t.Context() cancellation. Wait for it before TempDir cleanup.
+	// The warm-up goroutine survives t.Context() cancellation, so wait for it before TempDir cleanup.
 	t.Cleanup(func() { waitForReady(t, s) })
 
-	// Create a fake snapshot in the cache with a Last-Modified after the
-	// mirror's last fetch so the endpoint considers it fresh.
+	// A Last-Modified after the mirror's last fetch makes the endpoint consider the fake snapshot fresh.
 	upstreamURL := "https://github.com/org/repo"
 	cacheKey := cache.NewKey(upstreamURL + ".snapshot")
 	snapshotData := []byte("fake snapshot data")
@@ -71,8 +68,7 @@ func TestSnapshotHTTPEndpoint(t *testing.T) {
 	handler := mux.handlers["GET /git/{host}/{path...}"]
 	assert.NotZero(t, handler)
 
-	// Test successful snapshot request — cached snapshot is fresh (Last-Modified
-	// is after the mirror's last fetch), so it's served directly.
+	// The cached snapshot is fresh, so it's served directly.
 	req := httptest.NewRequest(http.MethodGet, "/git/github.com/org/repo/snapshot.tar.zst", nil)
 	req = req.WithContext(ctx)
 	req.SetPathValue("host", "github.com")
@@ -134,8 +130,7 @@ func TestSnapshotOnDemandGenerationViaHTTP(t *testing.T) {
 	assert.Equal(t, "application/zstd", w.Header().Get("Content-Type"))
 	assert.NotZero(t, w.Body.Len())
 
-	// Allow background goroutines (spool cleanup, cache backfill) to finish
-	// before TempDir cleanup runs.
+	// Let spool cleanup and cache backfill goroutines finish before TempDir cleanup.
 	time.Sleep(2 * time.Second)
 
 	restoreDir := t.TempDir()
@@ -180,7 +175,6 @@ func assertSnapshotGitFiles(t *testing.T, mirrorPath, restoredGitDir string) {
 	assert.NoError(t, err, string(output))
 }
 
-// createTestMirrorRepo creates a bare mirror-style repo at mirrorPath with one commit.
 func createTestMirrorRepo(t *testing.T, mirrorPath string) {
 	t.Helper()
 	createTestMirrorRepoWithFiles(t, mirrorPath, map[string]string{
@@ -219,8 +213,6 @@ func createTestMirrorRepoWithFiles(t *testing.T, mirrorPath string, files map[st
 	}
 }
 
-// addCommitToMirror pushes a new empty commit to the bare mirror so its HEAD
-// moves.
 func addCommitToMirror(t *testing.T, mirrorPath string) {
 	t.Helper()
 	tmpWork := t.TempDir()
@@ -472,8 +464,7 @@ exit "$git_status"
 	assert.IsError(t, err, os.ErrNotExist)
 }
 
-// createTestMirrorRepoWithHistory creates a mirror whose history contains a
-// superseded version of data.txt, returning that historical blob's SHA.
+// createTestMirrorRepoWithHistory creates a mirror with a superseded data.txt and returns that historical blob's SHA.
 func createTestMirrorRepoWithHistory(t *testing.T, mirrorPath string) string {
 	t.Helper()
 	tmpWork := t.TempDir()
@@ -495,8 +486,7 @@ func createTestMirrorRepoWithHistory(t *testing.T, mirrorPath string) string {
 	assert.NoError(t, os.WriteFile(filepath.Join(tmpWork, "data.txt"), []byte("current\n"), 0o644))
 	run("-C", tmpWork, "commit", "-am", "two")
 	run("clone", "--mirror", tmpWork, mirrorPath)
-	// configureMirror sets this on managed mirrors; a premade test mirror lacks
-	// it, and without it git silently ignores --filter.
+	// configureMirror sets this on managed mirrors; without it git silently ignores --filter.
 	run("-C", mirrorPath, "config", "uploadpack.allowfilter", "true")
 	run("-C", mirrorPath, "cat-file", "-e", historicalBlob)
 	return historicalBlob
@@ -657,9 +647,7 @@ func TestMirrorSnapshotRestoreDirectly(t *testing.T) {
 	cmd = exec.Command("git", "-C", restoreDir, "remote", "get-url", "origin")
 	output, err = cmd.CombinedOutput()
 	assert.NoError(t, err, string(output))
-	// Mirror clones from a local path, so remote points to the local mirror.
-	// After restore on a real pod, configureMirror would not change this;
-	// the upstream URL is set correctly because the snapshot IS the mirror.
+	// The test mirror's remote is a local path; on a real pod it is upstream because the snapshot IS the mirror.
 
 	// Verify the repo is functional: git branch should list at least one branch.
 	cmd = exec.Command("git", "-C", restoreDir, "branch")
@@ -733,8 +721,7 @@ func TestMirrorSnapshotWithMultipleBranches(t *testing.T) {
 	assert.True(t, os.IsNotExist(err), "mirror snapshot should not have refs/remotes")
 }
 
-// createTestMirrorRepoWithBranches creates a bare mirror-style repo at
-// mirrorPath with one commit on main and additional branches.
+// createTestMirrorRepoWithBranches creates a bare mirror at mirrorPath with one commit on main and extra branches.
 func createTestMirrorRepoWithBranches(t *testing.T, mirrorPath string, branches []string) {
 	t.Helper()
 	tmpWork := t.TempDir()
@@ -806,9 +793,9 @@ func TestSnapshotServesFreshSnapshotWithCommitHeader(t *testing.T) {
 	err = s.GenerateAndUploadSnapshot(ctx, repo)
 	assert.NoError(t, err)
 
-	// Serve the snapshot via HTTP. Since the mirror's HEAD matches the snapshot
-	// commit, no bundle URL should be set, but X-Cachew-Snapshot-Commit must
-	// be forwarded so the client knows the snapshot is fresh.
+	// The mirror's HEAD matches the snapshot commit, so no bundle URL is set.
+	//
+	// X-Cachew-Snapshot-Commit must still be forwarded so the client knows the snapshot is fresh.
 	handler := mux.handlers["GET /git/{host}/{path...}"]
 	assert.NotZero(t, handler)
 
@@ -915,8 +902,7 @@ func TestSnapshotGetHonorsIfNoneMatch(t *testing.T) {
 	mirrorPath := filepath.Join(mirrorRoot, "github.com", "org", "repo")
 	createTestMirrorRepo(t, mirrorPath)
 
-	// The memory cache returns a non-*os.File reader, exercising the io.Copy path
-	// where ServeContent would not otherwise evaluate conditionals.
+	// The memory cache's non-*os.File reader exercises the io.Copy path, where ServeContent skips conditionals.
 	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: time.Hour})
 	assert.NoError(t, err)
 	mux := newTestMux()
@@ -1052,9 +1038,7 @@ func TestColdSnapshotServesWithoutCommitHeader(t *testing.T) {
 	_, err = git.New(ctx, git.Config{}, newTestScheduler(ctx, t), memCache, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }, newTestSpools(t)) //nolint:nilnil
 	assert.NoError(t, err)
 
-	// Pre-populate the cache with a fake snapshot that has NO X-Cachew-Snapshot-Commit
-	// header, simulating a cold-start scenario where the snapshot was uploaded to S3
-	// without mirror metadata.
+	// A cached snapshot without X-Cachew-Snapshot-Commit simulates a cold-start upload lacking mirror metadata.
 	upstreamURL := "https://github.com/org/coldrepo"
 	cacheKey := cache.NewKey(upstreamURL + ".snapshot")
 	headers := make(map[string][]string)
@@ -1068,8 +1052,7 @@ func TestColdSnapshotServesWithoutCommitHeader(t *testing.T) {
 
 	handler := mux.handlers["GET /git/{host}/{path...}"]
 
-	// Use a cancelled context so ensureCloneReady fails quickly and the cold
-	// path returns the cached snapshot.
+	// A cancelled context makes ensureCloneReady fail fast, so the cold path returns the cached snapshot.
 	reqCtx, cancelReq := context.WithCancel(ctx)
 
 	req := httptest.NewRequest(http.MethodGet, "/git/github.com/org/coldrepo/snapshot.tar.zst", nil)
@@ -1081,8 +1064,7 @@ func TestColdSnapshotServesWithoutCommitHeader(t *testing.T) {
 	handler.ServeHTTP(w, req)
 	cancelReq()
 
-	// Cold path should serve the snapshot but without X-Cachew-Snapshot-Commit,
-	// signaling to the client that it needs to freshen.
+	// Omitting X-Cachew-Snapshot-Commit on the cold path signals the client to freshen.
 	assert.Equal(t, 200, w.Code)
 	assert.Equal(t, "", w.Header().Get("X-Cachew-Snapshot-Commit"),
 		"cold path should not set X-Cachew-Snapshot-Commit")
@@ -1130,16 +1112,14 @@ func TestDeferredRestoreOnlyScheduledOnce(t *testing.T) {
 	handler.ServeHTTP(w, req)
 	assert.Equal(t, 200, w.Code)
 
-	// Second request: should not panic or fail — deferred restore should only
-	// be scheduled once (idempotent via deferredRestoreOnce).
+	// The deferred restore must be scheduled only once, via deferredRestoreOnce.
 	req2 := httptest.NewRequest(http.MethodGet, "/git/github.com/org/deferred-test/snapshot.tar.zst", nil)
 	req2 = req2.WithContext(ctx)
 	req2.SetPathValue("host", "github.com")
 	req2.SetPathValue("path", "org/deferred-test/snapshot.tar.zst")
 	w2 := httptest.NewRecorder()
 	handler.ServeHTTP(w2, req2)
-	// Second request may be 200 (from local cache) or 503 (clone not ready).
-	// The key assertion is that it doesn't panic from double-scheduling.
+	// The status may be 200 or 503; the assertion is that double-scheduling doesn't panic.
 }
 
 func TestCacheBundleAbortsOnWriteFailure(t *testing.T) {
@@ -1174,8 +1154,7 @@ func TestCacheBundleAbortsOnWriteFailure(t *testing.T) {
 	assert.IsError(t, err, os.ErrNotExist)
 }
 
-// failWriteCache wraps a cache.Cache and makes Create return a writer that
-// always fails on Write.
+// failWriteCache wraps a cache.Cache so Create returns a writer that always fails on Write.
 type failWriteCache struct {
 	cache.Cache
 }
@@ -1261,8 +1240,7 @@ func TestSnapshotGetHonorsRange(t *testing.T) {
 	mirrorPath := filepath.Join(mirrorRoot, "github.com", "org", "repo")
 	createTestMirrorRepo(t, mirrorPath)
 
-	// The memory cache returns a non-*os.File reader, so range handling must come
-	// from the strategy forwarding Range to Open rather than http.ServeContent.
+	// The memory cache's non-*os.File reader proves Range is forwarded to Open, not handled by http.ServeContent.
 	memCache, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: time.Hour})
 	assert.NoError(t, err)
 	mux := newTestMux()
@@ -1311,8 +1289,7 @@ func TestSnapshotGetHonorsRange(t *testing.T) {
 	assert.Equal(t, "bytes", partial.Header().Get("Accept-Ranges"))
 	assert.Equal(t, "bytes 0-3/"+strconv.Itoa(len(body)), partial.Header().Get("Content-Range"))
 	assert.Equal(t, body[:4], partial.Body.Bytes())
-	// Ranged clients must receive the same freshen metadata as a full GET so
-	// they can apply a delta bundle after a parallel download.
+	// Ranged clients need the same freshen metadata as a full GET to apply a delta bundle after a parallel download.
 	assert.Equal(t, commit, partial.Header().Get("X-Cachew-Snapshot-Commit"))
 
 	// A range beyond the object is not satisfiable.
@@ -1337,9 +1314,7 @@ func TestSnapshotGetHonorsRange(t *testing.T) {
 		return w
 	}
 
-	// Conditional validators take precedence over the range: a matching
-	// If-None-Match revalidates to 304 and a stale If-Match fails with 412,
-	// rather than returning a 206 body the client would discard.
+	// Validators take precedence over the range, rather than returning a 206 body the client would discard.
 	notModified := getCond("bytes=0-3", map[string]string{"If-None-Match": etag})
 	assert.Equal(t, http.StatusNotModified, notModified.Code)
 	assert.Equal(t, 0, notModified.Body.Len())
@@ -1347,8 +1322,7 @@ func TestSnapshotGetHonorsRange(t *testing.T) {
 	preconditionFailed := getCond("bytes=0-3", map[string]string{"If-Match": `"stale-etag"`})
 	assert.Equal(t, http.StatusPreconditionFailed, preconditionFailed.Code)
 
-	// An unsatisfiable range with a stale If-Match is a precondition failure
-	// (412), not a 416.
+	// An unsatisfiable range with a stale If-Match is a 412, not a 416.
 	beyond := strconv.Itoa(len(body)+10) + "-" + strconv.Itoa(len(body)+20)
 	rangeWithStaleIfMatch := getCond("bytes="+beyond, map[string]string{"If-Match": `"stale-etag"`})
 	assert.Equal(t, http.StatusPreconditionFailed, rangeWithStaleIfMatch.Code)
@@ -1408,9 +1382,6 @@ func TestLFSSnapshotGetHonorsRangeAndIfMatch(t *testing.T) {
 	assert.Equal(t, http.StatusNotModified, notModified.Code)
 }
 
-// createUpstreamAndMirror creates a working upstream repo with one commit and
-// a mirror clone of it, returning the upstream work dir so tests can add
-// commits upstream after the mirror is created.
 func createUpstreamAndMirror(t *testing.T, mirrorPath string) string {
 	t.Helper()
 	upstream := t.TempDir()
@@ -1501,8 +1472,7 @@ func TestBundleRequestFreshensStaleMirror(t *testing.T) {
 	upstream := createUpstreamAndMirror(t, mirrorPath)
 	mux := newBundleTestStrategy(ctx, t, mirrorRoot, time.Millisecond)
 
-	// Commit upstream after startup so the mirror is genuinely stale and
-	// serving a bundle for base requires the handler's freshen fetch.
+	// Upstream commits after startup make the mirror stale, so serving base requires the handler's freshen fetch.
 	base := commitUpstream(t, upstream, "second")
 	commitUpstream(t, upstream, "third")
 	time.Sleep(5 * time.Millisecond)
@@ -1522,18 +1492,16 @@ func TestBundleRequestUpToDateFetchesDespiteRecentRefCheck(t *testing.T) {
 	mirrorRoot := filepath.Join(t.TempDir(), "mirrors")
 	mirrorPath := filepath.Join(mirrorRoot, "example.com", "org", "repo")
 	upstream := createUpstreamAndMirror(t, mirrorPath)
-	// A long RefCheckInterval so the startup fetch would suppress a
-	// rate-limited freshen for the rest of the test.
+	// A long RefCheckInterval means the startup fetch would suppress a rate-limited freshen for the whole test.
 	mux := newBundleTestStrategy(ctx, t, mirrorRoot, time.Hour)
 
 	head, err := exec.Command("git", "-C", mirrorPath, "rev-parse", "HEAD").Output()
 	assert.NoError(t, err)
 	base := strings.TrimSpace(string(head))
 
-	// Upstream advances after startup: the mirror's HEAD still equals base,
-	// but reporting up-to-date from the stale mirror would make the client
-	// skip its fallback freshen. The handler must fetch for real and serve a
-	// bundle instead.
+	// Upstream advances while the mirror's HEAD still equals base, so the handler must fetch and serve a bundle.
+	//
+	// Reporting up-to-date from the stale mirror would make the client skip its fallback freshen.
 	commitUpstream(t, upstream, "second")
 
 	w := requestBundle(ctx, mux, base)
@@ -1555,8 +1523,7 @@ func TestBundleRequestFreshenFailureIsNotUpToDate(t *testing.T) {
 	head, err := exec.Command("git", "-C", mirrorPath, "rev-parse", "HEAD").Output()
 	assert.NoError(t, err)
 
-	// With the upstream gone the freshen fetch fails, so the handler cannot
-	// verify that base is still upstream HEAD and must not report up-to-date.
+	// With upstream gone the freshen fetch fails, so the handler cannot verify base and must not report up-to-date.
 	assert.NoError(t, os.RemoveAll(upstream))
 	time.Sleep(5 * time.Millisecond)
 

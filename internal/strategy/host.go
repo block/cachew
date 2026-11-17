@@ -18,6 +18,7 @@ import (
 	"github.com/block/cachew/internal/strategy/handler"
 )
 
+// RegisterHost registers the host strategy, which caches GET requests proxied to a single upstream host.
 func RegisterHost(r *Registry, spools spool.Provider) {
 	Register(r, "host", "A generic host-based proxying strategy.", func(ctx context.Context, config HostConfig, c cache.Cache, mux Mux) (*Host, error) {
 		registry, err := spools()
@@ -30,13 +31,7 @@ func RegisterHost(r *Registry, spools spool.Provider) {
 
 // HostConfig represents the configuration for the Host strategy.
 //
-// In HCL it looks something like this:
-//
-//	host {
-//		target = "https://github.com/"
-//	}
-//
-// In this example, the strategy will be mounted under "/github.com".
+// A target of "https://github.com/" mounts the strategy under "/github.com".
 type HostConfig struct {
 	Target    string               `hcl:"target,label" help:"The target URL to proxy requests to."`
 	Headers   map[string]string    `hcl:"headers,optional" help:"Headers to add to upstream requests."`
@@ -60,6 +55,7 @@ type Host struct {
 
 var _ Strategy = (*Host)(nil)
 
+// NewHost creates a Host strategy and registers its route under the target's host and path on mux.
 func NewHost(_ context.Context, config HostConfig, cache cache.Cache, mux Mux, spools *spool.Registry) (*Host, error) {
 	u, err := url.Parse(config.Target)
 	if err != nil {
@@ -116,7 +112,6 @@ func NewHost(_ context.Context, config HostConfig, cache cache.Cache, mux Mux, s
 
 func (d *Host) String() string { return "host:" + d.target.Host + d.target.Path }
 
-// buildTargetURL constructs the target URL from the incoming request.
 func (d *Host) buildTargetURL(r *http.Request) *url.URL {
 	// Strip the prefix from the request path
 	path := r.URL.Path

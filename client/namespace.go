@@ -12,8 +12,8 @@ const DefaultNamespace Namespace = "default"
 var namespaceRe = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]*$`)
 
 // Namespace identifies a logical partition within a cache or metadata store.
-// Valid names start with an alphanumeric character and contain only
-// alphanumerics, hyphens, and underscores.
+//
+// Valid names start with an alphanumeric character and contain only alphanumerics, hyphens, and underscores.
 type Namespace string
 
 // ValidateNamespace checks that a namespace name is valid.

@@ -11,12 +11,14 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 )
 
+// JWTGenerator signs GitHub App JWTs used to request installation tokens.
 type JWTGenerator struct {
 	appID      string
 	privateKey *rsa.PrivateKey
 	expiration time.Duration
 }
 
+// NewJWTGenerator loads an RSA private key from a PEM file and returns a JWTGenerator for the app.
 func NewJWTGenerator(appID, privateKeyPath string, expiration time.Duration) (*JWTGenerator, error) {
 	privateKey, err := loadPrivateKey(privateKeyPath)
 	if err != nil {
@@ -30,6 +32,7 @@ func NewJWTGenerator(appID, privateKeyPath string, expiration time.Duration) (*J
 	}, nil
 }
 
+// GenerateJWT returns a newly signed RS256 JWT issued by the app that expires after the configured duration.
 func (g *JWTGenerator) GenerateJWT() (string, error) {
 	now := time.Now()
 

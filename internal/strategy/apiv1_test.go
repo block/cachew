@@ -306,9 +306,7 @@ func TestRangeGetIfRange(t *testing.T) {
 	}
 }
 
-// TestRangeStoredContentRangeIgnored guards against a client-supplied
-// Content-Range request header being stored and later replayed, which would
-// make a plain GET spuriously answer 206.
+// TestRangeStoredContentRangeIgnored guards against a stored client Content-Range making a plain GET answer 206.
 func TestRangeStoredContentRangeIgnored(t *testing.T) {
 	handler, ctx := testAPISetup(t)
 	key := cache.NewKey("range-stored-cr")

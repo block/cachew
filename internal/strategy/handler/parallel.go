@@ -23,10 +23,10 @@ func (p *parallelFetch) firstChunkRange() string {
 	return fmt.Sprintf("bytes=0-%d", p.chunkSize-1)
 }
 
-// fetch turns first, the upstream's answer to firstChunkRange, into a
-// response carrying the whole object, fetching the remaining chunks in
-// parallel. The returned body owns first's body.
-func (p *parallelFetch) fetch(ctx context.Context, c *http.Client, first *http.Response) (*http.Response, error) {
+// fetch turns first, the upstream's answer to firstChunkRange, into a response carrying the whole object.
+//
+// The remaining chunks are fetched in parallel. The returned body owns first's body.
+func (p *parallelFetch) fetch(ctx context.Context, c *http.Client, first *http.Response) (*http.Response, error) { //nolint:privatedoc // documents a non-obvious contract
 	headers := first.Header.Clone()
 	headers.Del("Content-Range")
 	headers.Del("Content-Length")
@@ -42,8 +42,6 @@ func (p *parallelFetch) fetch(ctx context.Context, c *http.Client, first *http.R
 	return &http.Response{StatusCode: http.StatusOK, Header: headers, Body: body, ContentLength: size}, nil
 }
 
-// contentRangeSize returns the total size from a Content-Range header, or -1
-// if it is unknown.
 func contentRangeSize(contentRange string) int64 {
 	_, total, ok := strings.Cut(contentRange, "/")
 	if !ok {
@@ -56,9 +54,9 @@ func contentRangeSize(contentRange string) int64 {
 	return size
 }
 
-// upstreamRanges adapts an upstream URL to client.RangeReader so ParallelGet
-// can drive it. Chunks are requested from the final URL of the first
-// response, so registries that redirect to a CDN are resolved only once.
+// upstreamRanges adapts an upstream URL to client.RangeReader so ParallelGet can drive it.
+//
+// Chunks are requested from the first response's final URL, so registries that redirect to a CDN resolve once.
 type upstreamRanges struct {
 	client     *http.Client
 	request    *http.Request
@@ -68,8 +66,7 @@ type upstreamRanges struct {
 	first *http.Response
 }
 
-// Open serves ParallelGet's discovery request from the response the handler
-// already received, rather than requesting the first chunk twice.
+// Open serves ParallelGet's discovery request from the handler's existing response, avoiding a repeat fetch.
 func (u *upstreamRanges) Open(ctx context.Context, _ client.Key, opts ...client.RequestOption) (io.ReadCloser, http.Header, error) {
 	o := client.NewRequestOptions(opts...)
 	if first := u.takeFirst(); first != nil {

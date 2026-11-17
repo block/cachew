@@ -65,8 +65,7 @@ func TestCheckConditionals(t *testing.T) {
 	}
 }
 
-// trackingReader records whether Close was called, so tests can assert the body
-// is always released.
+// trackingReader records whether Close was called, so tests can assert the body is always released.
 type trackingReader struct {
 	io.Reader
 	closed bool
@@ -164,8 +163,7 @@ func TestServeCacheHit(t *testing.T) {
 	})
 
 	t.Run("DecoratorRunsOnFullPartialAndUnsatisfiable", func(t *testing.T) {
-		// The decorator must run before the status is written on the 200, 206 and
-		// 416 paths, but not on the bodiless 304/412 paths.
+		// The decorator must run before the status on the 200, 206 and 416 paths, but not on 304 or 412.
 		cases := []struct {
 			name       string
 			headers    http.Header

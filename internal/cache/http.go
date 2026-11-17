@@ -12,6 +12,7 @@ import (
 )
 
 // Fetch retrieves a response from cache or fetches from the request URL and caches it.
+//
 // The response is streamed without buffering. Returns HTTPError for semantic errors.
 // The caller must close the response body.
 func Fetch(client *http.Client, r *http.Request, c Cache) (*http.Response, error) {
@@ -40,6 +41,7 @@ func Fetch(client *http.Client, r *http.Request, c Cache) (*http.Response, error
 }
 
 // FetchDirect fetches and caches the given URL without checking the cache first.
+//
 // The response is streamed without buffering. Returns HTTPError for semantic errors.
 // The caller must close the response body.
 func FetchDirect(client *http.Client, r *http.Request, c Cache, key Key) (*http.Response, error) {

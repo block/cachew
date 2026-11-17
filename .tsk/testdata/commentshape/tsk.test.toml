@@ -1,0 +1,10 @@
+[[case]]
+name = "default"
+packages = ["./std"]
+
+[[case]]
+name = "raised-limits"
+packages = ["./wide"]
+[case.config]
+title-lines = 2
+body-lines = 3

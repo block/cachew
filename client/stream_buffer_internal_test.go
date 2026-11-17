@@ -80,9 +80,7 @@ func TestStreamBufferBackpressure(t *testing.T) {
 }
 
 func TestStreamBufferPartialReadDoesNotFreeSlot(t *testing.T) {
-	// A write one full ring ahead shares a page slot with the page currently
-	// being read; it must stay blocked until that page is wholly consumed, or
-	// it would overwrite the unread tail.
+	// A write one ring ahead must block until the page sharing its slot is fully read, or it clobbers the tail.
 	data := testPattern(48)
 	buf := newStreamBuffer(16, 1) // 2 pages: offset 32 reuses page 0's slot
 	_, err := buf.WriteAt(data[:32], 0)
@@ -162,9 +160,7 @@ func TestStreamBufferCloseUnblocksWriter(t *testing.T) {
 	}
 }
 
-// rangedReader serves correct byte ranges with an ETag, optionally delaying
-// earlier offsets so chunks complete out of order, and optionally failing the
-// chunk starting at failAt (-1 to disable).
+// rangedReader serves byte ranges, optionally completing chunks out of order and failing at failAt (-1 disables).
 type rangedReader struct {
 	data   []byte
 	delay  bool
@@ -207,9 +203,7 @@ func TestParallelGetIntoStreamBuffer(t *testing.T) {
 }
 
 func TestParallelGetIntoStreamBufferChunkFailure(t *testing.T) {
-	// A failing chunk must not deadlock workers blocked in WriteAt: dispatch
-	// run-ahead is bounded so their writes fit the window once the reader
-	// drains to the gap, and the reader then surfaces the download error.
+	// A failing chunk must not deadlock workers blocked in WriteAt; the reader drains, then surfaces the error.
 	data := testPattern(100_000)
 	c := &rangedReader{data: data, failAt: 50_000}
 	buf := newStreamBuffer(1000, 4)

@@ -18,8 +18,7 @@ import (
 	"github.com/block/cachew/internal/strategy"
 )
 
-// httpTransportMutexHermit ensures hermit tests don't run in parallel
-// since they modify the global http.DefaultTransport
+// httpTransportMutexHermit serialises hermit tests because they modify the global http.DefaultTransport.
 var httpTransportMutexHermit sync.Mutex //nolint:gochecknoglobals
 
 func setupHermitTest(t *testing.T) (*http.ServeMux, context.Context, cache.Cache) {

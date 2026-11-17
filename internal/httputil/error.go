@@ -24,6 +24,7 @@ type HTTPResponder interface {
 	WriteHTTP(http.ResponseWriter, *http.Request)
 }
 
+// HTTPError is an error carrying the HTTP status and headers to respond with.
 type HTTPError struct {
 	status int
 	err    error
@@ -39,6 +40,7 @@ func (h HTTPError) WriteHTTP(w http.ResponseWriter, r *http.Request) {
 	ErrorResponse(w, r, h.status, h.err.Error())
 }
 
+// Errorf returns an HTTPError with the given status and a formatted message.
 func Errorf(status int, format string, args ...any) error {
 	return HTTPError{
 		status: status,
@@ -46,8 +48,9 @@ func Errorf(status int, format string, args ...any) error {
 	}
 }
 
-// UpstreamErrorf is [Errorf] with the status of resp. For a 429 it keeps
-// Retry-After and marks the response no-store.
+// UpstreamErrorf is [Errorf] with the status of resp.
+//
+// For a 429 it keeps Retry-After and marks the response no-store.
 func UpstreamErrorf(resp *http.Response, format string, args ...any) error {
 	err := HTTPError{status: resp.StatusCode, err: errors.Errorf(format, args...)}
 	if resp.StatusCode == http.StatusTooManyRequests {

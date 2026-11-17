@@ -28,8 +28,8 @@ lint:
 # Format code
 fmt:
     just --unstable --fmt
-    git ls-files | grep '\.go$' | xargs gosimports -local github.com/block -w
-    git ls-files | grep '\.go$' | xargs dirname | uniq | sed 's,^,./,' | xargs go fmt
+    git ls-files | grep '\.go$' | grep -v '/testdata/' | xargs gosimports -local github.com/block -w
+    git ls-files | grep '\.go$' | grep -v '/testdata/' | xargs dirname | uniq | sed 's,^,./,' | xargs go fmt
     go mod tidy
 
 # ============================================================================

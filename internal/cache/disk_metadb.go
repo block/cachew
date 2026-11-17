@@ -25,8 +25,6 @@ type diskMetaDB struct {
 	namespacesCache sync.Map // map[Namespace]bool - concurrent-safe
 }
 
-// compositeKey creates a unique database key from namespace and cache key.
-// Format: "namespace/hexkey" when namespace is set, or just "hexkey" when empty.
 func compositeKey(namespace Namespace, key Key) []byte {
 	if namespace == "" {
 		return []byte(key.String())

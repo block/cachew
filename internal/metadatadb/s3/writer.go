@@ -26,15 +26,16 @@ func (n *namespace) apply(ctx context.Context, ops []metadatadb.Op) error {
 	case <-n.b.ctx.Done():
 		return errors.New("backend closed")
 	}
-	// Once accepted, the write will be committed: returning the caller's
-	// cancellation here would misreport a write that still lands, and a
-	// retry would double-apply non-idempotent ops.
+	// Once accepted, the write will be committed, so ignore the caller's cancellation.
+	//
+	// Returning it would misreport a write that still lands, and a retry would double-apply non-idempotent ops.
 	select {
 	case err := <-req.reply:
 		return errors.WithStack(err)
 	case <-n.b.ctx.Done():
-		// Callers pass context.Background() (api.go), so shutdown must
-		// unblock them — but prefer a raced reply: the write may be durable.
+		// Callers pass context.Background() (api.go), so shutdown must unblock them.
+		//
+		// Prefer a raced reply, though: the write may be durable.
 		select {
 		case err := <-req.reply:
 			return errors.WithStack(err)
@@ -44,8 +45,7 @@ func (n *namespace) apply(ctx context.Context, ops []metadatadb.Op) error {
 	}
 }
 
-// writeLoop is the group-commit writer: one PUT in flight; requests arriving
-// during a flight queue on applyCh and drain into the next batch.
+// writeLoop is the group-commit writer: one PUT in flight, while new requests queue on applyCh for the next batch.
 func (n *namespace) writeLoop() {
 	defer n.b.wg.Done()
 	for {
@@ -80,8 +80,7 @@ func (n *namespace) writeLoop() {
 	}
 }
 
-// commit PUTs the batch as one segment, then applies it locally so
-// read-your-own-writes holds when the callers unblock.
+// commit PUTs the batch as one segment, then applies it locally so read-your-own-writes holds when callers unblock.
 func (n *namespace) commit(reqs []*applyReq) error {
 	var ops []metadatadb.Op
 	for _, req := range reqs {
@@ -107,8 +106,7 @@ func (n *namespace) commit(reqs []*applyReq) error {
 
 	n.stateMu.Lock()
 	defer n.stateMu.Unlock()
-	// Dedup against the committed cache only, never staging: committed
-	// means the served state already contains the ops.
+	// Dedup against the committed cache only, never staging: committed means the served state already has the ops.
 	if _, ok := n.cache[key]; ok {
 		return nil
 	}
@@ -119,9 +117,10 @@ func (n *namespace) commit(reqs []*applyReq) error {
 	return nil
 }
 
-// newSegmentKey relies on google/uuid's strict per-process V7 monotonicity:
-// key order is the canonical-order tiebreak within a LastModified granule.
-func newSegmentKey() (string, error) {
+// newSegmentKey relies on google/uuid's strict per-process V7 monotonicity.
+//
+// Key order is the canonical-order tiebreak within a LastModified granule.
+func newSegmentKey() (string, error) { //nolint:privatedoc // explains why
 	id, err := uuid.NewV7()
 	if err != nil {
 		return "", errors.Wrap(err, "uuidv7")

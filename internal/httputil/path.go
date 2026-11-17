@@ -7,13 +7,10 @@ import (
 	"github.com/alecthomas/errors"
 )
 
-// ValidatePath returns an error if the slash-separated path contains "." or
-// ".." segments, backslashes, or NUL bytes.
+// ValidatePath returns an error if path contains "." or ".." segments, backslashes, or NUL bytes.
 //
-// Go's ServeMux only cleans the escaped request path, so percent-encoded
-// sequences such as "..%2F" or "%2E%2E" survive routing and appear verbatim
-// in r.URL.Path and r.PathValue. Strategies that splice these values into
-// upstream URLs or filesystem paths must reject them to prevent traversal.
+// ServeMux only cleans the escaped path, so encoded sequences such as "..%2F" reach r.URL.Path and
+// r.PathValue. Strategies splicing these into upstream URLs or filesystem paths must reject them.
 func ValidatePath(path string) error {
 	if strings.ContainsAny(path, "\\\x00") {
 		return errors.Errorf("invalid path %q", path)
@@ -26,8 +23,7 @@ func ValidatePath(path string) error {
 	return nil
 }
 
-// ValidatePathSegment returns an error if s is not a single, non-empty path
-// segment that is safe to splice into a URL or filesystem path.
+// ValidatePathSegment returns an error unless s is one non-empty segment safe to splice into a URL or path.
 func ValidatePathSegment(s string) error {
 	if s == "" || strings.Contains(s, "/") {
 		return errors.Errorf("invalid path segment %q", s)
@@ -35,8 +31,7 @@ func ValidatePathSegment(s string) error {
 	return ValidatePath(s)
 }
 
-// RejectTraversal wraps next, responding with 400 Bad Request to any request
-// whose decoded URL path fails [ValidatePath].
+// RejectTraversal wraps next, answering 400 Bad Request when the decoded URL path fails [ValidatePath].
 func RejectTraversal(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if err := ValidatePath(r.URL.Path); err != nil {

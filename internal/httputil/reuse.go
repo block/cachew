@@ -8,8 +8,7 @@ import (
 	"time"
 )
 
-// heuristicallyCacheable lists the status codes RFC 9110 §15.1 defines as
-// heuristically cacheable.
+// heuristicallyCacheable lists the status codes RFC 9110 §15.1 defines as heuristically cacheable.
 var heuristicallyCacheable = map[int]bool{ //nolint:gochecknoglobals
 	http.StatusOK:                   true,
 	http.StatusNonAuthoritativeInfo: true,
@@ -25,8 +24,9 @@ var heuristicallyCacheable = map[int]bool{ //nolint:gochecknoglobals
 	http.StatusNotImplemented:       true,
 }
 
-// ReuseLifetime applies RFC 9111 shared-cache rules to a response to req. heuristic
-// is the lifetime of a heuristically cacheable response without explicit freshness.
+// ReuseLifetime applies RFC 9111 shared-cache rules to a response to req.
+//
+// heuristic is the lifetime of a heuristically cacheable response without explicit freshness.
 func ReuseLifetime(req *http.Request, status int, header http.Header, heuristic time.Duration) (lifetime time.Duration, ok bool) {
 	if req.Method != http.MethodGet || status < http.StatusOK {
 		return 0, false
@@ -58,8 +58,9 @@ func ReuseLifetime(req *http.Request, status int, header http.Header, heuristic 
 	return lifetime, lifetime > 0
 }
 
-// RequestsNoCache reports whether req forbids an answer from a stored response
-// without validation (RFC 9111 §5.2.1.4). Pragma counts only without Cache-Control.
+// RequestsNoCache reports whether req forbids a stored answer without validation (RFC 9111 §5.2.1.4).
+//
+// Pragma counts only without Cache-Control.
 func RequestsNoCache(req *http.Request) bool {
 	if len(req.Header.Values("Cache-Control")) > 0 {
 		return cacheControl(req.Header).has("no-cache")
@@ -74,8 +75,9 @@ func RequestsNoCache(req *http.Request) bool {
 	return false
 }
 
-// VaryMatches reports whether a response with header, stored for a request with
-// stored headers, may answer a request with req headers (RFC 9111 §4.1).
+// VaryMatches reports whether a stored response with header may answer req (RFC 9111 §4.1).
+//
+// stored holds the headers of the request the response was stored for.
 func VaryMatches(header, stored, req http.Header) bool {
 	for _, value := range header.Values("Vary") {
 		for field := range strings.SplitSeq(value, ",") {
@@ -119,9 +121,10 @@ func (d cacheDirectives) seconds(name string) (time.Duration, bool) {
 	return time.Duration(seconds) * time.Second, true
 }
 
-// expiresLifetime measures Expires against Date so clock skew does not matter. An
-// unparseable Expires means already stale (RFC 9111 §5.3).
-func expiresLifetime(header http.Header) (time.Duration, bool) {
+// expiresLifetime measures Expires against Date so clock skew does not matter.
+//
+// An unparseable Expires means already stale (RFC 9111 §5.3).
+func expiresLifetime(header http.Header) (time.Duration, bool) { //nolint:privatedoc // explains why
 	expires, err := http.ParseTime(header.Get("Expires"))
 	if err != nil {
 		return 0, false

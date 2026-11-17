@@ -9,8 +9,7 @@ import (
 	"github.com/alecthomas/errors"
 )
 
-// messageHandler wraps a slog.Handler and appends record attributes to the
-// message text for easier debugging (e.g. "My message (err=..., id=...)").
+// messageHandler appends record attributes to the message text, e.g. "My message (err=..., id=...)".
 type messageHandler struct {
 	inner slog.Handler
 }

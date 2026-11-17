@@ -16,15 +16,18 @@ import (
 // ErrNotFound is returned when a strategy is not found.
 var ErrNotFound = errors.New("strategy not found")
 
+// Mux is the subset of http.ServeMux that strategies use to register their routes.
 type Mux interface {
 	Handle(pattern string, handler http.Handler)
 	HandleFunc(pattern string, handler func(http.ResponseWriter, *http.Request))
 }
 
+// Registry maps strategy names to their HCL schemas and factories.
 type Registry struct {
 	registry map[string]registryEntry
 }
 
+// NewRegistry returns an empty strategy Registry.
 func NewRegistry() *Registry {
 	return &Registry{
 		registry: make(map[string]registryEntry),
@@ -36,6 +39,7 @@ type registryEntry struct {
 	factory func(ctx context.Context, config *hcl.Block, cache cache.Cache, mux Mux, vars map[string]string) (Strategy, error)
 }
 
+// Factory creates a strategy from its decoded config, a cache namespaced to the strategy, and a mux for its routes.
 type Factory[Config any, S Strategy] func(ctx context.Context, config Config, cache cache.Cache, mux Mux) (S, error)
 
 // Register a new proxy strategy.
@@ -62,8 +66,7 @@ func Register[Config any, S Strategy](r *Registry, id, description string, facto
 	}
 }
 
-// Schema returns the schema for all registered strategies.
-// Each entry is wrapped as a "strategy <name> { ... }" block.
+// Schema returns the schema for all registered strategies, each wrapped as a "strategy <name> { ... }" block.
 func (r *Registry) Schema() *hcl.AST {
 	ast := &hcl.AST{}
 	for _, entry := range r.registry {
@@ -79,6 +82,7 @@ func (r *Registry) Schema() *hcl.AST {
 	return ast
 }
 
+// Exists reports whether a strategy is registered under name.
 func (r *Registry) Exists(name string) bool {
 	_, ok := r.registry[name]
 	return ok
@@ -106,36 +110,34 @@ func (r *Registry) Create(
 	return nil, errors.Errorf("%s: %w", name, ErrNotFound)
 }
 
+// Strategy is a protocol-aware caching mechanism that serves requests through routes registered at creation.
 type Strategy interface {
 	String() string
 }
 
-// Interceptor is an optional interface a Strategy may implement to intercept
-// incoming HTTP requests before ServeMux route matching. This is necessary for
-// strategies like the HTTP proxy that need to inspect r.RequestURI rather than
-// r.URL.Path — registering a "/"  catch-all on the mux is insufficient because
-// more-specific routes (e.g. /api/v1/) still win for overlapping paths.
+// Interceptor is an optional Strategy interface for intercepting requests before ServeMux route matching.
+//
+// Needed by strategies like the HTTP proxy that inspect r.RequestURI: a "/" catch-all on the mux is
+// insufficient because more-specific routes (e.g. /api/v1/) still win for overlapping paths.
 type Interceptor interface {
 	Strategy
-	// Intercept wraps next, returning a handler that intercepts matching
-	// requests and delegates all others to next.
+	// Intercept wraps next, intercepting matching requests and delegating all others to next.
 	Intercept(next http.Handler) http.Handler
 }
 
-// MetadataConsumer is an optional interface a Strategy may implement to receive
-// the metadata store after construction. config.Load invokes SetMetadataStore
-// on each consumer once the metadata backend has been built. This avoids the
-// construction-order cycle where strategies are built inside config.Load but
-// the metadata backend is also created there.
+// MetadataConsumer is an optional Strategy interface for receiving the metadata store after construction.
+//
+// config.Load calls SetMetadataStore once the metadata backend is built, avoiding a construction-order
+// cycle because both strategies and the metadata backend are created inside config.Load.
 type MetadataConsumer interface {
 	Strategy
 	SetMetadataStore(*metadatadb.Store)
 }
 
-// Readier is an optional interface a Strategy may implement to gate the
-// /_readiness probe on background warm-up completing. The HTTP listener and
-// /_liveness come up immediately so the kubelet doesn't restart the pod, but
-// the Service load balancer holds traffic until every Readier reports true.
+// Readier is an optional Strategy interface that gates the /_readiness probe on background warm-up.
+//
+// The listener and /_liveness come up immediately so the kubelet doesn't restart the pod, but the Service
+// load balancer holds traffic until every Readier reports true.
 type Readier interface {
 	Strategy
 	// Ready reports whether the strategy is ready to serve traffic.

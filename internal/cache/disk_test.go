@@ -141,8 +141,9 @@ func TestDiskOpenRevisionAtomic(t *testing.T) {
 	wg.Wait()
 }
 
-// fileSinkWriter records what io.Copy hands to ReadFrom, as net/http does when
-// it passes a body to the connection's sendfile path.
+// fileSinkWriter records what io.Copy hands to ReadFrom.
+//
+// This mirrors net/http passing a body to the connection's sendfile path.
 type fileSinkWriter struct {
 	bytes.Buffer
 	src io.Reader
@@ -153,8 +154,9 @@ func (w *fileSinkWriter) ReadFrom(r io.Reader) (int64, error) {
 	return w.Buffer.ReadFrom(r)
 }
 
-// TestDiskRangeReachesSendfile verifies a ranged disk read reaches ReadFrom as
-// an *io.LimitedReader over the file, the only shape net's sendfile accepts.
+// TestDiskRangeReachesSendfile verifies a ranged disk read reaches ReadFrom as an *io.LimitedReader over the file.
+//
+// That is the only shape net's sendfile accepts.
 func TestDiskRangeReachesSendfile(t *testing.T) {
 	_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelError})
 	c, err := cache.NewDisk(ctx, cache.DiskConfig{Root: t.TempDir(), MaxTTL: time.Hour})

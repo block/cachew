@@ -26,18 +26,20 @@ import (
 	"github.com/block/cachew/internal/spool"
 )
 
-// CacheKeyParts holds the components used to build a cache key. Path is the
-// primary identifier (typically the upstream URL) and Vary captures
-// request-derived dimensions like Accept-Encoding.
+// CacheKeyParts holds the components used to build a cache key.
+//
+// Path is the primary identifier (typically the upstream URL); Vary holds request dimensions like Accept-Encoding.
 type CacheKeyParts struct {
 	Path string
 	Vary map[string]string
 }
 
+// NewCacheKeyParts returns CacheKeyParts for path with no Vary dimensions.
 func NewCacheKeyParts(path string) CacheKeyParts {
 	return CacheKeyParts{Path: path, Vary: make(map[string]string)}
 }
 
+// Key hashes Path and the Vary entries, sorted by name, into a cache key.
 func (p CacheKeyParts) Key() cache.Key {
 	if len(p.Vary) == 0 {
 		return cache.NewKey(p.Path)
@@ -60,16 +62,7 @@ func (p CacheKeyParts) Key() cache.Key {
 
 // Handler provides a fluent API for creating cache-backed HTTP handlers.
 //
-// Example usage:
-//
-//	h := handler.New(client, cache).
-//		CacheKey(func(r *http.Request) string {
-//			return "custom-key"
-//		}).
-//		Transform(func(r *http.Request) (*http.Request, error) {
-//			// Modify request before fetching
-//			return modifiedRequest, nil
-//		})
+// For example: handler.New(client, cache, spools).CacheKey(keyFunc).Transform(transformFunc).
 type Handler struct {
 	metrics       *metrics.ArtifactMetrics
 	strategy      string
@@ -93,16 +86,12 @@ type revalidation struct {
 	freshFor func(*http.Request) time.Duration
 }
 
-// checkedAtHeader records when a revalidated entry was last confirmed against
-// the upstream. It is internal bookkeeping and never sent to clients.
+// checkedAtHeader records when a revalidated entry was last confirmed upstream; it is never sent to clients.
 const checkedAtHeader = "X-Cachew-Checked-At"
 
-// New creates a new Handler with the given HTTP client and cache. Concurrent
-// cache misses for the same key share one upstream fetch through a spool group.
-// By default:
-// - Cache key is derived from the request URL
-// - No request transformation is performed
-// - Standard error handling is used.
+// New creates a Handler that keys on the request URL, forwards requests unchanged, and uses default error handling.
+//
+// Concurrent cache misses for the same key share one upstream fetch through a spool group.
 func New(client *http.Client, c cache.Cache, spools *spool.Registry) *Handler {
 	return &Handler{
 		client:   client,
@@ -129,16 +118,15 @@ func (h *Handler) Metrics(strategy, registry string) *Handler {
 	return h
 }
 
-// InternalForward marks delegation to another cache route. Its requests are
-// excluded from external-origin and fill metrics and from upstream cooldowns,
-// which the target route applies to the real upstream.
+// InternalForward marks delegation to another cache route.
+//
+// Its requests skip external-origin and fill metrics and upstream cooldowns, which the target route applies.
 func (h *Handler) InternalForward() *Handler {
 	h.external = false
 	return h
 }
 
-// CacheKey sets the function used to determine the cache key for a request.
-// The function receives the original incoming request.
+// CacheKey sets the function that derives the cache key from the original incoming request.
 func (h *Handler) CacheKey(f func(*http.Request) string) *Handler {
 	h.cacheKeyFunc = func(r *http.Request) CacheKeyParts {
 		return NewCacheKeyParts(f(r))
@@ -146,33 +134,29 @@ func (h *Handler) CacheKey(f func(*http.Request) string) *Handler {
 	return h
 }
 
-// Transform sets the function used to transform the incoming request before fetching.
-// This is where you can modify the request URL, headers, etc.
-// The function receives the original incoming request and should return the request
-// that will be sent to the upstream server.
+// Transform sets the function that turns the original incoming request into the upstream request.
 func (h *Handler) Transform(f func(*http.Request) (*http.Request, error)) *Handler {
 	h.transformFunc = f
 	return h
 }
 
-// OnError sets a custom error handler for the built handler.
-// If not set, a default error handler is used.
+// OnError sets a custom error handler, replacing the default.
 func (h *Handler) OnError(f func(error, http.ResponseWriter, *http.Request)) *Handler {
 	h.errorHandler = f
 	return h
 }
 
-// TTL sets the function used to determine the cache TTL for a request.
-// The function receives the original incoming request.
-// If not set or returns 0, the cache's default/maximum TTL is used.
+// TTL sets the function that derives the cache TTL from the original incoming request.
+//
+// If unset or it returns 0, the cache's default/maximum TTL is used.
 func (h *Handler) TTL(f func(*http.Request) time.Duration) *Handler {
 	h.ttlFunc = f
 	return h
 }
 
-// Vary keys the cache on request headers that change the upstream response,
-// so a variant fetched for one client is never served to a client that asked
-// for another. Accept-Encoding is always included.
+// Vary keys the cache on request headers that change the upstream response.
+//
+// This stops a variant fetched for one client being served to another. Accept-Encoding is always included.
 func (h *Handler) Vary(f func(*http.Request) map[string]string) *Handler {
 	h.varyFunc = f
 	return h
@@ -184,49 +168,35 @@ type Verifier interface {
 	Verify() error
 }
 
-// Verify keeps corrupt or truncated upstream responses out of the shared
-// cache, where they would otherwise be served to every later client. The
-// requesting client still receives the bytes. Return nil for requests whose
-// expected content is unknown.
+// Verify keeps corrupt or truncated upstream responses out of the shared cache.
+//
+// The requesting client still receives the bytes. Return nil for requests whose expected content is unknown.
 func (h *Handler) Verify(f func(*http.Request) Verifier) *Handler {
 	h.verifyFunc = f
 	return h
 }
 
-// Revalidate caches mutable upstream resources without serving them stale
-// indefinitely or refetching unchanged content. Unlike TTL expiry, a stale
-// entry is kept: it is revalidated with a cheap HEAD and served as-is when
-// the upstream is unchanged or unavailable.
+// Revalidate keeps stale entries of mutable resources, serving them if a HEAD shows no change or upstream is down.
 //
-// header names the response header that identifies the content (e.g.
-// Docker-Content-Digest). It cannot be ETag, which the cache replaces with
-// its own. freshFor returns how long an entry may be served without
-// revalidation; zero marks it as immutable.
+// header identifies the content (e.g. Docker-Content-Digest) and cannot be ETag, which the cache replaces.
+// freshFor returns how long an entry may be served without revalidation; zero marks it as immutable.
 func (h *Handler) Revalidate(header string, freshFor func(*http.Request) time.Duration) *Handler {
 	h.revalidation = &revalidation{header: header, freshFor: freshFor}
 	return h
 }
 
-// ParallelFetch speeds up cold fills of large objects from upstreams that
-// limit throughput per connection. It is opt-in because it multiplies
-// upstream requests and only helps some upstreams. Objects that fit in one
-// chunk cost a single request. Ranges are reassembled in order, so caching,
-// streaming and verification are unaffected.
+// ParallelFetch speeds up cold fills of large objects from upstreams that limit throughput per connection.
+//
+// It is opt-in because it multiplies upstream requests. Ranges are reassembled in order, so caching, streaming
+// and verification are unaffected.
 func (h *Handler) ParallelFetch(chunkSize int64, concurrency int) *Handler {
 	h.parallel = &parallelFetch{chunkSize: chunkSize, concurrency: concurrency}
 	return h
 }
 
-// ServeHTTP implements http.Handler.
-// The handler will:
-// 1. Determine the cache key using the configured function
-// 2. Check if the content exists in cache
-// 3. If cached, stream from cache
-// 4. If not cached, transform the request and fetch from upstream
-// 5. Cache the response while streaming to the client.
+// ServeHTTP serves from cache, or fetches from upstream and caches the response while streaming it to the client.
 //
-// HEAD misses are forwarded upstream without caching, so metadata probes
-// never trigger full downloads.
+// HEAD misses are forwarded upstream without caching, so metadata probes never trigger full downloads.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx := h.metrics.WithRequest(r.Context(), h.strategy, h.registry, h.external)
 	r = r.WithContext(ctx)
@@ -234,9 +204,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	logger := logging.FromContext(ctx)
 
 	parts := h.cacheKeyFunc(r)
-	// Upstreams may return different content based on Accept-Encoding (e.g.
-	// gzip-compressed vs uncompressed). Without this, the first variant cached
-	// is served to all clients, breaking those that expect the other encoding.
+	// Otherwise the first encoding variant cached is served to all clients, breaking those expecting another.
 	if ae := r.Header.Get("Accept-Encoding"); ae != "" {
 		parts.Vary["Accept-Encoding"] = ae
 	}
@@ -291,8 +259,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// CacheResultAttribute labels the request's HTTP server metrics with how the
-// cache answered it, so a strategy's hit ratio can be read in requests and bytes.
+// CacheResultAttribute labels HTTP server metrics with how the cache answered, for hit ratios in requests/bytes.
 const CacheResultAttribute = "cachew.cache.result"
 
 const (
@@ -306,8 +273,7 @@ const (
 	CacheError = "error"
 )
 
-// CacheSourceAttribute labels a cache hit with the backend that served it,
-// such as disk, s3 or remote, so local and shared hits can be told apart.
+// CacheSourceAttribute labels a cache hit with its backend (disk, s3, remote) to tell local and shared hits apart.
 const CacheSourceAttribute = "cachew.cache.source"
 
 func labelCacheResult(ctx context.Context, result string) {
@@ -325,8 +291,9 @@ func (h *Handler) labelCacheHit(ctx context.Context) {
 }
 
 // coalescable reports whether a miss can share the plain response for its key.
+//
 // Range and conditional requests need a different response.
-func coalescable(r *http.Request) bool {
+func coalescable(r *http.Request) bool { //nolint:privatedoc // explains why
 	for _, name := range []string{"Range", "If-Range", "If-Match", "If-None-Match", "If-Modified-Since", "If-Unmodified-Since"} {
 		if r.Header.Get(name) != "" {
 			return false
@@ -364,8 +331,6 @@ func (h *Handler) serveCached(w http.ResponseWriter, r *http.Request, key cache.
 	return h.cacheMiss(w, r, err), nil
 }
 
-// cacheMiss reports whether a failed cache lookup was answered with an error,
-// rather than being a miss to fill from upstream.
 func (h *Handler) cacheMiss(w http.ResponseWriter, r *http.Request, err error) bool {
 	if errors.Is(err, os.ErrNotExist) {
 		return false
@@ -389,9 +354,10 @@ func clientHeaders(headers http.Header) http.Header {
 	return headers
 }
 
-// fresh reports whether a cached entry may be served, revalidating it against
-// the upstream once its freshness lapses.
-func (h *Handler) fresh(r *http.Request, key cache.Key, headers http.Header) bool {
+// fresh reports whether a cached entry may be served.
+//
+// It revalidates the entry against the upstream once its freshness lapses.
+func (h *Handler) fresh(r *http.Request, key cache.Key, headers http.Header) bool { //nolint:privatedoc // documents a non-obvious contract
 	if h.revalidation == nil || headers == nil {
 		return true
 	}
@@ -407,6 +373,7 @@ func (h *Handler) fresh(r *http.Request, key cache.Key, headers http.Header) boo
 }
 
 // revalidate reports whether the upstream still serves the cached content.
+//
 // Upstream failures count as unchanged: a stale copy beats an error.
 func (h *Handler) revalidate(r *http.Request, key cache.Key, headers http.Header) bool {
 	ctx := r.Context()
@@ -438,8 +405,7 @@ func (h *Handler) revalidate(r *http.Request, key cache.Key, headers http.Header
 		return false
 	}
 	update := http.Header{checkedAtHeader: {strconv.FormatInt(time.Now().Unix(), 10)}}
-	// IfMatch stops a concurrent refetch of changed content from being marked
-	// as checked on the strength of this comparison.
+	// IfMatch stops a concurrent refetch of changed content being marked as checked by this comparison.
 	err = h.cache.UpdateMetadata(ctx, key, update, h.ttlFunc(r), cache.IfMatch(headers.Get(cache.ETagKey)))
 	if err != nil && !errors.Is(err, cache.ErrPreconditionFailed) && !errors.Is(err, os.ErrNotExist) {
 		logger.WarnContext(ctx, "Failed to record revalidation", "error", err)
@@ -447,9 +413,9 @@ func (h *Handler) revalidate(r *http.Request, key cache.Key, headers http.Header
 	return true
 }
 
-// upstreamRequest transforms r and forwards its safe headers. Range and
-// If-Range are never forwarded: whole objects are cached and ranges are cut
-// locally.
+// upstreamRequest transforms r and forwards its safe headers.
+//
+// Range and If-Range are never forwarded: whole objects are cached and ranges are cut locally.
 func (h *Handler) upstreamRequest(r *http.Request) (*http.Request, error) {
 	req, err := h.transformFunc(r)
 	if err != nil {
@@ -506,8 +472,9 @@ func (h *Handler) fetchAndCache(w http.ResponseWriter, r *http.Request, key cach
 	return h.streamAndCache(w, r, key, resp)
 }
 
-// fill produces the shared response for a coalesced miss. It runs detached from r
-// so the fetch and cache write finish even if every client leaves.
+// fill produces the shared response for a coalesced miss.
+//
+// It runs detached from r so the fetch and cache write finish even if every client leaves.
 func (h *Handler) fill(ctx context.Context, w *spool.Writer, r *http.Request, key cache.Key) error {
 	resp, ok := h.fetch(w, r)
 	if !ok {
@@ -568,10 +535,11 @@ const (
 	fillCanceled      = "canceled"
 )
 
-// fillWriter commits cw only if the body verifies, and records whether the
-// cache write itself failed. A failed commit does not fail the shared response,
-// so clients still receive the bytes, as in streamAndCache.
-func (h *Handler) fillWriter(r *http.Request, cw cache.Writer) *fillWriter {
+// fillWriter commits cw only if the body verifies, and records whether the cache write itself failed.
+//
+// A failed commit does not fail the shared response, so clients still receive the bytes, as in
+// streamAndCache.
+func (h *Handler) fillWriter(r *http.Request, cw cache.Writer) *fillWriter { //nolint:privatedoc // explains why
 	fw := &fillWriter{Writer: cw}
 	if h.verifyFunc != nil {
 		fw.verifier = h.verifyFunc(r)
@@ -622,9 +590,10 @@ func (f *fillWriter) OpenPending() (cache.ReadAtCloser, error) {
 	return errors.WithStack2(pending.OpenPending())
 }
 
-// result classifies a failed fill, preferring the cache's own write failure
-// over the stream or commit failure it caused.
-func (f *fillWriter) result(ctx context.Context, otherwise string) string {
+// result classifies a failed fill.
+//
+// It prefers the cache's own write failure over the stream or commit failure it caused.
+func (f *fillWriter) result(ctx context.Context, otherwise string) string { //nolint:privatedoc // documents a non-obvious contract
 	switch {
 	case f.writeErr != nil:
 		return fillWriteError
@@ -635,8 +604,7 @@ func (f *fillWriter) result(ctx context.Context, otherwise string) string {
 	}
 }
 
-// fetch sends the transformed request upstream. On failure it writes an error
-// response to w and returns false.
+// fetch sends the transformed request upstream, writing an error response to w and returning false on failure.
 func (h *Handler) fetch(w http.ResponseWriter, r *http.Request) (*http.Response, bool) {
 	logging.FromContext(r.Context()).DebugContext(r.Context(), "Cache miss, fetching from upstream")
 
@@ -666,9 +634,10 @@ func (h *Handler) fetch(w http.ResponseWriter, r *http.Request) (*http.Response,
 	return whole, true
 }
 
-// streamNonOKResponse forwards an upstream error with its headers, which carry
-// the Cache-Control directives that decide whether the spool may share it.
-func (h *Handler) streamNonOKResponse(w http.ResponseWriter, resp *http.Response) error {
+// streamNonOKResponse forwards an upstream error with its headers.
+//
+// The headers carry the Cache-Control directives that decide whether the spool may share it.
+func (h *Handler) streamNonOKResponse(w http.ResponseWriter, resp *http.Response) error { //nolint:privatedoc // explains why
 	maps.Copy(w.Header(), httputil.FilterHeaders(resp.Header, httputil.HopByHopHeaders...))
 	w.WriteHeader(resp.StatusCode)
 	if _, err := io.Copy(w, resp.Body); err != nil {
@@ -678,8 +647,8 @@ func (h *Handler) streamNonOKResponse(w http.ResponseWriter, resp *http.Response
 }
 
 // streamAndCache streams resp to the client while writing it to the cache.
-// Cache failures never interrupt the client stream: the cache entry is
-// discarded and the response is streamed in full.
+//
+// Cache failures never interrupt the client stream: the cache entry is discarded and the response streamed in full.
 func (h *Handler) streamAndCache(w http.ResponseWriter, r *http.Request, key cache.Key, resp *http.Response) error {
 	maps.Copy(w.Header(), resp.Header)
 	result := fillSuccess
@@ -739,9 +708,9 @@ func (h *Handler) streamAndCache(w http.ResponseWriter, r *http.Request, key cac
 	)
 }
 
-// writeRangeHeader answers a ranged request from the full upstream body, which
-// is still cached in full. It writes the status and returns the writer that
-// receives the body.
+// writeRangeHeader answers a ranged request from the full upstream body, which is still cached in full.
+//
+// It writes the status and returns the writer that receives the body.
 func writeRangeHeader(w http.ResponseWriter, r *http.Request, resp *http.Response) io.Writer {
 	opts := client.NewRequestOptions(httputil.ConditionalOptions(r)...)
 	size := resp.ContentLength
@@ -765,8 +734,7 @@ func writeRangeHeader(w http.ResponseWriter, r *http.Request, resp *http.Respons
 	return &windowWriter{w: w, start: start, end: start + length}
 }
 
-// windowWriter passes through only the bytes in [start, end) of the stream
-// written to it, while reporting every write as complete.
+// windowWriter passes through only bytes in [start, end) of its stream, while reporting every write as complete.
 type windowWriter struct {
 	w          io.Writer
 	start, end int64

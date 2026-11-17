@@ -1,9 +1,7 @@
 // Package reaper provides a background zombie process reaper.
 //
-// When a Go process runs as PID 1 (e.g. inside a container), it inherits
-// orphaned child processes. If those children exit without being waited on,
-// they accumulate as zombies. This package periodically calls waitpid(-1)
-// with WNOHANG to reap any such zombies.
+// A Go process running as PID 1, e.g. in a container, inherits orphans that become zombies if not waited on.
+// This package reaps them by periodically calling waitpid(-1) with WNOHANG.
 package reaper
 
 import (
@@ -15,9 +13,9 @@ import (
 	"github.com/block/cachew/internal/logging"
 )
 
-// Start launches a background goroutine that reaps zombie child processes.
-// It only activates when the current process is PID 1. The goroutine exits
-// when ctx is cancelled.
+// Start launches a goroutine that reaps zombie child processes until ctx is cancelled.
+//
+// It only activates when the current process is PID 1.
 func Start(ctx context.Context) {
 	logger := logging.FromContext(ctx)
 	if os.Getpid() != 1 {

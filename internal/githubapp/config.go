@@ -18,9 +18,9 @@ type TokenCacheConfig struct {
 }
 
 // DefaultTokenCacheConfig returns default token cache configuration.
-// RefreshBuffer must exceed the longest subprocess that bakes a token into
-// its environment, so a token can't expire mid-call (GitHub App tokens have
-// a fixed 1 h TTL).
+//
+// RefreshBuffer must exceed the longest subprocess holding a token in its environment, because GitHub App
+// tokens have a fixed 1 h TTL and must not expire mid-call.
 func DefaultTokenCacheConfig() TokenCacheConfig {
 	return TokenCacheConfig{
 		RefreshBuffer: 30 * time.Minute,

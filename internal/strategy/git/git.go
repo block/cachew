@@ -46,6 +46,7 @@ const minimumGitLFSVersion = "v3.8.1"
 //nolint:gochecknoglobals // The executable and its version are process-wide.
 var gitLFSVersionCheck = sync.OnceValue(checkGitLFSVersion)
 
+// Register registers the git strategy, which caches Git repositories and their snapshots under /git/.
 func Register(r *strategy.Registry, scheduler jobscheduler.Provider, cloneManagerProvider gitclone.ManagerProvider, tokenManagerProvider githubapp.TokenManagerProvider, spools spool.Provider) {
 	strategy.Register(r, "git", "Caches Git repositories, including tarball snapshots.", func(ctx context.Context, config Config, cache cache.Cache, mux strategy.Mux) (*Strategy, error) {
 		registry, err := spools()
@@ -56,6 +57,7 @@ func Register(r *strategy.Registry, scheduler jobscheduler.Provider, cloneManage
 	})
 }
 
+// Config configures snapshot, repack, compression, and request size behaviour of the git strategy.
 type Config struct {
 	SnapshotInterval       time.Duration `hcl:"snapshot-interval,optional" help:"How often to generate tar.zstd workstation snapshots. 0 disables snapshots." default:"0"`
 	SnapshotMaxAge         time.Duration `hcl:"snapshot-max-age,optional" help:"How long an unchanged snapshot (same HEAD commit) may be served before regeneration. Requires shared metadata; keep well below the cache max-ttl. 0 regenerates every interval." default:"24h"`
@@ -68,6 +70,7 @@ type Config struct {
 	SnapshotFilters map[string]string `hcl:"snapshot-filters,optional" help:"Per-repository git partial-clone filter applied to workstation snapshots, keyed by host/org/repo (e.g. {\"github.com/org/repo\": \"blob:none\"}). Filtered snapshots contain full history metadata but only the blobs needed for the HEAD checkout; clients lazily fetch historical blobs through cachew on demand."`
 }
 
+// Strategy serves Git smart HTTP and snapshot requests under /git/ from local mirrors of upstream repositories.
 type Strategy struct {
 	config                Config
 	cache                 cache.Cache
@@ -98,6 +101,7 @@ type Strategy struct {
 	ready                atomic.Bool
 }
 
+// New creates the git strategy and registers its /git/ routes, failing if required binaries are missing.
 func New(
 	ctx context.Context,
 	config Config,
@@ -173,27 +177,24 @@ func New(
 			return rand.N(coldPreparationSpread) //nolint:gosec // The delay does not protect sensitive data.
 		},
 	}
-	// Run startup fetches in the background so the HTTP listener (and
-	// /_liveness) come up immediately. /_readiness gates on Ready() so the
-	// Service load balancer holds traffic until warming completes.
+	// Warm up in the background so the HTTP listener and /_liveness come up immediately.
+	//
+	// /_readiness gates on Ready(), so the load balancer holds traffic until warming completes.
 	go func() {
 		warmCtx := context.WithoutCancel(ctx)
-		// Coordination only matters when warm-up will schedule snapshot
-		// jobs; with snapshots disabled, warm immediately.
+		// Only snapshot jobs need coordination, so with snapshots disabled, warm immediately.
 		if s.config.SnapshotInterval > 0 {
-			// Wait for SetMetadataStore so warm-up never schedules snapshot
-			// jobs before cross-replica coordination is installed.
-			// config.Load wires every MetadataConsumer immediately after
-			// construction.
+			// Wait for SetMetadataStore so snapshot jobs never run before cross-replica coordination exists.
+			//
+			// config.Load wires every MetadataConsumer immediately after construction.
 			select {
 			case <-s.metadataWired:
 			case <-ctx.Done():
 				return
 			}
-			// Sync shared coordination state before scheduling so the first
-			// claim decisions don't run against an empty local view. Bounded
-			// and fail-open (coordination is advisory) so a slow metadata
-			// backend can't wedge readiness.
+			// Sync coordination state first so early claim decisions don't see an empty local view.
+			//
+			// Bounded and fail-open (coordination is advisory) so a slow metadata backend can't wedge readiness.
 			primeCtx, cancel := context.WithTimeout(warmCtx, time.Minute)
 			if err := s.snapshotCoord.Load().Prime(primeCtx); err != nil {
 				logger.WarnContext(warmCtx, "Failed to prime snapshot coordination state", "error", err)
@@ -281,11 +282,10 @@ func (s *Strategy) Ready() bool {
 	return s.ready.Load()
 }
 
-// SetMetadataStore enables the per-repo clone histogram (and schedules its
-// daily reaper) and cross-replica snapshot generation coordination. Called by
-// config.Load after the metadata backend is built. It also releases the
-// warm-up goroutine, which waits for wiring so warmed repos are scheduled
-// with coordination in place.
+// SetMetadataStore enables the per-repo clone histogram, its daily reaper, and cross-replica snapshot coordination.
+//
+// config.Load calls it after building the metadata backend. It also releases the warm-up goroutine, which waits so
+// warmed repos are scheduled with coordination in place.
 func (s *Strategy) SetMetadataStore(store *metadatadb.Store) {
 	defer s.wiredOnce.Do(func() { close(s.metadataWired) })
 	if store == nil {
@@ -348,8 +348,7 @@ func (s *Strategy) warmExistingRepos(ctx context.Context) error {
 	return nil
 }
 
-// SetHTTPTransport overrides the HTTP transport used for upstream requests.
-// This is intended for testing.
+// SetHTTPTransport overrides the HTTP transport used for upstream requests, for testing.
 func (s *Strategy) SetHTTPTransport(t http.RoundTripper) {
 	s.httpClient.Transport = t
 	s.proxy.Transport = t
@@ -405,10 +404,9 @@ func (s *Strategy) handleRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Only handle known git smart protocol operations locally (info/refs
-	// discovery and git-upload-pack negotiation). Everything else (LFS API
-	// requests, unknown paths, etc.) is forwarded to upstream so it isn't
-	// mistakenly treated as a clone/fetch.
+	// Only info/refs and git-upload-pack are handled locally.
+	//
+	// Everything else, such as LFS API requests, goes upstream so it isn't mistaken for a clone or fetch.
 	if isGitRequest(pathValue) {
 		s.handleGitRequest(w, r, host, pathValue)
 		return
@@ -469,8 +467,9 @@ func (s *Strategy) handleGitRequest(w http.ResponseWriter, r *http.Request, host
 			writeRequestTooLarge(w, r)
 		} else if err != nil {
 			logger.WarnContext(ctx, "Spooled upload-pack response truncated", "error", err)
-			// Headers are already sent, so abort the connection rather than let the server
-			// end the chunked body cleanly and git mistake a truncated pack for a whole one.
+			// Headers are already sent, so abort the connection.
+			//
+			// A cleanly ended chunked body would make git mistake a truncated pack for a whole one.
 			if ctx.Err() == nil {
 				panic(http.ErrAbortHandler)
 			}
@@ -499,17 +498,14 @@ func (s *Strategy) serveReadyRepo(w http.ResponseWriter, r *http.Request, repo *
 		return nil
 	}
 	if isDiscovery && stale {
-		// Mirror is behind upstream. Forward to upstream so the client gets
-		// fresh refs immediately, and kick off a background fetch so the
-		// mirror catches up for subsequent requests.
+		// Give the client fresh refs from upstream now, while a background fetch catches the mirror up.
 		logger.InfoContext(ctx, "Refs stale, forwarding to upstream and fetching in background", "upstream", repo.UpstreamURL())
 		s.submitFetch(repo)
 		s.forwardToUpstream(w, r, host, pathValue)
 		return nil
 	}
 
-	// Buffer the request body so it can be replayed if serveFromBackend
-	// signals a fallback to upstream (e.g. on "not our ref").
+	// Buffer the body so it can be replayed if serveFromBackend falls back, e.g. on "not our ref".
 	var bodyBytes []byte
 	if r.Body != nil && r.Body != http.NoBody {
 		var readErr error
@@ -533,8 +529,9 @@ func (s *Strategy) serveReadyRepo(w http.ResponseWriter, r *http.Request, repo *
 		}
 	}
 
-	// The missing object is usually a commit the stale mirror has not fetched
-	// yet; fetching is far cheaper than proxying the whole pack from upstream.
+	// The missing object is usually a commit the mirror hasn't fetched yet.
+	//
+	// Fetching it is far cheaper than proxying the whole pack from upstream.
 	if err := repo.Fetch(ctx); err != nil {
 		logger.WarnContext(ctx, "Fetch after 'not our ref' failed, forwarding to upstream", "upstream", repo.UpstreamURL(),
 			"error", err)
@@ -551,10 +548,10 @@ func (s *Strategy) serveReadyRepo(w http.ResponseWriter, r *http.Request, repo *
 	return nil
 }
 
-// SpoolKeyForRequest returns the spool key for a request, or empty string if the
-// request is not spoolable. For POST requests, the body is hashed to differentiate
-// protocol v2 commands (e.g. ls-refs vs fetch) that share the same URL. The request
-// body is buffered and replaced so it can still be read by the caller.
+// SpoolKeyForRequest returns the spool key for a request, or "" if the request is not spoolable.
+//
+// POST bodies are hashed to tell apart protocol v2 commands (e.g. ls-refs, fetch) that share a URL. The body is buffered
+// and replaced so the caller can still read it.
 func SpoolKeyForRequest(pathValue string, r *http.Request) (string, error) {
 	if !strings.HasSuffix(pathValue, "/git-upload-pack") {
 		return "", nil
@@ -582,9 +579,10 @@ func (s *Strategy) uploadPackSpools(upstreamURL string) *spool.Group {
 	return group
 }
 
-// cleanupSpools drops the upload-pack responses kept while upstreamURL was
-// cloning, so later requests are served from the mirror or upstream.
-func (s *Strategy) cleanupSpools(upstreamURL string) {
+// cleanupSpools drops the upload-pack responses kept while upstreamURL was cloning.
+//
+// Later requests are then served from the mirror or upstream.
+func (s *Strategy) cleanupSpools(upstreamURL string) { //nolint:privatedoc // explains why
 	s.spoolsMu.Lock()
 	group, exists := s.spools[upstreamURL]
 	delete(s.spools, upstreamURL)
@@ -594,8 +592,9 @@ func (s *Strategy) cleanupSpools(upstreamURL string) {
 	}
 }
 
-// serveWithSpool shares upload-pack responses while the mirror is cloning. An
-// error other than request-too-large means a truncated response.
+// serveWithSpool shares upload-pack responses while the mirror is cloning.
+//
+// An error other than request-too-large means a truncated response.
 func (s *Strategy) serveWithSpool(w http.ResponseWriter, r *http.Request, host, pathValue, upstreamURL string) error {
 	ctx := r.Context()
 	logger := logging.FromContext(ctx)
@@ -661,13 +660,12 @@ func writeRequestTooLarge(w http.ResponseWriter, r *http.Request) {
 	cachewhttputil.ErrorResponse(w, r, http.StatusRequestEntityTooLarge, "request body too large")
 }
 
-// isGitRequest reports whether pathValue matches a git smart HTTP protocol
-// endpoint (info/refs discovery or git-upload-pack negotiation).
 func isGitRequest(pathValue string) bool {
 	return strings.HasSuffix(pathValue, "/info/refs") ||
 		strings.HasSuffix(pathValue, "/git-upload-pack")
 }
 
+// ExtractRepoPath strips Git smart HTTP endpoint suffixes and a trailing .git from a request path.
 func ExtractRepoPath(pathValue string) string {
 	repoPath := pathValue
 	repoPath = strings.TrimSuffix(repoPath, "/info/refs")
@@ -677,10 +675,9 @@ func ExtractRepoPath(pathValue string) string {
 	return repoPath
 }
 
-// ensureCloneReady blocks until the repository mirror is ready. If the mirror
-// does not exist yet (StateEmpty), it triggers a clone synchronously. If another
-// goroutine is already cloning (StateCloning), it polls until completion or the
-// context is cancelled. Returns an error if the clone fails or the context is done.
+// ensureCloneReady blocks until the repository mirror is ready.
+//
+// An empty mirror is cloned synchronously. A clone in progress elsewhere is polled until it finishes or ctx is done.
 func (s *Strategy) ensureCloneReady(ctx context.Context, repo *gitclone.Repository) error {
 	for {
 		switch repo.State() {
@@ -703,10 +700,9 @@ func (s *Strategy) ensureCloneReady(ctx context.Context, repo *gitclone.Reposito
 }
 
 func (s *Strategy) startClone(ctx context.Context, repo *gitclone.Repository) (returnErr error) {
-	// Atomically claim the clone so only one goroutine performs the restore
-	// or clone. Without this gate, concurrent snapshot requests each call
-	// startClone and extract tarballs over the same directory, corrupting
-	// packed-refs and other git metadata.
+	// Atomically claim the clone so only one goroutine restores or clones.
+	//
+	// Otherwise concurrent snapshot requests extract tarballs over the same directory and corrupt git metadata.
 	if !repo.TryStartCloning() {
 		return nil
 	}
@@ -738,19 +734,14 @@ func (s *Strategy) startClone(ctx context.Context, repo *gitclone.Repository) (r
 	} else {
 		logger.InfoContext(ctx, "Mirror snapshot restored, fetching to freshen", "upstream", upstream)
 
-		// Fetch with a generous timeout and no low-speed check: mirror
-		// snapshots can be hours old, so the delta may be very large and
-		// GitHub's server-side pack computation can stall at near-zero
-		// transfer for minutes (same as initial clone).
+		// Stay StateCloning until the fetch succeeds so ensureCloneReady callers never see a stale mirror.
 		//
-		// State remains StateCloning until fetch succeeds so that
-		// concurrent requests (via ensureCloneReady) block rather than
-		// serving from a potentially empty or stale mirror.
+		// FetchLenient has no low-speed check: an hours-old snapshot's delta can be large, and GitHub's pack
+		// computation can stall at near-zero transfer for minutes.
 		if err := repo.FetchLenient(ctx, s.cloneManager.Config().CloneTimeout); err != nil {
 			logger.WarnContext(ctx, "Post-restore fetch failed, discarding snapshot and falling back to clone",
 				"upstream", upstream, "error", err)
-			// The restored snapshot may be corrupt or empty. Remove it and
-			// fall through to a fresh clone so we don't re-upload bad data.
+			// The snapshot may be corrupt, so clone afresh rather than re-upload bad data.
 			if rmErr := os.RemoveAll(repo.Path()); rmErr != nil {
 				repo.ResetToEmpty()
 				return errors.Wrapf(rmErr, "remove corrupt mirror for %s", upstream)
@@ -777,8 +768,7 @@ func (s *Strategy) startClone(ctx context.Context, repo *gitclone.Repository) (r
 	cloneStart := time.Now()
 	err := repo.CloneClaimed(ctx)
 
-	// Clean up spools regardless of clone success or failure, so that subsequent
-	// requests either serve from the local backend or go directly to upstream.
+	// Clean up spools even on failure so later requests use the mirror or upstream directly.
 	s.cleanupSpools(upstream)
 
 	if err != nil {
@@ -798,10 +788,9 @@ func (s *Strategy) startClone(ctx context.Context, repo *gitclone.Repository) (r
 	return nil
 }
 
-// tryRestoreSnapshot attempts to restore a mirror from an S3 mirror snapshot.
-// Mirror snapshots are bare repositories that can be extracted and used directly
-// without any conversion. The snapshot is extracted into a temporary directory
-// and renamed into place only on success, so a failure can never delete an
+// tryRestoreSnapshot restores a mirror from a cached bare-repository snapshot.
+//
+// It extracts into a temporary directory and renames into place only on success, so a failure never deletes an
 // existing mirror directory.
 func (s *Strategy) tryRestoreSnapshot(ctx context.Context, repo *gitclone.Repository) (returnErr error) {
 	ctx, span := tracer.Start(ctx, "git.restore_snapshot",
@@ -852,20 +841,20 @@ func (s *Strategy) tryRestoreSnapshot(ctx context.Context, repo *gitclone.Reposi
 	return nil
 }
 
-// submitFetch schedules a fetch unconditionally. Use this when ls-remote has
-// already confirmed the mirror is behind upstream.
-func (s *Strategy) submitFetch(repo *gitclone.Repository) {
-	// Use a separate queue from snapshot/repack so fetches are not serialized
-	// behind long-running jobs on the same upstream URL queue.
+// submitFetch schedules a fetch unconditionally.
+//
+// Use this when ls-remote has already confirmed the mirror is behind upstream.
+func (s *Strategy) submitFetch(repo *gitclone.Repository) { //nolint:privatedoc // documents a non-obvious contract
+	// A separate queue keeps fetches from waiting behind long snapshot and repack jobs.
 	s.scheduler.Submit(repo.UpstreamURL()+"/fetch", "fetch", func(ctx context.Context) error {
 		return s.doFetch(ctx, repo)
 	})
 }
 
-// freshenMirror synchronously fetches the mirror unless it already fetched
-// within the ref-check interval, bounding upstream load when fallback bundle
-// requests repeat against the same repository.
-func (s *Strategy) freshenMirror(ctx context.Context, repo *gitclone.Repository) error {
+// freshenMirror synchronously fetches the mirror unless it already fetched within the ref-check interval.
+//
+// The interval bounds upstream load when fallback bundle requests repeat against one repository.
+func (s *Strategy) freshenMirror(ctx context.Context, repo *gitclone.Repository) error { //nolint:privatedoc // explains why
 	if !repo.NeedsFetch(s.cloneManager.Config().RefCheckInterval) {
 		return nil
 	}
@@ -876,9 +865,10 @@ func (s *Strategy) doFetch(ctx context.Context, repo *gitclone.Repository) error
 	return s.fetchMirror(ctx, repo, repo.Fetch)
 }
 
-// doFetchVerified is doFetch minus fetch coalescing: nil guarantees this call
-// ran a successful git fetch, so the caller can assert upstream state.
-func (s *Strategy) doFetchVerified(ctx context.Context, repo *gitclone.Repository) error {
+// doFetchVerified is doFetch minus fetch coalescing.
+//
+// A nil error guarantees this call ran a successful git fetch, so the caller can assert upstream state.
+func (s *Strategy) doFetchVerified(ctx context.Context, repo *gitclone.Repository) error { //nolint:privatedoc // documents a non-obvious contract
 	return s.fetchMirror(ctx, repo, repo.FetchVerified)
 }
 

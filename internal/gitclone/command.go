@@ -1,5 +1,4 @@
-// Package gitclone provides reusable git clone management with lifecycle control,
-// concurrency management, and large repository optimizations.
+// Package gitclone manages git clones with lifecycle control, concurrency limits, and large repository optimizations.
 package gitclone
 
 import (
@@ -36,9 +35,7 @@ func (r *Repository) GitCommand(ctx context.Context, args ...string) (*exec.Cmd,
 		allArgs = append(allArgs, configArgs...)
 	}
 
-	// Add credential helper configuration if we have a token
-	// This ensures git uses the GitHub App token for authentication
-	// for all operations (clone, fetch, remote update, etc.)
+	// A credential helper makes every git operation authenticate with the GitHub App token.
 	if token != "" {
 		escapedToken := strings.ReplaceAll(token, "'", "'\\''")
 		credHelper := "!f() { test \"$1\" = get && echo username=x-access-token && printf 'password=%s\\n' '" + escapedToken + "'; }; f"
@@ -82,6 +79,7 @@ func getInsteadOfDisableArgsForURL(ctx context.Context, targetURL string) ([]str
 	return args, nil
 }
 
+// ParseGitRefs parses "<sha> <ref>" lines, as printed by ls-remote and show-ref, into a map of ref name to SHA.
 func ParseGitRefs(output []byte) map[string]string {
 	refs := make(map[string]string)
 	scanner := bufio.NewScanner(strings.NewReader(string(output)))

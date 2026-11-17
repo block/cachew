@@ -13,6 +13,7 @@ import (
 )
 
 // Suite runs a comprehensive test suite against a metadatadb.Backend implementation.
+//
 // The factory must return n backends that share the same underlying storage.
 func Suite(t *testing.T, newBackends func(t *testing.T, n int) []metadatadb.Backend) {
 	one := func(t *testing.T) metadatadb.Backend { return newBackends(t, 1)[0] }

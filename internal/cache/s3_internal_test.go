@@ -37,10 +37,10 @@ func newS3(t *testing.T) *S3 {
 	return s
 }
 
-// TestS3StaleCompanionFallsBackToObjectMetadata verifies that a companion
-// describing a different data object than the one stored reads as a miss
-// while the data object is young (a commit may still be in flight), and past
-// the grace window serves the data object with its own embedded metadata.
+// TestS3StaleCompanionFallsBackToObjectMetadata verifies reads when the companion mismatches the data object.
+//
+// A young data object reads as a miss, since a commit may be in flight. Past the grace window it is served with
+// its own embedded metadata.
 func TestS3StaleCompanionFallsBackToObjectMetadata(t *testing.T) {
 	s := newS3(t)
 	defer s.Close()
@@ -63,9 +63,7 @@ func TestS3StaleCompanionFallsBackToObjectMetadata(t *testing.T) {
 	wantETag := headers.Get(ETagKey)
 	assert.NotEqual(t, "", wantETag)
 
-	// Simulate a stale companion left behind by an interleaved writer: the data
-	// object keeps its tag while the metadata is overwritten with a different
-	// one.
+	// Simulate a stale companion from an interleaved writer: the data object keeps its tag, the metadata gets another.
 	assert.NoError(t, s.writeMeta(ctx, s.namespace, key, s3Meta{
 		Tag:       "stale-tag",
 		ExpiresAt: time.Now().Add(time.Hour),
@@ -101,10 +99,9 @@ func TestS3StaleCompanionFallsBackToObjectMetadata(t *testing.T) {
 	assert.Equal(t, wantETag, headers.Get(ETagKey))
 }
 
-// TestS3StaleCompanionWithoutETagStaysMiss verifies that a data object whose
-// embedded headers carry no ETag (an intermediate format stored the ETag only
-// in the companion) is never served via the stale-companion fallback, since
-// it would be a hit without a validator.
+// TestS3StaleCompanionWithoutETagStaysMiss verifies a data object without an embedded ETag is never served.
+//
+// An intermediate format stored the ETag only in the companion, and a fallback hit would lack a validator.
 func TestS3StaleCompanionWithoutETagStaysMiss(t *testing.T) {
 	s := newS3(t)
 	defer s.Close()
@@ -113,8 +110,7 @@ func TestS3StaleCompanionWithoutETagStaysMiss(t *testing.T) {
 	key := NewKey("no-embedded-etag")
 	data := []byte("payload")
 
-	// Write a tagged data object whose embedded headers lack an ETag,
-	// mirroring the format that stored the ETag only in the companion.
+	// Write a tagged data object without an embedded ETag, mirroring the format that kept it only in the companion.
 	_, err := s.client.PutObject(ctx, s.config.Bucket, s.keyToPath(s.namespace, key),
 		bytes.NewReader(data), int64(len(data)), minio.PutObjectOptions{
 			UserMetadata: map[string]string{
@@ -141,9 +137,9 @@ func TestS3StaleCompanionWithoutETagStaysMiss(t *testing.T) {
 	assert.IsError(t, err, os.ErrNotExist)
 }
 
-// TestS3AbortedWriteNeverBecomesReadable verifies that a write aborted after
-// its data object upload already succeeded deletes the data object, so the
-// uncommitted write cannot age into the stale-companion fallback.
+// TestS3AbortedWriteNeverBecomesReadable verifies an abort after the data object upload deletes the data object.
+//
+// Otherwise the uncommitted write could age into the stale-companion fallback.
 func TestS3AbortedWriteNeverBecomesReadable(t *testing.T) {
 	s := newS3(t)
 	defer s.Close()
@@ -156,8 +152,7 @@ func TestS3AbortedWriteNeverBecomesReadable(t *testing.T) {
 	_, err = w.Write([]byte("uncommitted"))
 	assert.NoError(t, err)
 
-	// Complete the upload before aborting: close the pipe so PutObject sees
-	// EOF and finishes, then wait for the data object to land.
+	// Complete the upload before aborting: closing the pipe lets PutObject see EOF and land the data object.
 	sw := w.(*s3Writer)
 	assert.NoError(t, sw.pipe.Close())
 	objectName := s.keyToPath(s.namespace, key)
@@ -181,10 +176,9 @@ func TestS3AbortedWriteNeverBecomesReadable(t *testing.T) {
 	assert.Error(t, err)
 }
 
-// TestS3AbortSparesConcurrentWrite verifies that an aborted
-// writer's cleanup does not delete a concurrent writer's committed data
-// object for the same key: the delete is conditional on the stored object
-// still carrying the aborting writer's tag.
+// TestS3AbortSparesConcurrentWrite verifies an aborted writer's cleanup spares a concurrent writer's object.
+//
+// The delete is conditional on the stored object still carrying the aborting writer's tag.
 func TestS3AbortSparesConcurrentWrite(t *testing.T) {
 	s := newS3(t)
 	defer s.Close()
@@ -228,9 +222,9 @@ func TestS3AbortSparesConcurrentWrite(t *testing.T) {
 	assert.Equal(t, "writer B", string(data))
 }
 
-// TestS3LegacyUntaggedObjectIsReadable verifies backwards compatibility: an
-// object written before tagging was introduced carries no tag on either the
-// data object or its companion metadata, and must still read as a hit.
+// TestS3LegacyUntaggedObjectIsReadable verifies an object written before tagging still reads as a hit.
+//
+// Such objects carry no tag on either the data object or its companion metadata.
 func TestS3LegacyUntaggedObjectIsReadable(t *testing.T) {
 	s := newS3(t)
 	defer s.Close()
@@ -239,8 +233,7 @@ func TestS3LegacyUntaggedObjectIsReadable(t *testing.T) {
 	key := NewKey("legacy-untagged")
 	data := []byte("legacy payload")
 
-	// Write the data object with no tag user-metadata, mirroring an object
-	// produced by the pre-tagging implementation.
+	// Write the data object without tag user metadata, as the pre-tagging implementation did.
 	_, err := s.client.PutObject(ctx, s.config.Bucket, s.keyToPath(s.namespace, key),
 		bytes.NewReader(data), int64(len(data)), minio.PutObjectOptions{})
 	assert.NoError(t, err)

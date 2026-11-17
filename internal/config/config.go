@@ -89,8 +89,6 @@ func Split[GlobalConfig any](ast *hcl.AST) (global, providers *hcl.AST) {
 	return global, providers
 }
 
-// unwrapBlock extracts the registry name from a prefixed block (e.g. "cache disk { ... }")
-// and returns a copy of the block with Name set to the first label and remaining labels preserved.
 func unwrapBlock(block *hcl.Block) (name string, inner *hcl.Block, err error) {
 	if len(block.Labels) == 0 {
 		return "", nil, errors.Errorf("%s: %s block requires a name label", block.Pos, block.Name)
@@ -142,10 +140,9 @@ func classifyBlocks(ast *hcl.AST) (*classifiedBlocks, error) {
 	return result, nil
 }
 
-// Load HCL configuration and use that to construct the cache backend, and proxy strategies.
-// It returns an http.Handler that wraps mux — any loaded strategies that implement
-// strategy.Interceptor are applied as middleware before ServeMux route matching, so
-// that they can inspect r.RequestURI rather than the path-only r.URL.Path.
+// Load builds the cache backend and strategies from HCL config, returning a handler that wraps mux.
+//
+// Strategies implementing strategy.Interceptor run before mux routing so they see r.RequestURI, not r.URL.Path.
 func Load(
 	ctx context.Context,
 	cr *cache.Registry,
@@ -196,10 +193,9 @@ func Load(
 
 	logger.DebugContext(ctx, "Cache backend", "cache", cache)
 
-	// Second pass, instantiate strategies and bind them to the mux.
-	// Collect strategies that implement Interceptor separately — they need
-	// to run before ServeMux route matching, not as mux routes. Strategies
-	// that implement Readier are tracked so /_readiness can gate on warm-up.
+	// Second pass: instantiate strategies and bind them to the mux.
+	//
+	// Interceptors run before mux routing, not as routes. Readiers let /_readiness wait for warm-up.
 	var interceptors []strategy.Interceptor
 	var readiers []strategy.Readier
 	for _, block := range classified.strategies {
@@ -221,8 +217,7 @@ func Load(
 		}
 	}
 
-	// Wrap the mux with interceptors. The last-registered interceptor runs
-	// outermost so that registration order matches interception order.
+	// Wrap in reverse so the first-registered interceptor runs outermost, matching registration order.
 	var h http.Handler = mux
 	for i := len(interceptors) - 1; i >= 0; i-- {
 		h = interceptors[i].Intercept(h)
@@ -230,18 +225,11 @@ func Load(
 	return h, readiers, nil
 }
 
-// expandVars expands environment variable references in HCL `*hcl.String`
-// and `*hcl.Heredoc` attribute values in-place. It is a low-level helper;
-// most callers should go through `InjectEnvars`, which performs both
-// schema-driven attribute injection for absent attributes AND placeholder
-// expansion in attribute values that the operator wrote with `${VAR}`.
+// expandVars expands environment variable references in HCL string and heredoc attribute values in place.
 //
-// Heredoc handling is required so that templated policy text inside global
-// blocks (e.g. `opa { policy = <<EOF ... ${MY_PRINCIPAL} ... EOF }`) reaches
-// downstream consumers with placeholders substituted. The native
-// `hcl.WithDefaultTransformer` only runs against struct-tag default values
-// in `valueFromTag`, never against live AST node strings.
-func expandVars(ast *hcl.AST, vars map[string]string) {
+// Most callers should use InjectEnvars. Heredocs are handled so templated policy text is substituted:
+// hcl.WithDefaultTransformer only runs on struct-tag defaults, never on live AST strings.
+func expandVars(ast *hcl.AST, vars map[string]string) { //nolint:privatedoc // explains why
 	_ = hcl.Visit(ast, func(node hcl.Node, next func() error) error { //nolint:errcheck
 		attr, ok := node.(*hcl.Attribute)
 		if ok {
@@ -256,25 +244,10 @@ func expandVars(ast *hcl.AST, vars map[string]string) {
 	})
 }
 
-// InjectEnvars resolves environment variables against the config AST in two
-// passes:
+// InjectEnvars adds missing schema attributes from envars, then expands ${VAR} in string and heredoc values.
 //
-//  1. Schema-driven injection: walks the schema and for each attribute not
-//     already present in the config, checks for a corresponding environment
-//     variable and inserts it as a new attribute. Environment variable names
-//     are derived from the path to the attribute: prefix + block names +
-//     attribute name, joined with "_", uppercased, hyphens replaced with "_".
-//     E.g. prefix="CACHEW", path=["scheduler", "concurrency"] resolves to
-//     "CACHEW_SCHEDULER_CONCURRENCY".
-//  2. Placeholder expansion: walks the resulting AST and substitutes `${VAR}`
-//     references inside `*hcl.String` and `*hcl.Heredoc` attribute values
-//     using `os.Expand` semantics (unset names collapse to empty). This
-//     covers placeholders the operator wrote into the config file directly,
-//     including those inside heredocs (e.g. an OPA policy block).
-//
-// Both passes operate on the same `vars` map. Pass (1) only ever inserts
-// attributes that were absent, so it cannot overwrite operator-written values
-// that pass (2) then expands.
+// Envar names join prefix, block names and attribute name with "_", uppercased with hyphens as "_", e.g.
+// CACHEW_SCHEDULER_CONCURRENCY. Injection never overwrites written values; expansion follows os.Expand.
 func InjectEnvars(schema *hcl.AST, config *hcl.AST, prefix string, vars map[string]string) {
 	container := &entryContainer{ast: config}
 	injectEntries(schema.Entries, container, []string{prefix}, vars)
@@ -337,8 +310,7 @@ func injectEntries(schemaEntries hcl.Entries, container *entryContainer, path []
 		case *hcl.Block:
 			child := container.findBlock(entry.Name)
 			if child == nil {
-				// Create a temporary container; only add the block to the
-				// config if at least one envar populated it.
+				// Only add the block to the config if at least one envar populated it.
 				tmp := &entryContainer{ast: container.ast, block: &hcl.Block{Name: entry.Name}}
 				injectEntries(entry.Body, tmp, append(path, entry.Name), vars)
 				if len(tmp.block.Body) > 0 {
