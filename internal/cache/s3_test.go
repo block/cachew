@@ -45,9 +45,9 @@ func TestS3Cache(t *testing.T) {
 	cachetest.Suite(t, func(t *testing.T) cache.Cache { return newS3Cache(t, bucket) })
 }
 
-// TestS3ContextCancellationAbortsUpload verifies that cancelling the context before
-// closing the writer aborts the S3 upload and does not leave any object behind.
-// This is the mechanism snapshot.CreatePaths uses to prevent partial/corrupt uploads.
+// TestS3ContextCancellationAbortsUpload verifies cancelling before Close aborts the upload and leaves no object.
+//
+// snapshot.CreatePaths relies on this to prevent partial or corrupt uploads.
 func TestS3ContextCancellationAbortsUpload(t *testing.T) {
 	bucket := s3clienttest.Start(t)
 	c := newS3Cache(t, bucket)

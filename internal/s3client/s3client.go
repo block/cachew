@@ -1,8 +1,6 @@
 // Package s3client provides shared S3 connection configuration and minio client construction.
 //
-// A single Config block is declared in the global configuration and a
-// ClientProvider lazily constructs a singleton *minio.Client that can be
-// shared across multiple consumers (cache backends, strategies, etc.).
+// One global Config block feeds a ClientProvider that lazily builds a *minio.Client shared by all consumers.
 package s3client
 
 import (
@@ -18,8 +16,7 @@ import (
 	"github.com/block/cachew/internal/logging"
 )
 
-// Config holds S3 connection parameters that are shared across all consumers.
-// It is intended to be embedded as a global HCL block (e.g. `hcl:"s3,block"`).
+// Config holds S3 connection parameters shared by all consumers, as a global HCL block (e.g. `hcl:"s3,block"`).
 type Config struct {
 	Endpoint      string `hcl:"endpoint,optional" help:"S3 endpoint URL (e.g., s3.amazonaws.com or localhost:9000)." default:"s3.amazonaws.com"`
 	Region        string `hcl:"region,optional" help:"S3 region." default:"us-west-2"`
@@ -30,8 +27,7 @@ type Config struct {
 // ClientProvider is a function that lazily creates a singleton *minio.Client.
 type ClientProvider func() (*minio.Client, error)
 
-// NewClientProvider returns a ClientProvider that will construct the minio
-// client at most once using the supplied Config.
+// NewClientProvider returns a ClientProvider that constructs the minio client at most once from config.
 func NewClientProvider(ctx context.Context, config Config) ClientProvider {
 	return sync.OnceValues(func() (*minio.Client, error) {
 		return NewClient(ctx, config)
@@ -39,10 +35,9 @@ func NewClientProvider(ctx context.Context, config Config) ClientProvider {
 }
 
 // NewClient constructs a *minio.Client from the given Config.
-// The standard AWS credential chain is used:
-//  1. Environment variables (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN)
-//  2. AWS credentials file (~/.aws/credentials)
-//  3. IAM role from EC2 instance metadata or ECS container credentials
+//
+// Credentials come from the standard AWS chain: AWS_* environment variables, ~/.aws/credentials, then the
+// EC2 instance or ECS container IAM role.
 func NewClient(ctx context.Context, config Config) (*minio.Client, error) {
 	logging.FromContext(ctx).InfoContext(ctx, "Constructing shared S3 client",
 		"endpoint", config.Endpoint,

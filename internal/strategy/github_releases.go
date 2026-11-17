@@ -20,6 +20,7 @@ import (
 	"github.com/block/cachew/internal/strategy/handler"
 )
 
+// RegisterGitHubReleases registers the github-releases strategy, which caches GitHub release downloads.
 func RegisterGitHubReleases(r *Registry, tokenManagerProvider githubapp.TokenManagerProvider, spools spool.Provider) {
 	Register(r, "github-releases", "Caches public and authenticated GitHub releases.", func(ctx context.Context, config GitHubReleasesConfig, cache cache.Cache, mux Mux) (*GitHubReleases, error) {
 		registry, err := spools()
@@ -30,6 +31,7 @@ func RegisterGitHubReleases(r *Registry, tokenManagerProvider githubapp.TokenMan
 	})
 }
 
+// GitHubReleasesConfig sets the fallback GitHub token and the organisations whose releases need authentication.
 type GitHubReleasesConfig struct {
 	Token       string   `hcl:"token,optional" help:"GitHub token for authentication."`
 	PrivateOrgs []string `hcl:"private-orgs" help:"List of private GitHub organisations."`
@@ -64,8 +66,10 @@ func NewGitHubReleases(ctx context.Context, config GitHubReleasesConfig, cache c
 		client:       githubapp.NewAPIClient(http.DefaultClient),
 		tokenManager: tokenManager,
 	}
-	// eg. https://github.com/alecthomas/chroma/releases/download/v2.21.1/chroma-2.21.1-darwin-amd64.tar.gz
-	// eg. https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize/v5.8.1/kustomize_v5.8.1_linux_amd64.tar.gz
+	// Release tags may contain slashes, e.g.
+	//
+	// https://github.com/alecthomas/chroma/releases/download/v2.21.1/chroma-2.21.1-darwin-amd64.tar.gz
+	// https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize/v5.8.1/kustomize_v5.8.1_linux_amd64.tar.gz
 	h := handler.New(s.client, cache, spools).Metrics("github-releases", "github.com").
 		CacheKey(func(r *http.Request) string {
 			org := r.PathValue("org")
@@ -88,8 +92,9 @@ var _ Strategy = (*GitHubReleases)(nil)
 func (g *GitHubReleases) String() string { return "github-releases" }
 
 // splitReleasePath splits "release-tag/file.tar.gz" into the release tag and filename.
-// Supports release tags with slashes (e.g. "kustomize/v5.8.1/file.tar.gz").
-func splitReleasePath(rest string) (release, file string) {
+//
+// Release tags may contain slashes, as in "kustomize/v5.8.1/file.tar.gz".
+func splitReleasePath(rest string) (release, file string) { //nolint:privatedoc // documents a non-obvious contract
 	i := strings.LastIndex(rest, "/")
 	if i < 0 {
 		return "", rest
@@ -138,8 +143,8 @@ func (g *GitHubReleases) newGitHubRequest(ctx context.Context, reqURL, accept, o
 }
 
 // downloadRelease creates an HTTP request to download a GitHub release asset.
-// For private orgs, it uses the GitHub API to find and download the asset.
-// For public orgs, it constructs a direct download URL.
+//
+// Private orgs go through the GitHub API to find the asset; public orgs use a direct download URL.
 func (g *GitHubReleases) downloadRelease(ctx context.Context, org, repo, release, file string) (*http.Request, error) {
 	// These values are spliced into GitHub API URLs that may carry org credentials.
 	for _, segment := range []string{org, repo, file} {

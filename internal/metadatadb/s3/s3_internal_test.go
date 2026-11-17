@@ -67,8 +67,7 @@ func TestS3BackendSoakReplicas(t *testing.T) {
 		})
 		assert.NoError(t, err)
 		t.Cleanup(func() { assert.NoError(t, b.Close(context.Background())) })
-		// Aggressive thresholds so compactions, elections, and probes fire
-		// repeatedly during the run.
+		// Aggressive thresholds so compactions, elections, and probes fire repeatedly during the run.
 		b.ageThreshold = 2 * time.Second
 		b.segmentThreshold = 8
 		backends[i] = b
@@ -115,8 +114,7 @@ func TestWireRoundTrip(t *testing.T) {
 	for _, o := range decoded {
 		metadatadb.ApplyOp(got, o)
 	}
-	// Compare via JSON: identical encodings, differing Go types (int64 on
-	// the applied side, json.Number on the decoded side).
+	// Compare via JSON: the encodings match but Go types differ (int64 applied, json.Number decoded).
 	wantJSON, err := json.Marshal(want)
 	assert.NoError(t, err)
 	gotJSON, err := json.Marshal(got)
@@ -411,8 +409,7 @@ func TestStructKeysSurviveWire(t *testing.T) {
 	b := newBackend(t, bucket)
 	ctx := t.Context()
 
-	// Field order (Z before A) differs from sorted JSON key order, so this
-	// fails if local and replayed key encodings disagree.
+	// Field order (Z before A) differs from sorted JSON key order, catching local/replayed key encoding mismatches.
 	type structKey struct {
 		Z string `json:"z"`
 		A string `json:"a"`
@@ -465,8 +462,7 @@ func TestLeftoverCleanup(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, 2, len(lst.entries))
 
-	// Simulate a compactor that committed a rollup covering both segments
-	// and died before its deletes.
+	// Simulate a compactor that committed a rollup covering both segments and died before its deletes.
 	var m mark
 	for key, lm := range lst.entries {
 		if !m.covers(lm, key) {
@@ -504,8 +500,7 @@ func TestSeedRace(t *testing.T) {
 	assert.NoError(t, b1.Apply(ctx, "race", metadatadb.IntAdd{Key: "n", Delta: 1}))
 	assert.NoError(t, b2.Apply(ctx, "race", metadatadb.IntAdd{Key: "n", Delta: 1}))
 
-	// Both first ticks race the If-None-Match:* seed; the loser must adopt
-	// the winner and still complete its tick.
+	// Both first ticks race the If-None-Match:* seed; the loser must adopt the winner and still complete its tick.
 	wg := sync.WaitGroup{}
 	for _, b := range []*Backend{b1, b2} {
 		wg.Go(func() { assert.NoError(t, b.Flush(ctx, "race")) })

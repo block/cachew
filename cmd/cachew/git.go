@@ -23,8 +23,6 @@ import (
 //nolint:gochecknoglobals // OTel tracer instances are package-scoped by convention
 var tracer = otel.Tracer("github.com/block/cachew/cmd/cachew")
 
-// inSpan runs fn inside a named child span and records the error returned by
-// fn on the span before propagating it.
 func inSpan(ctx context.Context, name string, attrs []attribute.KeyValue, fn func(ctx context.Context) error) error {
 	ctx, span := tracer.Start(ctx, name, trace.WithAttributes(attrs...))
 	defer span.End()
@@ -36,16 +34,15 @@ func inSpan(ctx context.Context, name string, attrs []attribute.KeyValue, fn fun
 	return nil
 }
 
-// GitCmd groups git-aware subcommands that talk directly to cachew's
-// /git/ strategy endpoints (not the generic object-store API).
+// GitCmd groups git-aware subcommands that use cachew's /git/ strategy endpoints, not the object-store API.
 type GitCmd struct {
 	Restore GitRestoreCmd `cmd:"" help:"Restore a repository from a cachew git snapshot."`
 }
 
-// GitRestoreCmd fetches a git snapshot, extracts it, and optionally applies
-// a delta bundle. If --ref or --commit is set it then asks the server to
-// ensure those refs/commits are fresh and runs `git pull --ff-only` so the
-// working tree catches up to upstream.
+// GitRestoreCmd fetches and extracts a git snapshot, then optionally applies a delta bundle.
+//
+// With --ref or --commit it asks the server to freshen those refs and commits, then runs
+// `git pull --ff-only` so the working tree catches up to upstream.
 type GitRestoreCmd struct {
 	RepoURL             string            `arg:"" help:"Repository URL (e.g. https://github.com/org/repo)."`
 	Directory           string            `arg:"" help:"Target directory for the clone." type:"path"`
@@ -98,10 +95,7 @@ func (c *GitRestoreCmd) Run(ctx context.Context, api *client.Client) error {
 		}
 	}
 
-	// Snapshot + bundle leave the working tree at whatever the mirror had
-	// when the bundle was last generated, which may be arbitrarily old. If
-	// the caller asked for specific refs or commits to be fresh, freshen
-	// the mirror (if needed) and pull from origin (if needed) to catch up.
+	// Snapshot and bundle may be arbitrarily old, so freshen requested refs and commits.
 	if len(c.Ref) > 0 || len(c.Commit) > 0 {
 		if err := c.satisfyRefs(ctx, api); err != nil {
 			span.RecordError(err)
@@ -113,8 +107,7 @@ func (c *GitRestoreCmd) Run(ctx context.Context, api *client.Client) error {
 	return nil
 }
 
-// fetchAndExtractSnapshot pipes the snapshot download straight into extraction
-// and returns its freshen metadata (commit and bundle URL).
+// fetchAndExtractSnapshot streams the snapshot into extraction and returns its commit and bundle URL.
 func (c *GitRestoreCmd) fetchAndExtractSnapshot(ctx context.Context, api *client.Client) (commit, bundleURL string, err error) {
 	var snap *client.GitSnapshot
 	if err := inSpan(ctx, "cachew.download_snapshot",
@@ -147,14 +140,12 @@ func (c *GitRestoreCmd) fetchAndExtractSnapshot(ctx context.Context, api *client
 	return snap.Commit, snap.BundleURL, nil
 }
 
-// extract unpacks the snapshot into a staging directory renamed into place on
-// success, so a mid-download failure cannot leave a half-written checkout.
-// When the target directory already exists it extracts directly into it,
-// preserving restores over an existing checkout (rename would fail on a
-// non-empty destination).
+// extract unpacks the snapshot into a staging directory and renames it into place on success.
+//
+// Staging stops a failed download leaving a half-written checkout. An existing target is extracted
+// into directly, because rename fails on a non-empty destination.
 func (c *GitRestoreCmd) extract(ctx context.Context, body io.Reader) error {
-	// Clean strips trailing separators so filepath.Dir yields the true parent;
-	// otherwise MkdirAll would create the target itself and bypass staging.
+	// Clean strips trailing separators so MkdirAll creates the parent, not the target.
 	target := filepath.Clean(c.Directory)
 	parent := filepath.Dir(target)
 	if err := os.MkdirAll(parent, 0o750); err != nil {
@@ -195,10 +186,9 @@ func (c *GitRestoreCmd) extract(ctx context.Context, body io.Reader) error {
 	return nil
 }
 
-// satisfyRefs ensures the working tree contains every requested ref and
-// commit. It short-circuits whenever the local clone already has what was
-// asked for, avoiding both /ensure-refs and git pull when the snapshot+bundle
-// already brought down the required SHAs.
+// satisfyRefs ensures the working tree contains every requested ref and commit.
+//
+// It skips /ensure-refs and git pull when the local clone already has the required SHAs.
 func (c *GitRestoreCmd) satisfyRefs(ctx context.Context, api *client.Client) error {
 	ctx, span := tracer.Start(ctx, "cachew.satisfy_refs",
 		trace.WithAttributes(
@@ -208,8 +198,6 @@ func (c *GitRestoreCmd) satisfyRefs(ctx context.Context, api *client.Client) err
 	)
 	defer span.End()
 
-	// Fast path: if every ref is pinned and the local clone has every ref
-	// SHA and every requested commit, we're done.
 	if allPinned(c.Ref) &&
 		localHasAllRefSHAs(ctx, c.Directory, c.Ref) &&
 		localHasAllSHAs(ctx, c.Directory, c.Commit) {
@@ -248,11 +236,9 @@ func (c *GitRestoreCmd) satisfyRefs(ctx context.Context, api *client.Client) err
 			len(resp.MissingCommits), resp.MissingCommits)
 	}
 
-	// If the server's resolved SHAs and all requested commits are already
-	// in our local clone (e.g. the bundle brought them in), there's nothing
-	// new to pull. We only treat refs as "satisfied" when the server
-	// actually resolved them; an empty resp.Refs (e.g. unknown ref) leaves
-	// us no positive evidence, so fall through to the pull.
+	// Skip the pull if the local clone already has the server's resolved SHAs and all requested commits.
+	//
+	// Refs count as satisfied only when the server resolved all of them; an unknown ref gives no evidence.
 	refsSatisfied := len(c.Ref) == 0 ||
 		(len(resp.Refs) == len(c.Ref) && localHasAllRefSHAs(ctx, c.Directory, resp.Refs))
 	commitsSatisfied := localHasAllSHAs(ctx, c.Directory, c.Commit)
@@ -268,7 +254,6 @@ func (c *GitRestoreCmd) satisfyRefs(ctx context.Context, api *client.Client) err
 	return nil
 }
 
-// allPinned reports whether every entry in refs has a non-empty SHA.
 func allPinned(refs map[string]string) bool {
 	for _, sha := range refs {
 		if sha == "" {
@@ -278,11 +263,11 @@ func allPinned(refs map[string]string) bool {
 	return true
 }
 
-// localHasAllRefSHAs reports whether every non-empty SHA in refs exists in
-// the working clone's object database. An empty refs map returns true
-// (nothing to check); a ref with an empty SHA causes it to return false
-// because we don't know what to look for.
-func localHasAllRefSHAs(ctx context.Context, directory string, refs map[string]string) bool {
+// localHasAllRefSHAs reports whether every SHA in refs exists in the working clone's object database.
+//
+// An empty map returns true. A ref with an empty SHA returns false, because there is nothing to
+// look for.
+func localHasAllRefSHAs(ctx context.Context, directory string, refs map[string]string) bool { //nolint:privatedoc // documents a non-obvious contract
 	for _, sha := range refs {
 		if sha == "" {
 			return false
@@ -294,8 +279,6 @@ func localHasAllRefSHAs(ctx context.Context, directory string, refs map[string]s
 	return true
 }
 
-// localHasAllSHAs reports whether every commit SHA exists in the working
-// clone's object database. An empty slice returns true.
 func localHasAllSHAs(ctx context.Context, directory string, shas []string) bool {
 	for _, sha := range shas {
 		if !localHasSHA(ctx, directory, sha) {
@@ -373,11 +356,11 @@ func applyBundle(ctx context.Context, api *client.Client, bundleURL, directory s
 	return nil
 }
 
-// gitPullOrigin runs `git pull --ff-only` from the working clone's origin,
-// catching the working tree up to any commits made on the requested refs
-// after the bundle was generated. The clone's origin is the upstream URL,
-// so this respects the user's git insteadOf config to route through cachew.
-func gitPullOrigin(ctx context.Context, directory string) error {
+// gitPullOrigin fast-forwards the working clone to commits made after the bundle was generated.
+//
+// The clone's origin is the upstream URL, so the pull respects the user's git insteadOf config
+// and routes through cachew.
+func gitPullOrigin(ctx context.Context, directory string) error { //nolint:privatedoc // explains why
 	ctx, span := tracer.Start(ctx, "cachew.pull_origin",
 		trace.WithAttributes(attribute.String("cachew.directory", directory)),
 	)

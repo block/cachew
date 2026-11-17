@@ -16,6 +16,7 @@ import (
 	"github.com/block/cachew/internal/logging"
 )
 
+// RegisterAPIV1 registers the apiv1 strategy, which serves the cache object API under /api/v1/.
 func RegisterAPIV1(r *Registry) {
 	Register(r, "apiv1", "The stable API of the cache server.", NewAPIV1)
 }
@@ -28,6 +29,7 @@ type APIV1 struct {
 	logger *slog.Logger
 }
 
+// NewAPIV1 creates the APIV1 strategy and registers its /api/v1/ routes on mux.
 func NewAPIV1(ctx context.Context, _ struct{}, cache cache.Cache, mux Mux) (*APIV1, error) {
 	s := &APIV1{
 		logger: logging.FromContext(ctx),

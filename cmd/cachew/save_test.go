@@ -91,9 +91,7 @@ func TestPutCmdCancelOnCopyFailure(t *testing.T) {
 	api := client.New(srv.URL, nil)
 	defer api.Close()
 
-	// This mirrors what PutCmd.Run does internally:
-	// create with a cancellable context, write partial data, then cancel
-	// before closing — simulating an io.Copy error.
+	// Mirror PutCmd.Run on an io.Copy error: write partial data, then cancel the create context before closing.
 	key := client.NewKey("put-cancel-test")
 	createCtx, cancel := context.WithCancelCause(t.Context())
 	defer cancel(nil)

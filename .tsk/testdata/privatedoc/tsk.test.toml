@@ -1,0 +1,9 @@
+[[case]]
+name = "default"
+packages = ["./std"]
+
+[[case]]
+name = "lower-threshold"
+packages = ["./lower"]
+[case.config]
+min-lines = 3

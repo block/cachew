@@ -17,8 +17,7 @@ import (
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
-// HTTPStatusError is returned when the server responds with an unexpected
-// HTTP status code. Callers can use errors.As to inspect the status code.
+// HTTPStatusError reports an unexpected HTTP status code; use errors.As to inspect it.
 type HTTPStatusError struct {
 	StatusCode int
 }
@@ -41,8 +40,7 @@ func (e *HTTPStatusError) Is(target error) bool {
 	}
 }
 
-// transportHeaders are headers added by the HTTP transport layer that should
-// not be surfaced as cached-object metadata on responses.
+// transportHeaders are added by the HTTP transport and must not surface as cached-object metadata.
 var transportHeaders = []string{ //nolint:gochecknoglobals
 	"Date",
 	"Accept-Encoding",
@@ -51,35 +49,28 @@ var transportHeaders = []string{ //nolint:gochecknoglobals
 	"Time-To-Live",
 }
 
-// CacheWriter extends io.WriteCloser with the ability to abort an in-progress
-// cache write. Exactly one of Close or Abort must be called.
+// CacheWriter is an io.WriteCloser whose in-progress cache write can be aborted.
 //
-// Close commits the data to the cache. Abort discards the in-progress write,
-// ensuring the object is never made visible in the cache. Both methods are
-// idempotent after the first call.
+// Call exactly one of Close, which commits the object, or Abort, which ensures it is never visible.
+// Both are idempotent after the first call.
 type CacheWriter interface {
 	io.WriteCloser
-	// Abort discards the in-progress write and releases resources.
-	// The provided error is recorded as the cause of cancellation.
-	// The object MUST NOT be made available in the cache after Abort.
+	// Abort discards the in-progress write, recording err as the cause; the object MUST NOT become visible.
 	Abort(err error) error
 }
 
-// stdTransport is captured before cachewd wraps http.DefaultTransport with
-// upstream 429 cooldowns, so cache clients keep their own tuned pool.
+// stdTransport is captured before cachewd wraps http.DefaultTransport with 429 cooldowns.
+//
+// This lets cache clients keep their own tuned pool.
 var stdTransport = http.DefaultTransport.(*http.Transport) //nolint:errcheck,gochecknoglobals
 
 // HeaderFunc returns headers to attach to each outgoing request.
 type HeaderFunc func() http.Header
 
-// NewHTTPClient creates an *http.Client that attaches headerFunc headers
-// to every outgoing request. Useful for callers that need to talk to
-// non-API endpoints (e.g. /git/) with the same auth as the cache client.
+// NewHTTPClient creates an *http.Client that attaches headerFunc headers to every request, e.g. for /git/.
 //
-// The returned client is instrumented with otelhttp so each outgoing request
-// produces a child span and propagates the W3C traceparent header. When no
-// tracer provider is configured, otelhttp falls back to a no-op tracer, so
-// this is cost-free for callers that have not opted in to tracing.
+// Requests get otelhttp spans and W3C traceparent propagation. Without a tracer provider this is a no-op,
+// so callers that have not opted in to tracing pay nothing.
 func NewHTTPClient(headerFunc HeaderFunc) *http.Client {
 	base, ok := http.DefaultTransport.(*http.Transport)
 	if !ok {
@@ -110,18 +101,18 @@ func (t *headerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	return t.base.RoundTrip(req) //nolint:wrapcheck
 }
 
-// Client is an HTTP client for a Cachew cache server. Its method set mirrors
-// the cache.Cache interface, so it can be used as the transport for a remote
-// cache backend.
+// Client is an HTTP client for a Cachew cache server.
+//
+// Its method set mirrors cache.Cache, so it can be the transport for a remote cache backend.
 type Client struct {
 	baseURL   string
 	http      *http.Client
 	namespace Namespace
 }
 
-// New creates a Client against the given base URL (e.g. "http://localhost:8080").
-// If headerFunc is non-nil, its returned headers are added to every outgoing
-// request.
+// New creates a Client against baseURL (e.g. "http://localhost:8080").
+//
+// If headerFunc is non-nil, its headers are added to every outgoing request.
 func New(baseURL string, headerFunc HeaderFunc) *Client {
 	return &Client{
 		baseURL: strings.TrimRight(baseURL, "/"),
@@ -129,9 +120,9 @@ func New(baseURL string, headerFunc HeaderFunc) *Client {
 	}
 }
 
-// NewWithHTTPClient creates a Client against baseURL using the supplied
-// *http.Client. Callers are responsible for configuring authentication on
-// the supplied client (e.g. via a custom RoundTripper).
+// NewWithHTTPClient creates a Client against baseURL using httpClient.
+//
+// Callers must configure authentication on httpClient (e.g. via a custom RoundTripper).
 func NewWithHTTPClient(baseURL string, httpClient *http.Client) *Client {
 	return &Client{
 		baseURL: strings.TrimRight(baseURL, "/"),
@@ -139,8 +130,7 @@ func NewWithHTTPClient(baseURL string, httpClient *http.Client) *Client {
 	}
 }
 
-// HTTP returns the underlying HTTP client, for callers needing to talk to
-// non-API endpoints with the same auth configuration.
+// HTTP returns the underlying HTTP client, for reaching non-API endpoints with the same auth.
 func (c *Client) HTTP() *http.Client { return c.http }
 
 // BaseURL returns the cachew server root URL this client targets.
@@ -173,8 +163,7 @@ func (c *Client) invalidateURL(key Key) string {
 	return c.objectURL(key) + "/invalidate"
 }
 
-// Open retrieves an object from the cache server. Accepts optional
-// [RequestOption]s such as [IfNoneMatch] for conditional requests.
+// Open retrieves an object; [RequestOption]s such as [IfNoneMatch] make the request conditional.
 func (c *Client) Open(ctx context.Context, key Key, opts ...RequestOption) (io.ReadCloser, http.Header, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.objectURL(key), nil)
 	if err != nil {
@@ -213,8 +202,7 @@ func (c *Client) Open(ctx context.Context, key Key, opts ...RequestOption) (io.R
 	}
 }
 
-// Stat retrieves headers for an object from the cache server. Accepts optional
-// [RequestOption]s such as [IfNoneMatch] for conditional requests.
+// Stat retrieves an object's headers; [RequestOption]s such as [IfNoneMatch] make the request conditional.
 func (c *Client) Stat(ctx context.Context, key Key, opts ...RequestOption) (http.Header, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodHead, c.objectURL(key), nil)
 	if err != nil {
@@ -242,9 +230,9 @@ func (c *Client) Stat(ctx context.Context, key Key, opts ...RequestOption) (http
 	}
 }
 
-// Create stores a new object in the cache server. The returned CacheWriter
-// must be closed to commit the upload. Call Abort instead of Close to discard
-// the in-progress write and ensure the object is never made visible.
+// Create stores a new object in the cache server.
+//
+// Close the returned CacheWriter to commit, or Abort it to ensure the object is never visible.
 func (c *Client) Create(ctx context.Context, key Key, headers http.Header, ttl time.Duration, opts ...RequestOption) (CacheWriter, error) {
 	ctx, cancel := context.WithCancelCause(ctx)
 	pr, pw := io.Pipe()
@@ -298,8 +286,7 @@ func (c *Client) Create(ctx context.Context, key Key, headers http.Header, ttl t
 	return wc, nil
 }
 
-// UpdateMetadata exposes Cache.UpdateMetadata over HTTP so that revalidation
-// reaches remote tiers.
+// UpdateMetadata exposes Cache.UpdateMetadata over HTTP so that revalidation reaches remote tiers.
 func (c *Client) UpdateMetadata(ctx context.Context, key Key, headers http.Header, ttl time.Duration, opts ...RequestOption) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, c.objectURL(key), nil)
 	if err != nil {
@@ -434,7 +421,6 @@ func (c *Client) ListNamespaces(ctx context.Context) ([]string, error) {
 	return namespaces, nil
 }
 
-// filterHeaders returns a copy of headers with the specified keys removed.
 func filterHeaders(headers http.Header, skip ...string) http.Header {
 	skipSet := make(map[string]bool, len(skip))
 	for _, s := range skip {
@@ -470,10 +456,9 @@ func (wc *writeCloser) Abort(err error) error {
 	return wc.Close()
 }
 
-// Close is safe to call multiple times and from multiple goroutines (e.g. a
-// deferred Close racing an explicit Abort): the underlying close-and-wait
-// runs at most once, so the second caller will not deadlock waiting on a
-// drained <-wc.done channel.
+// Close is safe to call repeatedly and concurrently, e.g. a deferred Close racing Abort.
+//
+// The close-and-wait runs once, so a second caller cannot deadlock on the drained wc.done channel.
 func (wc *writeCloser) Close() error {
 	wc.once.Do(func() {
 		wc.closeErr = wc.doClose()
@@ -483,13 +468,9 @@ func (wc *writeCloser) Close() error {
 
 func (wc *writeCloser) doClose() error {
 	// Close the upload pipe so the goroutine driving c.http.Do can finish.
-	// If the caller's ctx is cancelled or the upload was Abort'd, propagate
-	// the cause via CloseWithError so any in-flight Write returns the cause
-	// rather than EOF; otherwise do a clean Close. context.Cause is
-	// preferred over ctx.Err so an Abort(cause) propagates the caller's
-	// reason rather than a generic context.Canceled — when the parent
-	// context cancels independently, Cause falls back to ctx.Err so
-	// behaviour matches the previous code in that path.
+	//
+	// On cancel or Abort, CloseWithError makes in-flight Writes return the cause rather than EOF.
+	// context.Cause carries Abort's reason; for an independent parent cancel it equals ctx.Err.
 	ctxCause := context.Cause(wc.ctx)
 	var pipeCloseErr error
 	if ctxCause != nil {
@@ -498,18 +479,13 @@ func (wc *writeCloser) doClose() error {
 		pipeCloseErr = wc.pw.Close()
 	}
 
-	// Always wait for the request goroutine to finish so connection
-	// resources are released and we can inspect the server's response.
+	// Always wait for the request goroutine so connection resources are released and the response is known.
 	serverErr := <-wc.done
 
-	// Prefer the server's typed *HTTPStatusError when present. The server
-	// can respond with an authoritative status (e.g. 403) before the local
-	// ctx is cancelled or the pipe is torn down — that response is more
-	// meaningful to the caller than the local symptom (a downstream
-	// "broken pipe" or context cancellation can fire as a consequence of
-	// the server closing the connection after writing its response).
-	// Without this preference, callers that match on *HTTPStatusError to
-	// classify e.g. "save not authorized" lose the signal entirely.
+	// Prefer the server's *HTTPStatusError (e.g. 403) over local cancellation or broken-pipe errors.
+	//
+	// Those local errors are often a symptom of the server closing after responding, and callers
+	// match on *HTTPStatusError to classify failures such as "save not authorized".
 	var statusErr *HTTPStatusError
 	if errors.As(serverErr, &statusErr) {
 		return errors.Wrap(serverErr, "request failed")

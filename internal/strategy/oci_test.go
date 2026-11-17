@@ -37,8 +37,7 @@ type fakeTokenRequest struct {
 	Username string
 }
 
-// fakeRegistry is a minimal OCI registry. Tag manifests serve an index or a
-// single manifest depending on Accept.
+// fakeRegistry is a minimal OCI registry whose tag manifests serve an index or single manifest depending on Accept.
 type fakeRegistry struct {
 	server *httptest.Server
 	cdn    *httptest.Server
@@ -68,7 +67,6 @@ func newFakeRegistry(t *testing.T, blobs ...[]byte) *fakeRegistry {
 	return f
 }
 
-// redirectBlobs serves blobs from a separate CDN server, as Docker Hub does.
 func (f *fakeRegistry) redirectBlobs(t *testing.T) {
 	t.Helper()
 	f.cdn = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -163,9 +161,10 @@ func (f *fakeRegistry) serveManifest(w http.ResponseWriter, r *http.Request, ref
 	_, _ = w.Write(body)
 }
 
-// read returns a fake's field under its lock, since fills record requests
-// from their own goroutines.
-func read[T any](f *fakeRegistry, field *T) T {
+// read returns a fake's field under its lock.
+//
+// Fills record requests from their own goroutines.
+func read[T any](f *fakeRegistry, field *T) T { //nolint:privatedoc // explains why
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return *field

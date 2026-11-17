@@ -21,6 +21,22 @@ doing. ALWAYS add Go-style documentation comments for public variables/types/fun
 comments MUST explain WHY something is happening, not WHAT is happening. NEVER add comments to top-level tests. BE
 SUCCINCT WHEN COMMENTING.
 
+A Go comment is at MOST one line, optionally followed by a blank comment line and up to two lines of explanation:
+
+```go
+// comment
+func foo()
+
+// comment
+//
+// explanation
+// explanation
+func bar()
+```
+
+The `privatedoc` linter rejects a doc comment on an unexported function under 20 lines. Keep one that explains why with
+`//nolint:privatedoc // <reason>` at the end of the `func` line.
+
 Functions should return errors, not log them internally. Logging belongs at the call site so callers retain control over
 how failures are reported and handled.
 

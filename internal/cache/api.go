@@ -35,15 +35,16 @@ type ReadAtCloser interface {
 }
 
 // PendingReader is implemented by a Writer whose bytes can be read before commit.
+//
 // The object stays invisible to Open and Stat until Close succeeds.
 type PendingReader interface {
-	// OpenPending must precede Close or Abort; the reader sees every returned Write
-	// and outlives the commit. Returns ErrPendingReadUnsupported if unsupported.
+	// OpenPending returns a reader over the uncommitted bytes, or ErrPendingReadUnsupported.
+	//
+	// It must be called before Close or Abort; the reader sees every returned Write and outlives the commit.
 	OpenPending() (ReadAtCloser, error)
 }
 
-// ErrPendingReadUnsupported is returned by PendingReader.OpenPending when a
-// write cannot be followed before it is committed.
+// ErrPendingReadUnsupported is returned by PendingReader.OpenPending when a write cannot be read before commit.
 var ErrPendingReadUnsupported = errors.New("pending reads unsupported")
 
 // ErrNotFound is returned when a cache backend is not found.
@@ -52,15 +53,13 @@ var ErrNotFound = errors.New("cache backend not found")
 // Option configures conditional parameters on a cache Open or Stat.
 type Option = client.RequestOption
 
-// RequestOptions is the resolved set of conditional and range parameters for an
-// Open or Stat.
+// RequestOptions is the resolved set of conditional and range parameters for an Open or Stat.
 type RequestOptions = client.RequestOptions
 
 // NewRequestOptions applies opts and returns the resulting RequestOptions.
 func NewRequestOptions(opts ...Option) RequestOptions { return client.NewRequestOptions(opts...) }
 
-// RangeOutcome classifies how a Range request should be answered, as returned by
-// RequestOptions.ResolveRange.
+// RangeOutcome classifies how a Range request should be answered, as returned by RequestOptions.ResolveRange.
 type RangeOutcome = client.RangeOutcome
 
 const (
@@ -72,34 +71,28 @@ const (
 	RangeNotSatisfiable = client.RangeNotSatisfiable
 )
 
-// IfMatch sets the If-Match precondition. Open/Stat return ErrPreconditionFailed
-// if the stored ETag does not match.
+// IfMatch sets the If-Match precondition; Open/Stat return ErrPreconditionFailed if the stored ETag differs.
 func IfMatch(etag string) Option { return client.IfMatch(etag) }
 
-// IfNoneMatch sets the If-None-Match precondition. Open/Stat return
-// ErrNotModified when the stored ETag matches.
+// IfNoneMatch sets the If-None-Match precondition; Open/Stat return ErrNotModified if the stored ETag matches.
 func IfNoneMatch(etag string) Option { return client.IfNoneMatch(etag) }
 
-// Range requests a single half-open byte range [start, end) from Open. A
-// negative end means "to the end of the object". The returned headers carry a
-// Content-Range; Open returns ErrRangeNotSatisfiable if the range lies outside
+// Range requests a single half-open byte range [start, end) from Open; a negative end means "to the end".
+//
+// The returned headers carry a Content-Range; Open returns ErrRangeNotSatisfiable if the range lies outside
 // the object. Stat ignores Range.
 func Range(start, end int64) Option { return client.Range(start, end) }
 
-// IfRange gates Range on the stored ETag: the range is only applied when etag
-// matches, otherwise the full object is returned.
+// IfRange applies Range only when the stored ETag matches etag; otherwise the full object is returned.
 func IfRange(etag string) Option { return client.IfRange(etag) }
 
-// ErrNotModified is returned by Open/Stat when an If-None-Match precondition is
-// satisfied.
+// ErrNotModified is returned by Open/Stat when an If-None-Match precondition is satisfied.
 var ErrNotModified = client.ErrNotModified
 
-// ErrPreconditionFailed is returned by Open/Stat when an If-Match precondition
-// is not met.
+// ErrPreconditionFailed is returned by Open/Stat when an If-Match precondition is not met.
 var ErrPreconditionFailed = client.ErrPreconditionFailed
 
-// ErrRangeNotSatisfiable is returned by Open when a requested Range lies outside
-// the object.
+// ErrRangeNotSatisfiable is returned by Open when a requested Range lies outside the object.
 var ErrRangeNotSatisfiable = client.ErrRangeNotSatisfiable
 
 // ErrStatsUnavailable is returned when a cache backend cannot provide statistics.
@@ -110,10 +103,12 @@ type registryEntry struct {
 	factory func(ctx context.Context, config *hcl.Block, vars map[string]string) (Cache, error)
 }
 
+// Registry maps cache backend names to their configuration schemas and factories.
 type Registry struct {
 	registry map[string]registryEntry
 }
 
+// NewRegistry returns an empty Registry for Register to populate.
 func NewRegistry() *Registry {
 	return &Registry{
 		registry: make(map[string]registryEntry),
@@ -147,8 +142,7 @@ func Register[Config any, C Cache](r *Registry, id, description string, factory 
 	}
 }
 
-// Schema returns the schema for all registered cache backends.
-// Each entry is wrapped as a "cache <name> { ... }" block.
+// Schema returns the schema for all registered cache backends, each wrapped as a "cache <name> { ... }" block.
 func (r *Registry) Schema() *hcl.AST {
 	ast := &hcl.AST{}
 	for _, entry := range r.registry {
@@ -164,6 +158,7 @@ func (r *Registry) Schema() *hcl.AST {
 	return ast
 }
 
+// Exists reports whether a cache backend with the given name is registered.
 func (r *Registry) Exists(name string) bool {
 	_, ok := r.registry[name]
 	return ok
@@ -197,61 +192,33 @@ type Stats = client.Stats
 type Cache interface {
 	// String describes the Cache implementation.
 	String() string
-	// Namespace creates a namespaced view of this cache.
-	// All operations on the returned cache will use the given namespace prefix.
+	// Namespace returns a view of this cache whose operations all use the given namespace prefix.
 	Namespace(namespace Namespace) Cache
-	// Stat returns the headers of an existing object in the cache.
+	// Stat returns the headers of an existing object; expired or missing objects MUST return os.ErrNotExist.
 	//
-	// Expired files MUST not be returned.
-	// Must return os.ErrNotExist if the file does not exist.
-	//
-	// Conditional opts are evaluated against the stored ETag: a satisfied
-	// If-None-Match returns ErrNotModified (with headers); a failed If-Match
-	// returns ErrPreconditionFailed.
+	// Conditional opts are evaluated against the stored ETag: a satisfied If-None-Match returns
+	// ErrNotModified (with headers); a failed If-Match returns ErrPreconditionFailed.
 	Stat(ctx context.Context, key Key, opts ...Option) (http.Header, error)
-	// Open an existing file in the cache.
+	// Open an existing object; headers MUST include Last-Modified, expired or missing objects return os.ErrNotExist.
 	//
-	// Expired files MUST NOT be returned.
-	// The returned headers MUST include a Last-Modified header.
-	// Must return os.ErrNotExist if the file does not exist.
-	//
-	// Conditional opts are evaluated against the stored ETag: a satisfied
-	// If-None-Match returns ErrNotModified (with headers, no body); a failed
-	// If-Match returns ErrPreconditionFailed.
-	//
-	// A Range opt requests a single byte range: on success the returned
-	// headers carry Content-Range and a Content-Length of the range, and the
-	// reader yields only those bytes. A range outside the object returns
-	// ErrRangeNotSatisfiable (with headers carrying Content-Range: bytes */N).
+	// Conditional opts behave as in Stat (ErrNotModified has no body). A Range yields only those bytes with matching
+	// Content-Range and Content-Length, or ErrRangeNotSatisfiable with "Content-Range: bytes */N" if out of bounds.
 	Open(ctx context.Context, key Key, opts ...Option) (io.ReadCloser, http.Header, error)
-	// Create a new file in the cache.
+	// Create a new object; if "ttl" is zero the implementation MUST use its maximum TTL.
 	//
-	// If "ttl" is zero, a maximum TTL MUST be used by the implementation.
-	//
-	// The file MUST NOT be available for read until completely written and closed.
-	//
-	// If the context is cancelled the object MUST NOT be made available in the cache.
+	// The object MUST NOT be readable until completely written and closed, and MUST NOT be made available at all if
+	// the context is cancelled.
 	Create(ctx context.Context, key Key, headers http.Header, ttl time.Duration, opts ...Option) (Writer, error)
-	// UpdateMetadata lets callers record revalidation results and extend an
-	// entry's lifetime without paying to rewrite its body. Headers not in
-	// headers are unchanged. If "ttl" is zero, the maximum TTL MUST be used.
+	// UpdateMetadata merges headers and resets the TTL (zero means maximum) without rewriting the body.
 	//
-	// Must return os.ErrNotExist if the entry does not exist or has expired.
-	//
-	// MUST NOT change the content ETag: tiers compare ETags to detect stale
-	// copies, so changing it would make unchanged content look replaced.
-	//
-	// An IfMatch opt prevents refreshing an entry that was replaced since the
-	// caller validated it.
+	// Returns os.ErrNotExist for missing or expired entries. MUST NOT change the ETag, which tiers compare to detect
+	// stale copies. An IfMatch opt prevents refreshing an entry replaced since the caller validated it.
 	UpdateMetadata(ctx context.Context, key Key, headers http.Header, ttl time.Duration, opts ...Option) error
-	// Delete a file from the cache.
-	//
-	// MUST be atomic.
+	// Delete an object from the cache; MUST be atomic.
 	Delete(ctx context.Context, key Key) error
 	// Invalidate evicts a stale local copy from the cache.
 	//
-	// Unlike Delete, invalidation MUST NOT remove authoritative shared storage.
-	// Missing objects are treated as successfully invalidated.
+	// Unlike Delete, it MUST NOT remove authoritative shared storage. Missing objects count as invalidated.
 	Invalidate(ctx context.Context, key Key) error
 	// Stats returns health and usage statistics for the cache.
 	Stats(ctx context.Context) (Stats, error)
@@ -261,9 +228,7 @@ type Cache interface {
 	Close() error
 }
 
-// WriteFunc is a convenience wrapper around Cache.Create that handles aborting
-// the write on error. The provided function receives a writer; if it returns an
-// error the cache entry is discarded. On success the entry is committed.
+// WriteFunc writes an entry via fn, committing it on success and aborting it if fn returns an error.
 func WriteFunc(ctx context.Context, c Cache, key Key, headers http.Header, ttl time.Duration, fn func(w io.Writer) error, opts ...Option) error {
 	w, err := c.Create(ctx, key, headers, ttl, opts...)
 	if err != nil {

@@ -24,8 +24,7 @@ import (
 	"github.com/block/cachew/internal/strategy"
 )
 
-// httpTransportMutex ensures GitHub release tests don't run in parallel
-// since they modify the global http.DefaultTransport
+// httpTransportMutex serialises GitHub release tests because they modify the global http.DefaultTransport.
 var httpTransportMutex sync.Mutex //nolint:gochecknoglobals
 
 type mockGitHubServer struct {

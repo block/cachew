@@ -15,16 +15,18 @@ import (
 	"github.com/block/cachew/internal/logging"
 )
 
-// EnsureRefsPath is the URL suffix for the ref-freshness endpoint. Clients
-// POST to /git/{host}/{repo}/ensure-refs to force cachew to ensure the local
-// mirror contains the listed refs before they fetch.
+// EnsureRefsPath is the URL suffix for the ref-freshness endpoint.
+//
+// Clients POST to /git/{host}/{repo}/ensure-refs so the mirror has the listed refs before they fetch.
 const EnsureRefsPath = "/ensure-refs"
 
-// EnsureRefsRequest is the JSON request body for POST .../ensure-refs. At
-// least one of Refs or Commits must be non-empty.
+// EnsureRefsRequest is the JSON request body for POST .../ensure-refs.
+//
+// At least one of Refs or Commits must be non-empty.
 type EnsureRefsRequest struct {
-	// Refs maps each required ref (e.g. "refs/heads/main") to a SHA that must be
-	// reachable from it. An empty SHA requires the ref to exist and be current.
+	// Refs maps each required ref (e.g. "refs/heads/main") to a SHA that must be reachable from it.
+	//
+	// An empty SHA requires the ref to exist and be current.
 	Refs map[string]string `json:"refs,omitempty"`
 	// Commits lists SHAs that must exist in the mirror, whichever ref holds them.
 	Commits []string `json:"commits,omitempty"`
@@ -59,9 +61,7 @@ func (s *Strategy) handleEnsureRefs(w http.ResponseWriter, r *http.Request, host
 
 	s.metrics.recordRequest(ctx, "ensure-refs")
 
-	// status and fetched are mutated by the handler and read by the deferred
-	// metric. Default to "error" so that any early return without explicit
-	// classification is treated as a failure.
+	// Default to "error" so an early return without classification counts as a failure in the deferred metric.
 	status := "error"
 	fetched := false
 	defer func() {

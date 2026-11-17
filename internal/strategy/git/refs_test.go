@@ -31,8 +31,7 @@ func TestEnsureRefsHandler(t *testing.T) {
 	tmpDir := t.TempDir()
 	mirrorRoot := filepath.Join(tmpDir, "mirrors")
 
-	// Build a bare upstream repo and a mirror clone of it. The mirror path
-	// must match what cachew derives from /git/local/repo.
+	// The mirror path must match what cachew derives from /git/local/repo.
 	upstreamPath := filepath.Join(tmpDir, "upstream.git")
 	workPath := filepath.Join(tmpDir, "work")
 	for _, args := range [][]string{

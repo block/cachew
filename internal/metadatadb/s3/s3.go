@@ -1,7 +1,6 @@
-// Package s3 implements the S3 metadata backend as an append-only journal of
-// immutable op segments plus a compacted rollup snapshot, replayed in a
-// canonical order all replicas agree on. See docs/metadatadb-s3.md for the
-// design and its invariants.
+// Package s3 implements the S3 metadata backend: an append-only journal of immutable op segments plus a rollup.
+//
+// Replicas replay it in one canonical order. See docs/metadatadb-s3.md for the design and its invariants.
 package s3
 
 import (
@@ -19,8 +18,7 @@ import (
 )
 
 const (
-	// metadataPrefix starts with "." to avoid collisions with cache
-	// namespaces, which are validated to not start with ".".
+	// metadataPrefix starts with "." so it cannot collide with cache namespaces, which may not start with ".".
 	metadataPrefix  = ".metadata"
 	rollupName      = "rollup.json"
 	jsonContentType = "application/json"
@@ -30,15 +28,15 @@ const (
 	minAgeThreshold  = 30 * time.Second
 	segmentThreshold = 256
 	sustainTicks     = 2
-	// putTimeout must stay under the age threshold: a PUT retried after its
-	// segment was folded and deleted would re-create it and replay it twice.
+	// putTimeout must stay under the age threshold.
+	//
+	// A PUT retried after its segment was folded and deleted would re-create it and replay it twice.
 	putTimeout       = 15 * time.Second
 	fetchConcurrency = 8
 	maxJitter        = 500 * time.Millisecond
 )
 
-// Register registers the S3 metadata backend. The clientProvider supplies the
-// shared minio client constructed from the global s3 config block.
+// Register registers the S3 metadata backend using the shared minio client built from the global s3 config block.
 func Register(r *metadatadb.Registry, clientProvider s3client.ClientProvider) {
 	metadatadb.Register(r, "s3", "Stores metadata state in S3 as an op journal with rollup compaction",
 		func(ctx context.Context, config Config) (*Backend, error) {
@@ -54,12 +52,10 @@ type Config struct {
 	LockTTL      time.Duration `hcl:"lock-ttl,optional" help:"Deprecated; the backend is lock-free."`
 }
 
-// Backend stores metadata as immutable op segments in S3, compacted into a
-// rollup snapshot. Writes are synchronous group-committed segment PUTs;
-// queries serve local state refreshed by a per-namespace background sync
-// tick. It requires GET/PUT/LIST/DELETE permissions and a store with strong
-// list-after-write consistency and enforced conditional writes (AWS S3,
-// MinIO).
+// Backend stores metadata as immutable op segments in S3, compacted into a rollup; queries serve local state.
+//
+// Writes are synchronous group-committed PUTs and a per-namespace background tick refreshes local state. It needs
+// GET/PUT/LIST/DELETE plus strong list-after-write consistency and enforced conditional writes (AWS S3, MinIO).
 type Backend struct {
 	client           *minio.Client
 	bucket           string
@@ -118,6 +114,9 @@ func New(ctx context.Context, clientProvider s3client.ClientProvider, config Con
 	}, nil
 }
 
+// Apply implements metadatadb.Backend, returning once the ops' segment is in S3 and applied to local state.
+//
+// Caller cancellation is ignored once the writer accepts the ops, because the write will still land.
 func (b *Backend) Apply(ctx context.Context, namespace string, ops ...metadatadb.Op) error {
 	if len(ops) == 0 {
 		return nil
@@ -125,6 +124,7 @@ func (b *Backend) Apply(ctx context.Context, namespace string, ops ...metadatadb
 	return b.namespace(namespace).apply(ctx, ops)
 }
 
+// Query implements metadatadb.Backend against local state, which may lag other replicas until the next sync.
 func (b *Backend) Query(_ context.Context, namespace string, q metadatadb.ReadOp, target any) error {
 	n := b.namespace(namespace)
 	n.stateMu.RLock()
@@ -132,8 +132,9 @@ func (b *Backend) Query(_ context.Context, namespace string, q metadatadb.ReadOp
 	return errors.Wrap(metadatadb.QueryStateInto(n.state, q, target), "s3 query")
 }
 
-// Flush runs a sync tick now and returns its error. Its LIST starts after
-// this call, so every write durable before the call is observed.
+// Flush runs a sync tick now and returns its error.
+//
+// Its LIST starts after this call, so every write durable before the call is observed.
 func (b *Backend) Flush(ctx context.Context, namespace string) error {
 	return b.namespaceForFlush(namespace).flush(ctx)
 }
@@ -156,11 +157,11 @@ func (b *Backend) namespace(name string) *namespace {
 	return b.getNamespace(name, true)
 }
 
-// namespaceForFlush creates the namespace without the unconditional startup
-// tick: when a Flush is the first operation, its own tick is the initial
-// convergence and runs under the caller's deadline, so a separate background
-// tick under n.b.ctx cannot wedge the loop past an abandoned Flush.
-func (b *Backend) namespaceForFlush(name string) *namespace {
+// namespaceForFlush creates the namespace without the unconditional startup tick.
+//
+// When a Flush is the first operation, its own tick is the initial convergence under the caller's
+// deadline, so a background tick cannot wedge the loop past an abandoned Flush.
+func (b *Backend) namespaceForFlush(name string) *namespace { //nolint:privatedoc // explains why
 	return b.getNamespace(name, false)
 }
 
@@ -195,19 +196,20 @@ type namespace struct {
 	applyCh chan *applyReq
 	flushCh chan flushReq
 
-	// runInitialTick runs one background tick at loop start; cleared when the
-	// namespace is created by Flush so its own tick is the initial convergence.
+	// runInitialTick runs one background tick at loop start.
+	//
+	// Flush clears it when it creates the namespace, so its own tick is the initial convergence.
 	runInitialTick bool
 
-	// stateMu guards state and cache; the tick's replay runs unlocked
-	// between its input-snapshot and swap critical sections.
+	// stateMu guards state and cache.
+	//
+	// The tick's replay runs unlocked between its input-snapshot and swap critical sections.
 	stateMu sync.RWMutex
 	state   map[string]any
 	cache   map[string]*cacheEntry
 }
 
-// loopState is the state of a namespace's sync loop. runLoop owns it, so tick
-// and compaction state is never shared with another goroutine.
+// loopState is a namespace's sync-loop state, owned by runLoop so tick and compaction state is never shared.
 type loopState struct {
 	*namespace
 	rollup     *heldRollup
@@ -216,8 +218,7 @@ type loopState struct {
 	sustain    int
 }
 
-// cacheEntry is one live segment: unlisted (zero lm) from writer insert until
-// its first LIST supplies the canonical stamp.
+// cacheEntry is one live segment, unlisted (zero lm) from writer insert until a LIST supplies its canonical stamp.
 type cacheEntry struct {
 	ops    []metadatadb.Op
 	lm     time.Time
@@ -233,9 +234,9 @@ type heldRollup struct {
 	state []byte
 }
 
-// rootNamespaceDir stands in for the empty root namespace: MinIO rejects the
-// "//" an empty component would produce, and cache namespaces never start
-// with ".", so it cannot collide.
+// rootNamespaceDir stands in for the empty root namespace, whose empty component makes a "//" that MinIO rejects.
+//
+// Cache namespaces never start with ".", so it cannot collide.
 const rootNamespaceDir = ".root"
 
 func (n *namespace) dir() string {
@@ -259,6 +260,7 @@ func isNotFound(err error) bool           { return errStatus(err, 404) }
 func isNotModified(err error) bool        { return errStatus(err, 304) }
 func isPreconditionFailed(err error) bool { return errStatus(err, 412) }
 
-// isConflict matches AWS's 409 for racing conditional writes; like 412 it
-// means a benignly lost election.
-func isConflict(err error) bool { return errStatus(err, 409) }
+// isConflict matches AWS's 409 for racing conditional writes.
+//
+// Like 412, it means a benignly lost election.
+func isConflict(err error) bool { return errStatus(err, 409) } //nolint:privatedoc // explains why

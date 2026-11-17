@@ -16,17 +16,20 @@ import (
 	"github.com/block/cachew/internal/strategy"
 )
 
+// Register registers the gomod strategy, which serves a caching Go module proxy under /gomod/.
 func Register(r *strategy.Registry, cloneManager gitclone.ManagerProvider) {
 	strategy.Register(r, "gomod", "Caches Go module proxy requests.", func(ctx context.Context, config Config, cache cache.Cache, mux strategy.Mux) (*Strategy, error) {
 		return New(ctx, config, cache, mux, cloneManager)
 	})
 }
 
+// Config sets the upstream module proxy and the module path patterns fetched privately via git.
 type Config struct {
 	Proxy        string   `hcl:"proxy,optional" help:"Upstream Go module proxy URL (defaults to proxy.golang.org)" default:"https://proxy.golang.org"`
 	PrivatePaths []string `hcl:"private-paths,optional" help:"Module path patterns for private repositories"`
 }
 
+// Strategy is a caching Go module proxy that fetches private modules via git and others from the upstream proxy.
 type Strategy struct {
 	config       Config
 	cache        cache.Cache
@@ -38,6 +41,7 @@ type Strategy struct {
 
 var _ strategy.Strategy = (*Strategy)(nil)
 
+// New creates the gomod strategy and registers its /gomod/ route; git is required when private paths are set.
 func New(ctx context.Context, config Config, cache cache.Cache, mux strategy.Mux, cloneManagerProvider gitclone.ManagerProvider) (*Strategy, error) {
 	if len(config.PrivatePaths) > 0 {
 		if _, err := exec.LookPath("git"); err != nil {

@@ -17,6 +17,7 @@ import (
 	"github.com/block/cachew/internal/strategy/handler"
 )
 
+// RegisterArtifactory registers the artifactory strategy, which caches artifacts from an Artifactory server.
 func RegisterArtifactory(r *Registry, spools spool.Provider) {
 	Register(r, "artifactory", "Caches artifacts from an Artifactory server.", func(ctx context.Context, config ArtifactoryConfig, c cache.Cache, mux Mux) (*Artifactory, error) {
 		registry, err := spools()
@@ -27,29 +28,18 @@ func RegisterArtifactory(r *Registry, spools spool.Provider) {
 	})
 }
 
-// ArtifactoryConfig represents the configuration for the Artifactory strategy.
+// ArtifactoryConfig configures the Artifactory strategy, e.g. `artifactory "https://x.jfrog.io" { hosts = [...] }`.
 //
-// In HCL it looks something like this:
-//
-//	artifactory "https://example.jfrog.io" {
-//	  hosts = ["maven.example.com", "npm.example.com"]
-//	}
-//
-// When hosts are configured, the strategy supports both host-based routing
-// (clients connect to maven.example.com) and path-based routing
-// (clients connect to /example.jfrog.io). Both modes share the same cache.
+// With hosts configured, both host-based routing (clients connect to maven.example.com) and path-based routing
+// (clients connect to /example.jfrog.io) are supported, sharing the same cache.
 type ArtifactoryConfig struct {
 	Target string   `hcl:"target,label" help:"The target Artifactory URL to proxy requests to."`
 	Hosts  []string `hcl:"hosts,optional" help:"List of hostnames to accept for host-based routing. If empty, uses path-based routing only."`
 }
 
-// The Artifactory [Strategy] forwards all GET requests to the specified Artifactory instance,
-// caching the response payloads.
+// The Artifactory [Strategy] forwards GET requests to an Artifactory instance, caching the response payloads.
 //
-// Key features:
-// - Sets X-JFrog-Download-Redirect-To header to prevent redirects
-// - Passes through authentication headers
-// - Supports both host-based and path-based routing simultaneously.
+// It passes through auth headers, disables download redirects, and supports host- and path-based routing at once.
 type Artifactory struct {
 	target       *url.URL
 	cache        cache.Cache
@@ -61,6 +51,7 @@ type Artifactory struct {
 
 var _ Strategy = (*Artifactory)(nil)
 
+// NewArtifactory creates an Artifactory strategy and registers its path-based and host-based routes on mux.
 func NewArtifactory(ctx context.Context, config ArtifactoryConfig, cache cache.Cache, mux Mux, spools *spool.Registry) (*Artifactory, error) {
 	u, err := url.Parse(config.Target)
 	if err != nil {
@@ -93,7 +84,6 @@ func NewArtifactory(ctx context.Context, config ArtifactoryConfig, cache cache.C
 	return a, nil
 }
 
-// registerPathBased registers the path-based routing pattern.
 func (a *Artifactory) registerPathBased(ctx context.Context, target *url.URL, hdlr http.Handler, mux Mux) {
 	a.prefix = "/" + target.Host + target.EscapedPath()
 
@@ -102,7 +92,6 @@ func (a *Artifactory) registerPathBased(ctx context.Context, target *url.URL, hd
 	a.logger.InfoContext(ctx, "Registered Artifactory path-based route", "prefix", a.prefix, "target", target)
 }
 
-// registerHostBased registers host-based routing patterns for the configured hosts.
 func (a *Artifactory) registerHostBased(ctx context.Context, hosts []string, hdlr http.Handler, mux Mux) {
 	// Store allowed hosts for routing detection in buildTargetURL
 	a.allowedHosts = hosts
@@ -116,7 +105,6 @@ func (a *Artifactory) registerHostBased(ctx context.Context, hosts []string, hdl
 
 func (a *Artifactory) String() string { return "artifactory:" + a.target.Host + a.target.Path }
 
-// transformRequest transforms the incoming request before sending to upstream Artifactory.
 func (a *Artifactory) transformRequest(r *http.Request) (*http.Request, error) {
 	if err := httputil.ValidatePath(r.URL.Path); err != nil {
 		return nil, httputil.Errorf(http.StatusBadRequest, "%w", err)
@@ -131,8 +119,7 @@ func (a *Artifactory) transformRequest(r *http.Request) (*http.Request, error) {
 	// Pass through authentication headers
 	a.copyAuthHeaders(r, req)
 
-	// Set X-JFrog-Download-Redirect-To to None to prevent Artifactory from redirecting
-	// This ensures the proxy can cache the actual artifact content
+	// Disable Artifactory download redirects so the proxy caches the artifact itself.
 	req.Header.Set("X-Jfrog-Download-Redirect-To", "None")
 
 	return req, nil
@@ -142,24 +129,16 @@ func (a *Artifactory) transformRequest(r *http.Request) (*http.Request, error) {
 func (a *Artifactory) buildTargetURL(r *http.Request) *url.URL {
 	var path string
 
-	// Dynamically detect routing mode based on request
-	// If request Host matches one of our configured hosts, use host-based routing
-	// Otherwise, use path-based routing
 	isHostBased := a.isHostBasedRequest(r)
 
 	if isHostBased {
-		// Host-based: use full request path as-is
-		// Request: GET http://maven.example.jfrog.io/libs-release/foo.jar
-		// Proxy to: GET https://global.example.jfrog.io/libs-release/foo.jar
+		// Host-based: proxy the request path as-is, e.g. /libs-release/foo.jar.
 		path = r.URL.Path
 		if path == "" {
 			path = "/"
 		}
 	} else {
-		// Path-based: strip prefix from request path
-		// Request: GET http://cachew.local/global.example.jfrog.io/libs-release/foo.jar
-		// Strip "/global.example.jfrog.io" -> "/libs-release/foo.jar"
-		// Proxy to: GET https://global.example.jfrog.io/libs-release/foo.jar
+		// Path-based: strip the prefix, e.g. /example.jfrog.io/libs-release/foo.jar -> /libs-release/foo.jar.
 		path = r.URL.Path
 		if len(path) >= len(a.prefix) {
 			path = path[len(a.prefix):]
@@ -181,7 +160,6 @@ func (a *Artifactory) buildTargetURL(r *http.Request) *url.URL {
 	return &targetURL
 }
 
-// isHostBasedRequest checks if the incoming request is using host-based routing.
 func (a *Artifactory) isHostBasedRequest(r *http.Request) bool {
 	if len(a.allowedHosts) == 0 {
 		return false // No hosts configured, must be path-based
@@ -197,7 +175,6 @@ func (a *Artifactory) isHostBasedRequest(r *http.Request) bool {
 	return slices.Contains(a.allowedHosts, requestHost)
 }
 
-// copyAuthHeaders copies authentication-related headers from the source to destination request.
 func (a *Artifactory) copyAuthHeaders(src, dst *http.Request) {
 	authHeaders := []string{
 		"Authorization",

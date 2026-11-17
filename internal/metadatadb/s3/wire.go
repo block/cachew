@@ -12,10 +12,11 @@ import (
 	"github.com/block/cachew/internal/metadatadb"
 )
 
-// unmarshalNumeric decodes with UseNumber: a plain unmarshal coerces JSON
-// numbers in any-typed destinations to float64, corrupting int64 values
-// above 2^53.
-func unmarshalNumeric(data []byte, target any) error {
+// unmarshalNumeric decodes with UseNumber.
+//
+// A plain unmarshal coerces JSON numbers in any-typed destinations to float64, corrupting int64
+// values above 2^53.
+func unmarshalNumeric(data []byte, target any) error { //nolint:privatedoc // explains why
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.UseNumber()
 	return errors.WithStack(dec.Decode(target))
@@ -26,16 +27,14 @@ func unmarshalState(data []byte) (map[string]any, error) {
 	if err := unmarshalNumeric(data, &state); err != nil {
 		return nil, errors.Wrap(err, "unmarshal state")
 	}
-	// JSON null decodes by setting the map to nil without error; accepting
-	// it would panic later on the first write into the state.
+	// JSON null decodes to a nil map without error; accepting it would panic on the first write into the state.
 	if state == nil {
 		return nil, errors.New("state is null")
 	}
 	return state, nil
 }
 
-// There is no wire format version: evolution is handled by adding new op
-// types here, keyed by Go type name.
+// opTypes maps Go type names to op types. There is no wire format version: evolve it by adding op types here.
 //
 //nolint:gochecknoglobals
 var opTypes = func() map[string]reflect.Type {
@@ -88,9 +87,10 @@ func unmarshalSegment(data []byte) ([]metadatadb.Op, error) {
 	return ops, nil
 }
 
-// encodeOp splices the discriminator in rather than round-tripping through a
-// map, which would coerce int64 fields to float64 above 2^53.
-func encodeOp(o metadatadb.Op) (json.RawMessage, error) {
+// encodeOp splices the discriminator in rather than round-tripping through a map.
+//
+// A map would coerce int64 fields to float64 above 2^53.
+func encodeOp(o metadatadb.Op) (json.RawMessage, error) { //nolint:privatedoc // explains why
 	name := reflect.TypeOf(o).Name()
 	if _, ok := opTypes[name]; !ok {
 		return nil, errors.Errorf("unregistered op type %T", o)
@@ -128,16 +128,14 @@ func decodeOp(data json.RawMessage) (metadatadb.Op, error) {
 	return op, nil
 }
 
-// mark is a rollup's high-water (LastModified, key) position in canonical
-// order; the zero mark covers nothing. LM must always derive from
-// LIST-returned values, never HEAD, so comparisons against listing stamps
-// are exact.
+// mark is a rollup's high-water (LastModified, key) position in canonical order; the zero mark covers nothing.
+//
+// LM must always derive from LIST-returned values, never HEAD, so comparisons against listing stamps are exact.
 type mark struct {
 	LM  time.Time `json:"lm"`
 	Key string    `json:"key"`
 }
 
-// covers reports whether (lm, key) is at or below the mark in canonical order.
 func (m mark) covers(lm time.Time, key string) bool {
 	if !lm.Equal(m.LM) {
 		return lm.Before(m.LM)

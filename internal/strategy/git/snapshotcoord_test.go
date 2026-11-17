@@ -264,8 +264,7 @@ func TestSnapshotCoordinatorUnchanged(t *testing.T) {
 
 	assert.NoError(t, coords[0].Complete("snapshot", upstream, "abc123"))
 
-	// Peers share the record: same commit within maxAge skips, everything
-	// else regenerates.
+	// Peers share the record: same commit within maxAge skips, everything else regenerates.
 	clock = clock.Add(12 * time.Hour)
 	assert.True(t, coords[1].Unchanged("snapshot", upstream, "abc123", maxAge))
 	assert.False(t, coords[1].Unchanged("snapshot", upstream, "def456", maxAge))
@@ -382,15 +381,13 @@ func TestSnapshotCoordinatorSkipSuppressesPeersForInterval(t *testing.T) {
 	// A skip is not a completion, so it never validates an unchanged check.
 	assert.False(t, coords[1].Unchanged("snapshot", upstream, "abc123", 24*time.Hour))
 
-	// But it counts as freshness for claiming: unchanged repos get one
-	// fetch-and-check per interval, not one per replica.
+	// But it counts as freshness for claiming: one fetch-and-check per interval, not one per replica.
 	clock = clock.Add(time.Minute)
 	claimed, err = coords[1].Claim("snapshot", upstream, time.Hour)
 	assert.NoError(t, err)
 	assert.False(t, claimed)
 
-	// Once the interval elapses a peer claims again, well before the claim
-	// TTL would have allowed had the claim lingered.
+	// Once the interval elapses a peer claims again, well before a lingering claim's TTL would allow.
 	clock = clock.Add(time.Hour)
 	claimed, err = coords[1].Claim("snapshot", upstream, time.Hour)
 	assert.NoError(t, err)
@@ -405,8 +402,7 @@ func TestSnapshotCoordinatorFailedGenerationDoesNotMarkFresh(t *testing.T) {
 	claimed, err := coords[0].Claim("snapshot", upstream, time.Hour)
 	assert.NoError(t, err)
 	assert.True(t, claimed)
-	// Generation fails: Complete is never called. After the claim expires the
-	// peer generates instead of waiting a full interval.
+	// Generation fails without Complete, so after the claim expires the peer generates without waiting an interval.
 	clock = clock.Add(snapshotClaimTTL)
 	claimed, err = coords[1].Claim("snapshot", upstream, time.Hour)
 	assert.NoError(t, err)

@@ -151,9 +151,10 @@ func (t Tiered) replacementETag(ctx context.Context, key Key, newETag string) (b
 	}
 }
 
-// UpdateMetadata updates every tier holding the entry. A tier without the
-// entry, or holding a different version than an IfMatch names, is skipped:
-// it will be backfilled or invalidated by later reads.
+// UpdateMetadata updates every tier holding the entry.
+//
+// A tier without the entry, or holding a different version than an IfMatch names, is skipped: it will be
+// backfilled or invalidated by later reads.
 func (t Tiered) UpdateMetadata(ctx context.Context, key Key, headers http.Header, ttl time.Duration, opts ...Option) error {
 	wg := sync.WaitGroup{}
 	errs := make([]error, len(t.caches))
@@ -202,8 +203,8 @@ func (t Tiered) Delete(ctx context.Context, key Key) error {
 }
 
 // Invalidate evicts stale local copies from every non-authoritative tier.
-// The final tier is authoritative by construction, so invalidation leaves it
-// intact even if that backend's own Invalidate method would remove the object.
+//
+// The final tier is authoritative by construction, so it is left intact even if its own Invalidate would remove it.
 func (t Tiered) Invalidate(ctx context.Context, key Key) error {
 	if len(t.caches) <= 1 {
 		return nil
@@ -217,15 +218,10 @@ func (t Tiered) Invalidate(ctx context.Context, key Key) error {
 	return errors.Join(errs...)
 }
 
-// Stat returns headers from the first cache that succeeds.
+// Stat returns headers from the first cache that succeeds, or all errors if every cache fails.
 //
-// A tier that fails an If-Match precondition holds a different version of the
-// object, not a definitive answer: deeper tiers are consulted for the version
-// the validator names, and ErrPreconditionFailed is only returned when none
-// holds it. A tier that errored while being probed takes precedence, so
-// outages are not misreported as missing versions.
-//
-// If all caches fail, all errors are returned.
+// A failed If-Match is not definitive: deeper tiers are consulted, and ErrPreconditionFailed returns only if none
+// holds the version. A tier that errored takes precedence, so outages aren't misreported as missing versions.
 func (t Tiered) Stat(ctx context.Context, key Key, opts ...Option) (http.Header, error) {
 	rejected := false
 	var probeErrs []error
@@ -248,8 +244,7 @@ func (t Tiered) Stat(ctx context.Context, key Key, opts ...Option) (http.Header,
 		if i < len(t.caches)-1 && t.invalidateStale(ctx, c, key, headers) {
 			continue
 		}
-		// Any other outcome (success, ErrNotModified, or a hard error) is
-		// definitive for this tier; surface it with its headers.
+		// Success, ErrNotModified, or a hard error is definitive for this tier; surface it with its headers.
 		observeSource(ctx, c, err)
 		return headers, errors.WithStack(err)
 	}
@@ -262,24 +257,22 @@ func (t Tiered) Stat(ctx context.Context, key Key, opts ...Option) (http.Header,
 	return nil, errors.Join(errs...)
 }
 
-// AuthoritativeStater reports object existence in authoritative shared
-// storage, bypassing local tiers whose copies can outlive a lost shared
-// object.
+// AuthoritativeStater reports object existence in authoritative shared storage.
+//
+// It bypasses local tiers, whose copies can outlive a lost shared object.
 type AuthoritativeStater interface {
 	AuthoritativeStat(ctx context.Context, key Key, opts ...Option) (http.Header, error)
 }
 
 var _ AuthoritativeStater = (*Tiered)(nil)
 
-// AuthoritativeStat stats the final tier, which is authoritative by
-// construction.
+// AuthoritativeStat stats the final tier, which is authoritative by construction.
 func (t Tiered) AuthoritativeStat(ctx context.Context, key Key, opts ...Option) (http.Header, error) {
 	headers, err := t.caches[len(t.caches)-1].Stat(ctx, key, opts...)
 	return headers, errors.WithStack(err)
 }
 
-// StatAuthoritative stats the authoritative tier when the cache is tiered,
-// and falls back to a plain Stat for single-tier caches.
+// StatAuthoritative stats the authoritative tier when the cache is tiered, else falls back to a plain Stat.
 func StatAuthoritative(ctx context.Context, c Cache, key Key, opts ...Option) (http.Header, error) {
 	if as, ok := c.(AuthoritativeStater); ok {
 		headers, err := as.AuthoritativeStat(ctx, key, opts...)
@@ -289,31 +282,18 @@ func StatAuthoritative(ctx context.Context, c Cache, key Key, opts ...Option) (h
 	return headers, errors.WithStack(err)
 }
 
-// Open returns a reader from the first cache that succeeds.
-// When a higher tier hits but lower tiers missed, the returned reader
-// transparently backfills the lowest tier as the caller reads, so that
-// subsequent Opens are served locally.
+// Open returns a reader from the first cache that succeeds, or all errors if every cache fails.
 //
-// A tier that holds a different version than the request's validators name —
-// a failed If-Match, or an If-Range miss — is not definitive: deeper tiers are
-// consulted for the named version, so a replica whose local tier has diverged
-// can still satisfy a pinned request from a shared tier. When no tier holds
-// it, the first tier's outcome stands: the full representation for an If-Range
-// miss (per RFC 9110), ErrPreconditionFailed for a failed If-Match. A tier
-// that errored while being probed takes precedence over both, so outages are
-// not misreported as missing versions.
-//
-// If all caches fail, all errors are returned.
+// Higher-tier hits backfill the lowest tier as read. A tier failing If-Match or missing If-Range defers to deeper
+// tiers; if none holds it, the first's full body (RFC 9110) or 412 stands, unless a tier errored while probed.
 //
 //nolint:funlen // Conditional fallback and tier selection share one ordered traversal.
 func (t Tiered) Open(ctx context.Context, key Key, opts ...Option) (io.ReadCloser, http.Header, error) {
 	ro := NewRequestOptions(opts...)
-	// A Range request yields a partial body, which must never be backfilled
-	// into a lower tier as if it were the whole object.
+	// A Range request yields a partial body, which must never be backfilled into a lower tier as the whole object.
 	partial := ro.Range != ""
 
-	// The first tier whose version missed If-Range supplies the full-body
-	// fallback, served only if no deeper tier holds the pinned version.
+	// The first tier that missed If-Range supplies the full-body fallback, served only if no deeper tier matches.
 	var fallback io.ReadCloser
 	var fallbackHeaders http.Header
 	var fallbackSource Cache
@@ -333,19 +313,19 @@ func (t Tiered) Open(ctx context.Context, key Key, opts ...Option) (io.ReadClose
 		case t.invalidateStaleConditional(ctx, i, c, key, headers, err, errs):
 			continue
 		case errors.Is(err, ErrNotModified), errors.Is(err, ErrRangeNotSatisfiable):
-			// This tier's version satisfies the request's validator, so the
-			// outcome is definitive. Surface headers so callers can build the
-			// conditional response. No body to backfill.
+			// This tier satisfies the validator, so the outcome is definitive.
+			//
+			// Surface headers so callers can build the conditional response. No body to backfill.
 			if fallback != nil {
 				discardTieredReader(ctx, key, fallback)
 			}
 			metrics.ObserveCacheSource(ctx, BackendName(c))
 			return nil, headers, errors.WithStack(err)
 		case err != nil:
-			// A hard error is definitive when no earlier tier produced a
-			// servable outcome. Otherwise defer it: a deeper tier may still
-			// satisfy the validator, but if none does the error is surfaced in
-			// preference to the degraded fallback/412.
+			// A hard error is definitive when no earlier tier produced a servable outcome.
+			//
+			// Otherwise defer it: a deeper tier may still satisfy the validator, but if none does the error is surfaced
+			// in preference to the degraded fallback/412.
 			if fallback == nil && !rejected {
 				return nil, headers, errors.WithStack(err)
 			}
@@ -355,8 +335,7 @@ func (t Tiered) Open(ctx context.Context, key Key, opts ...Option) (io.ReadClose
 			discardTieredReader(ctx, key, r)
 			continue
 		case ro.IfRangeMisses(headers.Get(ETagKey)):
-			// This tier holds a different version than the range is pinned to:
-			// hold its full body as the fallback and probe deeper tiers.
+			// This tier holds a different version than the range pins: keep its full body as fallback and go deeper.
 			if fallback != nil {
 				discardTieredReader(ctx, key, r)
 				continue
@@ -393,14 +372,13 @@ func discardTieredReader(ctx context.Context, key Key, r io.ReadCloser) {
 }
 
 // backfillReader wraps src so that every byte read is also written to dst.
-// On successful close the dst entry becomes available for future reads.
-// On error or partial read the dst entry is discarded per the Cache contract
-// (the context is cancelled, causing the writer to discard on Close).
-func (t Tiered) backfillReader(ctx context.Context, key Key, src io.ReadCloser, headers http.Header, dst Cache) io.ReadCloser {
+//
+// A successful close makes the dst entry available. An error or partial read discards it, per the
+// Cache contract, by cancelling the context the writer closes under.
+func (t Tiered) backfillReader(ctx context.Context, key Key, src io.ReadCloser, headers http.Header, dst Cache) io.ReadCloser { //nolint:privatedoc // documents a non-obvious contract
 	ctx = metrics.WithCachePurpose(ctx, "backfill")
 	logger := logging.FromContext(ctx)
-	// Use a cancellable context so we can abort the write on failure.
-	// The Cache contract guarantees that cancelled-context writes are discarded.
+	// Cancelling the write context on failure discards the write, per the Cache contract.
 	writeCtx, cancel := context.WithCancel(ctx)
 	createOpts := backfillCreateOptions(headers)
 	w, err := dst.Create(writeCtx, key, headers, 0, createOpts...) // 0 → use the cache's max TTL
@@ -519,8 +497,9 @@ func (t Tiered) convergeTier0(ctx context.Context, key Key, r io.ReadCloser, hea
 	case !partial:
 		return t.backfillReader(ctx, key, r, headers, t.caches[0])
 	default:
-		// A ranged body can't backfill tier 0, so refresh it out of band;
-		// otherwise a divergent tier 0 never converges under ParallelGet.
+		// A ranged body can't backfill tier 0, so refresh it out of band.
+		//
+		// Otherwise a divergent tier 0 never converges under ParallelGet.
 		t.healTier0(ctx, key, source, headers.Get(ETagKey))
 		return r
 	}
@@ -530,8 +509,7 @@ func (t Tiered) healTier0(reqCtx context.Context, key Key, source Cache, servedE
 	if t.healer == nil || servedETag == "" {
 		return
 	}
-	// Skip if tier 0 is legitimately newer than the served version, so a lagging
-	// deeper tier never overwrites it.
+	// Skip if tier 0 is legitimately newer than the served version, so a lagging deeper tier never overwrites it.
 	want, ok := t.etags.Get(key)
 	if !ok || want != servedETag {
 		return
@@ -573,9 +551,9 @@ func (t Tiered) backfillTier0FromSource(ctx context.Context, key Key, source Cac
 		logger.WarnContext(ctx, "Tiered: ranged heal copy failed", "key", key, "error", errors.Join(err, w.Abort(err)))
 		return
 	}
-	// A concurrent Delete drops the etag entry; committing then would resurrect an
-	// object that invalidateStale can no longer clean up (it only fires on an
-	// etag mismatch, not a missing entry). Re-check narrows that window.
+	// A concurrent Delete drops the etag entry, and committing then would resurrect an object nothing cleans up.
+	//
+	// invalidateStale only fires on an etag mismatch, not a missing entry. Re-checking narrows that window.
 	if got, ok := t.etags.Get(key); !ok || got != wantETag {
 		result = "superseded"
 		if err := w.Abort(errHealSuperseded); err != nil {
@@ -591,12 +569,10 @@ func (t Tiered) backfillTier0FromSource(ctx context.Context, key Key, source Cac
 	}
 }
 
-// backfillReadCloser tees reads from src into dst asynchronously. Chunks are
-// sent to a background goroutine via a buffered channel so the Read path is
-// never blocked by disk I/O (up to ~32 MB of buffer). Only a stream consumed
-// through to io.EOF commits the dst entry; a mid-stream read error or a Close
-// before EOF cancels the write context so the partial entry is discarded. On
-// any write failure the backfill is abandoned but reads continue unaffected.
+// backfillReadCloser tees reads from src into dst asynchronously via a buffered channel (up to ~32 MB).
+//
+// Only a stream read to io.EOF commits dst; a read error or early Close cancels the partial entry. Write failures
+// abandon the backfill without affecting reads.
 type backfillReadCloser struct {
 	src     io.ReadCloser
 	ch      chan []byte
@@ -684,8 +660,7 @@ func (b *backfillReadCloser) Read(p []byte) (int, error) {
 			b.eof = true
 			b.closeMu.Unlock()
 		} else {
-			// Mid-stream failure: cancel so the writer discards the partial
-			// entry instead of committing a truncated object.
+			// Mid-stream failure: cancel so the writer discards the partial entry instead of committing it truncated.
 			b.cancel()
 		}
 		b.closeChan()
@@ -699,8 +674,7 @@ func (b *backfillReadCloser) Close() error {
 	complete := b.eof
 	b.closeMu.Unlock()
 	if !complete {
-		// Closed before EOF: the stream was abandoned or failed, so the
-		// partial entry must be discarded, not committed.
+		// Closed before EOF means the stream was abandoned or failed, so discard the partial entry.
 		b.cancel()
 	}
 	b.closeChan()
@@ -721,6 +695,7 @@ func (t Tiered) String() string {
 	return "tiered:" + strings.Join(names, ",")
 }
 
+// Stats sums the statistics of every tier, skipping tiers that return ErrStatsUnavailable.
 func (t Tiered) Stats(ctx context.Context) (Stats, error) {
 	var combined Stats
 	for _, c := range t.caches {
@@ -752,8 +727,9 @@ type tieredWriter struct {
 var _ Writer = (*tieredWriter)(nil)
 var _ PendingReader = (*tieredWriter)(nil)
 
-// OpenPending follows the first tier that supports it. Write only returns after
-// every tier has accepted the bytes, so any tier sees everything Write accepted.
+// OpenPending follows the first tier that supports it.
+//
+// Write only returns after every tier has accepted the bytes, so any tier sees everything Write accepted.
 func (t *tieredWriter) OpenPending() (ReadAtCloser, error) {
 	for _, w := range t.writers {
 		pending, ok := w.(PendingReader)
@@ -808,8 +784,7 @@ func (t *tieredWriter) Write(p []byte) (n int, err error) {
 	return
 }
 
-// Namespace creates a namespaced view of the tiered cache.
-// All underlying caches are also namespaced.
+// Namespace creates a namespaced view of the tiered cache, namespacing all underlying caches.
 func (t Tiered) Namespace(namespace Namespace) Cache {
 	namespaced := make([]Cache, len(t.caches))
 	for i, c := range t.caches {

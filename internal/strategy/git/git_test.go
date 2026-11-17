@@ -40,9 +40,9 @@ func (m *testMux) HandleFunc(pattern string, handler func(http.ResponseWriter, *
 
 func newTestScheduler(ctx context.Context, t *testing.T) jobscheduler.Provider {
 	t.Helper()
-	// Derive a context that carries the caller's logger but cancels when the
-	// test ends (via t.Context()). This ensures scheduler workers shut down
-	// before TempDir cleanup without needing an explicit context.WithCancel.
+	// Keep the caller's logger but cancel with t.Context().
+	//
+	// Scheduler workers then shut down before TempDir cleanup.
 	schedCtx := logging.ContextWithLogger(t.Context(), logging.FromContext(ctx))
 	sched, err := jobscheduler.New(schedCtx, jobscheduler.Config{})
 	if err != nil {
@@ -61,13 +61,13 @@ func newTestSpools(t *testing.T) *spool.Registry {
 	return spools
 }
 
-// waitForReady blocks until the strategy reports Ready() — used by tests that
-// operate directly on the mirror directory to avoid racing with the background
+// waitForReady blocks until the strategy reports Ready.
+//
+// Tests that operate directly on the mirror directory use it to avoid racing the background
 // warm-up goroutine started in git.New.
-func waitForReady(t *testing.T, s *git.Strategy) {
+func waitForReady(t *testing.T, s *git.Strategy) { //nolint:privatedoc // explains why
 	t.Helper()
-	// Simulate config.Load's wiring step, which releases the warm-up
-	// goroutine. Idempotent, so repeated calls are safe.
+	// Simulate config.Load's wiring step, which releases the warm-up goroutine; repeated calls are safe.
 	s.SetMetadataStore(nil)
 	deadline := time.Now().Add(5 * time.Second)
 	for !s.Ready() && time.Now().Before(deadline) {
@@ -223,9 +223,7 @@ func TestNewWithExistingCloneOnDisk(t *testing.T) {
 	assert.NoError(t, err)
 }
 
-// TestNewIsReadyAfterWarm verifies that startup warm-up runs in the background
-// (so the HTTP listener can bind immediately) and that Ready() flips to true
-// once warming completes.
+// TestNewIsReadyAfterWarm verifies that warm-up runs in the background and Ready() flips once it completes.
 func TestNewIsReadyAfterWarm(t *testing.T) {
 	_, ctx := logging.Configure(context.Background(), logging.Config{})
 	tmpDir := t.TempDir()
@@ -269,7 +267,6 @@ func TestIntegrationWithMockUpstream(t *testing.T) {
 	assert.NotZero(t, mux.handlers["POST /git/{host}/{path...}"])
 }
 
-// fakeBin creates a minimal executable file in dir with the given name.
 func fakeBin(t *testing.T, dir, name string) {
 	t.Helper()
 	err := os.WriteFile(filepath.Join(dir, name), []byte("#!/bin/sh\n"), 0o755)
@@ -295,8 +292,7 @@ func TestNewMissingGitBinary(t *testing.T) {
 	assert.Contains(t, err.Error(), "git")
 }
 
-// TestNewMissingSnapshotBinaries verifies that New returns an error when tar or zstd are
-// not in PATH and snapshot-interval > 0.
+// TestNewMissingSnapshotBinaries verifies that New fails when snapshots are enabled and tar or zstd is missing.
 func TestNewMissingSnapshotBinaries(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("PATH manipulation for binary checks not supported on Windows")
@@ -336,9 +332,9 @@ func TestNewMissingSnapshotBinaries(t *testing.T) {
 	})
 }
 
-// TestSetMetadataStore verifies that wiring a metadata store after construction
-// enables the per-repo histogram. The behaviour of the resulting RepoCounts is
-// covered in repocounts_test.go.
+// TestSetMetadataStore verifies that wiring a metadata store after construction enables the per-repo histogram.
+//
+// RepoCounts behaviour is covered in repocounts_test.go.
 func TestSetMetadataStore(t *testing.T) {
 	_, ctx := logging.Configure(context.Background(), logging.Config{})
 

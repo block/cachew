@@ -61,8 +61,9 @@ func ContinueArtifactRequest(ctx, request context.Context) context.Context {
 	return ctx
 }
 
-// WithoutArtifactRequest detaches ctx from its artifact request, so auxiliary
-// lookups such as release metadata are not counted as origin traffic.
+// WithoutArtifactRequest detaches ctx from its artifact request.
+//
+// Auxiliary lookups such as release metadata are then not counted as origin traffic.
 func WithoutArtifactRequest(ctx context.Context) context.Context {
 	return context.WithValue(ctx, artifactKey{}, nil)
 }
@@ -124,8 +125,8 @@ func (r *artifactRequest) options(extra ...attribute.KeyValue) metric.Measuremen
 }
 
 // OriginTransport measures the exchanges of artifact requests that reach base.
-// It must sit below any transport that answers without contacting the origin,
-// such as upstream cooldowns, so that those answers are not counted.
+//
+// It must sit below any transport that answers without contacting the origin, such as upstream cooldowns.
 type OriginTransport struct {
 	base http.RoundTripper
 }

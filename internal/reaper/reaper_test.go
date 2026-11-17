@@ -35,9 +35,7 @@ func TestStartReapsZombies(t *testing.T) {
 
 	reaper.StartForTest(ctx)
 
-	// Create a child process that exits immediately. We deliberately
-	// don't call cmd.Wait(), so the exited process becomes a zombie
-	// that the reaper should collect.
+	// Start a child that exits immediately without cmd.Wait(), so it becomes a zombie for the reaper.
 	cmd := exec.Command("true")
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	err := cmd.Start()

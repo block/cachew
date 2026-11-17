@@ -12,14 +12,11 @@ import (
 	"github.com/block/cachew/client"
 )
 
-// minRangePartSize is the smallest per-request part worth fetching in
-// parallel for ranged reads; below this, per-request overhead outweighs the
-// bandwidth gained from additional streams.
+// minRangePartSize is the smallest ranged-read part worth fetching in parallel.
+//
+// Below this, per-request overhead outweighs the bandwidth gained from additional streams.
 const minRangePartSize int64 = 4 << 20
 
-// parallelGetReader returns a reader for a whole S3 object, fetched with
-// parallel range-GET requests via [client.ParallelGetReader]. Objects that
-// fit in one chunk use a single GetObject.
 func (s *S3) parallelGetReader(ctx context.Context, bucket, objectName string, size int64, etag string) (io.ReadCloser, error) {
 	chunkSize := int64(s.config.DownloadPartSizeMB) << 20                                      // #nosec G115 -- DownloadPartSizeMB is a small operator-supplied tuning value.
 	if concurrency := int(s.config.DownloadConcurrency); size > chunkSize && concurrency > 1 { // #nosec G115 -- DownloadConcurrency is a small operator-supplied tuning value.
@@ -33,13 +30,11 @@ func (s *S3) parallelGetReader(ctx context.Context, bucket, objectName string, s
 	return &s3Reader{obj: obj}, nil
 }
 
-// rangedGetReader serves [start, start+length) of an S3 object. Large ranges
-// are split into parallel sub-range requests because a single S3 stream is
-// limited to a fraction of the available bandwidth; small ranges use a single
-// request. Sub-range parts scale down below the configured part size (to a
-// floor of minRangePartSize) so that ranges smaller than one configured part
-// still fan out across multiple streams.
-func (s *S3) rangedGetReader(ctx context.Context, bucket, objectName string, start, length int64, etag string) (io.ReadCloser, error) {
+// rangedGetReader serves [start, start+length) of an S3 object.
+//
+// Large ranges fan out as parallel sub-ranges because one S3 stream uses a fraction of the bandwidth.
+// Parts shrink to a floor of minRangePartSize so ranges under one configured part still fan out.
+func (s *S3) rangedGetReader(ctx context.Context, bucket, objectName string, start, length int64, etag string) (io.ReadCloser, error) { //nolint:privatedoc // explains why
 	concurrency := int64(s.config.DownloadConcurrency) // #nosec G115 -- DownloadConcurrency is a small operator-supplied tuning value.
 	if length < 2*minRangePartSize || concurrency <= 1 {
 		return s.rangeGetReader(ctx, bucket, objectName, start, length, etag)
@@ -50,10 +45,10 @@ func (s *S3) rangedGetReader(ctx context.Context, bucket, objectName string, sta
 	return client.ParallelGetReader(ctx, window, Key{}, chunkSize, int(concurrency)) //nolint:wrapcheck
 }
 
-// rangeGetReader returns an io.ReadCloser for a single byte range of an S3
-// object, pinned to etag (when non-empty) so the read sees a consistent
-// object revision.
-func (s *S3) rangeGetReader(ctx context.Context, bucket, objectName string, start, length int64, etag string) (io.ReadCloser, error) {
+// rangeGetReader returns a reader for a single byte range of an S3 object.
+//
+// A non-empty etag pins the read to one object revision.
+func (s *S3) rangeGetReader(ctx context.Context, bucket, objectName string, start, length int64, etag string) (io.ReadCloser, error) { //nolint:privatedoc // explains why
 	opts := minio.GetObjectOptions{}
 	if err := opts.SetRange(start, start+length-1); err != nil {
 		return nil, errors.Errorf("set range %d-%d: %w", start, start+length-1, err)
@@ -70,15 +65,10 @@ func (s *S3) rangeGetReader(ctx context.Context, bucket, objectName string, star
 	return &s3Reader{obj: obj}, nil
 }
 
-// s3ObjectWindow adapts a byte window of a pinned S3 object revision to
-// [client.RangeReader], letting ParallelGet drive parallel S3 downloads.
-// Range offsets are relative to the window, and every request carries an
-// If-Match for the pinned etag regardless of the supplied options, so
-// discovery and sub-range requests can never splice revisions. Response
-// headers are synthesized from the pinned values: minio enforces the real
-// preconditions (SetRange, SetMatchETag) at the protocol level, surfacing
-// violations as read errors. The window's identity is bound in the struct, so
-// the Key argument is ignored.
+// s3ObjectWindow adapts a byte window of a pinned S3 object revision to [client.RangeReader] for ParallelGet.
+//
+// Offsets are window-relative and every request carries If-Match for the pinned etag, so requests never splice
+// revisions. minio enforces the preconditions, so headers are synthesized from pinned values; Key is ignored.
 type s3ObjectWindow struct {
 	s3         *S3
 	bucket     string

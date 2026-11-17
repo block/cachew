@@ -19,6 +19,7 @@ import (
 	"github.com/block/cachew/internal/logging"
 )
 
+// RegisterMemory registers the in-memory cache backend.
 func RegisterMemory(r *Registry) {
 	Register(
 		r,
@@ -28,6 +29,7 @@ func RegisterMemory(r *Registry) {
 	)
 }
 
+// MemoryConfig is the HCL configuration for the in-memory cache backend.
 type MemoryConfig struct {
 	LimitMB int           `hcl:"limit-mb,optional" help:"Maximum size of the disk cache in megabytes (defaults to 1GB)." default:"1024"`
 	MaxTTL  time.Duration `hcl:"max-ttl,optional" help:"Maximum time-to-live for entries in the disk cache (defaults to 1 hour)." default:"1h"`
@@ -39,6 +41,7 @@ type memoryEntry struct {
 	headers   http.Header
 }
 
+// Memory is a Cache that holds objects in process memory, evicting the soonest-expiring entries when full.
 type Memory struct {
 	config      MemoryConfig
 	namespace   Namespace
@@ -47,6 +50,7 @@ type Memory struct {
 	currentSize *atomic.Int64
 }
 
+// NewMemory creates an empty in-memory cache from config.
 func NewMemory(ctx context.Context, config MemoryConfig) (*Memory, error) {
 	logging.FromContext(ctx).InfoContext(ctx, "Constructing in-memory Cache", "limit-mb", config.LimitMB, "max-ttl", config.MaxTTL)
 	return &Memory{
@@ -59,6 +63,7 @@ func NewMemory(ctx context.Context, config MemoryConfig) (*Memory, error) {
 
 func (m *Memory) String() string { return fmt.Sprintf("memory:%dMB", m.config.LimitMB) }
 
+// Stat returns stored headers plus Content-Length; missing or expired entries return os.ErrNotExist.
 func (m *Memory) Stat(_ context.Context, key Key, opts ...Option) (http.Header, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -85,6 +90,7 @@ func (m *Memory) Stat(_ context.Context, key Key, opts ...Option) (http.Header, 
 	return headers, nil
 }
 
+// Open returns a reader over the stored bytes, honouring conditional and Range options.
 func (m *Memory) Open(_ context.Context, key Key, opts ...Option) (io.ReadCloser, http.Header, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -120,6 +126,7 @@ func (m *Memory) Open(_ context.Context, key Key, opts ...Option) (io.ReadCloser
 	return io.NopCloser(bytes.NewReader(data)), headers, nil
 }
 
+// Create buffers writes in memory and stores the entry on Close; a zero ttl uses MaxTTL.
 func (m *Memory) Create(ctx context.Context, key Key, headers http.Header, ttl time.Duration, opts ...Option) (Writer, error) {
 	if ttl == 0 {
 		ttl = m.config.MaxTTL
@@ -151,6 +158,7 @@ func (m *Memory) Create(ctx context.Context, key Key, headers http.Header, ttl t
 	return writer, nil
 }
 
+// UpdateMetadata merges headers and resets the TTL without copying the stored bytes.
 func (m *Memory) UpdateMetadata(_ context.Context, key Key, headers http.Header, ttl time.Duration, opts ...Option) error {
 	if ttl == 0 {
 		ttl = m.config.MaxTTL
@@ -171,6 +179,7 @@ func (m *Memory) UpdateMetadata(_ context.Context, key Key, headers http.Header,
 	return nil
 }
 
+// Delete removes an entry, returning os.ErrNotExist if it is absent.
 func (m *Memory) Delete(_ context.Context, key Key) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -189,6 +198,7 @@ func (m *Memory) Delete(_ context.Context, key Key) error {
 	return nil
 }
 
+// Invalidate deletes the entry, treating a missing entry as success.
 func (m *Memory) Invalidate(ctx context.Context, key Key) error {
 	err := m.Delete(ctx, key)
 	if errors.Is(err, os.ErrNotExist) {
@@ -197,6 +207,7 @@ func (m *Memory) Invalidate(ctx context.Context, key Key) error {
 	return errors.WithStack(err)
 }
 
+// Close releases the entry map; the cache must not be written to afterwards.
 func (m *Memory) Close() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -205,6 +216,7 @@ func (m *Memory) Close() error {
 	return nil
 }
 
+// Stats reports entry count and bytes held across all namespaces, with capacity from LimitMB.
 func (m *Memory) Stats(_ context.Context) (Stats, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()

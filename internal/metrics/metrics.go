@@ -115,8 +115,7 @@ func New(ctx context.Context, cfg Config) (*Client, error) {
 	provider := sdkmetric.NewMeterProvider(providerOpts...)
 	otel.SetMeterProvider(provider)
 
-	// Emit Go runtime metrics (runtime.go.*) on the configured meter
-	// provider. Replaces the dd-trace-go tracer's WithRuntimeMetrics().
+	// Emit Go runtime metrics (runtime.go.*), replacing the dd-trace-go tracer's WithRuntimeMetrics().
 	if err := otelruntime.Start(otelruntime.WithMinimumReadMemStatsInterval(time.Second)); err != nil {
 		return nil, errors.Errorf("starting OTel runtime instrumentation: %w", err)
 	}
@@ -161,8 +160,7 @@ func (c *Client) Handler() http.Handler {
 	})
 }
 
-// ServeMetrics starts a dedicated HTTP server for Prometheus metrics scraping.
-// This is only started if Prometheus exporter is enabled.
+// ServeMetrics starts a dedicated Prometheus scraping server when the Prometheus exporter is enabled.
 func (c *Client) ServeMetrics(ctx context.Context) error {
 	// Only start metrics server if Prometheus is enabled
 	if !c.prometheusEnabled {

@@ -9,17 +9,10 @@ import (
 	"github.com/alecthomas/errors"
 )
 
-// streamBuffer reorders concurrent WriteAt calls back into a sequential byte
-// stream readable via Read, buffering in memory. A fixed ring of 2*concurrency
-// chunk-sized pages bounds memory: WriteAt blocks while its target page is
-// more than 2*concurrency pages past the page being read, applying
-// backpressure to fetchers, so peak buffering is capped at
-// 2*concurrency*chunkSize regardless of object size.
+// streamBuffer reorders concurrent WriteAt calls into a sequential Read stream using a ring of 2*concurrency pages.
 //
-// WriteAt carries no context, so a blocked write is only released by reader
-// progress, Close, or closeWrite. ParallelGet guarantees release by never
-// dispatching a chunk more than 2*concurrency past the oldest incomplete one:
-// every in-flight write fits the window once the reader drains to the frontier.
+// WriteAt blocks past the ring, capping memory, and has no ctx: only reads, Close, or closeWrite release it.
+// ParallelGet's dispatch window guarantees every in-flight write fits once the reader drains to the frontier.
 type streamBuffer struct {
 	chunkSize int64
 	n         int64 // page count = 2*concurrency
@@ -37,8 +30,6 @@ type streamBuffer struct {
 
 type writeInterval struct{ start, end int64 }
 
-// newStreamBuffer returns a streamBuffer with a ring of 2*concurrency pages
-// of chunkSize bytes each, allocated lazily.
 func newStreamBuffer(chunkSize int64, concurrency int) *streamBuffer {
 	n := int64(2 * max(concurrency, 1))
 	s := &streamBuffer{
@@ -50,8 +41,7 @@ func newStreamBuffer(chunkSize int64, concurrency int) *streamBuffer {
 	return s
 }
 
-// WriteAt implements io.WriterAt. Writes at non-overlapping offsets may run
-// concurrently; a write beyond the window blocks until the reader catches up.
+// WriteAt implements io.WriterAt; non-overlapping writes may run concurrently and block beyond the window.
 func (s *streamBuffer) WriteAt(p []byte, off int64) (int, error) {
 	written := 0
 	for len(p) > 0 {
@@ -66,10 +56,10 @@ func (s *streamBuffer) WriteAt(p []byte, off int64) (int, error) {
 	return written, nil
 }
 
-// writeSome copies as much of p as fits the current page, blocking until the
-// page's ring slot is free. The window is page-granular: a slot is reusable
-// only once the reader has moved wholly past its previous page, otherwise a
-// write one ring ahead would clobber the unread tail of a partially read page.
+// writeSome copies as much of p as fits the current page, blocking until the page's ring slot is free.
+//
+// A slot is reusable only once the reader is wholly past its previous page, otherwise a write one ring ahead
+// would clobber the unread tail of a partially read page.
 func (s *streamBuffer) writeSome(p []byte, off int64) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -93,10 +83,9 @@ func (s *streamBuffer) writeSome(p []byte, off int64) (int, error) {
 	return int(n), nil
 }
 
-// Read emits bytes in offset order as the contiguous write frontier advances,
-// blocking until data arrives or the write side finishes. After closeWrite it
-// drains the remaining buffered bytes, then returns the recorded error or
-// io.EOF.
+// Read emits bytes in offset order as the contiguous write frontier advances, blocking until data arrives.
+//
+// After closeWrite it drains the buffered bytes, then returns the recorded error or io.EOF.
 func (s *streamBuffer) Read(p []byte) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -123,11 +112,11 @@ func (s *streamBuffer) Read(p []byte) (int, error) {
 	return int(n), nil
 }
 
-// closeWrite marks the write side finished; err (nil on success) is surfaced
-// to Read after the buffered bytes drain. A nil err with incomplete coverage
-// from offset 0 is reported as an error so a gap can never silently truncate
-// the stream.
-func (s *streamBuffer) closeWrite(err error) {
+// closeWrite marks the write side finished, surfacing err to Read after the buffered bytes drain.
+//
+// A nil err with incomplete coverage from offset 0 is reported as an error, so a gap can never
+// silently truncate the stream.
+func (s *streamBuffer) closeWrite(err error) { //nolint:privatedoc // documents a non-obvious contract
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err == nil && len(s.pending) > 0 {
@@ -140,8 +129,7 @@ func (s *streamBuffer) closeWrite(err error) {
 	s.cond.Broadcast()
 }
 
-// Close releases the buffer, unblocking any blocked WriteAt or Read.
-// Cancelling the download itself is the caller's responsibility.
+// Close unblocks any blocked WriteAt or Read; cancelling the download itself is the caller's responsibility.
 func (s *streamBuffer) Close() error {
 	s.mu.Lock()
 	s.rclosed = true
@@ -150,8 +138,7 @@ func (s *streamBuffer) Close() error {
 	return nil
 }
 
-// extendLocked records [start, end) as written and advances the contiguous
-// frontier over any pending intervals it now reaches. Callers must hold mu.
+// extendLocked records [start, end) as written and advances the frontier over pending intervals it now reaches.
 func (s *streamBuffer) extendLocked(start, end int64) {
 	if start == s.frontier && len(s.pending) == 0 {
 		s.frontier = end

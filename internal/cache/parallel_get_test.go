@@ -15,8 +15,9 @@ import (
 	"github.com/block/cachew/internal/logging"
 )
 
-// bufferAt is an in-memory io.WriterAt that extends like a file, zero-filling
-// any gap, so tests can assert reassembly without touching disk.
+// bufferAt is an in-memory io.WriterAt that extends like a file, zero-filling any gap.
+//
+// Tests use it to assert reassembly without touching disk.
 type bufferAt struct {
 	mu  sync.Mutex
 	buf []byte
@@ -80,8 +81,7 @@ func TestParallelGetEmptyObject(t *testing.T) {
 	assert.NoError(t, err)
 	assert.NoError(t, w.Close())
 
-	// concurrency 4 takes the ranged discovery path (ErrRangeNotSatisfiable),
-	// concurrency 1 takes the up-front full-read path; both must yield nothing.
+	// Concurrency 4 takes the ranged discovery path and 1 the up-front full-read path; both must yield nothing.
 	for _, concurrency := range []int{4, 1} {
 		var dst bufferAt
 		assert.NoError(t, cache.ParallelGet(ctx, c, key, &dst, 100, concurrency))

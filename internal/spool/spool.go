@@ -1,5 +1,4 @@
-// Package spool shares one in-flight HTTP response between concurrent requests,
-// which stream it while it is still being produced.
+// Package spool shares one in-flight HTTP response between concurrent requests that stream it as it is produced.
 package spool
 
 import (
@@ -13,8 +12,7 @@ import (
 	"github.com/alecthomas/errors"
 )
 
-// fileSuffix marks spool files so New can remove only its own leftovers from a
-// directory that may be shared with other data.
+// fileSuffix marks spool files so New removes only its own leftovers from a possibly shared directory.
 const fileSuffix = ".spool"
 
 // Config configures the spool Registry.
@@ -34,8 +32,9 @@ func NewProvider(ctx context.Context, config Config, onReleaseError func(error))
 	})
 }
 
-// Registry owns every in-flight fill in the process. Fills run detached from
-// the requests that started them, so Close is the only way to cancel them.
+// Registry owns every in-flight fill in the process.
+//
+// Fills run detached from the requests that started them, so Close is the only way to cancel them.
 type Registry struct {
 	config         Config
 	ctx            context.Context
@@ -45,6 +44,7 @@ type Registry struct {
 }
 
 // New creates a Registry and removes stale spool files; ctx's cancellation is ignored, use Close.
+//
 // onReleaseError receives cleanup failures from any goroutine and must not call the Registry.
 func New(ctx context.Context, config Config, onReleaseError func(error)) (*Registry, error) {
 	if err := os.MkdirAll(config.Dir, 0o750); err != nil {
@@ -68,16 +68,18 @@ func (r *Registry) NewGroup(retention Retention) *Group {
 	return &Group{registry: r, retention: retention, entries: map[string]*entry{}}
 }
 
-// Close cancels in-flight fills and waits for them to return. Call it after the
-// HTTP server has drained, because a cancelled fill truncates its response.
+// Close cancels in-flight fills and waits for them to return.
+//
+// Call it after the HTTP server has drained, because a cancelled fill truncates its response.
 func (r *Registry) Close() {
 	r.cancel()
 	r.fills.Wait()
 }
 
-// start runs fill for e. The fill keeps req's values, such as the logger and
-// trace span, but not its cancellation.
-func (r *Registry) start(e *entry, req *http.Request, fill FillFunc) {
+// start runs fill for e.
+//
+// The fill keeps req's values, such as the logger and trace span, but not its cancellation.
+func (r *Registry) start(e *entry, req *http.Request, fill FillFunc) { //nolint:privatedoc // documents a non-obvious contract
 	ctx := context.WithoutCancel(req.Context())
 	var cancel context.CancelFunc
 	if r.config.FillTimeout > 0 {
@@ -94,9 +96,10 @@ func (r *Registry) start(e *entry, req *http.Request, fill FillFunc) {
 	})
 }
 
-// runFill converts http.ErrAbortHandler panics into errors. Fills reuse handler
-// code such as httputil.ReverseProxy, but run outside the server's recovery.
-func runFill(ctx context.Context, w *Writer, fill FillFunc) (err error) {
+// runFill converts http.ErrAbortHandler panics into errors.
+//
+// Fills reuse handler code such as httputil.ReverseProxy, but run outside the server's recovery.
+func runFill(ctx context.Context, w *Writer, fill FillFunc) (err error) { //nolint:privatedoc // explains why
 	defer func() {
 		recovered := recover()
 		if recovered == nil {

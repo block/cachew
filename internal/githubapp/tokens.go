@@ -20,8 +20,7 @@ import (
 // TokenManagerProvider is a function that lazily creates a singleton TokenManager.
 type TokenManagerProvider func() (*TokenManager, error)
 
-// NewTokenManagerProvider creates a provider that lazily initializes a TokenManager
-// from one or more GitHub App configurations.
+// NewTokenManagerProvider returns a provider that lazily builds a TokenManager from GitHub App configs.
 func NewTokenManagerProvider(configs []Config, logger *slog.Logger) TokenManagerProvider {
 	return sync.OnceValues(func() (*TokenManager, error) {
 		return newTokenManager(configs, logger, githubAPIBase, http.DefaultClient)
@@ -103,8 +102,9 @@ func newTokenManager(configs []Config, logger *slog.Logger, apiBase string, http
 }
 
 // GetTokenForOrg returns an installation token for the given GitHub organization.
-// Installations are listed via the GitHub API on first use and refreshed by
-// RunInstallationRefresh. Orgs without an installation get the fallback org's token.
+//
+// Installations are listed on first use and refreshed by RunInstallationRefresh. Orgs without an
+// installation get the fallback org's token.
 func (tm *TokenManager) GetTokenForOrg(ctx context.Context, org string) (string, error) {
 	token, _, err := tm.GetTokenForOrgWithInstallation(ctx, org)
 	return token, err
@@ -145,8 +145,9 @@ func (tm *TokenManager) GetTokenForOrgWithInstallation(ctx context.Context, org 
 	return "", Installation{}, errors.Errorf("no GitHub App installation found for org: %s", org)
 }
 
-// RefreshInstallations relists the installations of every configured app. An app
-// whose listing fails keeps its previously known installations.
+// RefreshInstallations relists every configured app's installations.
+//
+// An app whose listing fails keeps its previously known installations.
 func (tm *TokenManager) RefreshInstallations(ctx context.Context) error {
 	var errs []error
 	for _, app := range tm.apps {
@@ -160,9 +161,9 @@ func (tm *TokenManager) RefreshInstallations(ctx context.Context) error {
 const installationRefreshInterval = 5 * time.Minute
 const installationRefreshTimeout = 30 * time.Second
 
-// RunInstallationRefresh calls RefreshInstallations now and every five minutes until
-// ctx is cancelled, so installations added later are found. It passes failures to
-// onError, which must be non-nil.
+// RunInstallationRefresh calls RefreshInstallations now and every five minutes until ctx is cancelled.
+//
+// This finds installations added later. Failures go to onError, which must be non-nil.
 func (tm *TokenManager) RunInstallationRefresh(ctx context.Context, onError func(error)) {
 	ticker := time.NewTicker(installationRefreshInterval)
 	defer ticker.Stop()
@@ -270,8 +271,6 @@ func (a *appState) fetchInstallationToken(ctx context.Context, org, installation
 	return result.Token, result.ExpiresAt, nil
 }
 
-// lookupInstallationID returns the app's installation ID for the given org or user
-// from the listed installations, listing them first if they have never been listed.
 func (a *appState) lookupInstallationID(ctx context.Context, org string) (string, error) {
 	if err := a.ensureInstallations(ctx); err != nil {
 		return "", err
@@ -303,8 +302,6 @@ func (a *appState) listed() bool {
 	return a.installations != nil
 }
 
-// refreshInstallations replaces the known installations with the app's current
-// installations, keeping the previous set if listing fails.
 func (a *appState) refreshInstallations(ctx context.Context) error {
 	a.listMu.Lock()
 	defer a.listMu.Unlock()
@@ -370,8 +367,6 @@ func (a *appState) listInstallationsPage(ctx context.Context, jwt string, page i
 	return installations, nil
 }
 
-// setInstallations replaces the known installations, keyed by installation ID with
-// the account login as the owner.
 func (a *appState) setInstallations(owners map[string]string) {
 	installations := make(map[string]string, len(owners))
 	for id, owner := range owners {

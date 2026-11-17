@@ -281,9 +281,8 @@ func (p *privateFetcher) generateZip(ctx context.Context, repo *gitclone.Reposit
 	cloneDir := filepath.Join(tmpDir, "repo")
 	gitRef := VersionToGitRef(version)
 
-	// Local clone from the mirror at the requested ref — git hardlinks objects by default.
-	// We use --no-checkout then checkout the specific ref so that both tagged versions and
-	// raw commit hashes (from pseudo-versions) work; --branch only accepts branch/tag names.
+	// Local clones hardlink objects; a separate checkout supports pseudo-version hashes, which --branch rejects.
+	//
 	// #nosec G204 - repo.Path() and cloneDir are controlled by us
 	cmd := exec.CommandContext(ctx, "git", "-c", "core.hooksPath="+os.DevNull, "clone", "--template=", "--no-checkout", repo.Path(), cloneDir)
 	cmd.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL="+os.DevNull,
@@ -321,10 +320,9 @@ func (r *readSeekCloser) Close() error {
 	return nil
 }
 
-// VersionToGitRef converts a Go module version string to a git ref. For pseudo-versions
-// (e.g. v0.0.0-20160603174536-ad42235f7e24), it extracts the commit hash suffix. For
-// all other versions (tagged releases, pre-releases, +incompatible), it returns the
-// version unchanged.
+// VersionToGitRef converts a Go module version string to a git ref.
+//
+// Pseudo-versions (e.g. v0.0.0-20160603174536-ad42235f7e24) yield their commit hash; other versions are unchanged.
 func VersionToGitRef(version string) string {
 	if module.IsPseudoVersion(version) {
 		rev, err := module.PseudoVersionRev(version)

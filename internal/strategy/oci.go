@@ -36,8 +36,9 @@ func RegisterOCI(r *Registry, spools spool.Provider) {
 	})
 }
 
-// OCIConfig configures a pull-through cache for one OCI registry. Registries are
-// separate blocks because each has its own credentials and client-facing hostnames.
+// OCIConfig configures a pull-through cache for one OCI registry.
+//
+// Registries are separate blocks because each has its own credentials and client-facing hostnames.
 type OCIConfig struct {
 	Registry        string        `hcl:"registry,label" help:"Registry name as clients reference it, e.g. docker.io."`
 	Upstream        string        `hcl:"upstream,optional" help:"API URL, for registries served from a different host than their name (defaults to https://<registry>)."`
@@ -50,14 +51,14 @@ type OCIConfig struct {
 	Rewrites        []OCIRewrite  `hcl:"rewrite,block" help:"Repository name rewrites, for names the upstream does not serve directly."`
 }
 
-// OCIRewrite maps a repository name as clients send it to the name the
-// upstream serves, e.g. Docker Hub's implicit "library/" namespace.
+// OCIRewrite maps a client repository name to the upstream's, e.g. Docker Hub's implicit "library/" namespace.
 type OCIRewrite struct {
 	Pattern     string `hcl:"pattern,label" help:"Regular expression matched against the repository name."`
 	Replacement string `hcl:"replacement" help:"Replacement, with $1-style references."`
 }
 
 // The OCI [Strategy] is a read-only pull-through cache for one OCI registry.
+//
 // Tags are revalidated with HEAD, which Docker Hub does not count against pull limits.
 type OCI struct {
 	registry  string
@@ -128,8 +129,7 @@ func NewOCI(ctx context.Context, config OCIConfig, c cache.Cache, mux Mux, spool
 		Verify(o.verifier).
 		Revalidate("Docker-Content-Digest", o.manifestFreshFor)
 
-	// Patterns omit the method so that pushes reach ServeHTTP and get a 405
-	// explaining the mirror is read-only.
+	// Patterns omit the method so pushes reach ServeHTTP and get a 405 explaining the mirror is read-only.
 	patterns := []string{"/oci/" + config.Registry + "/v2/{rest...}"}
 	for _, host := range config.Hosts {
 		patterns = append(patterns, host+"/v2/{rest...}")
@@ -155,8 +155,7 @@ func compileOCIRewrites(configs []OCIRewrite) ([]ociRewrite, error) {
 
 func (o *OCI) String() string { return "oci:" + o.registry }
 
-// ServeHTTP answers the OCI Distribution API ping and routes pulls to the
-// blob, manifest or pass-through path.
+// ServeHTTP answers the OCI Distribution API ping and routes pulls to the blob, manifest or pass-through path.
 func (o *OCI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		w.Header().Set("Allow", "GET, HEAD")
@@ -191,9 +190,10 @@ func (o *OCI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// parseRequest parses the path after /v2/ and validates it after rewriting,
-// so rewrites can turn client names into names the upstream accepts.
-func (o *OCI) parseRequest(path string) (ociRequest, error) {
+// parseRequest parses the path after /v2/ and validates it after rewriting.
+//
+// Rewrites can then turn client names into names the upstream accepts.
+func (o *OCI) parseRequest(path string) (ociRequest, error) { //nolint:privatedoc // explains why
 	req, err := parseOCIPath(path)
 	if err != nil {
 		return ociRequest{}, err
@@ -211,8 +211,7 @@ func (o *OCI) rewrite(repository string) string {
 	return repository
 }
 
-// passThrough forwards uncached endpoints, whose responses change too often
-// or are too cheap to be worth caching.
+// passThrough forwards endpoints whose responses change too often or are too cheap to be worth caching.
 func (o *OCI) passThrough(w http.ResponseWriter, r *http.Request) error {
 	req, err := o.transform(r)
 	if err != nil {
@@ -237,9 +236,10 @@ func (o *OCI) passThrough(w http.ResponseWriter, r *http.Request) error {
 	return nil
 }
 
-// transform builds the upstream request from the parsed path, so client paths
-// and query parameters such as containerd's "ns" never reach the upstream.
-func (o *OCI) transform(r *http.Request) (*http.Request, error) {
+// transform builds the upstream request from the parsed path.
+//
+// Client paths and query parameters such as containerd's "ns" then never reach the upstream.
+func (o *OCI) transform(r *http.Request) (*http.Request, error) { //nolint:privatedoc // explains why
 	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, o.upstreamURL(r), nil)
 	if err != nil {
 		return nil, errors.Wrap(err, "create upstream request")
@@ -267,18 +267,20 @@ func (o *OCI) manifestKey(r *http.Request) string {
 	return o.registry + "/" + req.repository + "/manifests/" + req.reference
 }
 
-// manifestVary keys tag manifests on Accept, which selects between an index and
-// a single-platform manifest. Digest references name exact bytes.
-func (o *OCI) manifestVary(r *http.Request) map[string]string {
+// manifestVary keys tag manifests on Accept, which selects between an index and a single-platform manifest.
+//
+// Digest references name exact bytes.
+func (o *OCI) manifestVary(r *http.Request) map[string]string { //nolint:privatedoc // explains why
 	if ociRequestFrom(r.Context()).digest != "" {
 		return nil
 	}
 	return map[string]string{"Accept": normaliseAccept(r.Header.Values("Accept"))}
 }
 
-// normaliseAccept stops equivalent Accept headers that differ only in order,
-// spacing or repetition from caching separate copies of a manifest.
-func normaliseAccept(values []string) string {
+// normaliseAccept canonicalises Accept headers that differ only in order, spacing or repetition.
+//
+// Equivalent headers then do not cache separate copies of a manifest.
+func normaliseAccept(values []string) string { //nolint:privatedoc // explains why
 	var types []string
 	for _, value := range values {
 		for t := range strings.SplitSeq(value, ",") {
@@ -341,8 +343,9 @@ func (k ociKind) segment() string {
 	panic("unknown OCI request kind")
 }
 
-// ociRequest is a parsed OCI Distribution API path. It travels in the request
-// context so fills that outlive the request see the same rewritten repository.
+// ociRequest is a parsed OCI Distribution API path.
+//
+// It travels in the request context so fills that outlive the request see the same rewritten repository.
 type ociRequest struct {
 	repository string
 	kind       ociKind
@@ -360,9 +363,10 @@ func ociRequestFrom(ctx context.Context) ociRequest {
 	return req
 }
 
-// parseOCIPath splits the path after /v2/ from the end, because repository
-// names may themselves contain slashes.
-func parseOCIPath(path string) (ociRequest, error) {
+// parseOCIPath splits the path after /v2/ from the end.
+//
+// Repository names may themselves contain slashes.
+func parseOCIPath(path string) (ociRequest, error) { //nolint:privatedoc // explains why
 	parts := strings.Split(path, "/")
 	if len(parts) < 3 {
 		return ociRequest{}, httputil.Errorf(http.StatusNotFound, "unknown OCI API path %q", path)
@@ -384,8 +388,6 @@ var (
 	ociTagPattern        = regexp.MustCompile(`^[a-zA-Z0-9_][a-zA-Z0-9._-]{0,127}$`)
 )
 
-// validate rejects malformed names and references, and records the digest of
-// digest references.
 func (req *ociRequest) validate() error {
 	if len(req.repository) > 255 || !ociRepositoryPattern.MatchString(req.repository) {
 		return httputil.Errorf(http.StatusBadRequest, "invalid repository name %q", req.repository)

@@ -15,29 +15,29 @@ import (
 	"github.com/block/cachew/internal/httputil"
 )
 
-// ErrNotShared reports that a response cannot be served from the spool. Nothing
-// has been written to the client, so the caller must serve the request itself.
+// ErrNotShared reports that a response cannot be served from the spool.
+//
+// Nothing has been written to the client, so the caller must serve the request itself.
 var ErrNotShared = errors.New("response not shared")
 
-// ErrUncommitted reports a fill that stored a cache write and returned without
-// calling Writer.Commit, which would otherwise lose the entry silently.
+// ErrUncommitted reports a fill that stored a cache write but returned without calling Writer.Commit.
+//
+// Without this error the entry would be lost silently.
 var ErrUncommitted = errors.New("spool fill returned without committing its cache write")
 
-// Retention controls whether a Group keeps a successful response after its fill
-// ends.
+// Retention controls whether a Group keeps a successful response after its fill ends.
 type Retention int
 
 const (
-	// ReleaseCompleted drops a successful response when its fill ends, for
-	// callers that cache it so later requests hit the cache instead.
+	// ReleaseCompleted drops a successful response when its fill ends, for callers that cache it.
 	ReleaseCompleted Retention = iota
-	// RetainCompleted keeps successful responses until the Group is closed, for
-	// callers with nowhere else to serve them from.
+	// RetainCompleted keeps successful responses until the Group closes, for callers with no other source.
 	RetainCompleted
 )
 
-// FillFunc produces the shared response into w. ctx keeps the starting request's
-// values but not its cancellation; it ends at Registry.Close or FillTimeout.
+// FillFunc produces the shared response into w.
+//
+// ctx keeps the starting request's values but not its cancellation; it ends at Registry.Close or FillTimeout.
 type FillFunc func(ctx context.Context, w *Writer) error
 
 // Result describes how Serve answered a request.
@@ -61,8 +61,9 @@ type Group struct {
 	closed    bool
 }
 
-// Serve answers req with the shared response for key. On ErrNotShared nothing was
-// written; any other error means a truncated body and the caller must abort.
+// Serve answers req with the shared response for key.
+//
+// On ErrNotShared nothing was written; any other error means a truncated body and the caller must abort.
 func (g *Group) Serve(w http.ResponseWriter, req *http.Request, key string, fill FillFunc) (Result, error) {
 	e, filled := g.join(req, key, fill)
 	if e == nil {
@@ -72,8 +73,9 @@ func (g *Group) Serve(w http.ResponseWriter, req *http.Request, key string, fill
 	return e.serve(w, req, filled)
 }
 
-// Close drops every response in the group. Requests already streaming one
-// finish undisturbed; later Serve calls return ErrNotShared.
+// Close drops every response in the group.
+//
+// Requests already streaming one finish undisturbed; later Serve calls return ErrNotShared.
 func (g *Group) Close() {
 	g.mu.Lock()
 	g.closed = true
@@ -118,13 +120,13 @@ func (g *Group) remove(e *entry) {
 	e.markRemoved()
 }
 
-// entry is one shared response. Its source and file are released once the
-// entry has left its group, its fill has finished and no request is reading it.
+// entry is one shared response.
+//
+// Its source and file are released once it has left its group, its fill has finished and no request reads it.
 type entry struct {
 	group *Group
 	key   string
-	// leader is the request that started the fill, reduced to the fields the
-	// reuse rules read so it can outlive that request.
+	// leader is the fill's starting request, reduced to the fields the reuse rules read so it can outlive it.
 	leader *http.Request
 
 	mu      sync.Mutex
@@ -132,8 +134,7 @@ type entry struct {
 	status  int
 	header  http.Header
 	shared  bool
-	// expires is when a shared error stops accepting readers, counted from receipt
-	// of its headers; zero for every other response.
+	// expires is when a shared error stops accepting readers, counted from its headers; zero otherwise.
 	expires time.Time
 	source  io.ReaderAt
 	release func() error
@@ -149,9 +150,10 @@ func (e *entry) notifyLocked() {
 	e.changed = make(chan struct{})
 }
 
-// addReader joins a request to e, refusing once a shared error has expired so the
-// caller starts a fresh fill instead.
-func (e *entry) addReader() bool {
+// addReader joins a request to e.
+//
+// It refuses once a shared error has expired, so the caller starts a fresh fill instead.
+func (e *entry) addReader() bool { //nolint:privatedoc // explains why
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if !e.expires.IsZero() && !time.Now().Before(e.expires) {
@@ -219,8 +221,7 @@ func (e *entry) advance(n int) {
 	e.notifyLocked()
 }
 
-// finish commits or aborts the fill's cache write, publishes the outcome and
-// decides how long the group keeps the response.
+// finish commits or aborts the fill's cache write, publishes the outcome and sets how long the group keeps it.
 func (e *entry) finish(w *Writer, fillErr error) {
 	fillErr = w.abortUncommitted(fillErr)
 	if fillErr == nil && w.status == 0 {
@@ -230,8 +231,7 @@ func (e *entry) finish(w *Writer, fillErr error) {
 	e.mu.Lock()
 	retain, forever := e.retentionLocked(fillErr)
 	e.mu.Unlock()
-	// Leave the group before publishing completion so no new request joins a
-	// response that is about to be dropped.
+	// Leave the group before publishing completion so no request joins a response about to be dropped.
 	if !forever && retain <= 0 {
 		e.group.remove(e)
 	}
@@ -260,8 +260,9 @@ func (e *entry) retentionLocked(fillErr error) (retain time.Duration, forever bo
 	}
 }
 
-// serve streams the response to w. It reads source only below written, which
-// the fill advances after each write lands, so it never sees unwritten bytes.
+// serve streams the response to w.
+//
+// It reads source only below written, which advances after each write lands, so it never sees unwritten bytes.
 func (e *entry) serve(w http.ResponseWriter, req *http.Request, filled bool) (Result, error) {
 	result := Result{Filled: filled}
 	start := time.Now()
@@ -312,9 +313,10 @@ func (e *entry) serve(w http.ResponseWriter, req *http.Request, filled bool) (Re
 	}
 }
 
-// reusableBy reports whether a follower may reuse the response. Errors are also
-// checked against the follower, so its credentials, varied headers and no-cache count.
-func (e *entry) reusableBy(req *http.Request, status int, header http.Header, shared bool) bool {
+// reusableBy reports whether a follower may reuse the response.
+//
+// Errors are also checked against the follower, so its credentials, varied headers and no-cache count.
+func (e *entry) reusableBy(req *http.Request, status int, header http.Header, shared bool) bool { //nolint:privatedoc // explains why
 	if !shared {
 		return false
 	}
@@ -328,6 +330,7 @@ func (e *entry) reusableBy(req *http.Request, status int, header http.Header, sh
 }
 
 // Writer receives a fill's response so existing forwarding code can write into it.
+//
 // It must only be used by the fill it was passed to.
 type Writer struct {
 	entry  *entry
@@ -347,10 +350,10 @@ type Writer struct {
 var _ http.ResponseWriter = (*Writer)(nil)
 var _ http.Flusher = (*Writer)(nil)
 
+// Header implements http.ResponseWriter.
 func (w *Writer) Header() http.Header { return w.header }
 
-// WriteHeader publishes status and a snapshot of the headers to readers.
-// Informational statuses are not forwarded.
+// WriteHeader publishes status and a snapshot of the headers to readers, except informational statuses.
 func (w *Writer) WriteHeader(status int) {
 	if w.status != 0 || status < http.StatusOK {
 		return
@@ -359,8 +362,9 @@ func (w *Writer) WriteHeader(status int) {
 	w.entry.publishHeader(status, w.header.Clone())
 }
 
-// Store takes ownership of cw, committing it if the fill succeeds. It must follow
-// a 2xx WriteHeader and precede the first Write.
+// Store takes ownership of cw, committing it if the fill succeeds.
+//
+// It must follow a 2xx WriteHeader and precede the first Write.
 func (w *Writer) Store(cw cache.Writer) error {
 	if w.status < 200 || w.status >= 300 || w.file != nil || w.stored || w.committed {
 		err := errors.Errorf("spool store requires a 2xx status and no body, got status %d", w.status)
@@ -384,8 +388,9 @@ func (w *Writer) Store(cw cache.Writer) error {
 	return nil
 }
 
-// Write appends p to the response. A cache failure fails the response only when
-// readers follow the cache write; otherwise the cache write is abandoned.
+// Write appends p to the response.
+//
+// A cache failure fails the response only when readers follow the cache write; otherwise the write is abandoned.
 func (w *Writer) Write(p []byte) (int, error) {
 	if w.committed {
 		return 0, errors.New("spool write after commit")
@@ -436,8 +441,9 @@ func (w *Writer) openFile() error {
 	return nil
 }
 
-// Commit stores the body in the cache and returns any cache failure, including
-// an abandoned write. Call it after the last Write; it is a no-op without Store.
+// Commit stores the body in the cache and returns any cache failure, including an abandoned write.
+//
+// Call it after the last Write; it is a no-op without Store.
 func (w *Writer) Commit() error {
 	if w.committed {
 		return nil

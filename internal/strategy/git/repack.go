@@ -35,9 +35,9 @@ func (s *Strategy) scheduleRepackJobs(repo *gitclone.Repository) {
 			span.End()
 		}()
 
-		// Pack count before and after gives us a direct view of how much
-		// the geometric repack actually consolidated. A flat before/after
-		// ratio over time means fragmentation is outpacing the schedule.
+		// Pack counts before and after show how much the geometric repack consolidated.
+		//
+		// A flat before/after ratio over time means fragmentation is outpacing the schedule.
 		if before, err := countPackFiles(repo.Path()); err == nil {
 			s.metrics.recordRepackPackCount(ctx, upstream, "before", before)
 			span.SetAttributes(attribute.Int("cachew.pack_count_before", before))
@@ -60,8 +60,6 @@ func (s *Strategy) scheduleRepackJobs(repo *gitclone.Repository) {
 	})
 }
 
-// countPackFiles returns the number of .pack files in the mirror's
-// objects/pack directory. Returns 0, nil if the directory is missing.
 func countPackFiles(repoPath string) (int, error) {
 	entries, err := os.ReadDir(filepath.Join(repoPath, "objects", "pack"))
 	if err != nil {

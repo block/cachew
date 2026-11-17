@@ -19,6 +19,9 @@ func NewKey(s string) Key { return Key(sha256.Sum256([]byte(s))) }
 
 func (k *Key) String() string { return hex.EncodeToString(k[:]) }
 
+// UnmarshalText implements encoding.TextUnmarshaler.
+//
+// Text that is not a 64-character hex digest is hashed into a key with NewKey.
 func (k *Key) UnmarshalText(text []byte) error {
 	if len(text) == 64 {
 		bytes, err := hex.DecodeString(string(text))
@@ -31,6 +34,7 @@ func (k *Key) UnmarshalText(text []byte) error {
 	return nil
 }
 
+// MarshalText implements encoding.TextMarshaler.
 func (k *Key) MarshalText() ([]byte, error) {
 	return []byte(k.String()), nil
 }

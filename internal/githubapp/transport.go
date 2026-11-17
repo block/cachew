@@ -43,8 +43,9 @@ func NewAPIClient(base *http.Client) *http.Client {
 	return &client
 }
 
-// WithInstallationCooldown scopes upstream cooldowns to a GitHub App
-// installation, since GitHub limits each installation separately.
+// WithInstallationCooldown scopes upstream cooldowns to a GitHub App installation.
+//
+// GitHub rate limits each installation separately.
 func WithInstallationCooldown(ctx context.Context, installationID string) context.Context {
 	return httputil.WithCooldownScope(ctx, "github-installation:"+installationID)
 }

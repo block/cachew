@@ -14,61 +14,70 @@ import (
 // HeaderFunc returns headers to attach to each outgoing request.
 type HeaderFunc = client.HeaderFunc
 
-// NewHTTPClient creates an *http.Client that attaches headerFunc headers
-// to every outgoing request.
+// NewHTTPClient creates an *http.Client that attaches headerFunc headers to every outgoing request.
 func NewHTTPClient(headerFunc HeaderFunc) *http.Client { return client.NewHTTPClient(headerFunc) }
 
-// Remote implements Cache as a client for the remote cache server, wrapping
-// a *client.Client.
+// Remote implements Cache as a client for the remote cache server, wrapping a *client.Client.
 type Remote struct {
 	c *client.Client
 }
 
 var _ Cache = (*Remote)(nil)
 
-// NewRemote creates a new remote cache client. If headerFunc is non-nil,
-// its returned headers are added to every outgoing request.
+// NewRemote creates a new remote cache client.
+//
+// If headerFunc is non-nil, its returned headers are added to every outgoing request.
 func NewRemote(baseURL string, headerFunc HeaderFunc) *Remote {
 	return &Remote{c: client.New(baseURL, headerFunc)}
 }
 
 func (r *Remote) String() string { return r.c.String() }
 
+// Namespace returns a Remote whose requests target the given namespace on the server.
 func (r *Remote) Namespace(namespace Namespace) Cache {
 	return &Remote{c: r.c.Namespace(namespace)}
 }
 
+// Open fetches an object from the cache server.
 func (r *Remote) Open(ctx context.Context, key Key, opts ...Option) (io.ReadCloser, http.Header, error) {
 	rc, h, err := r.c.Open(ctx, key, opts...)
 	return rc, h, errors.WithStack(err)
 }
 
+// Stat fetches an object's headers from the cache server.
 func (r *Remote) Stat(ctx context.Context, key Key, opts ...Option) (http.Header, error) {
 	return errors.WithStack2(r.c.Stat(ctx, key, opts...))
 }
 
+// Create returns a Writer that uploads the object to the cache server, committing on Close.
 func (r *Remote) Create(ctx context.Context, key Key, headers http.Header, ttl time.Duration, opts ...Option) (Writer, error) {
 	return errors.WithStack2(r.c.Create(ctx, key, headers, ttl, opts...))
 }
 
+// UpdateMetadata asks the cache server to merge headers and reset the TTL of an object.
 func (r *Remote) UpdateMetadata(ctx context.Context, key Key, headers http.Header, ttl time.Duration, opts ...Option) error {
 	return errors.WithStack(r.c.UpdateMetadata(ctx, key, headers, ttl, opts...))
 }
 
+// Delete removes an object from the cache server.
 func (r *Remote) Delete(ctx context.Context, key Key) error {
 	return errors.WithStack(r.c.Delete(ctx, key))
 }
 
+// Invalidate asks the cache server to evict its stale local copy of an object.
 func (r *Remote) Invalidate(ctx context.Context, key Key) error {
 	return errors.WithStack(r.c.Invalidate(ctx, key))
 }
 
+// Stats retrieves the cache server's statistics.
 func (r *Remote) Stats(ctx context.Context) (Stats, error) {
 	return errors.WithStack2(r.c.Stats(ctx))
 }
 
+// ListNamespaces returns the namespaces known to the cache server.
 func (r *Remote) ListNamespaces(ctx context.Context) ([]string, error) {
 	return errors.WithStack2(r.c.ListNamespaces(ctx))
 }
 
+// Close releases resources held by the underlying client.
 func (r *Remote) Close() error { return errors.WithStack(r.c.Close()) }

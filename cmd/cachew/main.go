@@ -58,9 +58,7 @@ func run() int {
 	ctx := context.Background()
 	_, ctx = logging.Configure(ctx, cli.LoggingConfig)
 
-	// Wire up tracing for the short-lived CLI. tracing.New is env-driven:
-	// it only installs an exporter when OTEL_EXPORTER_OTLP_ENDPOINT is set,
-	// so this is a no-op for users who haven't opted in.
+	// tracing.New only installs an exporter when OTEL_EXPORTER_OTLP_ENDPOINT is set, so this is opt-in.
 	stopTracing, err := tracing.New(ctx, tracing.Config{Enabled: true})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to initialize tracing: %v\n", err) //nolint:forbidigo
@@ -89,8 +87,8 @@ func run() int {
 }
 
 // errCacheMiss signals that a restore found no object for the requested key.
-// Sentinel so main can exit with code 2 (distinct from generic errors at
-// code 1), matching conventions used by grep/diff.
+//
+// main exits with code 2 for it, distinct from code 1 for other errors, as grep and diff do.
 var errCacheMiss = errors.New("cache miss")
 
 type GetCmd struct {
@@ -264,10 +262,11 @@ func (c *RestoreCmd) Run(ctx context.Context, api *client.Client, cli *CLI) erro
 	return nil
 }
 
-// resolveKey returns the final Key and a human-readable form for logging,
-// using exactly one of key or hashFiles (enforced by kong's xor group), then
-// applying any global --platform / --daily / --hourly prefixes.
-func resolveKey(cli *CLI, key string, hashFiles []string) (client.Key, string, error) {
+// resolveKey returns the final Key and a human-readable form for logging.
+//
+// It uses exactly one of key or hashFiles, enforced by kong's xor group, then applies the global
+// --platform, --daily and --hourly prefixes.
+func resolveKey(cli *CLI, key string, hashFiles []string) (client.Key, string, error) { //nolint:privatedoc // documents a non-obvious contract
 	raw := key
 	if len(hashFiles) > 0 {
 		k, err := client.HashFiles(hashFiles...)

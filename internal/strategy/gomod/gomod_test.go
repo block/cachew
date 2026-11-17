@@ -372,8 +372,7 @@ func TestGoModListNotCached(t *testing.T) {
 	assert.Equal(t, 2, mock.getRequestCount(upstreamPath), "/@v/list endpoint should not be cached")
 }
 
-// TestNewMissingGitBinaryForPrivatePaths verifies that New returns an error when git is not
-// in PATH and private-paths are configured, but succeeds when no private paths are set.
+// TestNewMissingGitBinaryForPrivatePaths verifies New requires git in PATH only when private-paths are configured.
 func TestNewMissingGitBinaryForPrivatePaths(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("PATH manipulation for binary checks not supported on Windows")

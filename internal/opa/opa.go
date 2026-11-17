@@ -26,8 +26,7 @@ allow if startswith(input.remote_addr, "127.0.0.1:")
 allow if not input.path[0] in {"api", "admin"}
 `
 
-// Config for OPA policy evaluation. If neither Policy nor PolicyFile is set,
-// a default policy allowing only GET and HEAD requests is used.
+// Config for OPA policy evaluation. Without Policy or PolicyFile, a default policy allows only GET and HEAD.
 type Config struct {
 	Policy     string `hcl:"policy,optional" help:"Inline Rego policy."`
 	PolicyFile string `hcl:"policy-file,optional" help:"Path to a Rego policy file."`
@@ -37,8 +36,8 @@ type Config struct {
 }
 
 // Middleware returns an http.Handler that evaluates OPA policy before delegating to next.
-// The policy must define a boolean "allow" rule under package cachew.authz.
-// If allow is true the request proceeds; otherwise it is rejected with 403.
+//
+// The policy must define a boolean "allow" rule in package cachew.authz; false rejects with 403.
 func Middleware(ctx context.Context, cfg Config, next http.Handler) (http.Handler, error) {
 	policy, err := loadPolicy(cfg)
 	if err != nil {
@@ -67,9 +66,10 @@ func Middleware(ctx context.Context, cfg Config, next http.Handler) (http.Handle
 		}
 		if !allowed {
 			logger.WarnContext(r.Context(), "OPA denied request", "method", r.Method, "path", r.URL.Path, "remote_addr", r.RemoteAddr)
-			// The unread body is still on the wire, so the connection can't be reused. Saying so
-			// up front also stops net/http reading up to 256KiB of the body before replying, which
-			// it does because otelhttp replaces r.Body and hides the unread length from it.
+			// The unread body is still on the wire, so the connection can't be reused.
+			//
+			// Saying so up front stops net/http reading up to 256KiB of body before replying, which it does because
+			// otelhttp replaces r.Body and hides its unread length.
 			if r.ContentLength != 0 {
 				w.Header().Set("Connection", "close")
 			}
@@ -81,11 +81,10 @@ func Middleware(ctx context.Context, cfg Config, next http.Handler) (http.Handle
 	}), nil
 }
 
-// RunTests compiles the configured policy together with the Rego test module in
-// cfg.Test and executes every test_* rule. It returns the number of tests that
-// passed and an error enumerating any that failed or errored. When cfg.Test is
-// empty it is a no-op. The policy under test is loaded the same way as
-// Middleware, so an empty policy config exercises DefaultPolicy.
+// RunTests runs every test_* rule in the cfg.Test Rego module against the configured policy.
+//
+// It returns the passed count and an error listing failures; empty cfg.Test is a no-op. The policy loads as
+// in Middleware, so an empty policy config tests DefaultPolicy.
 func RunTests(ctx context.Context, cfg Config) (int, error) {
 	if cfg.Test == "" {
 		return 0, nil
@@ -133,7 +132,6 @@ func RunTests(ctx context.Context, cfg Config) (int, error) {
 	return passed, nil
 }
 
-// parseTestModules parses the policy and test Rego sources into modules keyed by filename.
 func parseTestModules(policy, test string) (map[string]*ast.Module, error) {
 	policyModule, err := ast.ParseModule("policy.rego", policy)
 	if err != nil {
@@ -146,7 +144,6 @@ func parseTestModules(policy, test string) (map[string]*ast.Module, error) {
 	return map[string]*ast.Module{"policy.rego": policyModule, "test.rego": testModule}, nil
 }
 
-// prepareQuery compiles a single Rego query against the given policy and data options.
 func prepareQuery(ctx context.Context, query, policy string, dataOpts []func(*rego.Rego)) (rego.PreparedEvalQuery, error) {
 	opts := make([]func(*rego.Rego), 0, 2+len(dataOpts))
 	opts = append(opts, rego.Query(query), rego.Module("policy.rego", policy))
@@ -158,7 +155,6 @@ func prepareQuery(ctx context.Context, query, policy string, dataOpts []func(*re
 	return prepared, nil
 }
 
-// dataOptions returns rego options for loading external data, if configured.
 func dataOptions(cfg Config) ([]func(*rego.Rego), error) {
 	if cfg.Data == "" && cfg.DataFile == "" {
 		return nil, nil
@@ -170,7 +166,6 @@ func dataOptions(cfg Config) ([]func(*rego.Rego), error) {
 	return []func(*rego.Rego){rego.Data(opaData)}, nil
 }
 
-// evalAllow evaluates the prepared allow query and returns whether the request is permitted.
 func evalAllow(ctx context.Context, prepared rego.PreparedEvalQuery, input map[string]any) (bool, error) {
 	results, err := prepared.Eval(ctx, rego.EvalInput(input))
 	if err != nil {

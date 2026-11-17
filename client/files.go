@@ -42,8 +42,7 @@ type ttlOpt time.Duration
 
 func (o ttlOpt) applySave(c *saveConfig) { c.ttl = time.Duration(o) }
 
-// WithTTL sets the TTL on the uploaded object. Zero (the default) uses the
-// server default.
+// WithTTL sets the TTL on the uploaded object. Zero (the default) uses the server default.
 func WithTTL(d time.Duration) SaveOption { return ttlOpt(d) }
 
 type excludeOpt []string
@@ -74,12 +73,10 @@ type zstdThreadsOpt int
 func (o zstdThreadsOpt) applySave(c *saveConfig)       { c.zstdThreads = int(o) }
 func (o zstdThreadsOpt) applyRestore(c *restoreConfig) { c.zstdThreads = int(o) }
 
-// WithZstdThreads sets zstd parallelism. Zero (the default) uses all CPU
-// cores.
+// WithZstdThreads sets zstd parallelism. Zero (the default) uses all CPU cores.
 func WithZstdThreads(n int) SaveRestoreOption { return zstdThreadsOpt(n) }
 
-// Save archives the given paths within baseDir and uploads the tar+zstd
-// stream under key. Any existing object at key is overwritten.
+// Save archives paths within baseDir and uploads the tar+zstd stream under key, overwriting any existing object.
 func (c *Client) Save(ctx context.Context, key Key, baseDir string, paths []string, opts ...SaveOption) error {
 	var cfg saveConfig
 	for _, opt := range opts {
@@ -105,9 +102,9 @@ func (c *Client) Save(ctx context.Context, key Key, baseDir string, paths []stri
 	return errors.Wrap(wc.Close(), "failed to close writer")
 }
 
-// Restore downloads the archive stored under key and extracts it into
-// baseDir. Returns (false, nil) on cache miss so callers can populate
-// baseDir and then Save.
+// Restore downloads the archive stored under key and extracts it into baseDir.
+//
+// Returns (false, nil) on cache miss so callers can populate baseDir and then Save.
 func (c *Client) Restore(ctx context.Context, key Key, baseDir string, opts ...RestoreOption) (bool, error) {
 	var cfg restoreConfig
 	for _, opt := range opts {
@@ -129,14 +126,10 @@ func (c *Client) Restore(ctx context.Context, key Key, baseDir string, opts ...R
 	return true, nil
 }
 
-// HashFiles returns a Key derived from the contents of all regular files
-// matched by the given glob patterns. Patterns use doublestar syntax, so **
-// matches any number of path segments (e.g. "**/go.sum"). Matches are
-// deduplicated and sorted by path, and each file's path and contents are
-// folded into the digest so that content or path changes invalidate the key.
-// Directories and non-regular matches are skipped. Returns an error if no
-// regular files match any pattern, to avoid silently producing a constant
-// key on typos.
+// HashFiles returns a Key derived from the paths and contents of regular files matched by doublestar globs.
+//
+// "**" matches any number of path segments (e.g. "**/go.sum"); non-regular matches are skipped. Returns an error
+// if no regular files match, to avoid silently producing a constant key on typos.
 func HashFiles(patterns ...string) (Key, error) {
 	if len(patterns) == 0 {
 		return Key{}, errors.New("at least one pattern is required")

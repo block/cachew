@@ -19,8 +19,7 @@ import (
 	"github.com/block/cachew/client"
 )
 
-// TestMain drops the GIT_* variables git exports under hooks so test git
-// commands target their temp dirs, not the ambient repository.
+// TestMain clears the GIT_* variables git exports under hooks so test git commands use their temp dirs.
 func TestMain(m *testing.M) {
 	for _, v := range []string{
 		"GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE",
@@ -141,8 +140,7 @@ func TestGitRestoreSnapshotParallel(t *testing.T) {
 		if strings.HasSuffix(r.URL.Path, "/snapshot.tar.zst") {
 			w.Header().Set("Content-Type", "application/zstd")
 			w.Header().Set("ETag", `"snap-v1"`)
-			// ServeContent honours Range/If-Range against the ETag, so ParallelGet
-			// fetches the snapshot in concurrent chunks.
+			// ServeContent honours Range/If-Range against the ETag, so ParallelGet fetches in concurrent chunks.
 			http.ServeContent(w, r, "snapshot.tar.zst", time.Time{}, bytes.NewReader(snapshotData))
 			return
 		}
@@ -150,8 +148,7 @@ func TestGitRestoreSnapshotParallel(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	// A nested, not-yet-existing target exercises temp-dir creation on the
-	// target filesystem.
+	// A nested, missing target exercises temp-dir creation on the target filesystem.
 	dstDir := filepath.Join(t.TempDir(), "nested", "restored")
 	cmd := &GitRestoreCmd{
 		RepoURL:             "https://github.com/test/repo",
@@ -383,8 +380,7 @@ func TestGitRestoreWithRef(t *testing.T) {
 		NoBundle:  true,
 	}
 	api := client.NewWithHTTPClient(srv.URL, srv.Client())
-	// The restored snapshot has no origin remote, so the post-pull will fail.
-	// That's expected; we just want to verify ensure-refs ran after snapshot.
+	// The snapshot has no origin remote, so the pull fails; the test only checks that ensure-refs ran.
 	err := restoreCmd.Run(context.Background(), api)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "git pull")
@@ -540,17 +536,14 @@ func TestGitRestoreSkipsPullWhenLocalHasResolvedSHA(t *testing.T) {
 		NoBundle:  true,
 	}
 	api := client.NewWithHTTPClient(srv.URL, srv.Client())
-	// The snapshot has no origin remote, so a real pull would fail. The test
-	// passes only if pull is skipped because the server's resolved SHA is
-	// already in the local clone.
+	// With no origin remote, this passes only if the pull is skipped because the resolved SHA is local.
 	assert.NoError(t, restoreCmd.Run(context.Background(), api))
 }
 
 func TestGitRestorePullsFromOrigin(t *testing.T) {
-	// Build an "upstream" repo whose snapshot we serve, plus a bare clone of
-	// it that the working tree's origin will point at after restore. The
-	// upstream then gets an extra commit so we can verify that the post-
-	// restore `git pull` picks it up.
+	// Snapshot a repo whose origin is a bare clone, then commit to the bare clone.
+	//
+	// The post-restore `git pull` must pick up the new commit.
 	tmpDir := t.TempDir()
 	workDir := filepath.Join(tmpDir, "work")
 	assert.NoError(t, os.MkdirAll(workDir, 0o755))
@@ -565,8 +558,7 @@ func TestGitRestorePullsFromOrigin(t *testing.T) {
 	}
 	runGit("clone", "--bare", workDir, bareDir)
 
-	// Add an origin pointing at the bare clone so the post-restore pull has
-	// somewhere to fetch from.
+	// Add an origin pointing at the bare clone so the post-restore pull has somewhere to fetch from.
 	runGit("-C", workDir, "remote", "add", "origin", bareDir)
 	// Track origin/main so `git pull` knows what to merge.
 	runGit("-C", workDir, "fetch", "origin")
@@ -607,8 +599,7 @@ func TestGitRestorePullsFromOrigin(t *testing.T) {
 	api := client.NewWithHTTPClient(srv.URL, srv.Client())
 	assert.NoError(t, restoreCmd.Run(context.Background(), api))
 
-	// The post-restore pull from origin (= the bare repo) should have brought
-	// in the new.txt commit.
+	// The post-restore pull from origin (the bare repo) should have brought in new.txt.
 	content, err := os.ReadFile(filepath.Join(dstDir, "new.txt"))
 	assert.NoError(t, err)
 	assert.Equal(t, "added", string(content))

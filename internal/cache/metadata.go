@@ -9,10 +9,10 @@ import (
 	"github.com/block/cachew/internal/httputil"
 )
 
-// updatedHeaders returns stored with update's headers replacing their stored
-// values, after checking the update against the stored ETag. Backends share it
-// so UpdateMetadata has identical semantics everywhere.
-func updatedHeaders(stored, update http.Header, opts []Option) (http.Header, error) {
+// updatedHeaders returns stored with update's headers applied, after checking the update against the stored ETag.
+//
+// Backends share it so UpdateMetadata has identical semantics everywhere.
+func updatedHeaders(stored, update http.Header, opts []Option) (http.Header, error) { //nolint:privatedoc // explains why
 	if update.Get(ETagKey) != "" {
 		return nil, errors.New("UpdateMetadata cannot change the ETag")
 	}

@@ -23,8 +23,7 @@ type roundTripperFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
 
-// rangeGetCounters counts range GETs issued to S3, and how many of them lack
-// an If-Match revision pin.
+// rangeGetCounters counts range GETs issued to S3, and how many lack an If-Match revision pin.
 type rangeGetCounters struct {
 	rangeGets    atomic.Int64
 	unpinnedGets atomic.Int64
@@ -35,10 +34,10 @@ func (c *rangeGetCounters) reset() {
 	c.unpinnedGets.Store(0)
 }
 
-// newCountingS3 returns an S3 cache whose transport records range GETs in the
-// returned counters. Uploads are forced serial because minio-go's parallel
-// multipart upload races on a shared CRC digest and these tests only exercise
-// downloads.
+// newCountingS3 returns an S3 cache whose transport records range GETs in the returned counters.
+//
+// Uploads are forced serial because minio-go's parallel multipart upload races on a shared CRC digest, and these
+// tests only exercise downloads.
 func newCountingS3(t *testing.T, cfg S3Config) (*S3, context.Context, *rangeGetCounters) {
 	t.Helper()
 	cfg.Bucket = s3clienttest.Start(t)

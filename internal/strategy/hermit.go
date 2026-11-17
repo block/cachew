@@ -19,6 +19,7 @@ import (
 	"github.com/block/cachew/internal/strategy/handler"
 )
 
+// RegisterHermit registers the hermit strategy, which caches Hermit package downloads under /hermit/.
 func RegisterHermit(r *Registry, spools spool.Provider) {
 	Register(r, "hermit", "Caches Hermit package downloads.", func(ctx context.Context, config HermitConfig, c cache.Cache, mux Mux) (*Hermit, error) {
 		registry, err := spools()
@@ -32,18 +33,19 @@ func RegisterHermit(r *Registry, spools spool.Provider) {
 const defaultGitHubBaseURL = "http://127.0.0.1:8080/github.com"
 
 // hermitBinaryPattern matches the Hermit self-update binary (e.g. hermit-linux-amd64.gz).
-// Unlike versioned package downloads, this URL is mutable — the same path serves
-// different versions over time — so it needs a short cache TTL.
+//
+// Unlike versioned package downloads, this URL serves different versions over time, so it needs a short cache TTL.
 var hermitBinaryPattern = regexp.MustCompile(`/hermit-[a-z]+-[a-z0-9]+\.gz$`)
 
+// HermitConfig sets where GitHub release downloads are redirected and how long the self-update binary is cached.
 type HermitConfig struct {
 	GitHubBaseURL string        `hcl:"github-base-url" help:"Base URL for GitHub release redirects" default:"http://127.0.0.1:8080/github.com"`
 	BinaryTTL     time.Duration `hcl:"binary-ttl,optional" help:"Cache TTL for the mutable Hermit self-update binary" default:"1h"`
 }
 
 // Hermit caches Hermit package downloads.
-// Acts as a smart router: GitHub releases redirect to github-releases strategy,
-// all other sources are handled directly.
+//
+// GitHub releases are redirected to the github-releases strategy; all other sources are handled directly.
 type Hermit struct {
 	config          HermitConfig
 	cache           cache.Cache
@@ -56,6 +58,7 @@ type Hermit struct {
 
 var _ Strategy = (*Hermit)(nil)
 
+// NewHermit creates the Hermit strategy and registers its /hermit/ routes on mux.
 func NewHermit(ctx context.Context, config HermitConfig, _ jobscheduler.Scheduler, c cache.Cache, mux Mux, spools *spool.Registry) (*Hermit, error) {
 	logger := logging.FromContext(ctx)
 

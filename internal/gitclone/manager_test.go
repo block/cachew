@@ -17,8 +17,7 @@ import (
 	"github.com/block/cachew/internal/logging"
 )
 
-// TestMain drops the GIT_* variables git exports under hooks so test git
-// commands target their temp dirs, not the ambient repository.
+// TestMain drops hook-exported GIT_* variables so test git commands target temp dirs, not the ambient repository.
 func TestMain(m *testing.M) {
 	for _, v := range []string{
 		"GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE",
@@ -29,8 +28,6 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
-// testRepoConfig returns a Config with timeouts populated, suitable for
-// constructing Repository values directly in tests that bypass NewManager.
 func testRepoConfig() Config {
 	return Config{
 		CloneTimeout:    1 * time.Hour,
@@ -46,8 +43,7 @@ func testMirrorConfig(mirrorRoot string) Config {
 	return config
 }
 
-// createBareRepo creates a bare git repository at the given path, suitable for
-// use as an upstream or as a mirror clone target.
+// createBareRepo creates a bare git repository at the given path, for use as an upstream or mirror clone target.
 func createBareRepo(t *testing.T, dir string) string {
 	t.Helper()
 	workPath := filepath.Join(dir, "work")
@@ -314,8 +310,7 @@ func TestManager_DiscoverExisting_SkipsAndRemovesLeftoverCloneTempDirs(t *testin
 	assert.NoError(t, os.MkdirAll(filepath.Dir(realRepo), 0o755))
 	assert.NoError(t, exec.Command("git", "clone", "--bare", upstreamPath, realRepo).Run())
 
-	// Simulate an interrupted clone: a leftover .clone-* temp dir containing a
-	// mirror clone at its "repo" subdirectory, alongside the real repo.
+	// Simulate an interrupted clone: a leftover .clone-* dir holding a mirror in its "repo" subdirectory.
 	leftover := filepath.Join(tmpDir, "github.com", "user1", cloneTempPrefix+"123456")
 	assert.NoError(t, os.MkdirAll(leftover, 0o755))
 	assert.NoError(t, exec.Command("git", "clone", "--bare", upstreamPath, filepath.Join(leftover, "repo")).Run())
@@ -1165,9 +1160,9 @@ exec %q "$@"
 	assert.False(t, repo.refCheckValid)
 }
 
-// TestMirrorConfigAllowsUnreachableSHA verifies that the mirror config lets
-// git upload-pack serve objects that are present in the ODB but unreachable
-// from any ref (e.g. after a force-push orphans a commit).
+// TestMirrorConfigAllowsUnreachableSHA verifies upload-pack serves ODB objects unreachable from any ref.
+//
+// A force-push can orphan a commit this way.
 func TestMirrorConfigAllowsUnreachableSHA(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not found in PATH")
@@ -1221,8 +1216,7 @@ func TestMirrorConfigAllowsUnreachableSHA(t *testing.T) {
 	branchOut, _ := exec.Command("git", "-C", mirrorDir, "branch", "--contains", orphanedSHA).CombinedOutput()
 	assert.Equal(t, "", strings.TrimSpace(string(branchOut)))
 
-	// The key assertion: upload-pack should accept the unreachable SHA.
-	// With allowReachableSHA1InWant this fails; with allowAnySHA1InWant it passes.
+	// Key assertion: this fails with allowReachableSHA1InWant and passes with allowAnySHA1InWant.
 	cmd := exec.Command("git", "-C", mirrorDir, "upload-pack", "--strict", ".")
 	cmd.Stdin = strings.NewReader(
 		fmt.Sprintf("0032want %s\n00000009done\n", orphanedSHA),

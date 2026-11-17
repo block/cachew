@@ -31,6 +31,7 @@ func RegisterDisk(r *Registry) {
 	)
 }
 
+// DiskConfig is the HCL configuration for the disk cache backend.
 type DiskConfig struct {
 	Root          string        `hcl:"root,optional" help:"Root directory for the disk storage." default:"${CACHEW_STATE}/cache"`
 	LimitMB       int           `hcl:"limit-mb,optional" help:"Maximum size of the disk cache in megabytes (defaults to 10GB)." default:"10240"`
@@ -38,6 +39,7 @@ type DiskConfig struct {
 	EvictInterval time.Duration `hcl:"evict-interval,optional" help:"Interval at which to check files for eviction (defaults to 1 minute)." default:"1m"`
 }
 
+// Disk is a Cache that stores objects as files under a root directory, with TTLs and headers in bbolt.
 type Disk struct {
 	logger       *slog.Logger
 	config       DiskConfig
@@ -54,13 +56,10 @@ const diskLockStripes = 1024
 
 var _ Cache = (*Disk)(nil)
 
-// NewDisk creates a new disk-based cache instance.
+// NewDisk creates a new disk-based cache instance. config.Root MUST be set.
 //
-// config.Root MUST be set.
-//
-// This [Cache] implementation stores cache entries under a directory. If total usage exceeds the limit, entries are
-// evicted based on their last access time. TTLs are stored in a bbolt database. If an entry exceeds its
-// TTL or the default, it is evicted. The implementation is safe for concurrent use within a single Go process.
+// Entries are evicted by last access time when usage exceeds the limit, or when past their TTL (stored in bbolt). Safe
+// for concurrent use within a single Go process.
 func NewDisk(ctx context.Context, config DiskConfig) (*Disk, error) {
 	logging.FromContext(ctx).InfoContext(ctx, "Constructing disk cache", "limit-mb", config.LimitMB, "evict-interval", config.EvictInterval, "root", config.Root, "max-ttl", config.MaxTTL)
 	// Validate config
@@ -142,6 +141,7 @@ func (d *Disk) keyLock(namespace Namespace, key Key) *sync.RWMutex {
 
 func (d *Disk) String() string { return "disk:" + d.config.Root }
 
+// Close stops the background eviction loop and closes the metadata database.
 func (d *Disk) Close() error {
 	d.stop()
 	<-d.evictionDone
@@ -151,10 +151,12 @@ func (d *Disk) Close() error {
 	return nil
 }
 
+// Size returns the total bytes of cached files across all namespaces.
 func (d *Disk) Size() int64 {
 	return d.size.Load()
 }
 
+// Stats reports the object count, bytes used, and configured capacity.
 func (d *Disk) Stats(_ context.Context) (Stats, error) {
 	count, err := d.db.count()
 	if err != nil {
@@ -167,6 +169,7 @@ func (d *Disk) Stats(_ context.Context) (Stats, error) {
 	}, nil
 }
 
+// Create writes to a temporary file that is renamed into place on Close; ttl is capped at MaxTTL.
 func (d *Disk) Create(ctx context.Context, key Key, headers http.Header, ttl time.Duration, opts ...Option) (Writer, error) {
 	if ttl > d.config.MaxTTL || ttl == 0 {
 		ttl = d.config.MaxTTL
@@ -213,6 +216,7 @@ func (d *Disk) Create(ctx context.Context, key Key, headers http.Header, ttl tim
 	}, nil
 }
 
+// UpdateMetadata merges headers and resets the TTL, capped at MaxTTL, without touching the file.
 func (d *Disk) UpdateMetadata(_ context.Context, key Key, headers http.Header, ttl time.Duration, opts ...Option) error {
 	if ttl > d.config.MaxTTL || ttl == 0 {
 		ttl = d.config.MaxTTL
@@ -243,6 +247,7 @@ func (d *Disk) UpdateMetadata(_ context.Context, key Key, headers http.Header, t
 	return errors.Wrap(d.db.set(key, d.namespace, now.Add(ttl), merged), "failed to update metadata")
 }
 
+// Delete removes the file and its metadata; an expired entry is removed but reported as fs.ErrNotExist.
 func (d *Disk) Delete(_ context.Context, key Key) error {
 	path := d.keyToPath(d.namespace, key)
 	fullPath := filepath.Join(d.config.Root, path)
@@ -277,6 +282,7 @@ func (d *Disk) Delete(_ context.Context, key Key) error {
 	return nil
 }
 
+// Invalidate deletes the local file, treating a missing entry as success.
 func (d *Disk) Invalidate(ctx context.Context, key Key) error {
 	err := d.Delete(ctx, key)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -285,6 +291,7 @@ func (d *Disk) Invalidate(ctx context.Context, key Key) error {
 	return errors.WithStack(err)
 }
 
+// Stat returns stored headers plus Content-Length; expired entries are deleted and reported as fs.ErrNotExist.
 func (d *Disk) Stat(ctx context.Context, key Key, opts ...Option) (http.Header, error) {
 	path := d.keyToPath(d.namespace, key)
 	fullPath := filepath.Join(d.config.Root, path)
@@ -335,14 +342,16 @@ func (d *Disk) openLocked(key Key, fullPath string, now time.Time) (f *os.File, 
 	if err != nil {
 		return nil, nil, false, errors.Join(errors.Errorf("failed to get headers: %w", err), f.Close())
 	}
-	// Size eviction orders entries by mtime, so bumping it on read makes eviction LRU. The TTL is deliberately left
-	// alone so entries still expire when their creator requested.
+	// Size eviction orders entries by mtime, so bumping it on read makes eviction LRU.
+	//
+	// The TTL is deliberately left alone so entries still expire when their creator requested.
 	if err := os.Chtimes(fullPath, now, now); err != nil {
 		return nil, nil, false, errors.Join(errors.Errorf("failed to update access time: %w", err), f.Close())
 	}
 	return f, headers, false, nil
 }
 
+// Open returns the file and its headers, bumping its mtime so size eviction is least-recently-used.
 func (d *Disk) Open(ctx context.Context, key Key, opts ...Option) (io.ReadCloser, http.Header, error) {
 	path := d.keyToPath(d.namespace, key)
 	fullPath := filepath.Join(d.config.Root, path)
@@ -532,8 +541,9 @@ func (w *diskWriter) Write(p []byte) (int, error) {
 
 var _ PendingReader = (*diskWriter)(nil)
 
-// OpenPending opens a separate read handle on the temp file. The handle survives
-// the rename on commit and the unlink on abort or eviction.
+// OpenPending opens a separate read handle on the temp file.
+//
+// The handle survives the rename on commit and the unlink on abort or eviction.
 func (w *diskWriter) OpenPending() (ReadAtCloser, error) {
 	if w.closed {
 		return nil, errors.New("disk writer already closed")

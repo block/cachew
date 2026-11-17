@@ -15,6 +15,7 @@ import (
 	"github.com/minio/minio-go/v7/pkg/credentials"
 )
 
+// Connection settings for the shared MinIO test container.
 const (
 	containerName = "minio-test"
 	Port          = "19000"
@@ -25,14 +26,10 @@ const (
 
 var bucketNameRe = regexp.MustCompile(`[^a-z0-9-]`)
 
-// Start ensures a shared MinIO container is running, creates a
-// deterministic bucket for this test, and returns its name. The bucket
-// name is derived from the calling package and t.Name() so that
-// different test packages cannot collide even when run in parallel.
+// Start ensures a shared MinIO container is running, then creates and returns this test's deterministic bucket.
 //
-// Any stale objects left over from a previous (possibly crashed) run
-// are removed up front, and t.Cleanup removes objects when the test
-// finishes normally.
+// The name derives from the calling package and t.Name() so packages can't collide in parallel. Stale objects
+// from a crashed run are removed up front, and t.Cleanup removes objects when the test finishes.
 func Start(t *testing.T) string {
 	t.Helper()
 
@@ -63,10 +60,9 @@ func Start(t *testing.T) string {
 
 const modulePrefix = "github.com/block/cachew/"
 
-// bucketName returns a deterministic, S3-legal bucket name that
-// incorporates the calling package path and the test name. This
-// ensures uniqueness across packages even though t.Name() alone does
-// not include the package.
+// bucketName returns a deterministic, S3-legal bucket name from the calling package and test name.
+//
+// The package is included because t.Name() alone is not unique across packages.
 func bucketName(t *testing.T) string {
 	t.Helper()
 
@@ -119,12 +115,10 @@ func Client(t *testing.T) *minio.Client {
 	return client
 }
 
-// startContainer starts the shared MinIO container, tolerating races with
-// other test processes doing the same: a "name already in use" failure means
-// another process is creating the container, but "docker start" on it can
-// still fail with "No such container" until that creation finishes
-// registering, so keep retrying until the container is up or the deadline
-// passes.
+// startContainer starts the shared MinIO container, tolerating races with other test processes.
+//
+// After "name already in use", "docker start" can fail with "No such container" until the other process
+// finishes creating it, so retry until the container is up or the deadline passes.
 func startContainer(t *testing.T) {
 	t.Helper()
 	deadline := time.Now().Add(30 * time.Second)

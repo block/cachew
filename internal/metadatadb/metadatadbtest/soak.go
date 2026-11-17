@@ -84,8 +84,9 @@ func (tr *tracker) appendList(key string) {
 	tr.listAppends[key]++
 }
 
-// SkipUnlessSoak skips the test unless SOAK_TEST is set. Call it before any
-// expensive setup; Soak and SoakReplicas also enforce it.
+// SkipUnlessSoak skips the test unless SOAK_TEST is set.
+//
+// Call it before any expensive setup; Soak and SoakReplicas also enforce it.
 func SkipUnlessSoak(t *testing.T) {
 	t.Helper()
 	if os.Getenv("SOAK_TEST") == "" {
@@ -93,9 +94,9 @@ func SkipUnlessSoak(t *testing.T) {
 	}
 }
 
-// Soak runs a concurrent soak test against a backend, exercising all data
-// structure types with random operations and periodic flushes, then verifies
-// consistency by checking monotonic invariants and round-trip equality.
+// Soak runs a concurrent soak test of random operations and periodic flushes over all data structure types.
+//
+// It then verifies monotonic invariants and round-trip equality.
 func Soak(t *testing.T, backend metadatadb.Backend, config SoakConfig) SoakResult {
 	SkipUnlessSoak(t)
 	config.setDefaults()
@@ -133,9 +134,9 @@ func Soak(t *testing.T, backend metadatadb.Backend, config SoakConfig) SoakResul
 	return result
 }
 
-// SoakReplicas runs the soak workload concurrently across multiple backends
-// sharing the same underlying storage, then verifies the monotonic invariants
-// on every replica and that all replicas converge to identical state.
+// SoakReplicas runs the soak workload concurrently across backends sharing the same underlying storage.
+//
+// It verifies the monotonic invariants on every replica and that all replicas converge to identical state.
 func SoakReplicas(t *testing.T, backends []metadatadb.Backend, config SoakConfig) SoakResult {
 	SkipUnlessSoak(t)
 	config.setDefaults()
@@ -167,8 +168,7 @@ func SoakReplicas(t *testing.T, backends []metadatadb.Backend, config SoakConfig
 	wg.Wait()
 	result.Duration = time.Since(startTime)
 
-	// Writes are synchronous, so everything is durable once the workers
-	// stop; each replica's flush then observes every write.
+	// Writes are synchronous, so once workers stop every write is durable and each replica's flush observes it.
 	for _, ns := range replicas {
 		assert.NoError(t, ns.Flush(ctx))
 	}
