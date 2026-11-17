@@ -868,6 +868,12 @@ func TestRepository_EnsureRefs(t *testing.T) {
 	assert.False(t, fetched)
 	assert.Equal(t, newSHA, resolved[head])
 
+	// HEAD resolves through the mirror's symbolic ref, so it needs no fetch.
+	resolved, _, fetched, err = repo.EnsureRefs(ctx, map[string]string{"HEAD": ""}, nil)
+	assert.NoError(t, err)
+	assert.False(t, fetched)
+	assert.Equal(t, newSHA, resolved["HEAD"])
+
 	// Missing ref: fetch runs but ref remains missing → empty resolved SHA.
 	resolved, _, fetched, err = repo.EnsureRefs(ctx, map[string]string{"refs/heads/does-not-exist": ""}, nil)
 	assert.NoError(t, err)
