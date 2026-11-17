@@ -981,18 +981,24 @@ func resolvedRefs(localRefs, expect map[string]string) map[string]string {
 	return out
 }
 
+// GetLocalRefs returns the SHA of every ref in the local mirror, including
+// HEAD, matching what GetUpstreamRefs reports for upstream.
 func (r *Repository) GetLocalRefs(ctx context.Context) (map[string]string, error) {
 	var output []byte
 	var err error
 
 	r.mu.RLock()
 	// #nosec G204 - r.path is controlled by us
-	cmd := exec.CommandContext(ctx, "git", "-C", r.path, "for-each-ref", "--format=%(objectname) %(refname)")
+	cmd := exec.CommandContext(ctx, "git", "-C", r.path, "show-ref", "--head")
 	output, err = cmd.CombinedOutput()
 	r.mu.RUnlock()
 
+	// show-ref exits 1 with no output when the repository has no refs.
+	if exitErr, ok := errors.AsType[*exec.ExitError](err); ok && exitErr.ExitCode() == 1 && len(output) == 0 {
+		return map[string]string{}, nil
+	}
 	if err != nil {
-		return nil, errors.Wrap(err, "git for-each-ref")
+		return nil, errors.Wrapf(err, "git show-ref: %s", output)
 	}
 
 	return ParseGitRefs(output), nil
