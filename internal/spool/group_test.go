@@ -125,6 +125,69 @@ func TestFillOutlivesItsRequests(t *testing.T) {
 	assert.Equal(t, "first second", string(body))
 }
 
+func TestClientHangupAfterFullBodyIsComplete(t *testing.T) {
+	ctx, registry, _ := newTestRegistry(t, spool.Config{})
+	group := registry.NewGroup(spool.ReleaseCompleted)
+	rest, release := make(chan struct{}), make(chan struct{})
+	defer close(release)
+	fill := func(_ context.Context, w *spool.Writer) error {
+		w.Header().Set("Content-Length", "4")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, "bo")
+		<-rest
+		_, err := io.WriteString(w, "dy")
+		<-release
+		return err
+	}
+	serve := func() (*notifyingRecorder, context.CancelFunc, chan error) {
+		reqCtx, cancel := context.WithCancel(ctx)
+		w := &notifyingRecorder{ResponseRecorder: httptest.NewRecorder(), wrote: make(chan int, 4)}
+		served := make(chan error, 1)
+		go func() {
+			_, err := group.Serve(w, httptest.NewRequestWithContext(reqCtx, http.MethodGet, "/object", nil), key, fill)
+			served <- err
+		}()
+		return w, cancel, served
+	}
+
+	partial, cancelPartial, partialErr := serve()
+	assert.Equal(t, 2, <-partial.wrote)
+	cancelPartial()
+	assert.IsError(t, <-partialErr, context.Canceled)
+
+	full, cancelFull, fullErr := serve()
+	assert.Equal(t, 2, <-full.wrote)
+	close(rest)
+	assert.Equal(t, 4, <-full.wrote)
+	cancelFull()
+	assert.NoError(t, <-fullErr)
+	assert.Equal(t, "body", full.Body.String())
+}
+
+func TestClientHangupAfterFailedFlushIsIncomplete(t *testing.T) {
+	ctx, registry, _ := newTestRegistry(t, spool.Config{})
+	group := registry.NewGroup(spool.ReleaseCompleted)
+	release := make(chan struct{})
+	defer close(release)
+	fill := func(_ context.Context, w *spool.Writer) error {
+		w.Header().Set("Content-Length", "4")
+		w.WriteHeader(http.StatusOK)
+		_, err := io.WriteString(w, "body")
+		<-release
+		return err
+	}
+	reqCtx, cancel := context.WithCancel(ctx)
+	w := &failingFlushRecorder{notifyingRecorder{ResponseRecorder: httptest.NewRecorder(), wrote: make(chan int, 4)}}
+	served := make(chan error, 1)
+	go func() {
+		_, err := group.Serve(w, httptest.NewRequestWithContext(reqCtx, http.MethodGet, "/object", nil), key, fill)
+		served <- err
+	}()
+	assert.Equal(t, 4, <-w.wrote)
+	cancel()
+	assert.IsError(t, <-served, errFlush)
+}
+
 func TestRequestsFollowPendingCacheWrite(t *testing.T) {
 	ctx, registry, dir := newTestRegistry(t, spool.Config{})
 	group := registry.NewGroup(spool.ReleaseCompleted)
@@ -584,6 +647,23 @@ func waitFor(t *testing.T, condition func() bool) {
 }
 
 var errCacheFull = errors.New("cache full")
+
+type notifyingRecorder struct {
+	*httptest.ResponseRecorder
+	wrote chan int
+}
+
+func (r *notifyingRecorder) Write(p []byte) (int, error) {
+	n, err := r.ResponseRecorder.Write(p)
+	r.wrote <- r.Body.Len()
+	return n, err
+}
+
+var errFlush = errors.New("connection reset")
+
+type failingFlushRecorder struct{ notifyingRecorder }
+
+func (r *failingFlushRecorder) FlushError() error { return errFlush }
 
 type failingCacheWriter struct{ writes int }
 

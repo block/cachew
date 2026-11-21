@@ -6,6 +6,7 @@ import (
 	"maps"
 	"net/http"
 	"os"
+	"strconv"
 	"sync"
 	"time"
 
@@ -266,7 +267,7 @@ func (e *entry) retentionLocked(fillErr error) (retain time.Duration, forever bo
 func (e *entry) serve(w http.ResponseWriter, req *http.Request, filled bool) (Result, error) {
 	result := Result{Filled: filled}
 	start := time.Now()
-	headerSent := false
+	headerSent, flushed := false, false
 	var offset int64
 	for {
 		e.mu.Lock()
@@ -297,9 +298,11 @@ func (e *entry) serve(w http.ResponseWriter, req *http.Request, filled bool) (Re
 			if err != nil {
 				return result, errors.Wrap(err, "write spooled response")
 			}
-			if flusher, ok := w.(http.Flusher); ok {
-				flusher.Flush()
+			err = http.NewResponseController(w).Flush()
+			if err != nil && !errors.Is(err, http.ErrNotSupported) {
+				return result, errors.Wrap(err, "flush spooled response")
 			}
+			flushed = err == nil
 			continue
 		}
 		if headerSent && done {
@@ -307,6 +310,10 @@ func (e *entry) serve(w http.ResponseWriter, req *http.Request, filled bool) (Re
 		}
 		select {
 		case <-req.Context().Done():
+			// A client that has the whole declared body may hang up before the fill commits.
+			if flushed && header.Get("Content-Length") == strconv.FormatInt(offset, 10) {
+				return result, nil
+			}
 			return result, errors.WithStack(req.Context().Err())
 		case <-changed:
 		}
