@@ -24,7 +24,7 @@ func Middleware(next http.Handler, config Config) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 		// Propagate attributes tot the handlers.
-		logger := FromContext(ctx).With("method", r.Method, "uri", r.RequestURI)
+		logger := FromContext(ctx).With("method", r.Method, "uri", RedactURI(r.RequestURI))
 		start := time.Now()
 		logger.DebugContext(r.Context(), "Request received")
 		var attrs []any
@@ -82,7 +82,7 @@ func Configure(ctx context.Context, config Config) (*slog.Logger, context.Contex
 			},
 		})
 	}
-	logger := slog.New(handler)
+	logger := slog.New(&redactingHandler{inner: handler})
 	return logger, context.WithValue(ctx, logKey{}, logger)
 }
 

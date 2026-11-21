@@ -334,6 +334,8 @@ metrics {
 }
 ```
 
+Logs and error response bodies write URL query strings as `?REDACTED`, because queries can carry credentials such as presigned-URL signatures.
+
 Admin endpoints: `/_liveness`, `/_readiness`, `PUT /admin/log/level`, `/admin/pprof/`.
 
 GitHub App installations are checked at startup and every minute via `/rate_limit`.

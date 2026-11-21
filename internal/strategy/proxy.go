@@ -76,7 +76,7 @@ func NewHTTPProxy(ctx context.Context, c cache.Cache, _ Mux, spools *spool.Regis
 			p.logger.ErrorContext(r.Context(), "Proxy request failed",
 				slog.String("url", target.String()),
 				slog.String("error", err.Error()))
-			http.Error(w, "proxy error: "+err.Error(), http.StatusBadGateway)
+			http.Error(w, logging.RedactText("proxy error: "+err.Error()), http.StatusBadGateway)
 		})
 
 	logger.InfoContext(ctx, "HTTP proxy strategy initialized")

@@ -128,4 +128,24 @@ func TestEnsureRefsHandler(t *testing.T) {
 	// Empty body → 400.
 	w, _ = doRequest(map[string]any{})
 	assert.Equal(t, http.StatusBadRequest, w.Code)
+
+	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/repo.git/") {
+			w.Header().Set("Location", `/a"x"?token=synthetic-token`)
+			w.WriteHeader(http.StatusFound)
+		}
+	}))
+	t.Cleanup(redirector.Close)
+	assert.NoError(t, os.WriteFile(filepath.Join(workPath, "f.txt"), []byte("v3"), 0o644))
+	for _, args := range [][]string{
+		{"-C", workPath, "commit", "-am", "v3"},
+		{"-C", workPath, "push", "origin", "HEAD:main"},
+		{"-C", mirrorPath, "remote", "set-url", "origin", redirector.URL + "/repo.git"},
+	} {
+		assert.NoError(t, exec.Command("git", args...).Run())
+	}
+	w, _ = doRequest(map[string]any{"refs": map[string]string{"refs/heads/main": ""}})
+	assert.Equal(t, http.StatusBadGateway, w.Code)
+	assert.Contains(t, w.Body.String(), `/a"x"?REDACTED`)
+	assert.NotContains(t, w.Body.String(), "synthetic-token")
 }

@@ -156,6 +156,36 @@ func TestHTTPProxyNonOKStatus(t *testing.T) {
 	assert.Error(t, err, "non-OK responses should not be cached")
 }
 
+func TestHTTPProxyErrorRedactsRedirectQuery(t *testing.T) {
+	httpTransportMutexProxy.Lock()
+	defer httpTransportMutexProxy.Unlock()
+
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/object" {
+			http.Redirect(w, r, "/signed?X-Amz-Signature=synthetic-signature", http.StatusFound)
+			return
+		}
+		conn, _, err := w.(http.Hijacker).Hijack()
+		assert.NoError(t, err)
+		assert.NoError(t, conn.Close())
+	}))
+	defer backend.Close()
+
+	originalTransport := http.DefaultTransport
+	defer func() { http.DefaultTransport = originalTransport }()                                   //nolint:reassign
+	http.DefaultTransport = &mockTransport{backend: backend, originalTransport: originalTransport} //nolint:reassign
+
+	handler, ctx, _ := setupProxyTest(t)
+
+	req := httptest.NewRequestWithContext(ctx, http.MethodGet, "http://dl.google.com/object", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadGateway, w.Code)
+	assert.Contains(t, w.Body.String(), "https://dl.google.com/signed?REDACTED")
+	assert.NotContains(t, w.Body.String(), "synthetic")
+}
+
 // TestHTTPProxyHTTPSUpgrade verifies that http:// proxy requests are fetched from upstream over HTTPS.
 func TestHTTPProxyHTTPSUpgrade(t *testing.T) {
 	httpTransportMutexProxy.Lock()

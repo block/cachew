@@ -3,6 +3,7 @@ package handler_test
 import (
 	"cmp"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -1060,4 +1061,41 @@ func TestBackoffPausesHandler(t *testing.T) {
 	w = serve(t, h, http.MethodGet, "http://example.com/scoped?scope=installation&upstream="+limited.URL, nil)
 	assert.Equal(t, http.StatusOK, w.Code, "a scoped request has its own cooldown")
 	assert.Equal(t, int32(4), calls.Load())
+}
+
+type closedResponseWriter struct{ *httptest.ResponseRecorder }
+
+func (closedResponseWriter) Write([]byte) (int, error) { return 0, io.ErrClosedPipe }
+
+func TestLoggedCacheKeyOmitsQuery(t *testing.T) {
+	const target = "/object?X-Amz-Signature=synthetic-signature"
+	mem := mustNewMemoryCache()
+	defer mem.Close()
+	var logs strings.Builder
+	ctx := logging.ContextWithLogger(t.Context(), slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	cw, err := mem.Create(ctx, cache.NewKey(target), http.Header{}, time.Hour)
+	assert.NoError(t, err)
+	_, err = io.WriteString(cw, "cached")
+	assert.NoError(t, err)
+	assert.NoError(t, cw.Close())
+
+	h := handler.New(http.DefaultClient, mem, newTestSpools(t))
+	h.ServeHTTP(closedResponseWriter{httptest.NewRecorder()}, httptest.NewRequest(http.MethodGet, target, nil).WithContext(ctx))
+
+	var keys []string
+	for line := range strings.Lines(logs.String()) {
+		var record struct {
+			Message  string `json:"msg"`
+			CacheKey string `json:"cache_key"`
+		}
+		assert.NoError(t, json.Unmarshal([]byte(line), &record))
+		if record.CacheKey != "" {
+			keys = append(keys, record.Message+": "+record.CacheKey)
+		}
+	}
+	assert.Equal(t, []string{
+		"Processing request: /object?REDACTED",
+		"Failed to serve from cache: /object?REDACTED",
+	}, keys)
+	assert.NotContains(t, logs.String(), "synthetic")
 }
