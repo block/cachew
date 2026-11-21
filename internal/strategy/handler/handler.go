@@ -656,7 +656,9 @@ func (h *Handler) streamAndCache(w http.ResponseWriter, r *http.Request, key cac
 		defer func() { metrics.RecordCacheFill(r.Context(), result) }()
 	}
 
-	cw, err := h.cache.Create(r.Context(), key, h.cacheHeaders(resp), h.ttlFunc(r))
+	fillCtx, cancelFill := detachedFillContext(r.Context())
+	defer cancelFill()
+	cw, err := h.cache.Create(fillCtx, key, h.cacheHeaders(resp), h.ttlFunc(r))
 	if err != nil {
 		result = fillCreateError
 		_, copyErr := io.Copy(w, resp.Body)
@@ -695,6 +697,8 @@ func (h *Handler) streamAndCache(w http.ResponseWriter, r *http.Request, key cac
 	switch {
 	case tee.err != nil:
 		result = fillWriteError
+	case copyErr == nil && closeErr == nil && cacheErr == nil:
+		result = fillSuccess
 	case r.Context().Err() != nil:
 		result = fillCanceled
 	case copyErr != nil || closeErr != nil:
@@ -706,6 +710,29 @@ func (h *Handler) streamAndCache(w http.ResponseWriter, r *http.Request, key cac
 		errors.Wrap(errors.Join(copyErr, closeErr), "stream response"),
 		errors.Wrap(cacheErr, "cache response"),
 	)
+}
+
+// fillGrace bounds how long a cache write may outlive the client that started it.
+const fillGrace = 30 * time.Second
+
+// detachedFillContext lets a cache write commit for up to fillGrace after the client disconnects.
+//
+// Clients hang up as soon as they have the whole body, which would otherwise cancel the commit.
+func detachedFillContext(parent context.Context) (context.Context, context.CancelFunc) { //nolint:privatedoc // explains why
+	ctx, cancel := context.WithCancel(context.WithoutCancel(parent))
+	stop := context.AfterFunc(parent, func() {
+		timer := time.NewTimer(fillGrace)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+			cancel()
+		case <-ctx.Done():
+		}
+	})
+	return ctx, func() {
+		stop()
+		cancel()
+	}
 }
 
 // writeRangeHeader answers a ranged request from the full upstream body, which is still cached in full.

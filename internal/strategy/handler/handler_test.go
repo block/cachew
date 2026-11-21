@@ -513,6 +513,105 @@ func TestCacheWriteFailureDoesNotTruncateResponse(t *testing.T) {
 	}
 }
 
+type slowCommitCache struct {
+	cache.Cache
+	release <-chan struct{}
+}
+
+func (c slowCommitCache) Create(ctx context.Context, key cache.Key, headers http.Header, ttl time.Duration, opts ...cache.Option) (cache.Writer, error) {
+	w, err := c.Cache.Create(ctx, key, headers, ttl, opts...)
+	return &slowCommitWriter{Writer: w, release: c.release}, errors.WithStack(err)
+}
+
+type slowCommitWriter struct {
+	cache.Writer
+	release <-chan struct{}
+}
+
+func (w *slowCommitWriter) Close() error {
+	<-w.release
+	return errors.WithStack(w.Writer.Close())
+}
+
+func TestUncoalescedFillSurvivesClientHangup(t *testing.T) {
+	payload := strings.Repeat("0123456789abcdef", 4<<10)
+	for _, tt := range []struct {
+		name     string
+		complete bool
+	}{
+		{name: "AfterFullBody", complete: true},
+		{name: "MidBody"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			reader := artifactReader(t)
+			origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Length", strconv.Itoa(len(payload)))
+				if tt.complete {
+					_, _ = io.WriteString(w, payload)
+					return
+				}
+				_, _ = io.WriteString(w, payload[:len(payload)/2])
+				w.(http.Flusher).Flush()
+				<-r.Context().Done()
+			}))
+			defer origin.Close()
+			mem := mustNewMemoryCache()
+			defer mem.Close()
+			release := make(chan struct{})
+			h := handler.New(http.DefaultClient, slowCommitCache{Cache: mem, release: release}, newTestSpools(t)).
+				Transform(upstreamTransform(origin.URL))
+			logger := logging.FromContext(artifactContext(t))
+			canceled := make(chan struct{})
+			done := make(chan struct{})
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				defer close(done)
+				context.AfterFunc(r.Context(), func() { close(canceled) })
+				h.ServeHTTP(w, r.WithContext(logging.ContextWithLogger(r.Context(), logger)))
+			}))
+			defer server.Close()
+			transport := &http.Transport{DisableCompression: true}
+			defer transport.CloseIdleConnections()
+
+			req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, server.URL+"/object", nil)
+			assert.NoError(t, err)
+			req.Header.Set("If-None-Match", `"stale"`)
+			resp, err := (&http.Client{Transport: transport}).Do(req)
+			assert.NoError(t, err)
+			if tt.complete {
+				body, err := io.ReadAll(resp.Body)
+				assert.NoError(t, err)
+				assert.Equal(t, payload, string(body))
+			} else {
+				body := make([]byte, len(payload)/2)
+				_, err = io.ReadFull(resp.Body, body)
+				assert.NoError(t, err)
+			}
+			assert.NoError(t, resp.Body.Close())
+			transport.CloseIdleConnections()
+			select {
+			case <-canceled:
+			case <-time.After(5 * time.Second):
+				t.Fatal("server did not see the client hang up")
+			}
+			close(release)
+			<-done
+
+			cached, _, err := mem.Open(t.Context(), cache.NewKey("/object"))
+			if !tt.complete {
+				assert.IsError(t, err, os.ErrNotExist)
+				assert.Equal(t, int64(0), artifactCount(t, reader, "cachew.cache.fills", "result", "success"))
+				return
+			}
+			assert.NoError(t, err)
+			stored, err := io.ReadAll(cached)
+			assert.NoError(t, err)
+			assert.NoError(t, cached.Close())
+			assert.Equal(t, payload, string(stored))
+			assert.Equal(t, int64(1), artifactCount(t, reader, "cachew.cache.fills", "result", "success"))
+		})
+	}
+}
+
 func mustNewMemoryCache() cache.Cache {
 	_, ctx := logging.Configure(context.Background(), logging.Config{Level: slog.LevelError})
 	c, err := cache.NewMemory(ctx, cache.MemoryConfig{
