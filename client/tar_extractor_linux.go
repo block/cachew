@@ -106,9 +106,9 @@ type tarExtractor struct {
 	copyBuf      []byte
 }
 
-func newTarExtractor(root string, writers int) *tarExtractor {
-	root = filepath.Clean(root)
-	dest := &destDir{fd: -1, path: root}
+func newTarExtractor(dir string, writers int) *tarExtractor {
+	root := filepath.Clean(dir)
+	dest := &destDir{fd: -1, path: root, dir: dir}
 	return &tarExtractor{
 		root:         root,
 		dest:         dest,
@@ -269,6 +269,10 @@ func (e *tarExtractor) entry(ctx context.Context, tr *tar.Reader, hdr *tar.Heade
 		}
 	}
 	isDir := isDirEntry(hdr)
+	if !isDir && strings.HasSuffix(name, "/.") {
+		// Only a directory can exist at "x/." and it can't be removed through that name, so GNU tar always fails.
+		return errors.Errorf("%s: cannot create a non-directory at a name ending in \".\"", hdr.Name)
+	}
 	if target == e.root {
 		if !isDir {
 			return errors.Errorf("%s: cannot replace the target directory", hdr.Name)
@@ -504,6 +508,13 @@ func (e *tarExtractor) dir(ctx context.Context, name, target string, hdr *tar.He
 	switch {
 	case err == nil && isDirStat(st):
 		return e.recordDir(ctx, name, target, hdr, viaLink, nil)
+	case err == nil && strings.HasSuffix(name, "/."):
+		// GNU tar's mkdir of "x/." resolves a symlink at x, so a link to a directory stays and anything else fails.
+		path := target + "/."
+		if _, err := e.dest.lstat(path); err != nil {
+			return err
+		}
+		return e.recordDir(ctx, name, path, hdr, true, nil)
 	case err == nil:
 		if err := e.removeExisting(target, viaLink); err != nil {
 			return err
@@ -804,12 +815,24 @@ func nssID(ctx context.Context, database, name string) (int, bool) {
 	}
 	line, _, _ := strings.Cut(string(out), "\n")
 	fields := strings.Split(line, ":")
-	// getent also accepts a numeric ID as the key, which getpwnam doesn't.
-	if len(fields) < 3 || fields[0] != name {
+	if len(fields) < 3 {
+		return 0, false
+	}
+	// getent looks a numeric key up as an ID, which getpwnam doesn't; for a name, NSS may return the canonical one.
+	if isGetentID(name) && fields[0] != name {
 		return 0, false
 	}
 	id, err := strconv.Atoi(fields[2])
 	return id, err == nil
+}
+
+func isGetentID(key string) bool {
+	// getent's test is strtoul consuming the whole key: optional leading space and sign, then decimal digits.
+	key = strings.TrimLeft(key, " \t\n\v\f\r")
+	if key != "" && (key[0] == '+' || key[0] == '-') {
+		key = key[1:]
+	}
+	return key != "" && strings.Trim(key, "0123456789") == ""
 }
 
 func isUnsafeLinkTarget(target string) bool {
@@ -889,7 +912,12 @@ func (e *tarExtractor) isPlaceholder(path string) bool {
 }
 
 func (e *tarExtractor) hardlink(name, target string, hdr *tar.Header, viaLink bool) error {
-	source := filepath.Join(e.root, saferName(hdr.Linkname))
+	link := saferName(hdr.Linkname)
+	if strings.HasSuffix(link, "/") || strings.HasSuffix(link, "/.") {
+		// Only a directory can be named like this, and directories can't be hard linked.
+		return errors.Errorf("%s: cannot hard link to %s: not a directory", hdr.Name, hdr.Linkname)
+	}
+	source := filepath.Join(e.root, link)
 	if _, ok := e.dirs[filepath.Dir(source)]; ok {
 		e.wait(source)
 	} else {

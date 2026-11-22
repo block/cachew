@@ -12,15 +12,17 @@ import (
 //
 // Only the member name then counts towards PATH_MAX, so a long destination path doesn't make deep members fail.
 type destDir struct {
-	fd   int
+	fd int
+	// path is the cleaned destination that member paths are joined onto; dir is the caller's path, opened as given.
 	path string
+	dir  string
 }
 
 func (d *destDir) open() error {
-	// Like tar -C, a destination that is a symlink is followed.
-	fd, err := unix.Open(d.path, unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	// Like tar -C, symlinks are followed, so a ".." after one leads somewhere filepath.Clean wouldn't.
+	fd, err := unix.Open(d.dir, unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
 	if err != nil {
-		return errors.Wrapf(err, "failed to open %s", d.path)
+		return errors.Wrapf(err, "failed to open %s", d.dir)
 	}
 	d.fd = fd
 	return nil

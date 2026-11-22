@@ -202,6 +202,46 @@ func TestExtractMatchesGNUTar(t *testing.T) {
 			directory("d/./", 0o555),
 			regular("d/file", 0o644, "x"),
 		}},
+		{name: "TrailingDotThroughSymlink", entries: []tarEntry{
+			directory("real/", 0o755),
+			symlink("alias", "real"),
+			directory("alias/./", 0o700),
+			regular("alias/file", 0o644, "x"),
+			directory("other/", 0o755),
+			symlink("other-alias", "other"),
+			directory("other-alias/././", 0o750),
+			regular("other/file", 0o644, "x"),
+			directory("untouched/", 0o755),
+			symlink("untouched-alias", "untouched"),
+			directory("untouched-alias/./", 0o711),
+		}},
+		{name: "TrailingDotThroughSymlinkReadOnly", entries: []tarEntry{
+			directory("real/", 0o755),
+			symlink("alias", "real"),
+			directory("alias/./", 0o555),
+			regular("alias/file", 0o644, "x"),
+		}},
+		{name: "TrailingDotThroughDanglingSymlink", entries: []tarEntry{
+			symlink("alias", "missing"),
+			directory("alias/./", 0o700),
+		}},
+		{name: "TrailingDotThroughSymlinkToFile", entries: []tarEntry{
+			regular("file", 0o644, "x"),
+			symlink("alias", "file"),
+			directory("alias/./", 0o700),
+		}},
+		{name: "TrailingDotOverFile", entries: []tarEntry{regular("f", 0o644, "x"), directory("f/./", 0o700)}},
+		{name: "FileAtTrailingDot", entries: []tarEntry{directory("d/", 0o755), regular("d/.", 0o644, "x")}},
+		{name: "FileAtMissingTrailingDot", entries: []tarEntry{regular("m/.", 0o644, "x")}},
+		{name: "SymlinkAtTrailingDot", entries: []tarEntry{symlink("m/.", "x")}},
+		{name: "FifoAtTrailingDot", entries: []tarEntry{directory("d/", 0o755), typed(tar.TypeFifo, "d/.", 0o644, "")}},
+		{name: "HardlinkAtTrailingDot", entries: []tarEntry{
+			regular("f", 0o644, "x"),
+			directory("d/", 0o755),
+			hardlink("d/.", "f"),
+		}},
+		{name: "HardlinkToTrailingSlash", entries: []tarEntry{regular("f", 0o644, "x"), hardlink("h", "f/")}},
+		{name: "HardlinkToTrailingDot", entries: []tarEntry{regular("f", 0o644, "x"), hardlink("h", "f/.")}},
 		{name: "RevisitReadOnly", entries: []tarEntry{
 			directory("readonly/", 0o555),
 			regular("elsewhere", 0o644, "x"),
@@ -270,6 +310,23 @@ func TestExtractLongMemberNames(t *testing.T) {
 	assert.NoError(t, err, "%s", out)
 	assert.NoError(t, client.Extract(t.Context(), bytes.NewReader(zstdCompress(t, archive)), goDir, 0))
 	assert.Equal(t, treeState(t, gnuDir), treeState(t, goDir))
+}
+
+func TestExtractOpensDestinationAsGiven(t *testing.T) {
+	// tar -C resolves ".." after a symlink in the filesystem, where filepath.Clean would drop the symlink.
+	base := t.TempDir()
+	for _, dir := range []string{"other/child", "other/dest", "base/dest"} {
+		assert.NoError(t, os.MkdirAll(filepath.Join(base, dir), 0o755))
+	}
+	assert.NoError(t, os.Symlink(filepath.Join(base, "other/child"), filepath.Join(base, "base/link")))
+
+	archive := zstdCompress(t, buildTar(t, []tarEntry{regular("file", 0o644, "x")}))
+	dest := filepath.Join(base, "base/link") + "/../dest"
+	assert.NoError(t, client.Extract(t.Context(), bytes.NewReader(archive), dest, 0))
+	_, err := os.Stat(filepath.Join(base, "other/dest/file"))
+	assert.NoError(t, err)
+	_, err = os.Stat(filepath.Join(base, "base/dest/file"))
+	assert.True(t, errors.Is(err, fs.ErrNotExist))
 }
 
 func TestExtractRejectsGlobalDataLayoutRecords(t *testing.T) {
