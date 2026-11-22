@@ -197,7 +197,7 @@ func (h *Handler) ParallelFetch(chunkSize int64, concurrency int) *Handler {
 // ServeHTTP serves from cache, or fetches from upstream and caches the response while streaming it to the client.
 //
 // HEAD misses are forwarded upstream without caching, so metadata probes never trigger full downloads. An upstream
-// that refuses HEAD is asked with a GET whose body is never read.
+// that refuses HEAD with 403, 405 or 501, as presigned GET URLs do, is asked with a GET whose body isn't read.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx := h.metrics.WithRequest(r.Context(), h.strategy, h.registry, h.external)
 	r = r.WithContext(ctx)
@@ -444,7 +444,6 @@ func (h *Handler) upstreamRequest(r *http.Request) (*http.Request, error) {
 
 func (h *Handler) forwardHead(w http.ResponseWriter, r *http.Request) {
 	status, headers, err := h.probe(r, http.MethodHead)
-	// Some upstreams refuse HEAD for objects they serve: a presigned GET URL signs the method, so HEAD gets a 403.
 	if err == nil && headRefused(status) {
 		status, headers, err = h.probe(r, http.MethodGet)
 	}
@@ -462,7 +461,6 @@ func (h *Handler) probe(r *http.Request, method string) (int, http.Header, error
 		return 0, nil, err
 	}
 	req.Method = method
-	// Otherwise the transport asks for gzip on a GET and drops Content-Length when it decompresses.
 	if method == http.MethodGet && req.Header.Get("Accept-Encoding") == "" {
 		req.Header.Set("Accept-Encoding", "identity")
 	}
@@ -475,7 +473,6 @@ func (h *Handler) probe(r *http.Request, method string) (int, http.Header, error
 }
 
 func headRefused(status int) bool {
-	// 401 and 404 usually mean the caller or the object is the problem, so a GET would only repeat them.
 	return status == http.StatusForbidden || status == http.StatusMethodNotAllowed || status == http.StatusNotImplemented
 }
 
