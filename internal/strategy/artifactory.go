@@ -116,7 +116,7 @@ func (a *Artifactory) transformRequest(r *http.Request) (*http.Request, error) {
 		return nil, errors.Errorf("failed to create request: %w", err)
 	}
 
-	// Pass through other credentials; the handler forwards Authorization so each caller credential cools down alone.
+	// Pass through authentication headers
 	a.copyAuthHeaders(r, req)
 
 	// Disable Artifactory download redirects so the proxy caches the artifact itself.

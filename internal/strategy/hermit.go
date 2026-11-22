@@ -154,7 +154,6 @@ func (s *Hermit) buildRedirectRequest(r *http.Request) (*http.Request, error) {
 	}
 
 	req.Header = r.Header.Clone()
-	// The handler forwards Authorization, so each caller credential cools down alone.
 	req.Header.Del("Authorization")
 	return req, nil
 }
