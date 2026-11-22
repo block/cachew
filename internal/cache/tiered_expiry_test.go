@@ -141,7 +141,6 @@ func TestTieredSkipsBackfillPastWriterTTL(t *testing.T) {
 	ctx, tiered, lower, upper := newExpiryTiers(t)
 	key := cache.NewKey("expired")
 	past := time.Now().Add(-time.Second).UTC().Format(time.RFC3339Nano)
-	// Stands in for a lower tier that rounds expiry up and still serves the entry just past the writer's TTL.
 	writeEntry(ctx, t, upper, key, http.Header{expiresAtHeader: {past}}, time.Hour)
 
 	r, headers, err := tiered.Open(ctx, key)
