@@ -2,6 +2,7 @@ package client
 
 import (
 	"os"
+	"runtime"
 	"strings"
 
 	"github.com/alecthomas/errors"
@@ -16,6 +17,57 @@ type destDir struct {
 	// path is the cleaned destination that member paths are joined onto; dir is the caller's path, opened as given.
 	path string
 	dir  string
+	// unmasked is started on first use and stays nil where this process can't give a thread its own umask.
+	unmasked      *unmaskedDirs
+	unmaskedTried bool
+}
+
+// unmaskedDirs creates directories from an OS thread with its own cleared umask, as GNU tar clears it for -p.
+//
+// Restoring masked bits with chmod instead drops an inherited set-group-ID bit if the caller isn't in the group.
+type unmaskedDirs struct {
+	// umask is the process umask when the thread started.
+	umask uint32
+	reqs  chan mkdirRequest
+}
+
+type mkdirRequest struct {
+	path string
+	mode uint32
+	done chan error
+}
+
+func startUnmaskedDirs(fd int) *unmaskedDirs {
+	u := &unmaskedDirs{reqs: make(chan mkdirRequest)}
+	started := make(chan bool)
+	go u.serve(fd, started)
+	if !<-started {
+		return nil
+	}
+	return u
+}
+
+func (u *unmaskedDirs) serve(fd int, started chan<- bool) {
+	// Unlocked only on handover, so the thread exits with this goroutine and its umask can't reach other goroutines.
+	runtime.LockOSThread()
+	// /proc/self shows the main thread's umask, and Go keeps that thread instead of exiting it, so hand over.
+	if unix.Gettid() == unix.Getpid() {
+		handedOver := make(chan bool)
+		go u.serve(fd, handedOver)
+		started <- <-handedOver
+		runtime.UnlockOSThread()
+		return
+	}
+	// Seccomp profiles such as Docker's default refuse unshare; callers then fall back to chmod.
+	if unix.Unshare(unix.CLONE_FS) != nil {
+		started <- false
+		return
+	}
+	u.umask = uint32(unix.Umask(0)) //nolint:gosec // permission bits only
+	started <- true
+	for req := range u.reqs {
+		req.done <- unix.Mkdirat(fd, req.path, req.mode)
+	}
 }
 
 func (d *destDir) open() error {
@@ -29,6 +81,9 @@ func (d *destDir) open() error {
 }
 
 func (d *destDir) close() error {
+	if d.unmasked != nil {
+		close(d.unmasked.reqs)
+	}
 	return errors.Wrapf(unix.Close(d.fd), "failed to close %s", d.path)
 }
 
@@ -58,6 +113,25 @@ func (d *destDir) stat(path string) (unix.Stat_t, error) {
 
 func (d *destDir) mkdir(path string, mode uint32) error {
 	return errors.Wrapf(unix.Mkdirat(d.fd, d.rel(path), mode), "failed to create directory %s", path)
+}
+
+func (d *destDir) unmaskedThread() (umask uint32, ok bool) {
+	// Started only for umasks that mask owner bits, which are rare, so the common path keeps one thread less.
+	if !d.unmaskedTried {
+		d.unmaskedTried = true
+		d.unmasked = startUnmaskedDirs(d.fd)
+	}
+	if d.unmasked == nil {
+		return 0, false
+	}
+	return d.unmasked.umask, true
+}
+
+func (d *destDir) mkdirUnmasked(path string, mode uint32) error {
+	// Only valid once unmaskedThread has reported the thread available.
+	done := make(chan error, 1)
+	d.unmasked.reqs <- mkdirRequest{path: d.rel(path), mode: mode, done: done}
+	return errors.Wrapf(<-done, "failed to create directory %s", path)
 }
 
 func (d *destDir) chmod(path string, mode uint32) error {

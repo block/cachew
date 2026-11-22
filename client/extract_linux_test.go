@@ -427,6 +427,51 @@ func TestExtractLaterEntryReplacesUnsafeSymlink(t *testing.T) {
 	}
 }
 
+func TestExtractKeepsSetgidGroupForNonMember(t *testing.T) {
+	entries := []tarEntry{directory("child/", 0o700), regular("child/sub/file", 0o644, "x")}
+	if dest := os.Getenv("CACHEW_TEST_NON_MEMBER_DEST"); dest != "" {
+		archive := zstdCompress(t, buildTar(t, entries))
+		assert.NoError(t, client.Extract(t.Context(), bytes.NewReader(archive), dest, 0))
+		return
+	}
+	if os.Geteuid() != 0 {
+		t.Skip("needs root to give the destination a group the extracting user isn't in")
+	}
+	if _, err := exec.LookPath("setpriv"); err != nil {
+		t.Skip("setpriv is not installed")
+	}
+	// The kernel clears set-group-ID on chmod by a non-member, which GNU tar avoids by clearing the umask.
+	const nobody, group = 65534, 4242
+	tmp := t.TempDir()
+	assert.NoError(t, os.Chmod(filepath.Dir(tmp), 0o755))
+	assert.NoError(t, os.Chmod(tmp, 0o755))
+	exe, err := os.Executable()
+	assert.NoError(t, err)
+	data, err := os.ReadFile(exe)
+	assert.NoError(t, err)
+	bin := filepath.Join(tmp, "client.test")
+	assert.NoError(t, os.WriteFile(bin, data, 0o755)) //nolint:gosec // nobody must run it
+	dest := filepath.Join(tmp, "dest")
+	assert.NoError(t, os.Mkdir(dest, 0o755))
+	assert.NoError(t, os.Chown(dest, nobody, group))
+	assert.NoError(t, os.Chmod(dest, fs.ModeSetgid|0o775))
+
+	cmd := exec.Command("setpriv", "--reuid=65534", "--regid=65534", "--clear-groups", "sh", "-c",
+		`umask 0277 && exec "$0" -test.run='^TestExtractKeepsSetgidGroupForNonMember$'`, bin)
+	cmd.Dir = tmp
+	cmd.Env = append(os.Environ(), "CACHEW_TEST_NON_MEMBER_DEST="+dest)
+	out, err := cmd.CombinedOutput()
+	assert.NoError(t, err, "%s", out)
+	for _, name := range []string{"child", "child/sub", "child/sub/file"} {
+		info, err := os.Lstat(filepath.Join(dest, name))
+		assert.NoError(t, err)
+		assert.Equal(t, uint32(group), info.Sys().(*syscall.Stat_t).Gid, name) //nolint:forcetypeassert
+	}
+	info, err := os.Lstat(filepath.Join(dest, "child"))
+	assert.NoError(t, err)
+	assert.Equal(t, fs.ModeDir|fs.ModeSetgid|0o700, info.Mode())
+}
+
 // rewrites writes many small files twice, so queued writes must land in archive order.
 func rewrites() []tarEntry { //nolint:privatedoc // explains why
 	var entries []tarEntry

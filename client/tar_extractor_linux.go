@@ -463,22 +463,9 @@ func (e *tarExtractor) requireDir(path string) error {
 }
 
 func (e *tarExtractor) mkdirParent(name, path string, viaLink bool) error {
-	// GNU tar gives unlisted parents the umask's mode, owner-writable and searchable until extraction finishes.
-	if err := e.dest.mkdir(path, 0o777); err != nil {
-		return err
-	}
-	st, err := e.dest.lstat(path)
+	desired, created, err := e.mkdirInterdir(path)
 	if err != nil {
 		return err
-	}
-	desired, created := st.Mode&0o777, st.Mode&0o777
-	if !e.asRoot {
-		created |= 0o300
-	}
-	if created != desired {
-		if err := e.dest.chmod(path, st.Mode&0o7000|created); err != nil {
-			return err
-		}
 	}
 	return e.dirStack.push(pendingDir{
 		name:     e.parentName(name, path),
@@ -489,6 +476,31 @@ func (e *tarExtractor) mkdirParent(name, path string, viaLink bool) error {
 		hasSeen:  true,
 		viaLink:  viaLink,
 	})
+}
+
+func (e *tarExtractor) mkdirInterdir(path string) (desired, created uint32, err error) {
+	// GNU tar gives unlisted parents the umask's mode, owner-writable and searchable until extraction finishes.
+	if !e.asRoot && e.umask&0o300 != 0 {
+		if umask, ok := e.dest.unmaskedThread(); ok {
+			desired = 0o777 &^ umask
+			return desired, desired | 0o300, e.dest.mkdirUnmasked(path, desired|0o300)
+		}
+	}
+	if err := e.dest.mkdir(path, 0o777); err != nil {
+		return 0, 0, err
+	}
+	st, err := e.dest.lstat(path)
+	if err != nil {
+		return 0, 0, err
+	}
+	desired, created = st.Mode&0o777, st.Mode&0o777
+	if !e.asRoot {
+		created |= 0o300
+	}
+	if created == desired {
+		return desired, created, nil
+	}
+	return desired, created, e.dest.chmod(path, st.Mode&0o7000|created)
 }
 
 func (e *tarExtractor) parentName(name, path string) string {
@@ -565,18 +577,21 @@ func (e *tarExtractor) mkdir(target string, hdr *tar.Header) (uint32, error) {
 	if !e.asRoot {
 		mode |= 0o300
 	}
+	// GNU tar clears the umask for -p; only one thread here can, so it's used where the umask would affect the owner.
+	if e.umask&int(mode) == 0 {
+		return mode, e.dest.mkdir(target, mode)
+	}
+	if _, ok := e.dest.unmaskedThread(); ok {
+		return mode, e.dest.mkdirUnmasked(target, mode)
+	}
 	if err := e.dest.mkdir(target, mode); err != nil {
 		return 0, err
-	}
-	// GNU tar clears the umask for -p; this process can't, so undo it where it would affect the owner.
-	if e.umask&int(mode) == 0 {
-		return mode, nil
 	}
 	st, err := e.dest.lstat(target)
 	if err != nil {
 		return 0, err
 	}
-	// A set-group-ID bit inherited from the parent decides the group of subdirectories, so it must survive.
+	// Keeps an inherited set-group-ID bit, which decides subdirectories' group, unless the caller isn't in the group.
 	return mode, e.dest.chmod(target, st.Mode&0o7000|mode)
 }
 
