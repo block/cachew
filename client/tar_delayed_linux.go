@@ -184,7 +184,7 @@ func (e *tarExtractor) finish() error {
 	verify := false
 	for len(stack.pending) > 0 {
 		dir := stack.pop()
-		// From the first held-back directory on, GNU tar checks that each is still the same directory.
+		// From the first held-back directory on, GNU tar checks each is still the same directory and rereads its mode.
 		verify = verify || dir.afterLinks
 		if err := e.applyDir(dir, verify); err != nil {
 			return err
@@ -204,7 +204,7 @@ func (e *tarExtractor) applyDir(dir *pendingDir, verify bool) error {
 		}
 	}
 	if dir.interdir {
-		if dir.hasSeen && dir.seen == dir.stat.mode {
+		if !verify && dir.hasSeen && dir.seen == dir.stat.mode {
 			return nil
 		}
 		st, err := e.dest.lstat(dir.path)

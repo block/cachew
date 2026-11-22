@@ -226,6 +226,13 @@ func TestExtractMatchesGNUTar(t *testing.T) {
 			directory("child/", 0o700),
 			regular("child/sub/file", 0o644, "x"),
 		}},
+		{name: "ImplicitParentUnderDefaultACL", setup: permissiveDefaultACL, entries: []tarEntry{
+			regular("d/file", 0o644, "x"),
+		}},
+		{name: "UnsafeLinkParentReachedByAlias", entries: []tarEntry{
+			symlink("d/u", "/tmp"),
+			directory("./d/", 0o777),
+		}},
 		{name: "SetgidDirThroughSymlink", entries: []tarEntry{
 			directory("real/", 0o2775),
 			symlink("alias", "real"),
@@ -484,6 +491,20 @@ func rewrites() []tarEntry { //nolint:privatedoc // explains why
 		}
 	}
 	return entries
+}
+
+func permissiveDefaultACL(t *testing.T, dir string) {
+	t.Helper()
+	// The kernel's xattr layout: version 2, then user, group and other entries, each granting rwx.
+	acl := []byte{2, 0, 0, 0}
+	for _, tag := range []byte{0x01, 0x04, 0x20} {
+		acl = append(acl, tag, 0, 7, 0, 0xff, 0xff, 0xff, 0xff)
+	}
+	err := syscall.Setxattr(dir, "system.posix_acl_default", acl, 0)
+	if errors.Is(err, syscall.ENOTSUP) {
+		t.Skip("the filesystem doesn't support POSIX ACLs")
+	}
+	assert.NoError(t, err)
 }
 
 func setgidRoot(t *testing.T, dir string) {

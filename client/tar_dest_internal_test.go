@@ -54,3 +54,24 @@ func TestMkdirWithoutUnmaskedThreadKeepsInheritedSetgid(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, fs.ModeDir|fs.ModeSetgid|0o700, info.Mode())
 }
+
+func TestImplicitParentWithUnreadableUmaskKeepsCreatedMode(t *testing.T) {
+	dir := t.TempDir()
+	old := syscall.Umask(0o027)
+	t.Cleanup(func() { syscall.Umask(old) })
+	var archive bytes.Buffer
+	tw := tar.NewWriter(&archive)
+	assert.NoError(t, tw.WriteHeader(&tar.Header{Typeflag: tar.TypeReg, Name: "d/file", Mode: 0o644, Size: 1}))
+	_, err := tw.Write([]byte("x"))
+	assert.NoError(t, err)
+	assert.NoError(t, tw.Close())
+	e := newTarExtractor(dir, 1)
+	// As when /proc/self/status can't be read and unshare is refused.
+	e.umask = unknownUmask
+	e.dest.unmaskedTried = true
+
+	assert.NoError(t, e.extract(t.Context(), &archive))
+	info, err := os.Stat(filepath.Join(dir, "d"))
+	assert.NoError(t, err)
+	assert.Equal(t, fs.ModeDir|0o750, info.Mode())
+}

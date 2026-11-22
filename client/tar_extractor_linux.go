@@ -135,22 +135,25 @@ func newTarExtractor(dir string, writers int) *tarExtractor {
 	}
 }
 
+// unknownUmask stands for an unreadable umask, with every bit set so directory modes are always repaired.
+const unknownUmask = -1
+
 func processUmask() int {
-	// unix.Umask reads the umask by changing it, racing other goroutines; unknown is 0o777, assuming all bits masked.
+	// unix.Umask reads the umask by changing it, racing other goroutines; unknown has every bit set.
 	status, err := os.ReadFile("/proc/self/status")
 	if err != nil {
-		return 0o777
+		return unknownUmask
 	}
 	for line := range strings.Lines(string(status)) {
 		if value, ok := strings.CutPrefix(line, "Umask:"); ok {
 			umask, err := strconv.ParseInt(strings.TrimSpace(value), 8, 32)
 			if err != nil {
-				return 0o777
+				return unknownUmask
 			}
 			return int(umask)
 		}
 	}
-	return 0o777
+	return unknownUmask
 }
 
 func (e *tarExtractor) extract(ctx context.Context, r io.Reader) (err error) {
@@ -486,6 +489,30 @@ func (e *tarExtractor) mkdirInterdir(path string) (desired, created uint32, err 
 			return desired, desired | 0o300, e.dest.mkdirUnmasked(path, desired|0o300)
 		}
 	}
+	if e.umask == unknownUmask {
+		return e.mkdirInterdirReadBack(path)
+	}
+	// Taken from the umask, not read back, since a default ACL replaces the umask when creating.
+	desired = 0o777 &^ uint32(e.umask) //nolint:gosec // permission bits only
+	created = desired
+	if !e.asRoot {
+		created |= 0o300
+	}
+	if err := e.dest.mkdir(path, created); err != nil {
+		return 0, 0, err
+	}
+	if uint32(e.umask)&created == 0 { //nolint:gosec // permission bits only
+		return desired, created, nil
+	}
+	st, err := e.dest.lstat(path)
+	if err != nil {
+		return 0, 0, err
+	}
+	return desired, created, e.dest.chmod(path, st.Mode&0o7000|created)
+}
+
+func (e *tarExtractor) mkdirInterdirReadBack(path string) (desired, created uint32, err error) {
+	// Without a known umask, the mode mkdir leaves is the closest to GNU tar's.
 	if err := e.dest.mkdir(path, 0o777); err != nil {
 		return 0, 0, err
 	}
