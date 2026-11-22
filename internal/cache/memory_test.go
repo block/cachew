@@ -2,8 +2,10 @@ package cache_test
 
 import (
 	"log/slog"
+	"net/http"
 	"os"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/alecthomas/assert/v2"
@@ -19,6 +21,31 @@ func TestMemoryCache(t *testing.T) {
 		c, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: 3 * time.Second})
 		assert.NoError(t, err)
 		return c
+	})
+}
+
+func TestMemoryCapsTTLAtMaxTTL(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelError})
+		c, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: time.Hour})
+		assert.NoError(t, err)
+		created, updated := cache.NewKey("created"), cache.NewKey("updated")
+		for _, key := range []cache.Key{created, updated} {
+			w, err := c.Create(ctx, key, nil, 2*time.Hour)
+			assert.NoError(t, err)
+			assert.NoError(t, w.Close())
+		}
+
+		time.Sleep(30 * time.Minute)
+		assert.NoError(t, c.UpdateMetadata(ctx, updated, http.Header{}, 2*time.Hour))
+		time.Sleep(31 * time.Minute)
+		_, err = c.Stat(ctx, created)
+		assert.IsError(t, err, os.ErrNotExist)
+		_, err = c.Stat(ctx, updated)
+		assert.NoError(t, err)
+		time.Sleep(30 * time.Minute)
+		_, err = c.Stat(ctx, updated)
+		assert.IsError(t, err, os.ErrNotExist)
 	})
 }
 
