@@ -100,10 +100,14 @@ type tarExtractor struct {
 	delayed      []delayedLink
 	delayedAt    map[string]int
 	placeholders map[fileID]struct{}
-	users        map[string]int
-	groups       map[string]int
-	globalPAX    map[string]string
-	copyBuf      []byte
+	// claimed is the delayed link the current entry's path held, or -1; only that claim can be undone.
+	claimed int
+	// placeholderViaLink is set once a placeholder is made through a symlink, so delayedAt misses its other paths.
+	placeholderViaLink bool
+	users              map[string]int
+	groups             map[string]int
+	globalPAX          map[string]string
+	copyBuf            []byte
 }
 
 func newTarExtractor(dir string, writers int) *tarExtractor {
@@ -124,6 +128,7 @@ func newTarExtractor(dir string, writers int) *tarExtractor {
 		dirStack:     newDirStack(dest),
 		delayedAt:    map[string]int{},
 		placeholders: map[fileID]struct{}{},
+		claimed:      -1,
 		users:        map[string]int{},
 		groups:       map[string]int{},
 		copyBuf:      make([]byte, copyBufferBytes),
@@ -279,7 +284,7 @@ func (e *tarExtractor) entry(ctx context.Context, tr *tar.Reader, hdr *tar.Heade
 		}
 		return e.recordDir(ctx, name, target, hdr, false, nil)
 	}
-	claimed, hadPlaceholder := e.claim(target, isDir)
+	e.claim(target, isDir)
 	// A path through a symlink may alias one with a queued write or an applied directory; ensureParent settles both.
 	viaLink, err := e.ensureParent(name, target)
 	if err != nil {
@@ -288,7 +293,7 @@ func (e *tarExtractor) entry(ctx context.Context, tr *tar.Reader, hdr *tar.Heade
 	if err := e.apply(ctx, tr, hdr, name, target, viaLink); err != nil {
 		return err
 	}
-	if hadPlaceholder && e.delayed[claimed].replaced {
+	if claimed := e.claimed; claimed >= 0 && e.delayed[claimed].replaced {
 		// The inode is free for reuse, so it must not identify a placeholder any more.
 		delete(e.placeholders, e.delayed[claimed].id)
 	}
@@ -355,17 +360,17 @@ func saferName(name string) string {
 	return name
 }
 
-func (e *tarExtractor) claim(target string, isDir bool) (int, bool) {
+func (e *tarExtractor) claim(target string, isDir bool) {
 	e.wait(target)
-	i, ok := e.delayedAt[target]
-	if ok {
+	e.claimed = -1
+	if i, ok := e.delayedAt[target]; ok {
 		e.delayed[i].replaced = true
 		delete(e.delayedAt, target)
+		e.claimed = i
 	}
 	if !isDir {
 		e.forgetDir(target)
 	}
-	return i, ok
 }
 
 func (e *tarExtractor) forgetDir(path string) {
@@ -616,6 +621,12 @@ func (e *tarExtractor) regular(
 	stat, err := e.stat(ctx, hdr)
 	if err != nil {
 		return err
+	}
+	if !viaLink && e.placeholderViaLink {
+		// A writer removes what is at target without forgetting a placeholder, which claim only finds by its own path.
+		if st, err := e.dest.lstat(target); err == nil {
+			e.forgetPlaceholder(statID(st))
+		}
 	}
 	switch {
 	case viaLink:
@@ -888,6 +899,7 @@ func (e *tarExtractor) placeholder(name, target string, link delayedLink, viaLin
 			e.delayedAt[target] = len(e.delayed)
 			e.delayed = append(e.delayed, link)
 			e.placeholders[link.id] = struct{}{}
+			e.placeholderViaLink = e.placeholderViaLink || viaLink
 			return e.dirStack.markLinkParent(name)
 		}
 		if attempt > 0 || !errors.Is(err, fs.ErrExist) {
@@ -905,13 +917,10 @@ func (e *tarExtractor) placeholder(name, target string, link delayedLink, viaLin
 }
 
 func (e *tarExtractor) keepDelayed(path string) {
-	// The placeholder stays in place, so undo claim marking it replaced.
-	for i := len(e.delayed) - 1; i >= 0; i-- {
-		if e.delayed[i].path == path && e.delayed[i].replaced {
-			e.delayed[i].replaced = false
-			e.delayedAt[path] = i
-			return
-		}
+	// The placeholder stays in place, so undo this entry's claim; a placeholder already removed must stay forgotten.
+	if i := e.claimed; i >= 0 && e.delayed[i].path == path {
+		e.delayed[i].replaced = false
+		e.delayedAt[path] = i
 	}
 }
 

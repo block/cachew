@@ -373,6 +373,13 @@ func TestExtractLaterEntryReplacesUnsafeSymlink(t *testing.T) {
 		{"FileThroughAlias", []tarEntry{
 			symlink("entry", "/first"), symlink("alias", "."), regular("alias/entry", 0o644, "file"),
 		}, "file"},
+		{"DuplicateKeepsLinkMadeThroughAlias", []tarEntry{
+			symlink("source", "/first"), hardlink("entry", "source"), symlink("alias", "."),
+			regular("alias/entry", 0o644, "file"), symlink("alias/entry", "/second"), symlink("entry", "/third"),
+		}, "-> /second"},
+		{"FileOverLinkMadeThroughAlias", []tarEntry{
+			symlink("alias", "."), symlink("alias/entry", "/first"), regular("entry", 0o644, "file"),
+		}, "file"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
