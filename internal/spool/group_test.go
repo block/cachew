@@ -5,6 +5,7 @@ import (
 	"io"
 	"log/slog"
 	"maps"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -164,28 +165,47 @@ func TestClientHangupAfterFullBodyIsComplete(t *testing.T) {
 	assert.Equal(t, "body", full.Body.String())
 }
 
-func TestClientHangupAfterFailedFlushIsIncomplete(t *testing.T) {
-	ctx, registry, _ := newTestRegistry(t, spool.Config{})
-	group := registry.NewGroup(spool.ReleaseCompleted)
-	release := make(chan struct{})
-	defer close(release)
-	fill := func(_ context.Context, w *spool.Writer) error {
-		w.Header().Set("Content-Length", "4")
-		w.WriteHeader(http.StatusOK)
-		_, err := io.WriteString(w, "body")
-		<-release
-		return err
+func TestClientHangupAfterFailedSocketWriteIsIncomplete(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		wrap func(http.ResponseWriter) http.ResponseWriter
+	}{
+		{"ResponseWriter", func(w http.ResponseWriter) http.ResponseWriter { return w }},
+		{"FlusherOnlyWrapper", func(w http.ResponseWriter) http.ResponseWriter { return flusherOnly{w} }},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			_, registry, _ := newTestRegistry(t, spool.Config{})
+			group := registry.NewGroup(spool.ReleaseCompleted)
+			rest, release := make(chan struct{}), make(chan struct{})
+			defer close(release)
+			fill := func(_ context.Context, w *spool.Writer) error {
+				w.Header().Set("Content-Length", "4")
+				w.WriteHeader(http.StatusOK)
+				_, _ = io.WriteString(w, "bo")
+				<-rest
+				_, err := io.WriteString(w, "dy")
+				<-release
+				return err
+			}
+			served := make(chan error, 1)
+			server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, err := group.Serve(tt.wrap(w), r, key, fill)
+				served <- err
+			}))
+			server.Listener = failSecondWriteListener{server.Listener}
+			server.Start()
+			defer server.Close()
+
+			resp, err := http.Get(server.URL)
+			assert.NoError(t, err)
+			defer resp.Body.Close()
+			body := make([]byte, 2)
+			_, err = io.ReadFull(resp.Body, body)
+			assert.NoError(t, err)
+			close(rest)
+			assert.Error(t, <-served)
+		})
 	}
-	reqCtx, cancel := context.WithCancel(ctx)
-	w := &failingFlushRecorder{notifyingRecorder{ResponseRecorder: httptest.NewRecorder(), wrote: make(chan int, 4)}}
-	served := make(chan error, 1)
-	go func() {
-		_, err := group.Serve(w, httptest.NewRequestWithContext(reqCtx, http.MethodGet, "/object", nil), key, fill)
-		served <- err
-	}()
-	assert.Equal(t, 4, <-w.wrote)
-	cancel()
-	assert.IsError(t, <-served, errFlush)
 }
 
 func TestRequestsFollowPendingCacheWrite(t *testing.T) {
@@ -659,11 +679,31 @@ func (r *notifyingRecorder) Write(p []byte) (int, error) {
 	return n, err
 }
 
-var errFlush = errors.New("connection reset")
+type flusherOnly struct{ http.ResponseWriter }
 
-type failingFlushRecorder struct{ notifyingRecorder }
+func (w flusherOnly) Flush() { w.ResponseWriter.(http.Flusher).Flush() }
 
-func (r *failingFlushRecorder) FlushError() error { return errFlush }
+var errConnReset = errors.New("connection reset")
+
+type failSecondWriteListener struct{ net.Listener }
+
+func (l failSecondWriteListener) Accept() (net.Conn, error) {
+	conn, err := l.Listener.Accept()
+	return &failSecondWriteConn{Conn: conn}, errors.WithStack(err)
+}
+
+type failSecondWriteConn struct {
+	net.Conn
+	writes atomic.Int32
+}
+
+func (c *failSecondWriteConn) Write(p []byte) (int, error) {
+	if c.writes.Add(1) == 2 {
+		return 0, errConnReset
+	}
+	n, err := c.Conn.Write(p)
+	return n, errors.WithStack(err)
+}
 
 type failingCacheWriter struct{ writes int }
 
