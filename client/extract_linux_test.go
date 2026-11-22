@@ -202,6 +202,11 @@ func TestExtractMatchesGNUTar(t *testing.T) {
 			directory("d/./", 0o555),
 			regular("d/file", 0o644, "x"),
 		}},
+		{name: "SetgidDirThroughSymlink", entries: []tarEntry{
+			directory("real/", 0o2775),
+			symlink("alias", "real"),
+			regular("alias/sub/file", 0o644, "x"),
+		}},
 		{name: "TrailingDotThroughSymlink", entries: []tarEntry{
 			directory("real/", 0o755),
 			symlink("alias", "real"),
@@ -365,6 +370,9 @@ func TestExtractLaterEntryReplacesUnsafeSymlink(t *testing.T) {
 		{"LinkAfterFile", []tarEntry{
 			symlink("entry", "/first"), regular("entry", 0o644, "file"), symlink("entry", "/second"),
 		}, "-> /second"},
+		{"FileThroughAlias", []tarEntry{
+			symlink("entry", "/first"), symlink("alias", "."), regular("alias/entry", 0o644, "file"),
+		}, "file"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

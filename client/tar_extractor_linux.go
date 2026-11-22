@@ -280,15 +280,10 @@ func (e *tarExtractor) entry(ctx context.Context, tr *tar.Reader, hdr *tar.Heade
 		return e.recordDir(ctx, name, target, hdr, false, nil)
 	}
 	claimed, hadPlaceholder := e.claim(target, isDir)
+	// A path through a symlink may alias one with a queued write or an applied directory; ensureParent settles both.
 	viaLink, err := e.ensureParent(name, target)
 	if err != nil {
 		return err
-	}
-	if viaLink {
-		// The path may alias one with a queued write or an applied directory, so settle both first.
-		if err := e.flushFinished(); err != nil {
-			return err
-		}
 	}
 	if err := e.apply(ctx, tr, hdr, name, target, viaLink); err != nil {
 		return err
@@ -435,7 +430,10 @@ func (e *tarExtractor) ensureParent(name, target string) (bool, error) {
 	case isDirStat(st):
 	case isSymlinkStat(st):
 		viaLink = true
-		err = e.requireDir(parent)
+		if err = e.requireDir(parent); err == nil {
+			// The link may lead into an applied directory, whose setgid bit and group a new subdirectory inherits.
+			err = e.flushFinished()
+		}
 	default:
 		err = errors.Errorf("%s: not a directory", parent)
 	}
@@ -567,7 +565,8 @@ func (e *tarExtractor) recordDir(
 }
 
 func (e *tarExtractor) removeExisting(path string, viaLink bool) error {
-	if st, err := e.dest.lstat(path); err == nil && isDirStat(st) {
+	st, err := e.dest.lstat(path)
+	if err == nil && isDirStat(st) {
 		// Queued writes may still be filling the directory, which GNU tar would find non-empty.
 		e.waitAll()
 		if viaLink {
@@ -575,7 +574,24 @@ func (e *tarExtractor) removeExisting(path string, viaLink bool) error {
 			e.dirs = map[string]struct{}{e.root: {}}
 		}
 	}
+	if err == nil {
+		e.forgetPlaceholder(statID(st))
+	}
 	return e.removeEntry(path)
+}
+
+func (e *tarExtractor) forgetPlaceholder(id fileID) {
+	// The path may alias the placeholder's, and once removed its inode number can be reused by a later file.
+	if _, ok := e.placeholders[id]; !ok {
+		return
+	}
+	delete(e.placeholders, id)
+	for i := range e.delayed {
+		if e.delayed[i].id == id && !e.delayed[i].replaced {
+			e.delayed[i].replaced = true
+			delete(e.delayedAt, e.delayed[i].path)
+		}
+	}
 }
 
 func (e *tarExtractor) removeEntry(path string) error {
