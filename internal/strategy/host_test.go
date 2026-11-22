@@ -480,8 +480,8 @@ func TestHostFallbackConnectionReuse(t *testing.T) {
 	}{
 		{"small", 96, false, false, 1},
 		{"small chunked", 96, true, false, 1},
-		{"large", 4096, false, false, 2},
-		{"large chunked", 4096, true, false, 2},
+		{"large", 1 << 20, false, false, 2},
+		{"large chunked", 1 << 20, true, false, 2},
 		{"stalled", 96, false, true, 2},
 		{"stalled chunked", 96, true, true, 2},
 	} {
