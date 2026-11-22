@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/alecthomas/assert/v2"
+	"github.com/alecthomas/errors"
 
 	"github.com/block/cachew/client"
 )
@@ -184,6 +185,23 @@ func TestExtractMatchesGNUTar(t *testing.T) {
 			directory("alias/written/", 0o700),
 			regular("real/written/file", 0o644, "x"),
 		}},
+		{name: "TrailingDot", entries: []tarEntry{
+			directory("created/./", 0o555),
+			regular("created/file", 0o644, "x"),
+			directory("nested/created/././", 0o555),
+			regular("nested/created/file", 0o644, "x"),
+			regular("existing/before", 0o644, "x"),
+			directory("existing/./", 0o700),
+			regular("existing/after", 0o644, "x"),
+			regular("aliased/before", 0o644, "x"),
+			directory("./aliased/", 0o700),
+			regular("aliased/after", 0o644, "x"),
+		}},
+		{name: "TrailingDotOverDirectory", entries: []tarEntry{
+			directory("d/", 0o755),
+			directory("d/./", 0o555),
+			regular("d/file", 0o644, "x"),
+		}},
 		{name: "RevisitReadOnly", entries: []tarEntry{
 			directory("readonly/", 0o555),
 			regular("elsewhere", 0o644, "x"),
@@ -224,6 +242,34 @@ func TestExtractMatchesGNUTar(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestExtractLongMemberNames(t *testing.T) {
+	if out, err := exec.Command("tar", "--version").Output(); err != nil || !bytes.Contains(out, []byte("GNU tar")) {
+		t.Skip("GNU tar is not installed")
+	}
+	// Each name fits in PATH_MAX but not once joined to the destination, which GNU tar resolves names against.
+	deep := strings.TrimSuffix(strings.Repeat(strings.Repeat("d", 200)+"/", 20), "/")
+	archive := buildTar(t, []tarEntry{
+		directory(deep+"/", 0o750),
+		regular(deep+"/file", 0o640, "x"),
+		regular(deep+"/replaced", 0o644, "x"),
+		regular(deep+"/replaced", 0o600, "y"),
+		symlink(deep+"/link", "file"),
+		hardlink(deep+"/hard", deep+"/file"),
+		symlink(deep+"/absolute", "/elsewhere"),
+	})
+	prefix := strings.Repeat("p", 200)
+	gnuDir, goDir := filepath.Join(t.TempDir(), prefix), filepath.Join(t.TempDir(), prefix)
+	assert.NoError(t, os.Mkdir(gnuDir, 0o755))
+	assert.NoError(t, os.Mkdir(goDir, 0o755))
+
+	gnuTar := exec.Command("tar", "-xpf", "-", "-C", gnuDir)
+	gnuTar.Stdin = bytes.NewReader(archive)
+	out, err := gnuTar.CombinedOutput()
+	assert.NoError(t, err, "%s", out)
+	assert.NoError(t, client.Extract(t.Context(), bytes.NewReader(zstdCompress(t, archive)), goDir, 0))
+	assert.Equal(t, treeState(t, gnuDir), treeState(t, goDir))
 }
 
 func TestExtractRejectsGlobalDataLayoutRecords(t *testing.T) {
@@ -367,43 +413,44 @@ func zstdCompress(t *testing.T, data []byte) []byte {
 	return out
 }
 
-// treeState describes every path under root; only archived mtimes are comparable, the rest are extraction times.
-func treeState(t *testing.T, root string) map[string]string { //nolint:privatedoc // explains why
+// treeState describes every path under dir; only archived mtimes are comparable, the rest are extraction times.
+//
+// It resolves paths through an os.Root, so trees deeper than PATH_MAX can be compared.
+func treeState(t *testing.T, dir string) map[string]string { //nolint:privatedoc // explains why
 	t.Helper()
-	state := map[string]string{}
-	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		info, err := d.Info()
-		if err != nil {
-			return err
-		}
-		rel, err := filepath.Rel(root, path)
-		if err != nil {
-			return err
-		}
-		desc := fmt.Sprintf("%v nlink=%d", info.Mode(), info.Sys().(*syscall.Stat_t).Nlink) //nolint:forcetypeassert
-		if !info.ModTime().After(archiveTime()) {
-			desc += " mtime=" + info.ModTime().Format(time.RFC3339Nano)
-		}
-		switch {
-		case info.Mode()&fs.ModeSymlink != 0:
-			target, err := os.Readlink(path)
-			if err != nil {
-				return err
-			}
-			desc += " -> " + target
-		case info.Mode().IsRegular():
-			data, err := os.ReadFile(path)
-			if err != nil {
-				return err
-			}
-			desc += fmt.Sprintf(" sha256=%x", sha256.Sum256(data))
-		}
-		state[rel] = desc
-		return nil
-	})
+	root, err := os.OpenRoot(dir)
 	assert.NoError(t, err)
+	defer root.Close()
+	state := map[string]string{}
+	describeTree(t, root, ".", state)
 	return state
+}
+
+func describeTree(t *testing.T, root *os.Root, name string, state map[string]string) {
+	t.Helper()
+	info, err := root.Lstat(name)
+	assert.NoError(t, err)
+	desc := fmt.Sprintf("%v nlink=%d", info.Mode(), info.Sys().(*syscall.Stat_t).Nlink) //nolint:forcetypeassert
+	if !info.ModTime().After(archiveTime()) {
+		desc += " mtime=" + info.ModTime().Format(time.RFC3339Nano)
+	}
+	switch {
+	case info.Mode()&fs.ModeSymlink != 0:
+		target, err := root.Readlink(name)
+		assert.NoError(t, err)
+		desc += " -> " + target
+	case info.Mode().IsRegular():
+		data, err := root.ReadFile(name)
+		assert.NoError(t, err)
+		desc += fmt.Sprintf(" sha256=%x", sha256.Sum256(data))
+	case info.IsDir():
+		f, err := root.Open(name)
+		assert.NoError(t, err)
+		children, err := f.Readdirnames(-1)
+		assert.NoError(t, errors.Join(err, f.Close()))
+		for _, child := range children {
+			describeTree(t, root, filepath.Join(name, child), state)
+		}
+	}
+	state[name] = desc
 }

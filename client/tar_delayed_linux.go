@@ -1,12 +1,10 @@
 package client
 
 import (
-	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/alecthomas/errors"
-	"golang.org/x/sys/unix"
 )
 
 // pendingDir is directory metadata that GNU tar applies once it stops extracting into the directory.
@@ -40,10 +38,11 @@ type dirStack struct {
 	finishedPaths map[string]struct{}
 	// finishedViaLink is set when a finished directory may be reached through a path finishedPaths doesn't hold.
 	finishedViaLink bool
+	dest            *destDir
 }
 
-func newDirStack() dirStack {
-	return dirStack{byName: map[string]*pendingDir{}, finishedPaths: map[string]struct{}{}}
+func newDirStack(dest *destDir) dirStack {
+	return dirStack{byName: map[string]*pendingDir{}, finishedPaths: map[string]struct{}{}, dest: dest}
 }
 
 func (s *dirStack) push(dir pendingDir) error {
@@ -52,11 +51,11 @@ func (s *dirStack) push(dir pendingDir) error {
 	if ok {
 		dir.afterLinks, dir.id = existing.afterLinks, existing.id
 		if existing.interdir && existing.afterLinks {
-			info, err := os.Lstat(dir.path)
+			st, err := s.dest.lstat(dir.path)
 			if err != nil {
-				return errors.WithStack(err)
+				return err
 			}
-			dir.id = idOf(info)
+			dir.id = statID(st)
 		}
 		*existing = dir
 	} else {
@@ -115,11 +114,11 @@ func (s *dirStack) markAfterLinks(i int) error {
 	for ; i >= 0 && !s.pending[i].afterLinks; i-- {
 		dir := s.pending[i]
 		dir.afterLinks = true
-		info, err := os.Lstat(dir.path)
+		st, err := s.dest.lstat(dir.path)
 		if err != nil {
-			return errors.WithStack(err)
+			return err
 		}
-		dir.id = idOf(info)
+		dir.id = statID(st)
 	}
 	return nil
 }
@@ -196,25 +195,29 @@ func (e *tarExtractor) finish() error {
 
 func (e *tarExtractor) applyDir(dir *pendingDir, verify bool) error {
 	if verify {
-		info, err := os.Lstat(dir.path)
+		st, err := e.dest.lstat(dir.path)
 		if err != nil {
-			return errors.WithStack(err)
+			return err
 		}
-		if idOf(info) != dir.id {
+		if statID(st) != dir.id {
 			return errors.Errorf("%s: directory renamed before its status could be extracted", dir.path)
 		}
 	}
 	if dir.interdir {
-		var st unix.Stat_t
-		if err := unix.Lstat(dir.path, &st); err != nil {
-			return errors.Wrapf(err, "failed to stat %s", dir.path)
+		if dir.wasCreated && dir.created == dir.stat.mode {
+			// GNU tar compares against the mode it made the directory with, so a chmod through another name stays.
+			return nil
+		}
+		st, err := e.dest.lstat(dir.path)
+		if err != nil {
+			return err
 		}
 		// Only permission bits are restored, keeping any set-group-ID bit inherited from the parent.
 		mode := st.Mode&0o7000 | dir.stat.mode
 		if mode == st.Mode&0o7777 {
 			return nil
 		}
-		return errors.Wrapf(unix.Chmod(dir.path, mode), "failed to chmod %s", dir.path)
+		return e.dest.chmod(dir.path, mode)
 	}
 	keepMode := !verify && dir.wasCreated && dir.created == dir.stat.mode
 	return e.setPathStat(dir.path, dir.stat, keepMode)
@@ -226,22 +229,22 @@ func (e *tarExtractor) applyDelayedLinks() error {
 		if link.replaced {
 			continue
 		}
-		info, err := os.Lstat(link.path)
-		if err != nil || idOf(info) != link.id {
+		st, err := e.dest.lstat(link.path)
+		if err != nil || statID(st) != link.id {
 			// An entry reached the placeholder through another path and replaced it.
 			continue
 		}
-		if err := removeEntry(link.path); err != nil {
+		if err := e.removeEntry(link.path); err != nil {
 			return err
 		}
 		if !link.symlink {
-			if err := os.Link(link.target, link.path); err != nil {
-				return errors.Wrapf(err, "failed to link %s to %s", link.path, link.target)
+			if err := e.dest.link(link.target, link.path); err != nil {
+				return err
 			}
 			continue
 		}
-		if err := os.Symlink(link.target, link.path); err != nil {
-			return errors.Wrapf(err, "failed to create symlink %s", link.path)
+		if err := e.dest.symlink(link.target, link.path); err != nil {
+			return err
 		}
 		if err := e.setPathStat(link.path, link.stat, true); err != nil {
 			return err

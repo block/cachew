@@ -13,7 +13,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 
 	"github.com/alecthomas/errors"
 	"golang.org/x/sync/semaphore"
@@ -80,6 +79,7 @@ type delayedLink struct {
 // goroutine. Before an entry touches a path it waits for any pending write to it, so entries apply in archive order.
 type tarExtractor struct {
 	root       string
+	dest       *destDir
 	asRoot     bool
 	umask      int
 	numWriters int
@@ -108,8 +108,10 @@ type tarExtractor struct {
 
 func newTarExtractor(root string, writers int) *tarExtractor {
 	root = filepath.Clean(root)
+	dest := &destDir{fd: -1, path: root}
 	return &tarExtractor{
 		root:         root,
+		dest:         dest,
 		asRoot:       os.Geteuid() == 0,
 		umask:        processUmask(),
 		numWriters:   writers,
@@ -119,7 +121,7 @@ func newTarExtractor(root string, writers int) *tarExtractor {
 		failed:       make(chan struct{}),
 		inFlight:     map[string]chan struct{}{},
 		dirs:         map[string]struct{}{root: {}},
-		dirStack:     newDirStack(),
+		dirStack:     newDirStack(dest),
 		delayedAt:    map[string]int{},
 		placeholders: map[fileID]struct{}{},
 		users:        map[string]int{},
@@ -146,7 +148,11 @@ func processUmask() int {
 	return 0o777
 }
 
-func (e *tarExtractor) extract(ctx context.Context, r io.Reader) error {
+func (e *tarExtractor) extract(ctx context.Context, r io.Reader) (err error) {
+	if err := e.dest.open(); err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, e.dest.close()) }()
 	var writers sync.WaitGroup
 	for range e.numWriters {
 		writers.Go(e.runWriter)
@@ -170,7 +176,7 @@ func (e *tarExtractor) runWriter() {
 		select {
 		case <-e.failed:
 		default:
-			err := writeFile(job.target, job.stat, e.asRoot, removeEntry, func(f *os.File) error {
+			err := e.writeFile(job.target, job.stat, e.removeEntry, func(f *os.File) error {
 				_, err := f.Write(job.data)
 				return errors.WithStack(err)
 			})
@@ -267,7 +273,7 @@ func (e *tarExtractor) entry(ctx context.Context, tr *tar.Reader, hdr *tar.Heade
 		if !isDir {
 			return errors.Errorf("%s: cannot replace the target directory", hdr.Name)
 		}
-		return e.recordDir(name, target, hdr, false, nil)
+		return e.recordDir(ctx, name, target, hdr, false, nil)
 	}
 	claimed, hadPlaceholder := e.claim(target, isDir)
 	viaLink, err := e.ensureParent(name, target)
@@ -303,13 +309,13 @@ func (e *tarExtractor) apply(
 ) error {
 	switch {
 	case isDirEntry(hdr):
-		return e.dir(name, target, hdr, viaLink)
+		return e.dir(ctx, name, target, hdr, viaLink)
 	case hdr.Typeflag == tar.TypeSymlink:
-		return e.symlink(name, target, hdr, viaLink)
+		return e.symlink(ctx, name, target, hdr, viaLink)
 	case hdr.Typeflag == tar.TypeLink:
 		return e.hardlink(name, target, hdr, viaLink)
 	case hdr.Typeflag == tar.TypeChar, hdr.Typeflag == tar.TypeBlock, hdr.Typeflag == tar.TypeFifo:
-		return e.node(target, hdr, viaLink)
+		return e.node(ctx, target, hdr, viaLink)
 	default:
 		// GNU tar extracts regular, contiguous, sparse and unknown entry types as regular files.
 		return e.regular(ctx, tr, hdr, target, viaLink)
@@ -417,16 +423,15 @@ func (e *tarExtractor) ensureParent(name, target string) (bool, error) {
 		return false, err
 	}
 	e.wait(parent)
-	info, err := os.Lstat(parent)
+	st, err := e.dest.lstat(parent)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 		err = e.mkdirParent(name, parent, viaLink)
 	case err != nil:
-		err = errors.WithStack(err)
-	case info.IsDir():
-	case info.Mode()&fs.ModeSymlink != 0:
+	case isDirStat(st):
+	case isSymlinkStat(st):
 		viaLink = true
-		err = requireDir(parent)
+		err = e.requireDir(parent)
 	default:
 		err = errors.Errorf("%s: not a directory", parent)
 	}
@@ -439,12 +444,12 @@ func (e *tarExtractor) ensureParent(name, target string) (bool, error) {
 	return viaLink, nil
 }
 
-func requireDir(path string) error {
-	info, err := os.Stat(path)
+func (e *tarExtractor) requireDir(path string) error {
+	st, err := e.dest.stat(path)
 	if err != nil {
-		return errors.WithStack(err)
+		return err
 	}
-	if !info.IsDir() {
+	if !isDirStat(st) {
 		return errors.Errorf("%s: not a directory", path)
 	}
 	return nil
@@ -452,25 +457,30 @@ func requireDir(path string) error {
 
 func (e *tarExtractor) mkdirParent(name, path string, viaLink bool) error {
 	// GNU tar gives unlisted parents the umask's mode, owner-writable and searchable until extraction finishes.
-	if err := os.Mkdir(path, 0o777); err != nil {
-		return errors.WithStack(err)
+	if err := e.dest.mkdir(path, 0o777); err != nil {
+		return err
 	}
-	var st unix.Stat_t
-	if err := unix.Lstat(path, &st); err != nil {
-		return errors.Wrapf(err, "failed to stat %s", path)
+	st, err := e.dest.lstat(path)
+	if err != nil {
+		return err
 	}
-	desired := st.Mode & 0o777
-	if !e.asRoot && desired&0o300 != 0o300 {
-		if err := unix.Chmod(path, st.Mode&0o7777|0o300); err != nil {
-			return errors.Wrapf(err, "failed to chmod %s", path)
+	desired, created := st.Mode&0o777, st.Mode&0o777
+	if !e.asRoot {
+		created |= 0o300
+	}
+	if created != desired {
+		if err := e.dest.chmod(path, st.Mode&0o7000|created); err != nil {
+			return err
 		}
 	}
 	return e.dirStack.push(pendingDir{
-		name:     e.parentName(name, path),
-		path:     path,
-		stat:     entryStat{mode: desired},
-		interdir: true,
-		viaLink:  viaLink,
+		name:       e.parentName(name, path),
+		path:       path,
+		stat:       entryStat{mode: desired},
+		interdir:   true,
+		created:    created,
+		wasCreated: true,
+		viaLink:    viaLink,
 	})
 }
 
@@ -488,24 +498,28 @@ func (e *tarExtractor) parentName(name, path string) string {
 	return rel
 }
 
-func (e *tarExtractor) dir(name, target string, hdr *tar.Header, viaLink bool) error {
+func (e *tarExtractor) dir(ctx context.Context, name, target string, hdr *tar.Header, viaLink bool) error {
 	// Like GNU tar, keep an existing directory but replace anything else, even a symlink to a directory.
-	info, err := os.Lstat(target)
+	st, err := e.dest.lstat(target)
 	switch {
-	case err == nil && info.IsDir():
-		return e.recordDir(name, target, hdr, viaLink, nil)
+	case err == nil && isDirStat(st):
+		return e.recordDir(ctx, name, target, hdr, viaLink, nil)
 	case err == nil:
 		if err := e.removeExisting(target, viaLink); err != nil {
 			return err
 		}
 	case !errors.Is(err, fs.ErrNotExist):
-		return errors.WithStack(err)
+		return err
 	}
 	created, err := e.mkdir(target, hdr)
 	if err != nil {
 		return err
 	}
-	return e.recordDir(name, target, hdr, viaLink, &created)
+	// GNU tar's mkdir of "d/." fails, so it creates "d" as a parent and moves this entry's metadata onto it.
+	for strings.HasSuffix(name, "/.") {
+		name = strings.TrimSuffix(name, "/.")
+	}
+	return e.recordDir(ctx, name, target, hdr, viaLink, &created)
 }
 
 func (e *tarExtractor) mkdir(target string, hdr *tar.Header) (uint32, error) {
@@ -514,18 +528,20 @@ func (e *tarExtractor) mkdir(target string, hdr *tar.Header) (uint32, error) {
 	if !e.asRoot {
 		mode |= 0o300
 	}
-	if err := unix.Mkdir(target, mode); err != nil {
-		return 0, errors.Wrapf(err, "failed to create directory %s", target)
+	if err := e.dest.mkdir(target, mode); err != nil {
+		return 0, err
 	}
 	// GNU tar clears the umask for -p; this process can't, so undo it where it would affect the owner.
 	if e.umask&int(mode) != 0 {
-		return mode, errors.Wrapf(unix.Chmod(target, mode), "failed to chmod %s", target)
+		return mode, e.dest.chmod(target, mode)
 	}
 	return mode, nil
 }
 
-func (e *tarExtractor) recordDir(name, target string, hdr *tar.Header, viaLink bool, created *uint32) error {
-	stat, err := e.stat(hdr)
+func (e *tarExtractor) recordDir(
+	ctx context.Context, name, target string, hdr *tar.Header, viaLink bool, created *uint32,
+) error {
+	stat, err := e.stat(ctx, hdr)
 	if err != nil {
 		return err
 	}
@@ -540,7 +556,7 @@ func (e *tarExtractor) recordDir(name, target string, hdr *tar.Header, viaLink b
 }
 
 func (e *tarExtractor) removeExisting(path string, viaLink bool) error {
-	if info, err := os.Lstat(path); err == nil && info.IsDir() {
+	if st, err := e.dest.lstat(path); err == nil && isDirStat(st) {
 		// Queued writes may still be filling the directory, which GNU tar would find non-empty.
 		e.waitAll()
 		if viaLink {
@@ -548,11 +564,11 @@ func (e *tarExtractor) removeExisting(path string, viaLink bool) error {
 			e.dirs = map[string]struct{}{e.root: {}}
 		}
 	}
-	return removeEntry(path)
+	return e.removeEntry(path)
 }
 
-func removeEntry(path string) error {
-	return errors.Wrapf(os.Remove(path), "failed to replace %s", path)
+func (e *tarExtractor) removeEntry(path string) error {
+	return errors.Wrapf(e.dest.remove(path), "failed to replace %s", path)
 }
 
 func createReplacing(path string, remove func(string) error, create func() error) error {
@@ -570,7 +586,7 @@ func createReplacing(path string, remove func(string) error, create func() error
 func (e *tarExtractor) regular(
 	ctx context.Context, tr *tar.Reader, hdr *tar.Header, target string, viaLink bool,
 ) error {
-	stat, err := e.stat(hdr)
+	stat, err := e.stat(ctx, hdr)
 	if err != nil {
 		return err
 	}
@@ -578,7 +594,7 @@ func (e *tarExtractor) regular(
 	case viaLink:
 		// Written before the next entry, since a later path may alias this one.
 		remove := func(path string) error { return e.removeExisting(path, viaLink) }
-		return writeFile(target, stat, e.asRoot, remove, func(f *os.File) error {
+		return e.writeFile(target, stat, remove, func(f *os.File) error {
 			// Hiding ReadFrom keeps io.CopyBuffer on the large buffer instead of os.File's 32 KiB copy loop.
 			_, err := io.CopyBuffer(struct{ io.Writer }{f}, tr, e.copyBuf)
 			return errors.Wrapf(err, "failed to write %s", target)
@@ -608,7 +624,7 @@ func (e *tarExtractor) stream(ctx context.Context, tr *tar.Reader, hdr *tar.Head
 	e.inFlight[target] = done
 	e.streams.Go(func() {
 		defer close(done)
-		err := writeFile(target, stat, e.asRoot, removeEntry, func(f *os.File) error {
+		err := e.writeFile(target, stat, e.removeEntry, func(f *os.File) error {
 			for chunk := range chunks {
 				_, err := f.Write(chunk)
 				e.releaseChunk(chunk)
@@ -659,31 +675,31 @@ func (e *tarExtractor) releaseChunk(chunk []byte) {
 	}
 }
 
-func writeFile(
-	target string, stat entryStat, asRoot bool, remove func(string) error, write func(*os.File) error,
+func (e *tarExtractor) writeFile(
+	target string, stat entryStat, remove func(string) error, write func(*os.File) error,
 ) error {
 	var f *os.File
 	err := createReplacing(target, remove, func() error {
 		var err error
-		f, err = os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-		return errors.WithStack(err)
+		f, err = e.dest.create(target, 0o600)
+		return err
 	})
 	if err != nil {
-		return errors.Wrapf(err, "failed to create %s", target)
+		return err
 	}
 	err = write(f)
 	if err == nil {
-		err = setFileStat(f, stat, asRoot)
+		err = e.setFileStat(f, target, stat)
 	}
 	return errors.Join(err, errors.Wrapf(f.Close(), "failed to close %s", target))
 }
 
-func setFileStat(f *os.File, stat entryStat, asRoot bool) error {
+func (e *tarExtractor) setFileStat(f *os.File, target string, stat entryStat) error {
 	// Mode goes last, as in GNU tar, because chown can clear set-ID bits.
-	if err := setMtime(f.Name(), stat); err != nil {
+	if err := e.setMtime(target, stat); err != nil {
 		return err
 	}
-	if asRoot {
+	if e.asRoot {
 		if err := f.Chown(stat.uid, stat.gid); err != nil {
 			return errors.WithStack(err)
 		}
@@ -692,41 +708,41 @@ func setFileStat(f *os.File, stat entryStat, asRoot bool) error {
 }
 
 func (e *tarExtractor) setPathStat(path string, stat entryStat, keepMode bool) error {
-	if err := setMtime(path, stat); err != nil {
+	if err := e.setMtime(path, stat); err != nil {
 		return err
 	}
 	if e.asRoot {
-		if err := os.Lchown(path, stat.uid, stat.gid); err != nil {
-			return errors.WithStack(err)
+		if err := e.dest.lchown(path, stat.uid, stat.gid); err != nil {
+			return err
 		}
 	}
 	if keepMode {
 		return nil
 	}
-	return errors.Wrapf(unix.Chmod(path, stat.mode), "failed to chmod %s", path)
+	return e.dest.chmod(path, stat.mode)
 }
 
-func setMtime(path string, stat entryStat) error {
+func (e *tarExtractor) setMtime(path string, stat entryStat) error {
 	// GNU tar leaves atime alone outside incremental mode.
-	times := []unix.Timespec{{Nsec: unix.UTIME_OMIT}, stat.mtime}
-	err := unix.UtimesNanoAt(unix.AT_FDCWD, path, times, unix.AT_SYMLINK_NOFOLLOW)
-	return errors.Wrapf(err, "failed to set times on %s", path)
+	return e.dest.setTimes(path, []unix.Timespec{{Nsec: unix.UTIME_OMIT}, stat.mtime})
 }
 
-func (e *tarExtractor) stat(hdr *tar.Header) (entryStat, error) {
+func (e *tarExtractor) stat(ctx context.Context, hdr *tar.Header) (entryStat, error) {
 	mtime, err := unix.TimeToTimespec(hdr.ModTime)
 	if err != nil {
 		return entryStat{}, errors.Wrapf(err, "%s: unsupported modification time", hdr.Name)
 	}
 	stat := entryStat{mode: uint32(hdr.Mode) & 0o7777, mtime: mtime} //nolint:gosec // mode bits only
 	if e.asRoot {
-		stat.uid = cachedID(e.users, hdr.Uname, hdr.Uid, userID)
-		stat.gid = cachedID(e.groups, hdr.Gname, hdr.Gid, groupID)
+		stat.uid = cachedID(ctx, e.users, hdr.Uname, hdr.Uid, userID)
+		stat.gid = cachedID(ctx, e.groups, hdr.Gname, hdr.Gid, groupID)
 	}
 	return stat, nil
 }
 
-func cachedID(cache map[string]int, name string, numeric int, lookup func(string) (int, error)) int {
+func cachedID(
+	ctx context.Context, cache map[string]int, name string, numeric int, lookup func(context.Context, string) (int, error),
+) int {
 	// GNU tar prefers the archived owner name and falls back to the numeric ID when the name is unknown.
 	if name == "" {
 		return numeric
@@ -734,7 +750,7 @@ func cachedID(cache map[string]int, name string, numeric int, lookup func(string
 	id, ok := cache[name]
 	if !ok {
 		var err error
-		if id, err = lookup(name); err != nil {
+		if id, err = lookup(ctx, name); err != nil {
 			id = -1
 		}
 		cache[name] = id
@@ -745,9 +761,12 @@ func cachedID(cache map[string]int, name string, numeric int, lookup func(string
 	return id
 }
 
-func userID(name string) (int, error) {
-	if id, ok := nssID("passwd", name); ok {
+func userID(ctx context.Context, name string) (int, error) {
+	if id, ok := nssID(ctx, "passwd", name); ok {
 		return id, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return 0, errors.WithStack(err)
 	}
 	u, err := user.Lookup(name)
 	if err != nil {
@@ -757,9 +776,12 @@ func userID(name string) (int, error) {
 	return id, errors.WithStack(err)
 }
 
-func groupID(name string) (int, error) {
-	if id, ok := nssID("group", name); ok {
+func groupID(ctx context.Context, name string) (int, error) {
+	if id, ok := nssID(ctx, "group", name); ok {
 		return id, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return 0, errors.WithStack(err)
 	}
 	g, err := user.LookupGroup(name)
 	if err != nil {
@@ -769,14 +791,14 @@ func groupID(name string) (int, error) {
 	return id, errors.WithStack(err)
 }
 
-func nssID(database, name string) (int, bool) {
+func nssID(ctx context.Context, database, name string) (int, bool) {
 	// GNU tar resolves names through NSS, as getent does; os/user without cgo only reads /etc/passwd and /etc/group.
 	//
 	// A leading "-" would be parsed as a getent option.
 	if strings.HasPrefix(name, "-") {
 		return 0, false
 	}
-	out, err := exec.Command("getent", database, name).Output() //nolint:gosec,noctx // fixed binary, name is one argument
+	out, err := exec.CommandContext(ctx, "getent", database, name).Output() //nolint:gosec // name is a single argument
 	if err != nil {
 		return 0, false
 	}
@@ -795,8 +817,8 @@ func isUnsafeLinkTarget(target string) bool {
 	return strings.HasPrefix(target, "/") || containsDotDot(target)
 }
 
-func (e *tarExtractor) symlink(name, target string, hdr *tar.Header, viaLink bool) error {
-	stat, err := e.stat(hdr)
+func (e *tarExtractor) symlink(ctx context.Context, name, target string, hdr *tar.Header, viaLink bool) error {
+	stat, err := e.stat(ctx, hdr)
 	if err != nil {
 		return err
 	}
@@ -804,9 +826,9 @@ func (e *tarExtractor) symlink(name, target string, hdr *tar.Header, viaLink boo
 		return e.placeholder(name, target, delayedLink{symlink: true, target: hdr.Linkname, stat: stat}, viaLink)
 	}
 	remove := func(path string) error { return e.removeExisting(path, viaLink) }
-	err = createReplacing(target, remove, func() error { return errors.WithStack(os.Symlink(hdr.Linkname, target)) })
+	err = createReplacing(target, remove, func() error { return e.dest.symlink(hdr.Linkname, target) })
 	if err != nil {
-		return errors.Wrapf(err, "failed to create symlink %s", target)
+		return err
 	}
 	return e.setPathStat(target, stat, true)
 }
@@ -814,15 +836,16 @@ func (e *tarExtractor) symlink(name, target string, hdr *tar.Header, viaLink boo
 // placeholder creates the empty file GNU tar puts where a deferred link goes, and records the link.
 func (e *tarExtractor) placeholder(name, target string, link delayedLink, viaLink bool) error {
 	for attempt := 0; ; attempt++ {
-		f, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0)
+		f, err := e.dest.create(target, 0)
 		if err == nil {
-			info, err := f.Stat()
+			var st unix.Stat_t
+			err := unix.Fstat(int(f.Fd()), &st) //nolint:gosec // fd
 			closeErr := f.Close()
 			if err = errors.Join(err, closeErr); err != nil {
 				return errors.Wrapf(err, "failed to create placeholder %s", target)
 			}
 			link.path = target
-			link.id = idOf(info)
+			link.id = statID(st)
 			e.delayedAt[target] = len(e.delayed)
 			e.delayed = append(e.delayed, link)
 			e.placeholders[link.id] = struct{}{}
@@ -857,21 +880,12 @@ func (e *tarExtractor) isPlaceholder(path string) bool {
 	if len(e.placeholders) == 0 {
 		return false
 	}
-	info, err := os.Lstat(path)
+	st, err := e.dest.lstat(path)
 	if err != nil {
 		return false
 	}
-	_, ok := e.placeholders[idOf(info)]
+	_, ok := e.placeholders[statID(st)]
 	return ok
-}
-
-func idOf(info fs.FileInfo) fileID {
-	// os reports syscall.Stat_t, a different type from unix.Stat_t.
-	sys, ok := info.Sys().(*syscall.Stat_t)
-	if !ok {
-		return fileID{}
-	}
-	return fileID{dev: uint64(sys.Dev), ino: sys.Ino} //nolint:unconvert // Dev is uint32 on some architectures
 }
 
 func (e *tarExtractor) hardlink(name, target string, hdr *tar.Header, viaLink bool) error {
@@ -886,18 +900,18 @@ func (e *tarExtractor) hardlink(name, target string, hdr *tar.Header, viaLink bo
 		return e.placeholder(name, target, delayedLink{target: source}, viaLink)
 	}
 	for attempt := 0; ; attempt++ {
-		err := os.Link(source, target)
+		err := e.dest.link(source, target)
 		if err == nil {
 			return nil
 		}
 		if !errors.Is(err, fs.ErrExist) {
-			return errors.Wrapf(err, "failed to link %s to %s", target, source)
+			return err
 		}
-		if source == target || sameFile(source, target) {
+		if source == target || e.sameFile(source, target) {
 			return nil
 		}
 		if attempt > 0 {
-			return errors.Wrapf(err, "failed to link %s to %s", target, source)
+			return err
 		}
 		if err := e.removeExisting(target, viaLink); err != nil {
 			return err
@@ -905,17 +919,17 @@ func (e *tarExtractor) hardlink(name, target string, hdr *tar.Header, viaLink bo
 	}
 }
 
-func sameFile(a, b string) bool {
-	ai, err := os.Lstat(a)
+func (e *tarExtractor) sameFile(a, b string) bool {
+	as, err := e.dest.lstat(a)
 	if err != nil {
 		return false
 	}
-	bi, err := os.Lstat(b)
-	return err == nil && os.SameFile(ai, bi)
+	bs, err := e.dest.lstat(b)
+	return err == nil && statID(as) == statID(bs)
 }
 
-func (e *tarExtractor) node(target string, hdr *tar.Header, viaLink bool) error {
-	stat, err := e.stat(hdr)
+func (e *tarExtractor) node(ctx context.Context, target string, hdr *tar.Header, viaLink bool) error {
+	stat, err := e.stat(ctx, hdr)
 	if err != nil {
 		return err
 	}
@@ -931,10 +945,10 @@ func (e *tarExtractor) node(target string, hdr *tar.Header, viaLink bool) error 
 	dev := unix.Mkdev(uint32(hdr.Devmajor), uint32(hdr.Devminor)) //nolint:gosec // device numbers are 32-bit
 	remove := func(path string) error { return e.removeExisting(path, viaLink) }
 	err = createReplacing(target, remove, func() error {
-		return errors.WithStack(unix.Mknod(target, kind|stat.mode&0o777, int(dev))) //nolint:gosec // Linux dev_t
+		return e.dest.mknod(target, kind|stat.mode&0o777, int(dev)) //nolint:gosec // Linux dev_t
 	})
 	if err != nil {
-		return errors.Wrapf(err, "failed to create %s", target)
+		return err
 	}
 	return e.setPathStat(target, stat, false)
 }
