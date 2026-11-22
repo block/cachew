@@ -214,6 +214,9 @@ func New(
 			req.URL.Host = req.PathValue("host")
 			req.URL.Path = "/" + req.PathValue("path")
 			req.Host = req.URL.Host
+			if authorization := req.Header.Get("Authorization"); authorization != "" {
+				*req = *req.WithContext(cachewhttputil.WithForwardedCredentialCooldown(req.Context(), authorization))
+			}
 
 			// Inject GitHub App authentication for github.com requests
 			if s.tokenManager != nil && req.URL.Host == "github.com" {

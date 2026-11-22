@@ -2,6 +2,10 @@ package httputil
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"io"
 	"log/slog"
 	"math"
@@ -19,7 +23,8 @@ import (
 
 // BackoffTransport shares upstream cooldowns across requests and redirect hops.
 //
-// Cooldowns are keyed by outbound hostname, across strategies, schemes and ports, and by [WithCooldownScope].
+// Cooldowns are keyed by outbound hostname, across strategies, schemes and ports, and by [WithCooldownScope] or
+// [WithForwardedCredentialCooldown].
 type BackoffTransport struct {
 	base       http.RoundTripper
 	delay      time.Duration
@@ -27,6 +32,7 @@ type BackoffTransport struct {
 	logger     *slog.Logger
 	cooldowns  metric.Int64Counter
 	rejections metric.Int64Counter
+	scopeKey   []byte
 	mu         sync.Mutex
 	until      map[string]time.Time
 }
@@ -47,11 +53,12 @@ func NewBackoffTransport(base http.RoundTripper, delay, maxDelay time.Duration, 
 		panic(err)
 	}
 	return &BackoffTransport{base: base, delay: delay, maxDelay: maxDelay, logger: logger,
-		cooldowns: cooldowns, rejections: rejections, until: map[string]time.Time{}}
+		cooldowns: cooldowns, rejections: rejections, scopeKey: []byte(rand.Text()), until: map[string]time.Time{}}
 }
 
 type noCooldownKey struct{}
 type cooldownScopeKey struct{}
+type forwardedCredentialKey struct{}
 
 // WithCooldownScope gives requests their own cooldown on each host.
 //
@@ -65,6 +72,14 @@ func WithCooldownScope(ctx context.Context, scope string) context.Context {
 func CooldownScope(ctx context.Context) (string, bool) {
 	scope, ok := ctx.Value(cooldownScopeKey{}).(string)
 	return scope, ok
+}
+
+// WithForwardedCredentialCooldown gives requests that send the caller's own Authorization value one cooldown per value.
+//
+// The caller's 429 then doesn't pause the host for others. A request whose Authorization no longer matches, because a
+// transport replaced it, shares the host's cooldown. [WithCooldownScope] takes precedence.
+func WithForwardedCredentialCooldown(ctx context.Context, authorization string) context.Context {
+	return context.WithValue(ctx, forwardedCredentialKey{}, authorization)
 }
 
 // WithoutCooldown exempts requests that cachew forwards to one of its own routes.
@@ -82,8 +97,12 @@ func (t *BackoffTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	}
 	cooldown := strings.ToLower(r.URL.Hostname())
 	scope, scoped := CooldownScope(r.Context())
+	authorization := r.Header.Get("Authorization")
+	if forwarded, _ := r.Context().Value(forwardedCredentialKey{}).(string); !scoped && authorization != "" && authorization == forwarded {
+		scope, scoped = t.forwardedCredentialScope(authorization), true
+	}
 	// A redirect to another host drops the credential that the scope stands for.
-	scoped = scoped && r.Header.Get("Authorization") != ""
+	scoped = scoped && authorization != ""
 	if scoped {
 		cooldown += "#" + scope
 	} else {
@@ -150,6 +169,15 @@ func (t *BackoffTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 		}
 	}
 	return resp, nil
+}
+
+// forwardedCredentialScope names a caller credential's cooldown, which is logged.
+//
+// The name is keyed with a secret that never leaves the process, so it can't be used to test guesses of the credential.
+func (t *BackoffTransport) forwardedCredentialScope(authorization string) string { //nolint:privatedoc // explains why
+	mac := hmac.New(sha256.New, t.scopeKey)
+	mac.Write([]byte(authorization))
+	return "forwarded-credential:" + hex.EncodeToString(mac.Sum(nil)[:8])
 }
 
 // RetryAfterDeadline parses Retry-After, using fallback and returning false when the value is invalid.

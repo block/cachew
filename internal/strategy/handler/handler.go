@@ -431,6 +431,9 @@ func (h *Handler) upstreamRequest(r *http.Request) (*http.Request, error) {
 	req = req.Clone(ctx)
 	// Forward safe headers from the original request, without overwriting headers set by transform.
 	forwardable := httputil.FilterHeaders(r.Header, slices.Concat(httputil.HopByHopHeaders, []string{"Range", "If-Range"})...)
+	if authorization := forwardable.Get("Authorization"); authorization != "" && req.Header.Get("Authorization") == "" {
+		req = req.WithContext(httputil.WithForwardedCredentialCooldown(req.Context(), authorization))
+	}
 	for key, values := range forwardable {
 		if req.Header.Get(key) == "" {
 			req.Header[key] = values

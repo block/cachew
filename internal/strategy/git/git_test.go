@@ -2,12 +2,14 @@ package git_test
 
 import (
 	"context"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -15,6 +17,7 @@ import (
 
 	"github.com/block/cachew/internal/gitclone"
 	"github.com/block/cachew/internal/githubapp"
+	"github.com/block/cachew/internal/httputil"
 	"github.com/block/cachew/internal/jobscheduler"
 	"github.com/block/cachew/internal/logging"
 	"github.com/block/cachew/internal/metadatadb"
@@ -403,4 +406,53 @@ abc123def456 refs/heads/main`,
 			assert.Equal(t, tt.expected, result)
 		})
 	}
+}
+
+type proxyTransport func(*http.Request) int
+
+// RoundTrip answers every proxied request with the status chosen by f.
+func (f proxyTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	return &http.Response{
+		StatusCode: f(r),
+		Header:     make(http.Header),
+		Body:       io.NopCloser(strings.NewReader("")),
+		Request:    r,
+	}, nil
+}
+
+func TestProxyScopesForwardedCredentials(t *testing.T) {
+	_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelError})
+	mux := newTestMux()
+	cm := gitclone.NewManagerProvider(ctx, gitclone.Config{MirrorRoot: t.TempDir()}, nil)
+	s, err := git.New(ctx, git.Config{}, newTestScheduler(ctx, t), nil, mux, cm, func() (*githubapp.TokenManager, error) { return nil, nil }, newTestSpools(t)) //nolint:nilnil
+	assert.NoError(t, err)
+	waitForReady(t, s)
+	calls := 0
+	s.SetHTTPTransport(httputil.NewBackoffTransport(proxyTransport(func(r *http.Request) int {
+		calls++
+		if r.Header.Get("Authorization") == "Bearer limited" {
+			return http.StatusTooManyRequests
+		}
+		return http.StatusOK
+	}), time.Minute, time.Hour, slog.New(slog.DiscardHandler)))
+	for _, step := range []struct {
+		authorization string
+		status        int
+	}{
+		{"Bearer limited", http.StatusTooManyRequests},
+		{"Bearer limited", http.StatusTooManyRequests},
+		{"Bearer other", http.StatusOK},
+		{"", http.StatusOK},
+	} {
+		r := httptest.NewRequestWithContext(ctx, http.MethodPost, "/git/example.test/org/repo.git/info/lfs/objects/batch", nil)
+		r.SetPathValue("host", "example.test")
+		r.SetPathValue("path", "org/repo.git/info/lfs/objects/batch")
+		if step.authorization != "" {
+			r.Header.Set("Authorization", step.authorization)
+		}
+		w := httptest.NewRecorder()
+		mux.handlers["POST /git/{host}/{path...}"].ServeHTTP(w, r)
+		assert.Equal(t, step.status, w.Code, step.authorization)
+	}
+	assert.Equal(t, 3, calls)
 }

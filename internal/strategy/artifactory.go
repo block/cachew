@@ -116,7 +116,7 @@ func (a *Artifactory) transformRequest(r *http.Request) (*http.Request, error) {
 		return nil, errors.Errorf("failed to create request: %w", err)
 	}
 
-	// Pass through authentication headers
+	// Pass through other credentials; the handler forwards Authorization so each caller credential cools down alone.
 	a.copyAuthHeaders(r, req)
 
 	// Disable Artifactory download redirects so the proxy caches the artifact itself.
@@ -177,7 +177,6 @@ func (a *Artifactory) isHostBasedRequest(r *http.Request) bool {
 
 func (a *Artifactory) copyAuthHeaders(src, dst *http.Request) {
 	authHeaders := []string{
-		"Authorization",
 		"X-JFrog-Art-Api",
 		"Cookie",
 	}
