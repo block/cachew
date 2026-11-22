@@ -481,13 +481,13 @@ func (e *tarExtractor) mkdirParent(name, path string, viaLink bool) error {
 		}
 	}
 	return e.dirStack.push(pendingDir{
-		name:       e.parentName(name, path),
-		path:       path,
-		stat:       entryStat{mode: desired},
-		interdir:   true,
-		created:    created,
-		wasCreated: true,
-		viaLink:    viaLink,
+		name:     e.parentName(name, path),
+		path:     path,
+		stat:     entryStat{mode: desired},
+		interdir: true,
+		seen:     created,
+		hasSeen:  true,
+		viaLink:  viaLink,
 	})
 }
 
@@ -510,14 +510,18 @@ func (e *tarExtractor) dir(ctx context.Context, name, target string, hdr *tar.He
 	st, err := e.dest.lstat(target)
 	switch {
 	case err == nil && isDirStat(st):
-		return e.recordDir(ctx, name, target, hdr, viaLink, nil)
+		return e.recordDir(ctx, name, target, hdr, viaLink, seenMode(st))
 	case err == nil && strings.HasSuffix(name, "/."):
-		// GNU tar's mkdir of "x/." resolves a symlink at x, so a link to a directory stays and anything else fails.
-		path := target + "/."
-		if _, err := e.dest.lstat(path); err != nil {
+		// The link may lead into an applied directory, whose mode GNU tar records as it finds it.
+		if err := e.flushFinished(); err != nil {
 			return err
 		}
-		return e.recordDir(ctx, name, path, hdr, true, nil)
+		// GNU tar's mkdir of "x/." resolves a symlink at x, so a link to a directory stays and anything else fails.
+		path := target + "/."
+		if st, err = e.dest.lstat(path); err != nil {
+			return err
+		}
+		return e.recordDir(ctx, name, path, hdr, true, seenMode(st))
 	case err == nil:
 		if err := e.removeExisting(target, viaLink); err != nil {
 			return err
@@ -525,15 +529,34 @@ func (e *tarExtractor) dir(ctx context.Context, name, target string, hdr *tar.He
 	case !errors.Is(err, fs.ErrNotExist):
 		return err
 	}
+	if strings.HasSuffix(name, "/.") {
+		return e.dotDir(ctx, name, target, hdr, viaLink)
+	}
 	created, err := e.mkdir(target, hdr)
 	if err != nil {
 		return err
 	}
-	// GNU tar's mkdir of "d/." fails, so it creates "d" as a parent and moves this entry's metadata onto it.
+	return e.recordDir(ctx, name, target, hdr, viaLink, &created)
+}
+
+func (e *tarExtractor) dotDir(ctx context.Context, name, target string, hdr *tar.Header, viaLink bool) error {
+	// GNU tar's mkdir of "d/." fails, so it creates "d" as a missing parent and moves this entry's metadata onto it.
+	if err := e.mkdirParent(name, target, viaLink); err != nil {
+		return err
+	}
+	st, err := e.dest.lstat(target)
+	if err != nil {
+		return err
+	}
 	for strings.HasSuffix(name, "/.") {
 		name = strings.TrimSuffix(name, "/.")
 	}
-	return e.recordDir(ctx, name, target, hdr, viaLink, &created)
+	return e.recordDir(ctx, name, target, hdr, viaLink, seenMode(st))
+}
+
+func seenMode(st unix.Stat_t) *uint32 {
+	mode := st.Mode & 0o7777
+	return &mode
 }
 
 func (e *tarExtractor) mkdir(target string, hdr *tar.Header) (uint32, error) {
@@ -546,14 +569,19 @@ func (e *tarExtractor) mkdir(target string, hdr *tar.Header) (uint32, error) {
 		return 0, err
 	}
 	// GNU tar clears the umask for -p; this process can't, so undo it where it would affect the owner.
-	if e.umask&int(mode) != 0 {
-		return mode, e.dest.chmod(target, mode)
+	if e.umask&int(mode) == 0 {
+		return mode, nil
 	}
-	return mode, nil
+	st, err := e.dest.lstat(target)
+	if err != nil {
+		return 0, err
+	}
+	// A set-group-ID bit inherited from the parent decides the group of subdirectories, so it must survive.
+	return mode, e.dest.chmod(target, st.Mode&0o7000|mode)
 }
 
 func (e *tarExtractor) recordDir(
-	ctx context.Context, name, target string, hdr *tar.Header, viaLink bool, created *uint32,
+	ctx context.Context, name, target string, hdr *tar.Header, viaLink bool, seen *uint32,
 ) error {
 	stat, err := e.stat(ctx, hdr)
 	if err != nil {
@@ -563,8 +591,8 @@ func (e *tarExtractor) recordDir(
 		e.dirs[target] = struct{}{}
 	}
 	dir := pendingDir{name: name, path: target, stat: stat, viaLink: viaLink}
-	if created != nil {
-		dir.created, dir.wasCreated = *created, true
+	if seen != nil {
+		dir.seen, dir.hasSeen = *seen, true
 	}
 	return e.dirStack.push(dir)
 }

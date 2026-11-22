@@ -15,9 +15,9 @@ type pendingDir struct {
 	stat entryStat
 	// interdir marks a missing parent created for an entry, which only gets its permission bits restored.
 	interdir bool
-	// created is the mode a directory was made with; GNU tar skips the chmod when it already matches.
-	created    uint32
-	wasCreated bool
+	// seen is the mode GNU tar last saw the directory with; it skips the chmod if that matches, even if changed since.
+	seen    uint32
+	hasSeen bool
 	// afterLinks holds the directory back until delayed links exist; id detects it being replaced meanwhile.
 	afterLinks bool
 	id         fileID
@@ -204,8 +204,7 @@ func (e *tarExtractor) applyDir(dir *pendingDir, verify bool) error {
 		}
 	}
 	if dir.interdir {
-		if dir.wasCreated && dir.created == dir.stat.mode {
-			// GNU tar compares against the mode it made the directory with, so a chmod through another name stays.
+		if dir.hasSeen && dir.seen == dir.stat.mode {
 			return nil
 		}
 		st, err := e.dest.lstat(dir.path)
@@ -219,7 +218,7 @@ func (e *tarExtractor) applyDir(dir *pendingDir, verify bool) error {
 		}
 		return e.dest.chmod(dir.path, mode)
 	}
-	keepMode := !verify && dir.wasCreated && dir.created == dir.stat.mode
+	keepMode := !verify && dir.hasSeen && dir.seen == dir.stat.mode
 	return e.setPathStat(dir.path, dir.stat, keepMode)
 }
 

@@ -67,6 +67,8 @@ type extractCase struct {
 	name    string
 	setup   func(t *testing.T, dir string)
 	entries []tarEntry
+	// umask replaces the process umask for both extractions when non-zero.
+	umask int
 }
 
 func TestExtractMatchesGNUTar(t *testing.T) {
@@ -202,6 +204,28 @@ func TestExtractMatchesGNUTar(t *testing.T) {
 			directory("d/./", 0o555),
 			regular("d/file", 0o644, "x"),
 		}},
+		{name: "RepeatedTrailingDot", entries: []tarEntry{
+			directory("d/./", 0o755),
+			directory("d/./", 0o700),
+			directory("e/./", 0o700),
+			directory("e/./", 0o755),
+		}},
+		{name: "RevisitedDirKeepsSeenMode", entries: []tarEntry{
+			directory("d/", 0o755),
+			regular("elsewhere", 0o644, "x"),
+			directory("d/", 0o755),
+			directory("d/./", 0o700),
+		}},
+		{name: "TrailingDotThroughSymlinkRepeated", entries: []tarEntry{
+			directory("real/", 0o755),
+			symlink("alias", "real"),
+			directory("alias/./", 0o755),
+			directory("alias/././", 0o700),
+		}},
+		{name: "SetgidInheritedUnderOwnerUmask", setup: setgidRoot, umask: 0o277, entries: []tarEntry{
+			directory("child/", 0o700),
+			regular("child/sub/file", 0o644, "x"),
+		}},
 		{name: "SetgidDirThroughSymlink", entries: []tarEntry{
 			directory("real/", 0o2775),
 			symlink("alias", "real"),
@@ -271,6 +295,10 @@ func TestExtractMatchesGNUTar(t *testing.T) {
 			archive := buildTar(t, tc.entries)
 			gnuDir, goDir := t.TempDir(), t.TempDir()
 			t.Cleanup(func() { makeWritable(t, gnuDir); makeWritable(t, goDir) })
+			if tc.umask != 0 {
+				old := syscall.Umask(tc.umask)
+				t.Cleanup(func() { syscall.Umask(old) })
+			}
 			if tc.setup != nil {
 				tc.setup(t, gnuDir)
 				tc.setup(t, goDir)
@@ -411,6 +439,11 @@ func rewrites() []tarEntry { //nolint:privatedoc // explains why
 		}
 	}
 	return entries
+}
+
+func setgidRoot(t *testing.T, dir string) {
+	t.Helper()
+	assert.NoError(t, os.Chmod(dir, fs.ModeSetgid|0o755))
 }
 
 func existingTree(t *testing.T, dir string) {
