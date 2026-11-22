@@ -47,6 +47,16 @@ func regularWithSlash(name string, mode int64) tarEntry {
 	return tarEntry{hdr: tar.Header{Typeflag: tar.TypeReg, Name: placeholder, Mode: mode}, rawName: name}
 }
 
+func globalHeader(records map[string]string) tarEntry {
+	return tarEntry{hdr: tar.Header{Typeflag: tar.TypeXGlobalHeader, Name: "global", PAXRecords: records}}
+}
+
+func wholeSecond(entry tarEntry) tarEntry {
+	// Whole seconds fit the USTAR field, so the member has no mtime record of its own.
+	entry.hdr.ModTime = time.Date(2019, 1, 2, 3, 4, 5, 0, time.UTC)
+	return entry
+}
+
 func typed(flag byte, name string, mode int64, body string) tarEntry {
 	return tarEntry{hdr: tar.Header{Typeflag: flag, Name: name, Mode: mode}, body: body}
 }
@@ -98,6 +108,7 @@ func TestExtractMatchesGNUTar(t *testing.T) {
 			hardlink("hard-small", "dir/small"),
 			hardlink("hard-large", "dir/large"),
 			hardlink("hard-absolute", "absolute"),
+			regular("dir/small", 0o600, "replaced"),
 			hardlink("hard-rooted", "/dir/small"),
 			hardlink("hard-escaping", "../../dir/small"),
 			typed(tar.TypeFifo, "fifo", 0o640, ""),
@@ -133,13 +144,26 @@ func TestExtractMatchesGNUTar(t *testing.T) {
 			typed('Z', "unknown-type", 0o644, "data"),
 			regular("/absolute/file", 0o644, "abs"),
 		}},
+		{name: "GlobalHeaders", entries: []tarEntry{
+			globalHeader(map[string]string{"mtime": "1500000000.5", "linkpath": "global-target"}),
+			wholeSecond(regular("global-mtime", 0o644, "x")),
+			regular("own-mtime-record", 0o644, "x"),
+			wholeSecond(symlink("global-linkpath", "own-target")),
+			globalHeader(map[string]string{"comment": "replaces the first global header"}),
+			wholeSecond(regular("after-replacing-global", 0o644, "x")),
+			globalHeader(map[string]string{"mtime": "1400000000"}),
+			wholeSecond(regular("global-mtime-again", 0o644, "x")),
+			globalHeader(map[string]string{}),
+			wholeSecond(regular("after-empty-global", 0o644, "x")),
+		}},
 		{name: "ExistingTree", setup: existingTree, entries: []tarEntry{
-			regular("file-over-dir-parent/file", 0o644, "x"),
 			directory("symlink-to-dir/", 0o755),
 			regular("symlink-to-dir/file", 0o644, "x"),
 			regular("symlinked-parent/file", 0o644, "into target"),
 			regular("dangling", 0o644, "x"),
 			regular("readonly", 0o644, "rewritten"),
+			symlink("unsafe", "/first"),
+			symlink("stale", "/second"),
 		}},
 		{name: "OutOfOrder", entries: []tarEntry{
 			directory("revisited/", 0o755),
@@ -151,6 +175,14 @@ func TestExtractMatchesGNUTar(t *testing.T) {
 			directory("link-parent/", 0o755),
 			symlink("link-parent/unsafe", "/absolute"),
 			regular("after-link", 0o644, "x"),
+		}},
+		{name: "AliasedDirectory", entries: []tarEntry{
+			directory("real/", 0o755),
+			symlink("alias", "real"),
+			directory("alias/replaced/", 0o755),
+			regular("real/replaced", 0o644, "x"),
+			directory("alias/written/", 0o700),
+			regular("real/written/file", 0o644, "x"),
 		}},
 		{name: "RevisitReadOnly", entries: []tarEntry{
 			directory("readonly/", 0o555),
@@ -164,6 +196,9 @@ func TestExtractMatchesGNUTar(t *testing.T) {
 			symlink("u", "/tmp"),
 			symlink("s", "u"),
 			regular("s/file", 0o644, "x"),
+		}},
+		{name: "UnderExistingFile", setup: existingTree, entries: []tarEntry{
+			regular("file-over-dir-parent/file", 0o644, "x"),
 		}},
 		{name: "FileOverNonEmptyDir", entries: []tarEntry{regular("d/f", 0o644, "x"), regular("d", 0o644, "x")}},
 		{name: "FileOverTargetDir", entries: []tarEntry{regular(".", 0o644, "x")}},
@@ -187,6 +222,31 @@ func TestExtractMatchesGNUTar(t *testing.T) {
 			if gnuErr == nil {
 				assert.Equal(t, treeState(t, gnuDir), treeState(t, goDir))
 			}
+		})
+	}
+}
+
+func TestExtractRejectsGlobalDataLayoutRecords(t *testing.T) {
+	// GNU tar reads member data using these, but archive/tar has already sized the member from its own header.
+	for _, key := range []string{"size", "GNU.sparse.realsize"} {
+		t.Run(key, func(t *testing.T) {
+			entries := []tarEntry{globalHeader(map[string]string{key: "1"}), regular("file", 0o644, "data")}
+			archive := zstdCompress(t, buildTar(t, entries))
+			err := client.Extract(t.Context(), bytes.NewReader(archive), t.TempDir(), 0)
+			assert.Error(t, err)
+		})
+	}
+}
+
+func TestExtractRejectsIncompleteArchive(t *testing.T) {
+	archive := buildTar(t, []tarEntry{wholeSecond(regular("file", 0o644, "data"))})
+	for name, data := range map[string][]byte{
+		"Empty":          nil,
+		"MissingPadding": archive[:512+len("data")],
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := client.Extract(t.Context(), bytes.NewReader(zstdCompress(t, data)), t.TempDir(), 0)
+			assert.Error(t, err)
 		})
 	}
 }
@@ -244,6 +304,7 @@ func existingTree(t *testing.T, dir string) {
 	assert.NoError(t, os.Symlink("target", filepath.Join(dir, "symlinked-parent")))
 	assert.NoError(t, os.Symlink("nowhere", filepath.Join(dir, "dangling")))
 	assert.NoError(t, os.WriteFile(filepath.Join(dir, "readonly"), []byte("old"), 0o444))
+	assert.NoError(t, os.WriteFile(filepath.Join(dir, "stale"), []byte("old"), 0o644))
 }
 
 func archiveTime() time.Time {
@@ -256,11 +317,17 @@ func buildTar(t *testing.T, entries []tarEntry) []byte {
 	tw := tar.NewWriter(&buf)
 	for _, entry := range entries {
 		hdr := entry.hdr
-		hdr.ModTime = archiveTime()
+		if hdr.ModTime.IsZero() {
+			hdr.ModTime = archiveTime()
+		}
 		hdr.Format = tar.FormatPAX
 		hdr.Size = int64(len(entry.body))
 		if hdr.Typeflag == tar.TypeXGlobalHeader {
-			hdr = tar.Header{Typeflag: tar.TypeXGlobalHeader, Name: hdr.Name, PAXRecords: map[string]string{"comment": "x"}}
+			records := hdr.PAXRecords
+			if records == nil {
+				records = map[string]string{"comment": "x"}
+			}
+			hdr = tar.Header{Typeflag: tar.TypeXGlobalHeader, Name: hdr.Name, PAXRecords: records}
 		}
 		if entry.rawName != "" {
 			// A single USTAR block, so the name can be patched in place.

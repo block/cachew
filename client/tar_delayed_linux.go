@@ -23,6 +23,8 @@ type pendingDir struct {
 	// afterLinks holds the directory back until delayed links exist; id detects it being replaced meanwhile.
 	afterLinks bool
 	id         fileID
+	// viaLink marks a path through a symlink, which entries can reach under another name.
+	viaLink bool
 }
 
 // dirStack mirrors GNU tar's delayed_set_stat list, deferring the metadata calls it would make mid-extraction.
@@ -36,6 +38,8 @@ type dirStack struct {
 	// finished holds directories GNU tar would already have applied, in order, keyed by path in finishedPaths.
 	finished      []*pendingDir
 	finishedPaths map[string]struct{}
+	// finishedViaLink is set when a finished directory may be reached through a path finishedPaths doesn't hold.
+	finishedViaLink bool
 }
 
 func newDirStack() dirStack {
@@ -76,6 +80,7 @@ func (s *dirStack) finishNonAncestors(name string) {
 		s.pop()
 		s.finished = append(s.finished, top)
 		s.finishedPaths[top.path] = struct{}{}
+		s.finishedViaLink = s.finishedViaLink || top.viaLink
 	}
 }
 
@@ -90,6 +95,9 @@ func (s *dirStack) touchesFinished(root, path string) bool {
 	// Writing path changes its parent's mtime, so an applied directory on the way must be applied first.
 	if len(s.finishedPaths) == 0 {
 		return false
+	}
+	if s.finishedViaLink {
+		return true
 	}
 	for ; len(path) >= len(root); path = filepath.Dir(path) {
 		if _, ok := s.finishedPaths[path]; ok {
@@ -156,6 +164,7 @@ func (e *tarExtractor) flushFinished() error {
 	}
 	e.dirStack.finished = nil
 	clear(e.dirStack.finishedPaths)
+	e.dirStack.finishedViaLink = false
 	return nil
 }
 

@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 
 	"github.com/alecthomas/errors"
 	"golang.org/x/sync/semaphore"
@@ -34,6 +35,8 @@ const (
 	copyBufferBytes  = 1 << 20
 	// pruneInFlightAt is the pending-write map size that triggers dropping completed writes.
 	pruneInFlightAt = 1024
+	// blockSize is the tar record unit; a complete archive is a whole number of blocks.
+	blockSize = 512
 )
 
 // entryStat is the metadata applied to an extracted entry.
@@ -98,6 +101,7 @@ type tarExtractor struct {
 	placeholders map[fileID]struct{}
 	users        map[string]int
 	groups       map[string]int
+	globalPAX    map[string]string
 	copyBuf      []byte
 }
 
@@ -146,7 +150,8 @@ func (e *tarExtractor) extract(ctx context.Context, r io.Reader) error {
 	for range e.numWriters {
 		writers.Go(e.runWriter)
 	}
-	if err := e.readEntries(ctx, tar.NewReader(r)); err != nil {
+	archive := &countingReader{r: r}
+	if err := e.readEntries(ctx, tar.NewReader(archive), archive); err != nil {
 		// Queued writes are skipped once extraction has failed.
 		e.fail(err)
 	}
@@ -177,6 +182,29 @@ func (e *tarExtractor) runWriter() {
 	}
 }
 
+// countingReader counts the bytes tar.Reader consumes, which shows where the archive ended.
+type countingReader struct {
+	r io.Reader
+	n int64
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += int64(n)
+	return n, err //nolint:wrapcheck // io.Reader errors such as io.EOF must pass through unwrapped
+}
+
+func (c *countingReader) checkEnd() error {
+	// tar.Reader reports io.EOF for an empty stream and for one cut off in a member's padding; GNU tar rejects both.
+	switch {
+	case c.n == 0:
+		return errors.New("archive is empty")
+	case c.n%blockSize != 0:
+		return errors.Errorf("unexpected EOF in archive after %d bytes", c.n)
+	}
+	return nil
+}
+
 func (e *tarExtractor) fail(err error) {
 	e.failOnce.Do(func() {
 		e.failErr = err
@@ -184,7 +212,7 @@ func (e *tarExtractor) fail(err error) {
 	})
 }
 
-func (e *tarExtractor) readEntries(ctx context.Context, tr *tar.Reader) error {
+func (e *tarExtractor) readEntries(ctx context.Context, tr *tar.Reader, archive *countingReader) error {
 	for {
 		select {
 		case <-e.failed:
@@ -196,7 +224,7 @@ func (e *tarExtractor) readEntries(ctx context.Context, tr *tar.Reader) error {
 		}
 		hdr, err := nextTarEntry(tr)
 		if errors.Is(err, io.EOF) {
-			return nil
+			return archive.checkEnd()
 		}
 		if err != nil {
 			return errors.Wrap(err, "failed to read archive")
@@ -209,7 +237,12 @@ func (e *tarExtractor) readEntries(ctx context.Context, tr *tar.Reader) error {
 
 func (e *tarExtractor) entry(ctx context.Context, tr *tar.Reader, hdr *tar.Header) error {
 	if hdr.Typeflag == tar.TypeXGlobalHeader {
-		return nil
+		// As in GNU tar, each global header replaces the previous one, even an empty one.
+		e.globalPAX = hdr.PAXRecords
+		return checkGlobalPAX(e.globalPAX)
+	}
+	if err := applyGlobalPAX(hdr, e.globalPAX); err != nil {
+		return err
 	}
 	if containsDotDot(hdr.Name) {
 		return errors.Errorf("%s: member name contains '..'", hdr.Name)
@@ -386,7 +419,7 @@ func (e *tarExtractor) ensureParent(name, target string) (bool, error) {
 	info, err := os.Lstat(parent)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
-		err = e.mkdirParent(name, parent)
+		err = e.mkdirParent(name, parent, viaLink)
 	case err != nil:
 		err = errors.WithStack(err)
 	case info.IsDir():
@@ -416,7 +449,7 @@ func requireDir(path string) error {
 	return nil
 }
 
-func (e *tarExtractor) mkdirParent(name, path string) error {
+func (e *tarExtractor) mkdirParent(name, path string, viaLink bool) error {
 	// GNU tar gives unlisted parents the umask's mode, owner-writable and searchable until extraction finishes.
 	if err := os.Mkdir(path, 0o777); err != nil {
 		return errors.WithStack(err)
@@ -436,6 +469,7 @@ func (e *tarExtractor) mkdirParent(name, path string) error {
 		path:     path,
 		stat:     entryStat{mode: desired},
 		interdir: true,
+		viaLink:  viaLink,
 	})
 }
 
@@ -497,7 +531,7 @@ func (e *tarExtractor) recordDir(name, target string, hdr *tar.Header, viaLink b
 	if !viaLink {
 		e.dirs[target] = struct{}{}
 	}
-	dir := pendingDir{name: name, path: target, stat: stat}
+	dir := pendingDir{name: name, path: target, stat: stat, viaLink: viaLink}
 	if created != nil {
 		dir.created, dir.wasCreated = *created, true
 	}
@@ -804,11 +838,12 @@ func (e *tarExtractor) isPlaceholder(path string) bool {
 }
 
 func idOf(info fs.FileInfo) fileID {
-	sys, ok := info.Sys().(*unix.Stat_t)
+	// os reports syscall.Stat_t, a different type from unix.Stat_t.
+	sys, ok := info.Sys().(*syscall.Stat_t)
 	if !ok {
 		return fileID{}
 	}
-	return fileID{dev: sys.Dev, ino: sys.Ino}
+	return fileID{dev: uint64(sys.Dev), ino: sys.Ino} //nolint:unconvert // Dev is uint32 on some architectures
 }
 
 func (e *tarExtractor) hardlink(name, target string, hdr *tar.Header, viaLink bool) error {
