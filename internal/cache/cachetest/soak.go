@@ -17,6 +17,7 @@ import (
 
 	"github.com/alecthomas/assert/v2"
 	"github.com/alecthomas/errors"
+	"github.com/minio/minio-go/v7"
 
 	"github.com/block/cachew/internal/cache"
 )
@@ -261,8 +262,9 @@ func doRead(
 
 	data, err := io.ReadAll(reader)
 	if err != nil {
-		// Object may have been deleted between Open and Read - treat as miss
-		if errors.Is(err, os.ErrNotExist) {
+		// A concurrent delete or overwrite can remove the revision Open returned.
+		var response minio.ErrorResponse
+		if errors.Is(err, os.ErrNotExist) || (errors.As(err, &response) && response.Code == "PreconditionFailed") {
 			atomic.AddInt64(&result.ReadMisses, 1)
 			atomic.AddInt64(&result.Reads, 1)
 			return
