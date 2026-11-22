@@ -2,6 +2,7 @@ package logging
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net/url"
 	"strings"
@@ -146,10 +147,30 @@ func redactAttr(a slog.Attr) slog.Attr {
 		a.Value = slog.StringValue(redactURL(&v))
 	case error:
 		if text, ok := errorText(v); ok {
-			a.Value = slog.StringValue(RedactText(text))
+			a.Value = slog.AnyValue(redactedError{err: v, text: RedactText(text)})
 		}
 	}
 	return a
+}
+
+// redactedError formats like the error it redacts, so a handler printing "%+v" still gets the error's trace.
+type redactedError struct {
+	err  error
+	text string
+}
+
+func (e redactedError) Error() string { return e.text }
+
+// Format implements [fmt.Formatter].
+func (e redactedError) Format(s fmt.State, verb rune) {
+	switch {
+	case verb == 'v' && s.Flag('+'):
+		fmt.Fprint(s, RedactText(fmt.Sprintf("%+v", e.err)))
+	case verb == 'q':
+		fmt.Fprintf(s, "%q", e.text)
+	default:
+		fmt.Fprint(s, e.text)
+	}
 }
 
 // errorText returns err.Error(), or false if it panics.

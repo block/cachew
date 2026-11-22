@@ -131,8 +131,9 @@ func TestRedactingHandler(t *testing.T) {
 	for _, tt := range []struct {
 		name  string
 		inner func(io.Writer) slog.Handler
+		trace bool
 	}{
-		{name: "Text", inner: func(w io.Writer) slog.Handler { return slog.NewTextHandler(w, nil) }},
+		{name: "Text", inner: func(w io.Writer) slog.Handler { return slog.NewTextHandler(w, nil) }, trace: true},
 		{name: "JSON", inner: func(w io.Writer) slog.Handler { return &messageHandler{inner: slog.NewJSONHandler(w, nil)} }},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -148,6 +149,7 @@ func TestRedactingHandler(t *testing.T) {
 			assert.Contains(t, out, "502")
 			assert.Contains(t, out, http.ErrHandlerTimeout.Error())
 			assert.Contains(t, out, "<nil>")
+			assert.Equal(t, tt.trace, strings.Contains(out, "redact_test.go:"), out)
 		})
 	}
 }
