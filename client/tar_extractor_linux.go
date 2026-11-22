@@ -6,6 +6,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"os/exec"
 	"os/user"
 	"path/filepath"
 	"slices"
@@ -745,6 +746,9 @@ func cachedID(cache map[string]int, name string, numeric int, lookup func(string
 }
 
 func userID(name string) (int, error) {
+	if id, ok := nssID("passwd", name); ok {
+		return id, nil
+	}
 	u, err := user.Lookup(name)
 	if err != nil {
 		return 0, errors.WithStack(err)
@@ -754,12 +758,36 @@ func userID(name string) (int, error) {
 }
 
 func groupID(name string) (int, error) {
+	if id, ok := nssID("group", name); ok {
+		return id, nil
+	}
 	g, err := user.LookupGroup(name)
 	if err != nil {
 		return 0, errors.WithStack(err)
 	}
 	id, err := strconv.Atoi(g.Gid)
 	return id, errors.WithStack(err)
+}
+
+func nssID(database, name string) (int, bool) {
+	// GNU tar resolves names through NSS, as getent does; os/user without cgo only reads /etc/passwd and /etc/group.
+	//
+	// A leading "-" would be parsed as a getent option.
+	if strings.HasPrefix(name, "-") {
+		return 0, false
+	}
+	out, err := exec.Command("getent", database, name).Output() //nolint:gosec,noctx // fixed binary, name is one argument
+	if err != nil {
+		return 0, false
+	}
+	line, _, _ := strings.Cut(string(out), "\n")
+	fields := strings.Split(line, ":")
+	// getent also accepts a numeric ID as the key, which getpwnam doesn't.
+	if len(fields) < 3 || fields[0] != name {
+		return 0, false
+	}
+	id, err := strconv.Atoi(fields[2])
+	return id, err == nil
 }
 
 func isUnsafeLinkTarget(target string) bool {
