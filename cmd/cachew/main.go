@@ -60,9 +60,13 @@ func run() int {
 
 	// tracing.New only installs an exporter when OTEL_EXPORTER_OTLP_ENDPOINT is set, so this is opt-in.
 	stopTracing, err := tracing.New(ctx, tracing.Config{Enabled: true})
-	if err != nil {
+	switch {
+	case errors.Is(err, tracing.ErrUnsupportedProtocol):
+		fmt.Fprintf(os.Stderr, "Warning: ignoring %v\n", err) //nolint:forbidigo
+		defer stopTracing()
+	case err != nil:
 		fmt.Fprintf(os.Stderr, "Warning: failed to initialize tracing: %v\n", err) //nolint:forbidigo
-	} else {
+	default:
 		defer stopTracing()
 	}
 

@@ -109,8 +109,7 @@ func main() {
 	configureProcess(logger, cli.MutexProfileFraction, globalConfig.UpstreamBackoff, globalConfig.UpstreamBackoffMax)
 
 	// tracing.New is a no-op when OTEL_EXPORTER_OTLP_ENDPOINT is unset, so it is safe without a collector.
-	stopTracing, err := tracing.New(ctx, tracing.Config{Enabled: true})
-	fatalIfError(ctx, logger, err, "Failed to start tracer")
+	stopTracing := startTracing(ctx, logger)
 	defer stopTracing()
 
 	reaper.Start(ctx)
@@ -442,6 +441,19 @@ func newServer(
 			return logging.ContextWithLogger(ctx, logger.With("client", c.RemoteAddr().String()))
 		},
 	}, nil
+}
+
+// startTracing installs the tracer provider and returns its stop function.
+//
+// An ignored OTLP protocol value is only a warning, because the OTel spec says it must not fail startup.
+func startTracing(ctx context.Context, logger *slog.Logger) (stop func()) { //nolint:privatedoc // explains why
+	stop, err := tracing.New(ctx, tracing.Config{Enabled: true})
+	if errors.Is(err, tracing.ErrUnsupportedProtocol) {
+		logger.WarnContext(ctx, "Ignoring unsupported OTLP protocol", "error", err)
+		return stop
+	}
+	fatalIfError(ctx, logger, err, "Failed to start tracer")
+	return stop
 }
 
 func configureProcess(logger *slog.Logger, mutexProfileFraction int, upstreamBackoff, upstreamBackoffMax time.Duration) {
