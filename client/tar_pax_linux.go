@@ -30,7 +30,10 @@ func applyGlobalPAX(hdr *tar.Header, records map[string]string) error {
 		var err error
 		switch key {
 		case "path":
-			hdr.Name = value
+			// GNU tar ignores an empty path, keeping the name from the member's own header.
+			if value != "" {
+				hdr.Name = value
+			}
 		case "linkpath":
 			hdr.Linkname = value
 		case "uname":

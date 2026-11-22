@@ -156,6 +156,8 @@ func TestExtractMatchesGNUTar(t *testing.T) {
 			wholeSecond(regular("after-replacing-global", 0o644, "x")),
 			globalHeader(map[string]string{"mtime": "1400000000"}),
 			wholeSecond(regular("global-mtime-again", 0o644, "x")),
+			globalHeader(map[string]string{"path": ""}),
+			wholeSecond(regular("after-empty-global-path", 0o644, "x")),
 			globalHeader(map[string]string{}),
 			wholeSecond(regular("after-empty-global", 0o644, "x")),
 		}},
