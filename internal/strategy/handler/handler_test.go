@@ -571,6 +571,102 @@ func TestHeadRequests(t *testing.T) {
 	assert.Equal(t, []string{http.MethodHead, http.MethodGet}, methods)
 }
 
+func TestHeadMissRefusedByUpstream(t *testing.T) {
+	const gzipLength = "27"
+	tests := []struct {
+		name           string
+		headStatus     int
+		getStatus      int
+		acceptEncoding string
+		expectStatus   int
+		expectLength   string
+		expectEncoding string
+		expectCalls    []string
+	}{
+		{name: "HeadSupported", headStatus: http.StatusOK,
+			expectStatus: http.StatusOK, expectLength: "7", expectCalls: []string{http.MethodHead}},
+		{name: "PresignedURL", headStatus: http.StatusForbidden, getStatus: http.StatusOK,
+			expectStatus: http.StatusOK, expectLength: "7", expectCalls: []string{http.MethodHead, http.MethodGet}},
+		{name: "PresignedURLMissingObject", headStatus: http.StatusForbidden, getStatus: http.StatusNotFound,
+			expectStatus: http.StatusNotFound, expectLength: "0", expectCalls: []string{http.MethodHead, http.MethodGet}},
+		{name: "MethodNotAllowed", headStatus: http.StatusMethodNotAllowed, getStatus: http.StatusOK,
+			expectStatus: http.StatusOK, expectLength: "7", expectCalls: []string{http.MethodHead, http.MethodGet}},
+		{name: "NotImplemented", headStatus: http.StatusNotImplemented, getStatus: http.StatusOK,
+			expectStatus: http.StatusOK, expectLength: "7", expectCalls: []string{http.MethodHead, http.MethodGet}},
+		{name: "ClientAcceptsGzip", headStatus: http.StatusMethodNotAllowed, getStatus: http.StatusOK,
+			acceptEncoding: "gzip", expectStatus: http.StatusOK, expectLength: gzipLength, expectEncoding: "gzip",
+			expectCalls: []string{http.MethodHead, http.MethodGet}},
+		{name: "ObjectMissing", headStatus: http.StatusNotFound,
+			expectStatus: http.StatusNotFound, expectCalls: []string{http.MethodHead}},
+		{name: "Unauthorized", headStatus: http.StatusUnauthorized,
+			expectStatus: http.StatusUnauthorized, expectCalls: []string{http.MethodHead}},
+		{name: "RateLimited", headStatus: http.StatusTooManyRequests,
+			expectStatus: http.StatusTooManyRequests, expectCalls: []string{http.MethodHead}},
+		{name: "ServerError", headStatus: http.StatusBadGateway,
+			expectStatus: http.StatusBadGateway, expectCalls: []string{http.MethodHead}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var (
+				mu      sync.Mutex
+				calls   []string
+				waited  atomic.Bool
+				hungUp  atomic.Bool
+				bodyGet = tt.getStatus == http.StatusOK
+			)
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				calls = append(calls, r.Method)
+				mu.Unlock()
+				status := tt.getStatus
+				if r.Method == http.MethodHead {
+					status = tt.headStatus
+				}
+				if status != http.StatusOK {
+					w.WriteHeader(status)
+					return
+				}
+				// Compress whenever allowed, as servers that gzip on the fly do.
+				if strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
+					w.Header().Set("Content-Encoding", "gzip")
+					w.Header().Set("Content-Length", gzipLength)
+				} else {
+					w.Header().Set("Content-Length", "7")
+				}
+				w.WriteHeader(http.StatusOK)
+				if r.Method != http.MethodGet {
+					return
+				}
+				// Holding the body back until the client hangs up shows the probe never waits for it.
+				w.(http.Flusher).Flush()
+				waited.Store(true)
+				select {
+				case <-r.Context().Done():
+					hungUp.Store(true)
+				case <-time.After(5 * time.Second):
+				}
+			}))
+			c := mustNewMemoryCache()
+			defer c.Close()
+			h := handler.New(http.DefaultClient, c, newTestSpools(t)).Transform(upstreamTransform(upstream.URL))
+
+			var headers map[string]string
+			if tt.acceptEncoding != "" {
+				headers = map[string]string{"Accept-Encoding": tt.acceptEncoding}
+			}
+			w := serve(t, h, http.MethodHead, "http://example.com/a", headers)
+			upstream.Close()
+			assert.Equal(t, tt.expectStatus, w.Code)
+			assert.Equal(t, tt.expectLength, w.Header().Get("Content-Length"))
+			assert.Equal(t, tt.expectEncoding, w.Header().Get("Content-Encoding"))
+			assert.Equal(t, "", w.Body.String())
+			assert.Equal(t, tt.expectCalls, calls)
+			assert.Equal(t, bodyGet && tt.headStatus != http.StatusOK, waited.Load())
+			assert.Equal(t, waited.Load(), hungUp.Load())
+		})
+	}
+}
+
 func TestRangeMissCachesFullObject(t *testing.T) {
 	const payload = "0123456789"
 	tests := []struct {
