@@ -13,6 +13,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/alecthomas/assert/v2"
@@ -127,42 +128,45 @@ func TestFillOutlivesItsRequests(t *testing.T) {
 }
 
 func TestClientHangupAfterFullBodyIsComplete(t *testing.T) {
-	ctx, registry, _ := newTestRegistry(t, spool.Config{})
-	group := registry.NewGroup(spool.ReleaseCompleted)
-	rest, release := make(chan struct{}), make(chan struct{})
-	defer close(release)
-	fill := func(_ context.Context, w *spool.Writer) error {
-		w.Header().Set("Content-Length", "4")
-		w.WriteHeader(http.StatusOK)
-		_, _ = io.WriteString(w, "bo")
-		<-rest
-		_, err := io.WriteString(w, "dy")
-		<-release
-		return err
-	}
-	serve := func() (*notifyingRecorder, context.CancelFunc, chan error) {
-		reqCtx, cancel := context.WithCancel(ctx)
-		w := &notifyingRecorder{ResponseRecorder: httptest.NewRecorder(), wrote: make(chan int, 4)}
-		served := make(chan error, 1)
-		go func() {
-			_, err := group.Serve(w, httptest.NewRequestWithContext(reqCtx, http.MethodGet, "/object", nil), key, fill)
-			served <- err
-		}()
-		return w, cancel, served
-	}
+	synctest.Test(t, func(t *testing.T) {
+		ctx, registry, _ := newTestRegistry(t, spool.Config{})
+		group := registry.NewGroup(spool.ReleaseCompleted)
+		rest, release := make(chan struct{}), make(chan struct{})
+		defer close(release)
+		fill := func(_ context.Context, w *spool.Writer) error {
+			w.Header().Set("Content-Length", "4")
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, "bo")
+			<-rest
+			_, err := io.WriteString(w, "dy")
+			<-release
+			return err
+		}
+		serve := func() (*notifyingRecorder, context.CancelFunc, chan error) {
+			reqCtx, cancel := context.WithCancel(ctx)
+			w := &notifyingRecorder{ResponseRecorder: httptest.NewRecorder(), wrote: make(chan int, 4)}
+			served := make(chan error, 1)
+			go func() {
+				_, err := group.Serve(w, httptest.NewRequestWithContext(reqCtx, http.MethodGet, "/object", nil), key, fill)
+				served <- err
+			}()
+			return w, cancel, served
+		}
 
-	partial, cancelPartial, partialErr := serve()
-	assert.Equal(t, 2, <-partial.wrote)
-	cancelPartial()
-	assert.IsError(t, <-partialErr, context.Canceled)
+		partial, cancelPartial, partialErr := serve()
+		assert.Equal(t, 2, <-partial.wrote)
+		cancelPartial()
+		assert.IsError(t, <-partialErr, context.Canceled)
 
-	full, cancelFull, fullErr := serve()
-	assert.Equal(t, 2, <-full.wrote)
-	close(rest)
-	assert.Equal(t, 4, <-full.wrote)
-	cancelFull()
-	assert.NoError(t, <-fullErr)
-	assert.Equal(t, "body", full.Body.String())
+		full, cancelFull, fullErr := serve()
+		assert.Equal(t, 2, <-full.wrote)
+		close(rest)
+		assert.Equal(t, 4, <-full.wrote)
+		synctest.Wait()
+		cancelFull()
+		assert.NoError(t, <-fullErr)
+		assert.Equal(t, "body", full.Body.String())
+	})
 }
 
 func TestClientHangupAfterFailedSocketWriteIsIncomplete(t *testing.T) {
