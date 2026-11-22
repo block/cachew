@@ -66,7 +66,7 @@ func Extract(ctx context.Context, r io.Reader, directory string, threads int) (r
 		return errors.Wrap(err, "failed to create target directory")
 	}
 
-	// Relax read-only dirs (e.g. Hermit package trees) so tar can overwrite them; restored on failure.
+	// Relax read-only dirs (e.g. Hermit package trees) so extraction can overwrite them; restored on failure.
 	relaxed, err := makeTreeWritable(directory)
 	defer func() {
 		if rerr != nil {
@@ -76,47 +76,7 @@ func Extract(ctx context.Context, r io.Reader, directory string, threads int) (r
 	if err != nil {
 		return errors.Wrap(err, "failed to make target directory writable")
 	}
-
-	zstdCmd := exec.CommandContext(ctx, "zstd", "-dc", fmt.Sprintf("-T%d", threads)) //nolint:gosec
-	tarCmd := exec.CommandContext(ctx, "tar", "-xpf", "-", "-C", directory)
-
-	pr, pw, err := os.Pipe()
-	if err != nil {
-		return errors.Wrap(err, "failed to create pipe")
-	}
-
-	var zstdStderr, tarStderr bytes.Buffer
-	zstdCmd.Stdin = r
-	zstdCmd.Stdout = pw
-	zstdCmd.Stderr = &zstdStderr
-
-	tarCmd.Stdin = pr
-	tarCmd.Stderr = &tarStderr
-
-	if err := zstdCmd.Start(); err != nil {
-		pw.Close() //nolint:errcheck,gosec
-		pr.Close() //nolint:errcheck,gosec
-		return errors.Wrap(err, "failed to start zstd")
-	}
-	pw.Close() //nolint:errcheck,gosec
-
-	if err := tarCmd.Start(); err != nil {
-		pr.Close() //nolint:errcheck,gosec
-		return errors.Join(errors.Wrap(err, "failed to start tar"), zstdCmd.Wait())
-	}
-	pr.Close() //nolint:errcheck,gosec
-
-	zstdErr := zstdCmd.Wait()
-	tarErr := tarCmd.Wait()
-
-	var errs []error
-	if zstdErr != nil {
-		errs = append(errs, errors.Errorf("zstd failed: %w: %s", zstdErr, zstdStderr.String()))
-	}
-	if tarErr != nil {
-		errs = append(errs, errors.Errorf("tar failed: %w: %s", tarErr, tarStderr.String()))
-	}
-	return errors.Join(errs...)
+	return extractStream(ctx, r, directory, threads)
 }
 
 // dirMode is a directory path and its pre-relaxation mode.
@@ -127,7 +87,7 @@ type dirMode struct {
 
 // makeTreeWritable adds owner-write to every directory under root, returning the originals of those it changed.
 //
-// tar overwrites a file by unlinking it, which requires a writable parent directory.
+// Extraction overwrites a file by unlinking it, which requires a writable parent directory.
 func makeTreeWritable(root string) ([]dirMode, error) {
 	var changed []dirMode
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
