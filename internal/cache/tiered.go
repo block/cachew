@@ -100,6 +100,7 @@ func (t Tiered) Create(ctx context.Context, key Key, headers http.Header, ttl ti
 		return nil, errors.WithStack(err)
 	}
 	createOpts := []Option{WithETag(rawETag)}
+	headers = withExpiresAt(headers, ttl, time.Now())
 
 	replaceETag, err := t.replacementETag(ctx, key, quotedETag)
 	if err != nil {
@@ -156,6 +157,7 @@ func (t Tiered) replacementETag(ctx context.Context, key Key, newETag string) (b
 // A tier without the entry, or holding a different version than an IfMatch names, is skipped: it will be
 // backfilled or invalidated by later reads.
 func (t Tiered) UpdateMetadata(ctx context.Context, key Key, headers http.Header, ttl time.Duration, opts ...Option) error {
+	headers = withUpdatedExpiresAt(headers, ttl, time.Now())
 	wg := sync.WaitGroup{}
 	errs := make([]error, len(t.caches))
 	for i, cache := range t.caches {
@@ -223,6 +225,11 @@ func (t Tiered) Invalidate(ctx context.Context, key Key) error {
 // A failed If-Match is not definitive: deeper tiers are consulted, and ErrPreconditionFailed returns only if none
 // holds the version. A tier that errored takes precedence, so outages aren't misreported as missing versions.
 func (t Tiered) Stat(ctx context.Context, key Key, opts ...Option) (http.Header, error) {
+	headers, err := t.stat(ctx, key, opts...)
+	return withoutExpiresAt(headers), err
+}
+
+func (t Tiered) stat(ctx context.Context, key Key, opts ...Option) (http.Header, error) {
 	rejected := false
 	var probeErrs []error
 	errs := make([]error, len(t.caches))
@@ -269,7 +276,7 @@ var _ AuthoritativeStater = (*Tiered)(nil)
 // AuthoritativeStat stats the final tier, which is authoritative by construction.
 func (t Tiered) AuthoritativeStat(ctx context.Context, key Key, opts ...Option) (http.Header, error) {
 	headers, err := t.caches[len(t.caches)-1].Stat(ctx, key, opts...)
-	return headers, errors.WithStack(err)
+	return withoutExpiresAt(headers), errors.WithStack(err)
 }
 
 // StatAuthoritative stats the authoritative tier when the cache is tiered, else falls back to a plain Stat.
@@ -286,9 +293,13 @@ func StatAuthoritative(ctx context.Context, c Cache, key Key, opts ...Option) (h
 //
 // Higher-tier hits backfill the lowest tier as read. A tier failing If-Match or missing If-Range defers to deeper
 // tiers; if none holds it, the first's full body (RFC 9110) or 412 stands, unless a tier errored while probed.
-//
-//nolint:funlen // Conditional fallback and tier selection share one ordered traversal.
 func (t Tiered) Open(ctx context.Context, key Key, opts ...Option) (io.ReadCloser, http.Header, error) {
+	r, headers, err := t.open(ctx, key, opts...)
+	return r, withoutExpiresAt(headers), err
+}
+
+//nolint:funlen // Conditional fallback and tier selection share one ordered traversal.
+func (t Tiered) open(ctx context.Context, key Key, opts ...Option) (io.ReadCloser, http.Header, error) {
 	ro := NewRequestOptions(opts...)
 	// A Range request yields a partial body, which must never be backfilled into a lower tier as the whole object.
 	partial := ro.Range != ""
@@ -378,10 +389,15 @@ func discardTieredReader(ctx context.Context, key Key, r io.ReadCloser) {
 func (t Tiered) backfillReader(ctx context.Context, key Key, src io.ReadCloser, headers http.Header, dst Cache) io.ReadCloser { //nolint:privatedoc // documents a non-obvious contract
 	ctx = metrics.WithCachePurpose(ctx, "backfill")
 	logger := logging.FromContext(ctx)
+	ttl, ok := backfillTTL(headers, time.Now())
+	if !ok {
+		metrics.RecordCacheFill(ctx, "expired")
+		return src
+	}
 	// Cancelling the write context on failure discards the write, per the Cache contract.
 	writeCtx, cancel := context.WithCancel(ctx)
 	createOpts := backfillCreateOptions(headers)
-	w, err := dst.Create(writeCtx, key, headers, 0, createOpts...) // 0 → use the cache's max TTL
+	w, err := dst.Create(writeCtx, key, headers, ttl, createOpts...)
 	w = observeWriter(writeCtx, dst, 0, w, err)
 	if err != nil {
 		cancel()
@@ -539,7 +555,12 @@ func (t Tiered) backfillTier0FromSource(ctx context.Context, key Key, source Cac
 		return
 	}
 
-	w, err := t.caches[0].Create(ctx, key, headers, 0, backfillCreateOptions(headers)...) // 0 → cache's max TTL
+	ttl, live := backfillTTL(headers, time.Now())
+	if !live {
+		result = "expired"
+		return
+	}
+	w, err := t.caches[0].Create(ctx, key, headers, ttl, backfillCreateOptions(headers)...)
 	w = observeWriter(ctx, t.caches[0], 0, w, err)
 	if err != nil {
 		result = "create_error"
