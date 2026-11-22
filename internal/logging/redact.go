@@ -153,7 +153,6 @@ func redactAttr(a slog.Attr) slog.Attr {
 	return a
 }
 
-// redactedError formats like the error it redacts, so a handler printing "%+v" still gets the error's trace.
 type redactedError struct {
 	err  error
 	text string
