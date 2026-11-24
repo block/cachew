@@ -689,6 +689,11 @@ func (s *Strategy) handleBundleRequest(w http.ResponseWriter, r *http.Request, h
 		return
 	}
 	span.SetAttributes(attribute.String("cachew.base_commit", base))
+	// The client's ensure-refs may have reached another replica; tip is the HEAD it saw there.
+	want := r.URL.Query().Get("tip")
+	if !commitSHARe.MatchString(want) {
+		want = ""
+	}
 
 	bKey := bundleCacheKey(upstreamURL, base)
 
@@ -714,9 +719,15 @@ func (s *Strategy) handleBundleRequest(w http.ResponseWriter, r *http.Request, h
 	for acquired := false; ; {
 		reader, headers, openErr := s.cache.Open(ctx, bKey, httputil.ConditionalOptions(r)...)
 		// Resumed downloads must keep reading the entry they started on, so only plain GETs re-check the tip.
-		if openErr == nil && r.Header.Get("Range") == "" && s.cachedBundleStale(ctx, s.cloneManager.Get(upstreamURL), headers) {
-			_ = reader.Close()
-			openErr = os.ErrNotExist
+		if openErr == nil && r.Header.Get("Range") == "" {
+			stale, staleErr := s.cachedBundleStale(ctx, s.cloneManager.Get(upstreamURL), headers, want)
+			if staleErr != nil {
+				logger.WarnContext(ctx, "Failed to freshen mirror for bundle tip", "upstream", upstreamURL, "tip", want, "error", staleErr)
+			}
+			if stale {
+				_ = reader.Close()
+				openErr = os.ErrNotExist
+			}
 		}
 		switch {
 		case openErr == nil,
@@ -816,6 +827,9 @@ func (s *Strategy) handleBundleRequest(w http.ResponseWriter, r *http.Request, h
 		}
 	}
 
+	if err := s.freshenForBundleTip(ctx, repo, want); err != nil {
+		logger.WarnContext(ctx, "Failed to freshen mirror for bundle tip", "upstream", upstreamURL, "tip", want, "error", err)
+	}
 	bundleFile, tip, err := s.createBundle(ctx, repo, base)
 	if errors.Is(err, errEmptyBundle) {
 		if freshenErr := s.doFetchVerified(ctx, repo); freshenErr != nil {
@@ -938,7 +952,7 @@ func (s *Strategy) pregenerateBundle(ctx context.Context, repo *gitclone.Reposit
 		logger := logging.FromContext(bgCtx)
 		if reader, headers, err := s.cache.Open(bgCtx, bKey); err == nil {
 			_ = reader.Close()
-			if !s.cachedBundleStale(bgCtx, repo, headers) {
+			if stale, err := s.cachedBundleStale(bgCtx, repo, headers, ""); err == nil && !stale {
 				return
 			}
 		}
@@ -1021,21 +1035,39 @@ func (s *Strategy) getMirrorHead(ctx context.Context, repo *gitclone.Repository)
 
 // cachedBundleStale reports whether this replica's mirror HEAD has moved past the tip a cached bundle was built to.
 //
-// A bundle is keyed by its base alone, so without this every clone gets the first bundle built after a snapshot
-// until the TTL expires. A tip this mirror lacks came from a newer replica and is kept, so replicas never ping-pong.
-func (s *Strategy) cachedBundleStale(ctx context.Context, repo *gitclone.Repository, headers http.Header) bool { //nolint:privatedoc // explains why
+// Bundles are keyed by base alone, so this stops clones getting the first one built after a snapshot. A tip this
+// mirror lacks came from a newer replica and is kept; a want the bundle lacks freshens this mirror first.
+func (s *Strategy) cachedBundleStale(ctx context.Context, repo *gitclone.Repository, headers http.Header, want string) (bool, error) { //nolint:privatedoc // explains why
 	if repo == nil || repo.State() != gitclone.StateReady {
-		return false
+		return false, nil
 	}
-	head := s.getMirrorHead(ctx, repo)
 	tip := headers.Get(bundleTipHeader)
+	validTip := commitSHARe.MatchString(tip)
+	if want != "" && validTip && (tip == want || repo.HasAncestor(ctx, want, tip)) {
+		return false, nil
+	}
+	freshenErr := s.freshenForBundleTip(ctx, repo, want)
+	head := s.getMirrorHead(ctx, repo)
 	if head == "" || head == tip {
-		return false
+		return false, freshenErr
 	}
 	if tip == "" {
-		return true
+		return true, freshenErr
 	}
-	return commitSHARe.MatchString(tip) && repo.HasAncestor(ctx, tip, head)
+	return validTip && repo.HasAncestor(ctx, tip, head), freshenErr
+}
+
+// freshenForBundleTip fetches upstream when the client saw a tip this replica's mirror lacks.
+//
+// freshenMirror's ref-check gate allows one fetch per interval, so a bogus or unreachable tip cannot repeat it.
+func (s *Strategy) freshenForBundleTip(ctx context.Context, repo *gitclone.Repository, want string) error { //nolint:privatedoc // explains why
+	if want == "" || repo.HasCommit(ctx, want) {
+		return nil
+	}
+	if err := s.freshenMirror(ctx, repo); err != nil {
+		return errors.Wrap(err, "freshen mirror for bundle tip")
+	}
+	return nil
 }
 
 // createBundle writes a git bundle of the commits between baseCommit and the mirror's HEAD to a temp file.
