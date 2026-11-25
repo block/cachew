@@ -5,6 +5,7 @@ import (
 	"io"
 	"log/slog"
 	"maps"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/alecthomas/assert/v2"
@@ -123,6 +125,91 @@ func TestFillOutlivesItsRequests(t *testing.T) {
 	body, err := io.ReadAll(r)
 	assert.NoError(t, err)
 	assert.Equal(t, "first second", string(body))
+}
+
+func TestClientHangupAfterFullBodyIsComplete(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, registry, _ := newTestRegistry(t, spool.Config{})
+		group := registry.NewGroup(spool.ReleaseCompleted)
+		rest, release := make(chan struct{}), make(chan struct{})
+		defer close(release)
+		fill := func(_ context.Context, w *spool.Writer) error {
+			w.Header().Set("Content-Length", "4")
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, "bo")
+			<-rest
+			_, err := io.WriteString(w, "dy")
+			<-release
+			return err
+		}
+		serve := func() (*notifyingRecorder, context.CancelFunc, chan error) {
+			reqCtx, cancel := context.WithCancel(ctx)
+			w := &notifyingRecorder{ResponseRecorder: httptest.NewRecorder(), wrote: make(chan int, 4)}
+			served := make(chan error, 1)
+			go func() {
+				_, err := group.Serve(w, httptest.NewRequestWithContext(reqCtx, http.MethodGet, "/object", nil), key, fill)
+				served <- err
+			}()
+			return w, cancel, served
+		}
+
+		partial, cancelPartial, partialErr := serve()
+		assert.Equal(t, 2, <-partial.wrote)
+		cancelPartial()
+		assert.IsError(t, <-partialErr, context.Canceled)
+
+		full, cancelFull, fullErr := serve()
+		assert.Equal(t, 2, <-full.wrote)
+		close(rest)
+		assert.Equal(t, 4, <-full.wrote)
+		synctest.Wait()
+		cancelFull()
+		assert.NoError(t, <-fullErr)
+		assert.Equal(t, "body", full.Body.String())
+	})
+}
+
+func TestClientHangupAfterFailedSocketWriteIsIncomplete(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		wrap func(http.ResponseWriter) http.ResponseWriter
+	}{
+		{"ResponseWriter", func(w http.ResponseWriter) http.ResponseWriter { return w }},
+		{"FlusherOnlyWrapper", func(w http.ResponseWriter) http.ResponseWriter { return flusherOnly{w} }},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			_, registry, _ := newTestRegistry(t, spool.Config{})
+			group := registry.NewGroup(spool.ReleaseCompleted)
+			rest, release := make(chan struct{}), make(chan struct{})
+			defer close(release)
+			fill := func(_ context.Context, w *spool.Writer) error {
+				w.Header().Set("Content-Length", "4")
+				w.WriteHeader(http.StatusOK)
+				_, _ = io.WriteString(w, "bo")
+				<-rest
+				_, err := io.WriteString(w, "dy")
+				<-release
+				return err
+			}
+			served := make(chan error, 1)
+			server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, err := group.Serve(tt.wrap(w), r, key, fill)
+				served <- err
+			}))
+			server.Listener = failSecondWriteListener{server.Listener}
+			server.Start()
+			defer server.Close()
+
+			resp, err := http.Get(server.URL)
+			assert.NoError(t, err)
+			defer resp.Body.Close()
+			body := make([]byte, 2)
+			_, err = io.ReadFull(resp.Body, body)
+			assert.NoError(t, err)
+			close(rest)
+			assert.Error(t, <-served)
+		})
+	}
 }
 
 func TestRequestsFollowPendingCacheWrite(t *testing.T) {
@@ -584,6 +671,43 @@ func waitFor(t *testing.T, condition func() bool) {
 }
 
 var errCacheFull = errors.New("cache full")
+
+type notifyingRecorder struct {
+	*httptest.ResponseRecorder
+	wrote chan int
+}
+
+func (r *notifyingRecorder) Write(p []byte) (int, error) {
+	n, err := r.ResponseRecorder.Write(p)
+	r.wrote <- r.Body.Len()
+	return n, err
+}
+
+type flusherOnly struct{ http.ResponseWriter }
+
+func (w flusherOnly) Flush() { w.ResponseWriter.(http.Flusher).Flush() }
+
+var errConnReset = errors.New("connection reset")
+
+type failSecondWriteListener struct{ net.Listener }
+
+func (l failSecondWriteListener) Accept() (net.Conn, error) {
+	conn, err := l.Listener.Accept()
+	return &failSecondWriteConn{Conn: conn}, errors.WithStack(err)
+}
+
+type failSecondWriteConn struct {
+	net.Conn
+	writes atomic.Int32
+}
+
+func (c *failSecondWriteConn) Write(p []byte) (int, error) {
+	if c.writes.Add(1) == 2 {
+		return 0, errConnReset
+	}
+	n, err := c.Conn.Write(p)
+	return n, errors.WithStack(err)
+}
 
 type failingCacheWriter struct{ writes int }
 

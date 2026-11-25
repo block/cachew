@@ -6,6 +6,7 @@ import (
 	"maps"
 	"net/http"
 	"os"
+	"strconv"
 	"sync"
 	"time"
 
@@ -263,10 +264,11 @@ func (e *entry) retentionLocked(fillErr error) (retain time.Duration, forever bo
 // serve streams the response to w.
 //
 // It reads source only below written, which advances after each write lands, so it never sees unwritten bytes.
+// A request that ends after the whole declared body was flushed is served, as clients hang up before the fill commits.
 func (e *entry) serve(w http.ResponseWriter, req *http.Request, filled bool) (Result, error) {
 	result := Result{Filled: filled}
 	start := time.Now()
-	headerSent := false
+	headerSent, flushed := false, false
 	var offset int64
 	for {
 		e.mu.Lock()
@@ -297,9 +299,11 @@ func (e *entry) serve(w http.ResponseWriter, req *http.Request, filled bool) (Re
 			if err != nil {
 				return result, errors.Wrap(err, "write spooled response")
 			}
-			if flusher, ok := w.(http.Flusher); ok {
-				flusher.Flush()
+			err = http.NewResponseController(w).Flush()
+			if err != nil && !errors.Is(err, http.ErrNotSupported) {
+				return result, errors.Wrap(err, "flush spooled response")
 			}
+			flushed = err == nil && req.Context().Err() == nil
 			continue
 		}
 		if headerSent && done {
@@ -307,6 +311,9 @@ func (e *entry) serve(w http.ResponseWriter, req *http.Request, filled bool) (Re
 		}
 		select {
 		case <-req.Context().Done():
+			if flushed && header.Get("Content-Length") == strconv.FormatInt(offset, 10) {
+				return result, nil
+			}
 			return result, errors.WithStack(req.Context().Err())
 		case <-changed:
 		}
