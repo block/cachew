@@ -349,7 +349,7 @@ func TestBundleBuildCancellationReleasesFetchLock(t *testing.T) {
 			assert.NoError(t, err)
 			bin := t.TempDir()
 			started := filepath.Join(bin, "started")
-			script := fmt.Sprintf("#!/bin/sh\nif [ \"$3\" = bundle ]; then\n  sleep 2 &\n  touch %q\n  wait\nfi\nexec %q \"$@\"\n", started, realGit)
+			script := fmt.Sprintf("#!/bin/sh\ncase \" $* \" in *\" bundle create \"*)\n  sleep 2 &\n  touch %q\n  wait\nesac\nexec %q \"$@\"\n", started, realGit)
 			assert.NoError(t, os.WriteFile(filepath.Join(bin, "git"), []byte(script), 0o700))
 			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 			ctx, cancel := context.WithCancel(s.ctx)

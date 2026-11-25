@@ -1044,7 +1044,7 @@ func createBundleFile(ctx context.Context, repo *gitclone.Repository, baseCommit
 		return nil, errors.Wrap(err, "close bundle temp file")
 	}
 
-	cmd := exec.CommandContext(ctx, "git", "-C", repo.Path(), "bundle", "create", //nolint:gosec // baseCommit is a SHA string from rev-parse
+	cmd := exec.CommandContext(ctx, "git", "-C", repo.Path(), "-c", "pack.useBitmaps=false", "bundle", "create", //nolint:gosec // baseCommit is a SHA string from rev-parse
 		bundlePath, headRef, "^"+baseCommit)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error {
