@@ -531,7 +531,7 @@ func TestOCIBackoff(t *testing.T) {
 			cached := "/oci/example.io/v2/alpine/manifests/cached"
 			assert.Equal(t, http.StatusOK, serveOCI(t, mux, http.MethodGet, cached, nil).Code)
 			f.set(func(f *fakeRegistry) { f.limitedPath = tt.limitedPath })
-			first := serveOCI(t, mux, http.MethodGet, "/oci/example.io"+tt.trigger, nil)
+			first := serveOCI(t, mux, http.MethodGet, "/oci/example.io"+tt.trigger, http.Header{"Authorization": {"Bearer client-token"}})
 			assert.Equal(t, http.StatusTooManyRequests, first.Code)
 			assert.Equal(t, "registry limit", first.Body.String())
 			assert.Equal(t, "120", first.Header().Get("Retry-After"))

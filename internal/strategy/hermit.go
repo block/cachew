@@ -154,6 +154,7 @@ func (s *Hermit) buildRedirectRequest(r *http.Request) (*http.Request, error) {
 	}
 
 	req.Header = r.Header.Clone()
+	req.Header.Del("Authorization")
 	return req, nil
 }
 

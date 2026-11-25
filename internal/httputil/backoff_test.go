@@ -294,3 +294,58 @@ func TestBackoffWithoutCooldown(t *testing.T) {
 		assert.Equal(t, 4, calls)
 	})
 }
+
+func TestBackoffForwardedCredentialCooldown(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		calls := 0
+		base := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			calls++
+			status := http.StatusOK
+			if r.URL.Path == "/limited" {
+				status = http.StatusTooManyRequests
+			}
+			return &http.Response{StatusCode: status, Header: make(http.Header), Body: http.NoBody, Request: r}, nil
+		})
+		var logs strings.Builder
+		client := &http.Client{Transport: httputil.NewBackoffTransport(base, time.Minute, time.Hour, slog.New(slog.NewTextHandler(&logs, nil)))}
+		for _, tt := range []struct {
+			name          string
+			forwarded     string
+			scope         string
+			path          string
+			authorization string
+			status        int
+		}{
+			{name: "CredentialLimited", forwarded: "Bearer a", path: "/limited", authorization: "Bearer a", status: http.StatusTooManyRequests},
+			{name: "SameCredentialCools", forwarded: "Bearer a", path: "/other", authorization: "Bearer a", status: http.StatusTooManyRequests},
+			{name: "OtherCredentialPasses", forwarded: "Bearer b", path: "/other", authorization: "Bearer b", status: http.StatusOK},
+			{name: "AnonymousPasses", path: "/other", status: http.StatusOK},
+			{name: "UnmarkedCredentialSharesHost", path: "/other", authorization: "Bearer a", status: http.StatusOK},
+			{name: "ExplicitScopeWins", forwarded: "Bearer a", scope: "installation", path: "/other", authorization: "Bearer a", status: http.StatusOK},
+			{name: "HostLimited", path: "/limited", status: http.StatusTooManyRequests},
+			{name: "AnonymousCoolsWithHost", path: "/other", status: http.StatusTooManyRequests},
+			{name: "ReplacedCredentialCoolsWithHost", forwarded: "Bearer b", path: "/other", authorization: "Bearer replaced", status: http.StatusTooManyRequests},
+			{name: "CredentialOutlivesHostCooldown", forwarded: "Bearer b", path: "/other", authorization: "Bearer b", status: http.StatusOK},
+		} {
+			ctx := t.Context()
+			if tt.forwarded != "" {
+				ctx = httputil.WithForwardedCredentialCooldown(ctx, tt.forwarded)
+			}
+			if tt.scope != "" {
+				ctx = httputil.WithCooldownScope(ctx, tt.scope)
+			}
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.example"+tt.path, nil)
+			assert.NoError(t, err)
+			if tt.authorization != "" {
+				req.Header.Set("Authorization", tt.authorization)
+			}
+			resp, err := client.Do(req)
+			assert.NoError(t, err)
+			assert.NoError(t, resp.Body.Close())
+			assert.Equal(t, tt.status, resp.StatusCode, tt.name)
+		}
+		assert.Equal(t, 7, calls)
+		assert.Contains(t, logs.String(), "scope=forwarded-credential:")
+		assert.NotContains(t, logs.String(), "Bearer", "the cooldown log names the scope without the credential")
+	})
+}

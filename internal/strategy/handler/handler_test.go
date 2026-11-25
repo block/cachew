@@ -1061,3 +1061,56 @@ func TestBackoffPausesHandler(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code, "a scoped request has its own cooldown")
 	assert.Equal(t, int32(4), calls.Load())
 }
+
+func TestBackoffScopesForwardedCredentials(t *testing.T) {
+	const limitedToken = "Bearer limited"
+	var calls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		if r.Header.Get("Authorization") == limitedToken {
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		_, _ = io.WriteString(w, "body")
+	}))
+	defer upstream.Close()
+	var logs strings.Builder
+	client := &http.Client{Transport: httputil.NewBackoffTransport(http.DefaultTransport, time.Minute, time.Hour, slog.New(slog.NewTextHandler(&logs, nil)))}
+	c := mustNewMemoryCache()
+	defer c.Close()
+	newHandler := func(attached string) *handler.Handler {
+		return handler.New(client, c, newTestSpools(t)).Transform(func(r *http.Request) (*http.Request, error) {
+			req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, upstream.URL+r.URL.Path, nil)
+			if err == nil && attached != "" {
+				req.Header.Set("Authorization", attached)
+			}
+			return req, err
+		})
+	}
+	get := func(h http.Handler, path, authorization string) int {
+		t.Helper()
+		var headers map[string]string
+		if authorization != "" {
+			headers = map[string]string{"Authorization": authorization}
+		}
+		return serve(t, h, http.MethodGet, "http://example.com"+path, headers).Code
+	}
+
+	forwarding := newHandler("")
+	assert.Equal(t, http.StatusTooManyRequests, get(forwarding, "/a", limitedToken))
+	assert.Equal(t, http.StatusTooManyRequests, get(forwarding, "/b", limitedToken))
+	assert.Equal(t, int32(1), calls.Load(), "the limited credential is not retried during its cooldown")
+	assert.Equal(t, http.StatusOK, get(forwarding, "/c", "Bearer other"), "another credential reaches the upstream")
+	assert.Equal(t, http.StatusOK, get(forwarding, "/d", ""), "anonymous requests reach the upstream")
+	assert.Equal(t, int32(3), calls.Load())
+
+	assert.Equal(t, http.StatusTooManyRequests, get(newHandler(limitedToken), "/e", limitedToken))
+	assert.Equal(t, http.StatusTooManyRequests, get(forwarding, "/f", ""),
+		"a credential the transform attached cools down the host, even when the client sent the same value")
+	assert.Equal(t, int32(4), calls.Load())
+	assert.Equal(t, http.StatusOK, get(forwarding, "/g", "Bearer other"), "a forwarded credential keeps its own cooldown")
+	assert.Equal(t, int32(5), calls.Load())
+
+	assert.Contains(t, logs.String(), "scope=forwarded-credential:")
+	assert.NotContains(t, logs.String(), "Bearer", "the cooldown log names the scope without the credential")
+}

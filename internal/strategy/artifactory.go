@@ -177,7 +177,6 @@ func (a *Artifactory) isHostBasedRequest(r *http.Request) bool {
 
 func (a *Artifactory) copyAuthHeaders(src, dst *http.Request) {
 	authHeaders := []string{
-		"Authorization",
 		"X-JFrog-Art-Api",
 		"Cookie",
 	}

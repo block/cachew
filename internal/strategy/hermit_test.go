@@ -37,46 +37,60 @@ func setupHermitTest(t *testing.T) (*http.ServeMux, context.Context, cache.Cache
 }
 
 func TestHermitBackoff(t *testing.T) {
-	calls := 0
-	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		calls++
-		if r.URL.Path == "/org/repo/releases/download/v1/file" {
-			w.WriteHeader(http.StatusTooManyRequests)
-			return
-		}
-		_, _ = w.Write([]byte("package"))
-	}))
-	defer backend.Close()
-	original := http.DefaultTransport
-	http.DefaultTransport = httputil.NewBackoffTransport( //nolint:reassign
-		&mockTransport{backend: backend, originalTransport: original}, time.Minute, time.Hour, slog.New(slog.DiscardHandler))
-	t.Cleanup(func() { http.DefaultTransport = original }) //nolint:reassign
-	_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelError})
-	c, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: time.Hour})
-	assert.NoError(t, err)
-	defer c.Close()
-	mux := http.NewServeMux()
-	_, err = strategy.NewHermit(ctx, strategy.HermitConfig{GitHubBaseURL: "https://github.com"},
-		nil, c, mux, newTestSpools(t))
-	assert.NoError(t, err)
 	for _, tt := range []struct {
-		path   string
-		status int
+		name          string
+		authorization string
 	}{
-		{"/hermit/github.com/cached", http.StatusOK},
-		{"/hermit/github.com/org/repo/releases/download/v1/file", http.StatusTooManyRequests},
-		{"/hermit/github.com/another", http.StatusTooManyRequests},
-		{"/hermit/example.com/another", http.StatusOK},
-		{"/hermit/github.com/cached", http.StatusOK},
+		{name: "Anonymous"},
+		{name: "ClientCredential", authorization: "Bearer client"},
 	} {
-		w := httptest.NewRecorder()
-		mux.ServeHTTP(w, httptest.NewRequestWithContext(ctx, http.MethodGet, tt.path, nil))
-		assert.Equal(t, tt.status, w.Code, tt.path)
-		if tt.status == http.StatusTooManyRequests {
-			assert.Equal(t, "60", w.Header().Get("Retry-After"))
-		}
+		t.Run(tt.name, func(t *testing.T) {
+			calls := 0
+			backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				if r.URL.Path == "/org/repo/releases/download/v1/file" {
+					w.WriteHeader(http.StatusTooManyRequests)
+					return
+				}
+				_, _ = w.Write([]byte("package"))
+			}))
+			defer backend.Close()
+			original := http.DefaultTransport
+			http.DefaultTransport = httputil.NewBackoffTransport( //nolint:reassign
+				&mockTransport{backend: backend, originalTransport: original}, time.Minute, time.Hour, slog.New(slog.DiscardHandler))
+			t.Cleanup(func() { http.DefaultTransport = original }) //nolint:reassign
+			_, ctx := logging.Configure(t.Context(), logging.Config{Level: slog.LevelError})
+			c, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: time.Hour})
+			assert.NoError(t, err)
+			defer c.Close()
+			mux := http.NewServeMux()
+			_, err = strategy.NewHermit(ctx, strategy.HermitConfig{GitHubBaseURL: "https://github.com"},
+				nil, c, mux, newTestSpools(t))
+			assert.NoError(t, err)
+			for _, step := range []struct {
+				path   string
+				status int
+			}{
+				{"/hermit/github.com/cached", http.StatusOK},
+				{"/hermit/github.com/org/repo/releases/download/v1/file", http.StatusTooManyRequests},
+				{"/hermit/github.com/another", http.StatusTooManyRequests},
+				{"/hermit/example.com/another", http.StatusOK},
+				{"/hermit/github.com/cached", http.StatusOK},
+			} {
+				r := httptest.NewRequestWithContext(ctx, http.MethodGet, step.path, nil)
+				if tt.authorization != "" {
+					r.Header.Set("Authorization", tt.authorization)
+				}
+				w := httptest.NewRecorder()
+				mux.ServeHTTP(w, r)
+				assert.Equal(t, step.status, w.Code, step.path)
+				if step.status == http.StatusTooManyRequests {
+					assert.Equal(t, "60", w.Header().Get("Retry-After"))
+				}
+			}
+			assert.Equal(t, 3, calls)
+		})
 	}
-	assert.Equal(t, 3, calls)
 }
 
 func TestHermitInternalForwardSkipsCooldown(t *testing.T) {
