@@ -126,9 +126,9 @@ func (m *Memory) Open(_ context.Context, key Key, opts ...Option) (io.ReadCloser
 	return io.NopCloser(bytes.NewReader(data)), headers, nil
 }
 
-// Create buffers writes in memory and stores the entry on Close; a zero ttl uses MaxTTL.
+// Create buffers writes in memory and stores the entry on Close; ttl is capped at MaxTTL.
 func (m *Memory) Create(ctx context.Context, key Key, headers http.Header, ttl time.Duration, opts ...Option) (Writer, error) {
-	if ttl == 0 {
+	if ttl > m.config.MaxTTL || ttl == 0 {
 		ttl = m.config.MaxTTL
 	}
 
@@ -158,9 +158,9 @@ func (m *Memory) Create(ctx context.Context, key Key, headers http.Header, ttl t
 	return writer, nil
 }
 
-// UpdateMetadata merges headers and resets the TTL without copying the stored bytes.
+// UpdateMetadata merges headers and resets the TTL, capped at MaxTTL, without copying the stored bytes.
 func (m *Memory) UpdateMetadata(_ context.Context, key Key, headers http.Header, ttl time.Duration, opts ...Option) error {
-	if ttl == 0 {
+	if ttl > m.config.MaxTTL || ttl == 0 {
 		ttl = m.config.MaxTTL
 	}
 	m.mu.Lock()

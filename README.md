@@ -167,7 +167,8 @@ Multiple backends can be configured simultaneously — they are automatically co
 are ordered from lowest/nearest to highest/authoritative. Reads check each tier in order and backfill lower tiers on a
 hit. Writes go to all tiers in parallel. Replica invalidations evict only non-authoritative tiers; the final cache block
 is authoritative. Tiered caches use the metadata backend to track authoritative ETags and invalidate stale lower-tier
-copies before falling through to the authoritative tier.
+copies before falling through to the authoritative tier. A backfill keeps the expiry of an entry written or refreshed
+with an explicit TTL, rather than giving the lower tier's copy that tier's maximum TTL.
 
 ### Memory
 
@@ -374,7 +375,7 @@ The HTTP server metrics of these handlers carry `cachew.cache.result` (`hit`, `m
 
 Origin metrics count HTTP exchanges that reach an origin through `http.DefaultTransport`, including redirect hops and transport failures. Requests rejected during an upstream 429 cooldown are not counted. `status_code=none` means no HTTP response; `error_type` is `none`, `transport`, `timeout`, or `canceled`. Duration ends at response headers or transport failure. Registry identifies the logical artifact provider, including its redirects, rather than each physical destination. These metrics do not count every low-level connection retry, Git transport, Go-module fetch, GitHub metadata lookup, OCI tag-list or referrer pass-through, or S3 operation. OCI registry ping and token exchanges are counted, because they go to the registry for the artifact. Internal Hermit forwarding to another Cachew route is excluded from origin/fill counts; the receiving handler measures its own work.
 
-Fills record a terminal outcome, rather than treating an origin 200 as successful publication. `purpose` separates `origin`, `backfill` and ranged `heal`. Results distinguish successful completion from creation, write, commit, transfer or read errors, cancellation, and superseded heals. Tier writes report backend outcomes separately: a failed S3 write can coexist with a successful disk write. Early close or canceled backfill is not a successful fill. Client responses continue normally when cache writes fail.
+Fills record a terminal outcome, rather than treating an origin 200 as successful publication. `purpose` separates `origin`, `backfill` and ranged `heal`. Results distinguish successful completion from creation, write, commit, transfer or read errors, cancellation, superseded heals, and copies skipped because the writer's TTL had already passed (`expired`). Tier writes report backend outcomes separately: a failed S3 write can coexist with a successful disk write. Early close or canceled backfill is not a successful fill. Client responses continue normally when cache writes fail.
 
 Use `cachew.cache.result` and `cachew.cache.source` to compare local/shared hits and misses, origin requests by status to measure dependency traffic, and fills/tier writes to find failed publication. An origin error percentage must use origin exchanges as its denominator; client response percentages include cache hits. Idle periods have no percentage.
 
