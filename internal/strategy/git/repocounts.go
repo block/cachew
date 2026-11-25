@@ -112,15 +112,25 @@ func inspectUploadPackBody(r *http.Request) ([]byte, error) {
 		io.Closer
 	}{io.MultiReader(bytes.NewReader(prefix), original), original}
 
-	inspect := prefix
-	if strings.EqualFold(r.Header.Get("Content-Encoding"), "gzip") {
-		if gr, gzErr := gzip.NewReader(bytes.NewReader(prefix)); gzErr == nil {
-			decoded, _ := io.ReadAll(io.LimitReader(gr, uploadPackBodyInspectLimit)) //nolint:errcheck // best-effort
-			_ = gr.Close()                                                           //nolint:errcheck // best-effort
-			inspect = decoded
-		}
+	return decodeUploadPackPrefix(r.Header, prefix), nil
+}
+
+func uploadPackBodyHasHaves(header http.Header, body []byte) bool {
+	inspect := decodeUploadPackPrefix(header, body[:min(len(body), uploadPackBodyInspectLimit)])
+	return !isLsRefsBody(inspect) && bytes.Contains(inspect, haveNeedle)
+}
+
+func decodeUploadPackPrefix(header http.Header, prefix []byte) []byte {
+	if !strings.EqualFold(header.Get("Content-Encoding"), "gzip") {
+		return prefix
 	}
-	return inspect, nil
+	gr, err := gzip.NewReader(bytes.NewReader(prefix))
+	if err != nil {
+		return prefix
+	}
+	decoded, _ := io.ReadAll(io.LimitReader(gr, uploadPackBodyInspectLimit)) //nolint:errcheck // best-effort
+	_ = gr.Close()                                                           //nolint:errcheck // best-effort
+	return decoded
 }
 
 func isLsRefsBody(inspect []byte) bool {

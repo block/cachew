@@ -83,7 +83,7 @@ func (b *bufferedResponseWriter) commit() {
 //
 // It returns true when upload-pack rejects the request with "not our ref" and it should be retried upstream.
 // This typically happens when a concurrent force-push fetch orphans a previously advertised commit.
-func (s *Strategy) serveFromBackend(w http.ResponseWriter, r *http.Request, repo *gitclone.Repository) bool {
+func (s *Strategy) serveFromBackend(w http.ResponseWriter, r *http.Request, repo *gitclone.Repository, incremental bool) bool {
 	ctx := r.Context()
 	logger := logging.FromContext(ctx)
 
@@ -145,6 +145,12 @@ func (s *Strategy) serveFromBackend(w http.ResponseWriter, r *http.Request, repo
 			"GIT_CONFIG_GLOBAL=" + os.DevNull,
 			"PATH=" + os.Getenv("PATH"),
 		},
+	}
+	// Incremental fetches skip bitmaps, whose fill-in for uncovered haves walks a whole tree, seconds on a monorepo.
+	//
+	// Clones send no haves and need bitmaps to avoid walking every object.
+	if incremental {
+		handler.Env = append(handler.Env, "GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=pack.useBitmaps", "GIT_CONFIG_VALUE_0=false")
 	}
 
 	r2 := r.Clone(r.Context())

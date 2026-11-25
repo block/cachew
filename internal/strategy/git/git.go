@@ -518,7 +518,8 @@ func (s *Strategy) serveReadyRepo(w http.ResponseWriter, r *http.Request, repo *
 		r.TransferEncoding = nil
 	}
 
-	if !s.serveFromBackend(w, r, repo) {
+	incremental := strings.HasSuffix(pathValue, "/git-upload-pack") && uploadPackBodyHasHaves(r.Header, bodyBytes)
+	if !s.serveFromBackend(w, r, repo, incremental) {
 		return nil
 	}
 	replayBody := func() {
@@ -537,7 +538,7 @@ func (s *Strategy) serveReadyRepo(w http.ResponseWriter, r *http.Request, repo *
 			"error", err)
 	} else {
 		replayBody()
-		if !s.serveFromBackend(w, r, repo) {
+		if !s.serveFromBackend(w, r, repo, incremental) {
 			logger.InfoContext(ctx, "Served from mirror after fetching object missing for 'not our ref'", "path", pathValue)
 			return nil
 		}
