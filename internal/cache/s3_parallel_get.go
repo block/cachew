@@ -23,7 +23,13 @@ func (s *S3) parallelGetReader(ctx context.Context, bucket, objectName string, s
 		window := &s3ObjectWindow{s3: s, bucket: bucket, objectName: objectName, start: 0, length: size, etag: etag}
 		return client.ParallelGetReader(ctx, window, Key{}, chunkSize, concurrency) //nolint:wrapcheck
 	}
-	obj, err := s.client.GetObject(ctx, bucket, objectName, minio.GetObjectOptions{})
+	opts := minio.GetObjectOptions{}
+	if etag != "" {
+		if err := opts.SetMatchETag(etag); err != nil {
+			return nil, errors.Errorf("set etag %s: %w", etag, err)
+		}
+	}
+	obj, err := s.client.GetObject(ctx, bucket, objectName, opts)
 	if err != nil {
 		return nil, errors.Errorf("failed to get object: %w", err)
 	}

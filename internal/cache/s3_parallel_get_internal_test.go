@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/alecthomas/assert/v2"
+	"github.com/alecthomas/errors"
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
 
@@ -157,4 +158,40 @@ func TestS3ParallelRangedGet(t *testing.T) {
 			"a range below 2x minRangePartSize must be served by a single request")
 		assert.Equal(t, int64(0), counters.unpinnedGets.Load(), "range request must be etag-pinned")
 	})
+}
+
+func TestS3OpenPinsDirectReads(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		config S3Config
+		size   int
+	}{
+		{name: "SmallObject", config: S3Config{DownloadPartSizeMB: 1, DownloadConcurrency: 8}, size: 64 << 10},
+		{name: "SingleWorker", config: S3Config{DownloadPartSizeMB: 1, DownloadConcurrency: 1}, size: 2 << 20},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			s, ctx, _ := newCountingS3(t, tt.config)
+			key := NewKey("pinned-direct-read")
+			write := func(seed int64) {
+				data := make([]byte, tt.size)
+				_, err := rand.New(rand.NewSource(seed)).Read(data)
+				assert.NoError(t, err)
+				w, err := s.Create(ctx, key, nil, time.Hour)
+				assert.NoError(t, err)
+				_, err = w.Write(data)
+				assert.NoError(t, err)
+				assert.NoError(t, w.Close())
+			}
+			write(1)
+			r, _, err := s.Open(ctx, key)
+			assert.NoError(t, err)
+			defer r.Close()
+			write(2)
+
+			_, err = io.ReadAll(r)
+			var response minio.ErrorResponse
+			assert.True(t, errors.As(err, &response), "read after a rewrite must fail, got %v", err)
+			assert.Equal(t, "PreconditionFailed", response.Code)
+		})
+	}
 }
