@@ -367,7 +367,7 @@ func TestBundleBuildCancellationReleasesFetchLock(t *testing.T) {
 				done = completed
 				go func() {
 					defer close(completed)
-					file, err := s.createBundle(ctx, repo, base)
+					file, _, err := s.createBundle(ctx, repo, base)
 					if file != nil {
 						_ = file.Close()
 					}
@@ -394,4 +394,146 @@ func TestBundleBuildCancellationReleasesFetchLock(t *testing.T) {
 			assert.Equal(t, int32(0), gate.creates.Load())
 		})
 	}
+}
+
+func commitToMirror(t *testing.T, repo *gitclone.Repository, message string) string {
+	t.Helper()
+	cmd := exec.CommandContext(t.Context(), "git", "-C", repo.Path(), "commit", "--allow-empty", "-m", message)
+	cmd.Env = append(os.Environ(), "GIT_AUTHOR_NAME=Test", "GIT_AUTHOR_EMAIL=test@example.com",
+		"GIT_COMMITTER_NAME=Test", "GIT_COMMITTER_EMAIL=test@example.com")
+	out, err := cmd.CombinedOutput()
+	assert.NoError(t, err, string(out))
+	head, err := mirrorHead(t.Context(), repo.Path())
+	assert.NoError(t, err)
+	return head
+}
+
+func TestBundleRebuiltWhenMirrorTipMoves(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		s, repo, base, gate := newBundleBuildTest(t)
+		close(gate.release)
+		oldTip := s.getMirrorHead(s.ctx, repo)
+		first := serveTestBundle(s.ctx, s, base)
+		assert.Equal(t, http.StatusOK, first.Code)
+		assert.Contains(t, first.Body.String(), oldTip)
+		synctest.Wait()
+
+		newTip := commitToMirror(t, repo, "after snapshot")
+		second := serveTestBundle(s.ctx, s, base)
+		assert.Equal(t, http.StatusOK, second.Code)
+		assert.Contains(t, second.Body.String(), newTip)
+		synctest.Wait()
+
+		third := serveTestBundle(s.ctx, s, base)
+		assert.Equal(t, second.Body.String(), third.Body.String())
+		synctest.Wait()
+		assert.Equal(t, int32(2), gate.creates.Load())
+	})
+}
+
+func TestBundleFromNewerReplicaIsKept(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		s, repo, base, gate := newBundleBuildTest(t)
+		close(gate.release)
+		key := bundleCacheKey(repo.UpstreamURL(), base)
+		assert.NoError(t, s.cacheBundle(s.ctx, key, strings.Repeat("ab", 20), strings.NewReader("peer bundle")))
+		response := serveTestBundle(s.ctx, s, base)
+		assert.Equal(t, http.StatusOK, response.Code)
+		assert.Equal(t, "peer bundle", response.Body.String())
+		assert.Equal(t, int32(1), gate.creates.Load())
+	})
+}
+
+func gitIn(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.CommandContext(t.Context(), "git", append([]string{"-C", dir}, args...)...)
+	cmd.Env = append(os.Environ(), "GIT_AUTHOR_NAME=Test", "GIT_AUTHOR_EMAIL=test@example.com",
+		"GIT_COMMITTER_NAME=Test", "GIT_COMMITTER_EMAIL=test@example.com")
+	out, err := cmd.CombinedOutput()
+	assert.NoError(t, err, string(out))
+	return strings.TrimSpace(string(out))
+}
+
+func newBundleTipTest(t *testing.T) (s *Strategy, repo *gitclone.Repository, upstream, base string, gate *bundlePublishGate) {
+	t.Helper()
+	ctx := logging.ContextWithLogger(t.Context(), slog.Default())
+	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	upstream = t.TempDir()
+	gitIn(t, upstream, "init", "-b", "main")
+	gitIn(t, upstream, "commit", "--allow-empty", "-m", "base")
+	base = gitIn(t, upstream, "rev-parse", "HEAD")
+	gitIn(t, upstream, "commit", "--allow-empty", "-m", "next")
+	manager, err := gitclone.NewManager(ctx, gitclone.Config{MirrorRoot: t.TempDir()}, nil)
+	assert.NoError(t, err)
+	repo, err = manager.GetOrCreate(ctx, "https://example.com/org/repo")
+	assert.NoError(t, err)
+	gitIn(t, upstream, "clone", "--mirror", upstream, repo.Path())
+	repo.MarkReady()
+	mem, err := cache.NewMemory(ctx, cache.MemoryConfig{MaxTTL: time.Hour})
+	assert.NoError(t, err)
+	gate = &bundlePublishGate{Cache: mem, started: make(chan context.Context, 32), release: make(chan struct{})}
+	close(gate.release)
+	s = &Strategy{ctx: ctx, cache: gate, cloneManager: manager, metrics: newGitMetrics(), config: Config{BundleCacheTTL: time.Hour}}
+	return s, repo, upstream, base, gate
+}
+
+func serveTestBundleWithTip(ctx context.Context, s *Strategy, base, tip string) *httptest.ResponseRecorder {
+	r := httptest.NewRequestWithContext(ctx, http.MethodGet, "/git/example.com/org/repo/snapshot.bundle?base="+base+"&tip="+tip, nil)
+	w := httptest.NewRecorder()
+	s.handleBundleRequest(w, r, "example.com", "org/repo/snapshot.bundle")
+	return w
+}
+
+func TestBundleTipFreshensMirrorBehindClient(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		s, repo, upstream, base, gate := newBundleTipTest(t)
+		first := serveTestBundle(s.ctx, s, base)
+		assert.Equal(t, http.StatusOK, first.Code)
+		synctest.Wait()
+
+		gitIn(t, upstream, "commit", "--allow-empty", "-m", "pushed after this replica fetched")
+		tip := gitIn(t, upstream, "rev-parse", "HEAD")
+		assert.False(t, repo.HasCommit(s.ctx, tip))
+		time.Sleep(s.cloneManager.Config().RefCheckInterval)
+
+		second := serveTestBundleWithTip(s.ctx, s, base, tip)
+		assert.Equal(t, http.StatusOK, second.Code)
+		assert.Contains(t, second.Body.String(), tip)
+		assert.True(t, repo.HasCommit(s.ctx, tip))
+		synctest.Wait()
+		assert.Equal(t, int32(2), gate.creates.Load())
+
+		// The cached bundle now contains tip, so the same hint is served without another build.
+		third := serveTestBundleWithTip(s.ctx, s, base, tip)
+		assert.Equal(t, second.Body.String(), third.Body.String())
+		synctest.Wait()
+		assert.Equal(t, int32(2), gate.creates.Load())
+	})
+}
+
+func TestBundleBogusTipFetchesAtMostOncePerInterval(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		s, repo, _, base, gate := newBundleTipTest(t)
+		first := serveTestBundle(s.ctx, s, base)
+		assert.Equal(t, http.StatusOK, first.Code)
+		synctest.Wait()
+
+		bogus := strings.Repeat("0f", 20)
+		time.Sleep(s.cloneManager.Config().RefCheckInterval)
+		before := repo.LastFetch()
+		second := serveTestBundleWithTip(s.ctx, s, base, bogus)
+		assert.Equal(t, first.Body.String(), second.Body.String())
+		fetched := repo.LastFetch()
+		assert.True(t, fetched.After(before))
+
+		third := serveTestBundleWithTip(s.ctx, s, base, bogus)
+		assert.Equal(t, first.Body.String(), third.Body.String())
+		assert.Equal(t, fetched, repo.LastFetch())
+
+		notSHA := serveTestBundleWithTip(s.ctx, s, base, "main")
+		assert.Equal(t, http.StatusOK, notSHA.Code)
+		synctest.Wait()
+		assert.Equal(t, int32(1), gate.creates.Load())
+	})
 }

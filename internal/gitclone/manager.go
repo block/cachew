@@ -1268,3 +1268,13 @@ func (r *Repository) HasCommit(ctx context.Context, ref string) bool {
 	err := cmd.Run()
 	return err == nil
 }
+
+// HasAncestor reports whether ancestor is in the mirror and reachable from descendant.
+func (r *Repository) HasAncestor(ctx context.Context, ancestor, descendant string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	// #nosec G204 - r.path is controlled by us; callers pass commit SHAs
+	cmd := exec.CommandContext(ctx, "git", "-C", r.path, "merge-base", "--is-ancestor", ancestor, descendant)
+	return cmd.Run() == nil
+}

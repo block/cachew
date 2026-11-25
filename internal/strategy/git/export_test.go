@@ -41,7 +41,7 @@ func (s *Strategy) RunFailingCoordinatedSnapshot(ctx context.Context, repo *gitc
 
 // CacheBundle exports cacheBundle for testing.
 func (s *Strategy) CacheBundle(ctx context.Context, key cache.Key, r io.Reader) error {
-	return s.cacheBundle(ctx, key, r)
+	return s.cacheBundle(ctx, key, "", r)
 }
 
 // MirrorPreparationScheduled lets tests check for a queued or active preparation job.
