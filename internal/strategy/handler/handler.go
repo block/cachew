@@ -212,12 +212,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		maps.Copy(parts.Vary, h.varyFunc(r))
 	}
 	key := parts.Key()
+	loggedKey := logging.RedactURI(parts.Path)
 
-	logger.DebugContext(ctx, "Processing request", "cache_key", parts.Path)
+	logger.DebugContext(ctx, "Processing request", "cache_key", loggedKey)
 
 	served, err := h.serveCached(w, r, key)
 	if err != nil {
-		logger.ErrorContext(ctx, "Failed to serve from cache", "cache_key", parts.Path, "error", err)
+		logger.ErrorContext(ctx, "Failed to serve from cache", "cache_key", loggedKey, "error", err)
 	}
 	if served {
 		return
@@ -231,7 +232,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !coalescable(r) {
 		labelCacheResult(ctx, CacheMiss)
 		if err := h.fetchAndCache(w, r, key); err != nil {
-			logger.ErrorContext(ctx, "Failed to fetch and cache", "cache_key", parts.Path, "error", err)
+			logger.ErrorContext(ctx, "Failed to fetch and cache", "cache_key", loggedKey, "error", err)
 		}
 		return
 	}
@@ -249,10 +250,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case errors.Is(err, spool.ErrNotShared):
 		if err := h.fetchAndCache(w, r, key); err != nil {
-			logger.ErrorContext(ctx, "Failed to fetch and cache", "cache_key", parts.Path, "error", err)
+			logger.ErrorContext(ctx, "Failed to fetch and cache", "cache_key", loggedKey, "error", err)
 		}
 	case err != nil:
-		logger.ErrorContext(ctx, "Failed to serve shared response", "cache_key", parts.Path, "error", err)
+		logger.ErrorContext(ctx, "Failed to serve shared response", "cache_key", loggedKey, "error", err)
 		if ctx.Err() == nil {
 			panic(http.ErrAbortHandler)
 		}

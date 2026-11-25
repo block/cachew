@@ -2,6 +2,7 @@ package logging //nolint:testpackage
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -15,6 +16,7 @@ func TestMiddleware(t *testing.T) {
 	tests := []struct {
 		name       string
 		config     Config
+		target     string
 		headers    map[string]string
 		wantAttrs  map[string]string
 		wantAbsent []string
@@ -63,6 +65,13 @@ func TestMiddleware(t *testing.T) {
 				"trace_id":   "def-456",
 			},
 		},
+		{
+			name:      "QueryRedacted",
+			config:    Config{Headers: map[string]string{"X-Request-ID": "request_id"}},
+			target:    "/bucket/object?X-Amz-Signature=synthetic-signature",
+			headers:   map[string]string{"X-Request-ID": "abc-123"},
+			wantAttrs: map[string]string{"uri": "/bucket/object?REDACTED"},
+		},
 	}
 
 	for _, tt := range tests {
@@ -83,7 +92,7 @@ func TestMiddleware(t *testing.T) {
 
 			handler := Middleware(inner, tt.config)
 
-			req := httptest.NewRequest(http.MethodGet, "/", nil)
+			req := httptest.NewRequest(http.MethodGet, cmp.Or(tt.target, "/"), nil)
 			req = req.WithContext(ContextWithLogger(req.Context(), logger))
 			for k, v := range tt.headers {
 				req.Header.Set(k, v)

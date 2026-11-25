@@ -113,7 +113,7 @@ func (s *Strategy) handleEnsureRefs(w http.ResponseWriter, r *http.Request, host
 	if repo.State() != gitclone.StateReady {
 		if err := s.ensureCloneReady(ctx, repo); err != nil {
 			logger.ErrorContext(ctx, "Clone not ready", "error", err, "upstream", upstreamURL)
-			http.Error(w, "clone not ready: "+err.Error(), http.StatusBadGateway)
+			http.Error(w, logging.RedactText("clone not ready: "+err.Error()), http.StatusBadGateway)
 			status = "clone_not_ready"
 			span.RecordError(err)
 			span.SetStatus(codes.Error, err.Error())
@@ -125,7 +125,7 @@ func (s *Strategy) handleEnsureRefs(w http.ResponseWriter, r *http.Request, host
 	fetched = didFetch
 	if err != nil {
 		logger.ErrorContext(ctx, "EnsureRefs failed", "error", errors.WithStack(err), "upstream", upstreamURL)
-		http.Error(w, "ensure refs: "+err.Error(), http.StatusBadGateway)
+		http.Error(w, logging.RedactText("ensure refs: "+err.Error()), http.StatusBadGateway)
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
 		return
