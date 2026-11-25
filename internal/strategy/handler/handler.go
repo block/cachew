@@ -196,7 +196,8 @@ func (h *Handler) ParallelFetch(chunkSize int64, concurrency int) *Handler {
 
 // ServeHTTP serves from cache, or fetches from upstream and caches the response while streaming it to the client.
 //
-// HEAD misses are forwarded upstream without caching, so metadata probes never trigger full downloads.
+// HEAD misses are forwarded upstream without caching, so metadata probes never trigger full downloads. An upstream
+// that refuses HEAD with 403, 405 or 501, as presigned GET URLs do, is asked with a GET whose body isn't read.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx := h.metrics.WithRequest(r.Context(), h.strategy, h.registry, h.external)
 	r = r.WithContext(ctx)
@@ -442,20 +443,37 @@ func (h *Handler) upstreamRequest(r *http.Request) (*http.Request, error) {
 }
 
 func (h *Handler) forwardHead(w http.ResponseWriter, r *http.Request) {
-	req, err := h.upstreamRequest(r)
+	status, headers, err := h.probe(r, http.MethodHead)
+	if err == nil && headRefused(status) {
+		status, headers, err = h.probe(r, http.MethodGet)
+	}
 	if err != nil {
 		h.errorHandler(err, w, r)
 		return
 	}
-	req.Method = http.MethodHead
+	maps.Copy(w.Header(), headers)
+	w.WriteHeader(status)
+}
+
+func (h *Handler) probe(r *http.Request, method string) (int, http.Header, error) {
+	req, err := h.upstreamRequest(r)
+	if err != nil {
+		return 0, nil, err
+	}
+	req.Method = method
+	if method == http.MethodGet && req.Header.Get("Accept-Encoding") == "" {
+		req.Header.Set("Accept-Encoding", "identity")
+	}
 	resp, err := h.client.Do(req)
 	if err != nil {
-		h.errorHandler(httputil.Errorf(http.StatusBadGateway, "failed to fetch: %w", err), w, r)
-		return
+		return 0, nil, httputil.Errorf(http.StatusBadGateway, "failed to fetch: %w", err)
 	}
-	_ = resp.Body.Close() //nolint:errcheck // HEAD has no body to lose
-	maps.Copy(w.Header(), resp.Header)
-	w.WriteHeader(resp.StatusCode)
+	_ = resp.Body.Close() //nolint:errcheck // Only the status and headers are used.
+	return resp.StatusCode, resp.Header, nil
+}
+
+func headRefused(status int) bool {
+	return status == http.StatusForbidden || status == http.StatusMethodNotAllowed || status == http.StatusNotImplemented
 }
 
 func (h *Handler) fetchAndCache(w http.ResponseWriter, r *http.Request, key cache.Key) error {
