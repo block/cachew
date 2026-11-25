@@ -35,6 +35,9 @@ const lfsFetchTimeout = 25 * time.Minute
 
 const bundleBuildTimeout = 5 * time.Minute
 
+// bundleTipHeader records the mirror HEAD a cached bundle was built up to.
+const bundleTipHeader = "X-Cachew-Bundle-Tip"
+
 type bundleBuild struct {
 	done          chan struct{}
 	verifiedEmpty bool
@@ -76,7 +79,7 @@ func (s *Strategy) finishBundleBuild(key cache.Key, build *bundleBuild) {
 	build.release()
 }
 
-func (s *Strategy) publishBundle(ctx context.Context, key cache.Key, build *bundleBuild, file *os.File) error {
+func (s *Strategy) publishBundle(ctx context.Context, key cache.Key, build *bundleBuild, file *os.File, tip string) error {
 	info, err := file.Stat()
 	if err != nil {
 		_ = file.Close()
@@ -91,7 +94,7 @@ func (s *Strategy) publishBundle(ctx context.Context, key cache.Key, build *bund
 		defer s.bundleBuilds.Delete(key)
 		publishCtx, cancel := context.WithDeadline(s.ctx, deadline)
 		defer cancel()
-		if err := s.cacheBundle(publishCtx, key, build.reader()); err != nil {
+		if err := s.cacheBundle(publishCtx, key, tip, build.reader()); err != nil {
 			logging.FromContext(ctx).WarnContext(publishCtx, "Failed to cache bundle", "key", key, "error", err)
 		}
 	}()
@@ -710,6 +713,11 @@ func (s *Strategy) handleBundleRequest(w http.ResponseWriter, r *http.Request, h
 	releaseBuild := func() {}
 	for acquired := false; ; {
 		reader, headers, openErr := s.cache.Open(ctx, bKey, httputil.ConditionalOptions(r)...)
+		// Resumed downloads must keep reading the entry they started on, so only plain GETs re-check the tip.
+		if openErr == nil && r.Header.Get("Range") == "" && s.cachedBundleStale(ctx, s.cloneManager.Get(upstreamURL), headers) {
+			_ = reader.Close()
+			openErr = os.ErrNotExist
+		}
 		switch {
 		case openErr == nil,
 			errors.Is(openErr, cache.ErrNotModified),
@@ -808,7 +816,7 @@ func (s *Strategy) handleBundleRequest(w http.ResponseWriter, r *http.Request, h
 		}
 	}
 
-	bundleFile, err := s.createBundle(ctx, repo, base)
+	bundleFile, tip, err := s.createBundle(ctx, repo, base)
 	if errors.Is(err, errEmptyBundle) {
 		if freshenErr := s.doFetchVerified(ctx, repo); freshenErr != nil {
 			source = "miss_stale"
@@ -823,7 +831,7 @@ func (s *Strategy) handleBundleRequest(w http.ResponseWriter, r *http.Request, h
 			http.Error(w, "Bundle not available", http.StatusNotFound)
 			return
 		}
-		bundleFile, err = s.createBundle(ctx, repo, base)
+		bundleFile, tip, err = s.createBundle(ctx, repo, base)
 		if errors.Is(err, errEmptyBundle) {
 			build.verifiedEmpty = true
 			releaseBuild()
@@ -838,7 +846,7 @@ func (s *Strategy) handleBundleRequest(w http.ResponseWriter, r *http.Request, h
 		span.RecordError(err)
 		return
 	}
-	if err := s.publishBundle(ctx, bKey, build, bundleFile); err != nil {
+	if err := s.publishBundle(ctx, bKey, build, bundleFile, tip); err != nil {
 		logger.WarnContext(ctx, "Failed to publish bundle", "upstream", upstreamURL, "error", err)
 		http.Error(w, "Bundle not available", http.StatusServiceUnavailable)
 		span.RecordError(err)
@@ -928,11 +936,13 @@ func (s *Strategy) pregenerateBundle(ctx context.Context, repo *gitclone.Reposit
 		defer cancel()
 		bgCtx = logging.ContextWithLogger(bgCtx, logging.FromContext(ctx))
 		logger := logging.FromContext(bgCtx)
-		if reader, _, err := s.cache.Open(bgCtx, bKey); err == nil {
+		if reader, headers, err := s.cache.Open(bgCtx, bKey); err == nil {
 			_ = reader.Close()
-			return
+			if !s.cachedBundleStale(bgCtx, repo, headers) {
+				return
+			}
 		}
-		bundleFile, err := s.createBundle(bgCtx, repo, snapshotCommit)
+		bundleFile, tip, err := s.createBundle(bgCtx, repo, snapshotCommit)
 		if err != nil {
 			if errors.Is(err, errEmptyBundle) {
 				return
@@ -940,7 +950,7 @@ func (s *Strategy) pregenerateBundle(ctx context.Context, repo *gitclone.Reposit
 			logger.WarnContext(bgCtx, "Failed to pre-generate bundle", "upstream", upstreamURL, "error", err)
 			return
 		}
-		if err := s.publishBundle(bgCtx, bKey, build, bundleFile); err != nil {
+		if err := s.publishBundle(bgCtx, bKey, build, bundleFile, tip); err != nil {
 			logger.WarnContext(bgCtx, "Failed to publish bundle", "upstream", upstreamURL, "error", err)
 		}
 	}()
@@ -980,8 +990,11 @@ func applySnapshotCacheHeaders(w http.ResponseWriter, headers http.Header) { //n
 	}
 }
 
-func (s *Strategy) cacheBundle(ctx context.Context, key cache.Key, r io.Reader) error {
+func (s *Strategy) cacheBundle(ctx context.Context, key cache.Key, tip string, r io.Reader) error {
 	headers := http.Header{"Content-Type": {"application/x-git-bundle"}}
+	if tip != "" {
+		headers.Set(bundleTipHeader, tip)
+	}
 	wc, err := s.cache.Create(ctx, key, headers, s.config.BundleCacheTTL)
 	if err != nil {
 		return errors.Wrap(err, "create cache entry")
@@ -1006,16 +1019,37 @@ func (s *Strategy) getMirrorHead(ctx context.Context, repo *gitclone.Repository)
 	return head
 }
 
+// cachedBundleStale reports whether this replica's mirror HEAD has moved past the tip a cached bundle was built to.
+//
+// A bundle is keyed by its base alone, so without this every clone gets the first bundle built after a snapshot
+// until the TTL expires. A tip this mirror lacks came from a newer replica and is kept, so replicas never ping-pong.
+func (s *Strategy) cachedBundleStale(ctx context.Context, repo *gitclone.Repository, headers http.Header) bool { //nolint:privatedoc // explains why
+	if repo == nil || repo.State() != gitclone.StateReady {
+		return false
+	}
+	head := s.getMirrorHead(ctx, repo)
+	tip := headers.Get(bundleTipHeader)
+	if head == "" || head == tip {
+		return false
+	}
+	if tip == "" {
+		return true
+	}
+	return commitSHARe.MatchString(tip) && repo.HasAncestor(ctx, tip, head)
+}
+
 // createBundle writes a git bundle of the commits between baseCommit and the mirror's HEAD to a temp file.
 //
-// The returned file is already removed from the filesystem, so the open descriptor keeps the
-// data alive. The caller must Close it.
-func (s *Strategy) createBundle(ctx context.Context, repo *gitclone.Repository, baseCommit string) (*os.File, error) { //nolint:privatedoc // documents a non-obvious contract
+// It also returns that HEAD. The returned file is already removed from the filesystem, so the open
+// descriptor keeps the data alive. The caller must Close it.
+func (s *Strategy) createBundle(ctx context.Context, repo *gitclone.Repository, baseCommit string) (*os.File, string, error) { //nolint:privatedoc // documents a non-obvious contract
 	ctx, cancel := context.WithTimeout(ctx, bundleBuildTimeout)
 	defer cancel()
 	var bundleFile *os.File
+	var head string
 	err := repo.WithFetchExclusion(ctx, func() error {
-		head, err := mirrorHead(ctx, repo.Path())
+		var err error
+		head, err = mirrorHead(ctx, repo.Path())
 		if err != nil {
 			return err
 		}
@@ -1025,7 +1059,7 @@ func (s *Strategy) createBundle(ctx context.Context, repo *gitclone.Repository, 
 		bundleFile, err = createBundleFile(ctx, repo, baseCommit)
 		return err
 	})
-	return bundleFile, errors.WithStack(err)
+	return bundleFile, head, errors.WithStack(err)
 }
 
 func createBundleFile(ctx context.Context, repo *gitclone.Repository, baseCommit string) (*os.File, error) {

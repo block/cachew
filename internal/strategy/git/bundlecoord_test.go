@@ -367,7 +367,7 @@ func TestBundleBuildCancellationReleasesFetchLock(t *testing.T) {
 				done = completed
 				go func() {
 					defer close(completed)
-					file, err := s.createBundle(ctx, repo, base)
+					file, _, err := s.createBundle(ctx, repo, base)
 					if file != nil {
 						_ = file.Close()
 					}
@@ -394,4 +394,52 @@ func TestBundleBuildCancellationReleasesFetchLock(t *testing.T) {
 			assert.Equal(t, int32(0), gate.creates.Load())
 		})
 	}
+}
+
+func commitToMirror(t *testing.T, repo *gitclone.Repository, message string) string {
+	t.Helper()
+	cmd := exec.CommandContext(t.Context(), "git", "-C", repo.Path(), "commit", "--allow-empty", "-m", message)
+	cmd.Env = append(os.Environ(), "GIT_AUTHOR_NAME=Test", "GIT_AUTHOR_EMAIL=test@example.com",
+		"GIT_COMMITTER_NAME=Test", "GIT_COMMITTER_EMAIL=test@example.com")
+	out, err := cmd.CombinedOutput()
+	assert.NoError(t, err, string(out))
+	head, err := mirrorHead(t.Context(), repo.Path())
+	assert.NoError(t, err)
+	return head
+}
+
+func TestBundleRebuiltWhenMirrorTipMoves(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		s, repo, base, gate := newBundleBuildTest(t)
+		close(gate.release)
+		oldTip := s.getMirrorHead(s.ctx, repo)
+		first := serveTestBundle(s.ctx, s, base)
+		assert.Equal(t, http.StatusOK, first.Code)
+		assert.Contains(t, first.Body.String(), oldTip)
+		synctest.Wait()
+
+		newTip := commitToMirror(t, repo, "after snapshot")
+		second := serveTestBundle(s.ctx, s, base)
+		assert.Equal(t, http.StatusOK, second.Code)
+		assert.Contains(t, second.Body.String(), newTip)
+		synctest.Wait()
+
+		third := serveTestBundle(s.ctx, s, base)
+		assert.Equal(t, second.Body.String(), third.Body.String())
+		synctest.Wait()
+		assert.Equal(t, int32(2), gate.creates.Load())
+	})
+}
+
+func TestBundleFromNewerReplicaIsKept(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		s, repo, base, gate := newBundleBuildTest(t)
+		close(gate.release)
+		key := bundleCacheKey(repo.UpstreamURL(), base)
+		assert.NoError(t, s.cacheBundle(s.ctx, key, strings.Repeat("ab", 20), strings.NewReader("peer bundle")))
+		response := serveTestBundle(s.ctx, s, base)
+		assert.Equal(t, http.StatusOK, response.Code)
+		assert.Equal(t, "peer bundle", response.Body.String())
+		assert.Equal(t, int32(1), gate.creates.Load())
+	})
 }
