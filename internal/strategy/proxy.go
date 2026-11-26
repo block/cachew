@@ -10,6 +10,7 @@ import (
 	"github.com/alecthomas/errors"
 
 	"github.com/block/cachew/internal/cache"
+	"github.com/block/cachew/internal/httputil"
 	"github.com/block/cachew/internal/logging"
 	"github.com/block/cachew/internal/spool"
 	"github.com/block/cachew/internal/strategy/handler"
@@ -49,7 +50,7 @@ var (
 // NewHTTPProxy creates an HTTPProxy; it registers no routes because it intercepts requests instead.
 func NewHTTPProxy(ctx context.Context, c cache.Cache, _ Mux, spools *spool.Registry) (*HTTPProxy, error) {
 	logger := logging.FromContext(ctx)
-	client := &http.Client{}
+	client := httputil.UpstreamClient()
 	p := &HTTPProxy{logger: logger}
 
 	p.handler = handler.New(client, c, spools).Metrics("proxy", "other").

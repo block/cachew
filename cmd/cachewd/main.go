@@ -450,10 +450,11 @@ func configureProcess(logger *slog.Logger, mutexProfileFraction int, upstreamBac
 	// The pprof endpoints are mounted on the main listener via net/http/pprof; OPA gates external access.
 	runtime.SetMutexProfileFraction(mutexProfileFraction)
 
-	// All strategies using http.DefaultTransport share per-host and per-credential 429 cooldowns.
+	// All strategies using httputil.UpstreamTransport share per-host and per-credential 429 cooldowns.
 	//
 	// Origin metrics sit below the cooldowns so requests rejected during a cooldown are not counted.
-	http.DefaultTransport = httputil.NewBackoffTransport(metrics.NewOriginTransport(http.DefaultTransport), upstreamBackoff, upstreamBackoffMax, logger) //nolint:reassign
+	// http.DefaultTransport stays a *http.Transport, which OPA's http.send asserts when a policy sets a TLS option.
+	httputil.SetUpstreamTransport(httputil.NewBackoffTransport(metrics.NewOriginTransport(http.DefaultTransport), upstreamBackoff, upstreamBackoffMax, logger))
 }
 
 // loadGlobalConfig unmarshals the global config from HCL in two passes.
